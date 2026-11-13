@@ -54,8 +54,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+from typing import Callable
 
 import httpx
+
+from .neotoma_transient import call_with_transient_retry
 
 log = logging.getLogger(__name__)
 
@@ -131,6 +134,29 @@ _FALLBACK_LOW_BLAST = frozenset(
 # the more confident an authoring agent was that a task needed a human, the
 # more certainly it auto-executed.
 NEVER_AUTO_EXECUTE_ACTION_TYPES = frozenset({"operator_only"})
+
+# Reason prefixes the gate writes on a NEVER-tier hold (ateles#1599). A type in
+# NEVER_AUTO_EXECUTE_ACTION_TYPES is reserved to the operator; any other NEVER
+# decision comes from a gap in the policy (an unclassified or missing action
+# type under a fail-closed default), which needs a classification, not a person
+# doing the work. `execution/scripts/decision_queue.py` reads both prefixes.
+OPERATOR_ONLY_REASON = (
+    "operator-only action — never auto-executable at any "
+    "confidence or recurrence count"
+)
+UNCLASSIFIED_REASON_PREFIX = "unclassified action type"
+
+
+def never_tier_reason(action_type: str | None) -> str:
+    """One-line reason for a NEVER-tier hold, telling reserved from unclassified."""
+    at = (action_type or "").strip().lower()
+    if at in NEVER_AUTO_EXECUTE_ACTION_TYPES:
+        return OPERATOR_ONLY_REASON
+    named = repr(at) if at else "(none declared)"
+    return (
+        f"{UNCLASSIFIED_REASON_PREFIX} {named} — the execution policy does not "
+        "classify it, so it is held until the policy classifies it"
+    )
 
 
 class BlastRadius(str, Enum):
@@ -426,7 +452,7 @@ def _fetch_entity(entity_id: str) -> dict | None:
     if not NEOTOMA_BEARER_TOKEN:
         return None
     url = f"{NEOTOMA_BASE_URL}/entities/{entity_id}"
-    try:
+    def _read() -> dict:
         resp = httpx.get(
             url,
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
@@ -434,6 +460,11 @@ def _fetch_entity(entity_id: str) -> dict | None:
         )
         resp.raise_for_status()
         return resp.json()
+
+    try:
+        # Timeouts / connection errors get two bounded retries; an HTTP error
+        # status is raised at once.  All attempts failing logs and returns None.
+        return call_with_transient_retry(_read, label=f"read of entity {entity_id}")
     except Exception as exc:  # noqa: BLE001 — fail closed, never crash dispatch
         log.warning(f"[gating] could not fetch entity {entity_id}: {exc}")
         return None
@@ -461,11 +492,17 @@ def fetch_entity_observations_strict(
         return None
 
     def read_page(offset: int) -> tuple[list[dict], int]:
-        resp = httpx.get(
-            f"{NEOTOMA_BASE_URL}/entities/{entity_id}/observations",
-            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            params={"limit": limit, "offset": offset},
-            timeout=10,
+        # Only the request itself is retried, and only on a timeout or a
+        # connection error; an HTTP status and every consistency check below
+        # still fail closed at once.
+        resp = call_with_transient_retry(
+            lambda: httpx.get(
+                f"{NEOTOMA_BASE_URL}/entities/{entity_id}/observations",
+                headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+                params={"limit": limit, "offset": offset},
+                timeout=10,
+            ),
+            label=f"observations read of entity {entity_id} (offset {offset})",
         )
         resp.raise_for_status()
         data = resp.json()
@@ -669,10 +706,7 @@ def evaluate_gate(
             confidence=confidence,
             threshold=threshold,
             policy_id=policy.entity_id,
-            reason=(
-                "operator-only action — never auto-executable at any "
-                "confidence or recurrence count"
-            ),
+            reason=never_tier_reason(action_type),
             confidence_unscored=confidence_unscored,
         )
 
@@ -900,6 +934,252 @@ def read_authenticated_checkpoint_authorization(
     return payload
 
 
+# Every field the ordinary envelope builder emits.  An authenticated envelope
+# that carries anything else is a restrictive extension: its producer narrowed
+# what the approval may do, so none of the ordinary consuming effects (close,
+# replace, retire, fallback stamp, denial marker) may be taken on it.
+CHECKPOINT_ORDINARY_ENVELOPE_FIELDS = frozenset(
+    {
+        "version",
+        "producer",
+        "producer_jkt",
+        "task_entity_id",
+        "task_revision",
+        "task_observation_count",
+        "task_last_observation_at",
+        "user_id",
+        "required_approver_sub",
+        "required_approver_jkt",
+        "action_type",
+        "policy_entity_id",
+        "policy_revision",
+        "gate_action",
+        "blast_radius",
+        "confidence",
+        "confidence_unscored",
+    }
+)
+
+SCOPE_ORDINARY = "ordinary"
+SCOPE_LEGACY = "legacy"
+SCOPE_RESTRICTED = "restricted"
+SCOPE_UNKNOWN = "unknown"
+
+
+def _body_extension_in_history(observations: list[dict]) -> bool:
+    """True when ANY observation of ``body`` ever carried a non-ordinary field."""
+    for item in observations:
+        fields = item.get("fields") if isinstance(item, dict) else None
+        body = fields.get("body") if isinstance(fields, dict) else None
+        if not isinstance(body, str):
+            continue
+        try:
+            payload = json.loads(body)
+        except (TypeError, ValueError):
+            continue
+        if (
+            isinstance(payload, dict)
+            and set(payload) - CHECKPOINT_ORDINARY_ENVELOPE_FIELDS
+        ):
+            return True
+    return False
+
+
+# Why a scope is what it is.  Reason codes name the cause so a held checkpoint
+# can say what happened and who clears it; they never change a decision.
+REASON_AUTHENTICATED_ORDINARY = "authenticated_ordinary"
+REASON_AUTHENTICATED_EXTENSION = "authenticated_extension"
+REASON_NO_RESTRICTION_EVER = "no_restriction_in_history"
+REASON_RECORD_UNAVAILABLE = "record_unavailable"
+REASON_HISTORY_UNREADABLE = "history_unreadable"
+REASON_EXTENSION_EDITED_AWAY = "extension_in_history_envelope_changed"
+REASON_EXTENSION_UNAUTHENTICATED = "extension_claim_unauthenticated"
+REASON_READER_ERROR = "scope_reader_error"
+
+
+def classify_checkpoint_effect_scope_with_reason(
+    checkpoint_record: dict | None,
+    authority: dict | None,
+    observations: list[dict] | None = None,
+) -> tuple[str, str]:
+    """Judge the ORIGINAL scope a checkpoint was authenticated with, and why.
+
+    Returns ``(scope, reason_code)``.  Scopes: ``ordinary`` (authenticated
+    envelope, no extension), ``legacy`` (no envelope was ever written, or no
+    observation of ``body`` ever carried an extension: the supported
+    migration/reissue population), ``restricted`` (authenticated envelope with
+    a restrictive extension) or ``unknown`` (the record or its observation
+    history cannot be read, or any observation of ``body`` ever carried an
+    extension that does not authenticate now).
+
+    When the envelope authenticates, the scope is the immutable creation
+    observation's.  When it does not (a later observation edited ``body`` or
+    another protected field), the mutable current snapshot is never trusted to
+    say "no restriction": the whole observation history is, and an uncertain
+    read (``observations is None``) is ``unknown``.
+    """
+    if not isinstance(checkpoint_record, dict):
+        return SCOPE_UNKNOWN, REASON_RECORD_UNAVAILABLE
+    if isinstance(authority, dict):
+        if set(authority) - CHECKPOINT_ORDINARY_ENVELOPE_FIELDS:
+            return SCOPE_RESTRICTED, REASON_AUTHENTICATED_EXTENSION
+        return SCOPE_ORDINARY, REASON_AUTHENTICATED_ORDINARY
+    if not isinstance(observations, list):
+        return SCOPE_UNKNOWN, REASON_HISTORY_UNREADABLE
+    if _body_extension_in_history(observations):
+        return SCOPE_UNKNOWN, REASON_EXTENSION_EDITED_AWAY
+    encoded = _snapshot_of(checkpoint_record).get("body")
+    if isinstance(encoded, str):
+        try:
+            payload = json.loads(encoded)
+        except (TypeError, ValueError):
+            payload = None
+        if (
+            isinstance(payload, dict)
+            and set(payload) - CHECKPOINT_ORDINARY_ENVELOPE_FIELDS
+        ):
+            return SCOPE_UNKNOWN, REASON_EXTENSION_UNAUTHENTICATED
+    return SCOPE_LEGACY, REASON_NO_RESTRICTION_EVER
+
+
+def classify_checkpoint_effect_scope(
+    checkpoint_record: dict | None,
+    authority: dict | None,
+    observations: list[dict] | None = None,
+) -> str:
+    """The scope alone; see ``classify_checkpoint_effect_scope_with_reason``."""
+    return classify_checkpoint_effect_scope_with_reason(
+        checkpoint_record, authority, observations
+    )[0]
+
+
+def checkpoint_effect_scope_with_reason(
+    checkpoint_id: str,
+    checkpoint_record: dict | None = None,
+    *,
+    read_authorization=None,
+    read_observations=None,
+) -> tuple[str, str]:
+    """Read a checkpoint and classify its original effect scope, with the cause."""
+    record = (
+        checkpoint_record
+        if isinstance(checkpoint_record, dict)
+        else fetch_checkpoint_record(checkpoint_id)
+    )
+    if not isinstance(record, dict):
+        return SCOPE_UNKNOWN, REASON_RECORD_UNAVAILABLE
+    reader = read_authorization or read_authenticated_checkpoint_authorization
+    try:
+        authority = reader(checkpoint_id, record)
+        observations = None
+        if not isinstance(authority, dict):
+            observations = (read_observations or fetch_entity_observations_strict)(
+                checkpoint_id
+            )
+    except Exception:  # noqa: BLE001 - an unreadable scope is an unknown one
+        return SCOPE_UNKNOWN, REASON_READER_ERROR
+    return classify_checkpoint_effect_scope_with_reason(
+        record, authority, observations
+    )
+
+
+def checkpoint_effect_scope(
+    checkpoint_id: str,
+    checkpoint_record: dict | None = None,
+    *,
+    read_authorization=None,
+    read_observations=None,
+) -> str:
+    """Read a checkpoint and classify its original effect scope."""
+    return checkpoint_effect_scope_with_reason(
+        checkpoint_id,
+        checkpoint_record,
+        read_authorization=read_authorization,
+        read_observations=read_observations,
+    )[0]
+
+
+def checkpoint_scope_permits_ordinary_effects(scope: str) -> bool:
+    return scope in (SCOPE_ORDINARY, SCOPE_LEGACY)
+
+
+def _read_authenticated_field_observation(
+    entity_id: str,
+    record: dict,
+    *,
+    field: str,
+    matches: Callable[[dict], bool],
+    snapshot_value_must_equal_observation: bool,
+    required_approver_sub: str,
+    required_approver_jkt: str,
+    expected_user_id: str,
+) -> dict | None:
+    """Shared provenance verifier behind every authenticated field read.
+
+    The snapshot value of ``field`` is reducer output and therefore says only
+    what value won, not who supplied it.  Authority comes from the immutable
+    observation named by that field's provenance.  ``matches`` is applied to
+    both the snapshot and that observation's own fields.  Missing, unreadable,
+    untrusted, cross-tenant, or wrong-principal attribution returns ``None``.
+    On success returns the principal evidence plus the observation's fields
+    under ``"observation_fields"``.
+    """
+    required_sub = str(required_approver_sub or "").strip()
+    required_jkt = str(required_approver_jkt or "").strip()
+    tenant_id = str(expected_user_id or "").strip()
+    if (
+        not required_sub
+        or not re.fullmatch(r"[A-Za-z0-9_-]{43}", required_jkt)
+        or not tenant_id
+        or not field
+    ):
+        return None
+    snapshot = _snapshot_of(record)
+    if not matches(snapshot):
+        return None
+    provenance = record.get("provenance")
+    if not isinstance(provenance, dict):
+        return None
+    observation_id = provenance.get(field)
+    if not isinstance(observation_id, str) or not observation_id:
+        return None
+    observation = next(
+        (
+            item
+            for item in _fetch_entity_observations(entity_id)
+            if item.get("id") == observation_id
+        ),
+        None,
+    )
+    if not isinstance(observation, dict):
+        return None
+    fields = observation.get("fields")
+    auth = observation.get("provenance")
+    if not isinstance(fields, dict) or not matches(fields):
+        return None
+    if snapshot_value_must_equal_observation and snapshot.get(field) != fields.get(
+        field
+    ):
+        return None
+    if str(observation.get("user_id") or "").strip() != tenant_id:
+        return None
+    if not isinstance(auth, dict):
+        return None
+    if (
+        str(auth.get("agent_sub") or "").strip() != required_sub
+        or str(auth.get("agent_thumbprint") or "").strip() != required_jkt
+        or auth.get("attribution_tier") not in _TRUSTED_AAUTH_TIERS
+    ):
+        return None
+    return {
+        "principal_sub": required_sub,
+        "observation_id": observation_id,
+        "attribution_tier": auth.get("attribution_tier"),
+        "agent_thumbprint": required_jkt,
+        "observation_fields": fields,
+    }
+
+
 def read_authenticated_checkpoint_resolution(
     checkpoint_id: str,
     checkpoint_record: dict,
@@ -917,56 +1197,62 @@ def read_authenticated_checkpoint_resolution(
     unreadable, untrusted, cross-tenant, or wrong-principal attribution is not
     an approval.
     """
-    required_sub = str(required_approver_sub or "").strip()
-    required_jkt = str(required_approver_jkt or "").strip()
-    tenant_id = str(expected_user_id or "").strip()
     expected = str(expected_resolution or "").strip().lower()
-    if (
-        not required_sub
-        or not re.fullmatch(r"[A-Za-z0-9_-]{43}", required_jkt)
-        or not tenant_id
-        or expected not in {"approved", "rejected"}
-    ):
+    if expected not in {"approved", "rejected"}:
         return None
-    snapshot = _snapshot_of(checkpoint_record)
-    if read_checkpoint_resolution(snapshot) != expected:
-        return None
-    provenance = checkpoint_record.get("provenance")
-    if not isinstance(provenance, dict):
-        return None
-    observation_id = provenance.get("status")
-    if not isinstance(observation_id, str) or not observation_id:
-        return None
-    observation = next(
-        (
-            item
-            for item in _fetch_entity_observations(checkpoint_id)
-            if item.get("id") == observation_id
-        ),
-        None,
+    verified = _read_authenticated_field_observation(
+        checkpoint_id,
+        checkpoint_record,
+        field="status",
+        matches=lambda data: read_checkpoint_resolution(data) == expected,
+        snapshot_value_must_equal_observation=False,
+        required_approver_sub=required_approver_sub,
+        required_approver_jkt=required_approver_jkt,
+        expected_user_id=expected_user_id,
     )
-    if not isinstance(observation, dict):
+    if verified is None:
         return None
-    fields = observation.get("fields")
-    auth = observation.get("provenance")
-    if not isinstance(fields, dict) or read_checkpoint_resolution(fields) != expected:
+    verified.pop("observation_fields", None)
+    return verified
+
+
+def read_authenticated_field_value(
+    entity_id: str,
+    record: dict,
+    *,
+    field: str,
+    required_approver_sub: str,
+    required_approver_jkt: str,
+    expected_user_id: str,
+) -> str | None:
+    """The string value of ``field`` iff its provenance observation is
+    authenticated as the required principal, else ``None``.
+
+    Same verifier as :func:`read_authenticated_checkpoint_resolution`,
+    parameterised by field name for entity types that carry a resolver-written
+    value other than a checkpoint ``status`` (e.g. a Monedula
+    ``payment_approval``).  The snapshot value must equal the value the
+    authenticating observation itself carries, so a later write by another
+    principal can never inherit an earlier approver's authority.
+    """
+
+    def _has_text(data: dict) -> bool:
+        value = data.get(field)
+        return isinstance(value, str) and bool(value.strip())
+
+    verified = _read_authenticated_field_observation(
+        entity_id,
+        record,
+        field=field,
+        matches=_has_text,
+        snapshot_value_must_equal_observation=True,
+        required_approver_sub=required_approver_sub,
+        required_approver_jkt=required_approver_jkt,
+        expected_user_id=expected_user_id,
+    )
+    if verified is None:
         return None
-    if str(observation.get("user_id") or "").strip() != tenant_id:
-        return None
-    if not isinstance(auth, dict):
-        return None
-    if (
-        str(auth.get("agent_sub") or "").strip() != required_sub
-        or str(auth.get("agent_thumbprint") or "").strip() != required_jkt
-        or auth.get("attribution_tier") not in _TRUSTED_AAUTH_TIERS
-    ):
-        return None
-    return {
-        "principal_sub": required_sub,
-        "observation_id": observation_id,
-        "attribution_tier": auth.get("attribution_tier"),
-        "agent_thumbprint": required_jkt,
-    }
+    return verified["observation_fields"][field]
 
 
 def _server_error_detail(exc: Exception) -> str:
@@ -1057,7 +1343,7 @@ def write_checkpoint_brief(
                 "reason": decision.reason,
                 "policy_entity_id": decision.policy_id,
                 "proposed_alternatives": alternatives or [],
-                "status": "awaiting_operator",
+                "status": CHECKPOINT_AWAITING_OPERATOR,
                 "handler": handler,
             }
         ],
@@ -1146,7 +1432,7 @@ def write_checkpoint_brief(
         _canonical_json(body["entities"]).encode()
     ).hexdigest()[:16]
     try:
-        headers = {"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}
+        signer = None
         encoded_request_body: bytes | None = None
         if authorization_expected:
             signer = _checkpoint_producer_http_signer(handler)
@@ -1157,24 +1443,33 @@ def write_checkpoint_brief(
                 )
                 return None
             encoded_request_body = _canonical_json(body).encode("utf-8")
+        store_url = f"{NEOTOMA_BASE_URL.rstrip('/')}/store"
+
+        def _post_checkpoint():
+            # Each attempt is signed afresh (a signature may carry its own
+            # timestamp/nonce) but posts the SAME body, and so the same
+            # content-bound idempotency key.
+            headers = {"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}
+            if signer is None:
+                return httpx.post(store_url, headers=headers, json=body, timeout=15)
             headers.update(
                 signer.sign_headers(
                     method="POST",
-                    url=f"{NEOTOMA_BASE_URL.rstrip('/')}/store",
+                    url=store_url,
                     body=encoded_request_body,
                     content_type="application/json",
                 )
             )
-        store_url = f"{NEOTOMA_BASE_URL.rstrip('/')}/store"
-        if encoded_request_body is None:
-            resp = httpx.post(store_url, headers=headers, json=body, timeout=15)
-        else:
-            resp = httpx.post(
+            return httpx.post(
                 store_url,
                 headers=headers,
                 content=encoded_request_body,
                 timeout=15,
             )
+
+        resp = call_with_transient_retry(
+            _post_checkpoint, label="checkpoint_brief store"
+        )
         resp.raise_for_status()
         data = resp.json()
         ents = data.get("entities") or []
@@ -1358,6 +1653,9 @@ def write_producer_assessment(
 #   rejected  → mark the task declined; do not execute.
 #
 # Any other status (awaiting_operator, or an unknown value) is a no-op.
+
+# The status a brief carries while it waits for the operator.
+CHECKPOINT_AWAITING_OPERATOR = "awaiting_operator"
 
 # Statuses that resolve a checkpoint, and how the dispatcher should treat them.
 CHECKPOINT_APPROVED_STATES = frozenset({"approved", "approve", "accepted"})
@@ -1595,6 +1893,15 @@ def _transition_checkpoint_status(
     idempotency_label: str,
 ) -> bool:
     """Write and read back a terminal/non-releasable checkpoint status."""
+    scope = checkpoint_effect_scope(checkpoint_entity_id)
+    if not checkpoint_scope_permits_ordinary_effects(scope):
+        log.warning(
+            "[gating] checkpoint %s original scope is %s - not transitioning to %s",
+            checkpoint_entity_id,
+            scope,
+            status,
+        )
+        return False
     if not NEOTOMA_BEARER_TOKEN:
         log.warning(
             "[gating] no bearer token — cannot transition checkpoint to %s", status
@@ -1732,15 +2039,37 @@ def query_entities(
 
 
 def query_all_entities(
-    entity_type: str, *, snapshot_filters: dict, limit: int | None = None
+    entity_type: str,
+    *,
+    snapshot_filters: dict,
+    limit: int | None = None,
+    strict: bool = False,
 ) -> list[dict] | None:
     """Every entity matching ``snapshot_filters``, or ``None`` if any page failed.
 
-    Pages by offset until a page comes back short; a partial list is never
-    returned for a failed page.  ``limit`` stops early once that many are held.
+    Pages by offset until the server returns a short page, counting the rows the
+    server returned rather than the ones kept, so a dropped row never ends paging
+    early.  A partial list is never returned for a failed page.  ``limit`` stops
+    early once that many are held.
+
+    ``strict`` is for callers that choose among the rows for a safety decision,
+    where a missing row could be the one that decides: any row that is not an
+    object, a page whose ``entities`` is missing or not a list, a page without
+    a non-negative integer ``total`` (or whose ``total`` differs from an
+    earlier page's), a collected row count that does not equal ``total``, or a
+    ``has_more`` that disagrees with the rows still outstanding makes the whole
+    read failed (``None``) instead of silently smaller.  Every row must also
+    carry a non-empty string ``entity_id``, equal to its own ``.strip()``,
+    that no other row on any page repeats (distinctness is of that exact
+    value), and a row that names an ``entity_type`` must name the requested
+    one; the count compared with ``total`` is of distinct ids, so a repeated
+    row can never stand in for an omitted one.  A short page alone is never
+    taken as proof that the listing ended.
     """
     page_size = QUERY_PAGE_SIZE
     found: list[dict] = []
+    seen_ids: set[str] = set()
+    total: int | None = None
     offset = 0
     while True:
         page = query_entities(
@@ -1751,20 +2080,90 @@ def query_all_entities(
         )
         if page is None:
             return None
-        entities = [e for e in page.get("entities") or [] if isinstance(e, dict)]
-        found.extend(entities)
+        raw = page.get("entities")
+        if strict:
+            if not isinstance(raw, list) or not all(isinstance(e, dict) for e in raw):
+                log.warning(
+                    f"[gating] entity query for {entity_type} returned a malformed "
+                    f"page at offset {offset} — listing is unknown"
+                )
+                return None
+            page_total = page.get("total")
+            if (
+                not isinstance(page_total, int)
+                or isinstance(page_total, bool)
+                or page_total < 0
+                or (total is not None and page_total != total)
+            ):
+                log.warning(
+                    f"[gating] entity query for {entity_type} reported total "
+                    f"{page_total!r} at offset {offset} (earlier pages: {total!r}) "
+                    "— listing is unknown"
+                )
+                return None
+            total = page_total
+            for row in raw:
+                row_id = row.get("entity_id")
+                row_type = row.get("entity_type", entity_type)
+                # One identity: the id exactly as listed, which must equal its
+                # own strip, so no later normalization can merge two rows.
+                if (
+                    not isinstance(row_id, str)
+                    or not row_id
+                    or row_id != row_id.strip()
+                    or row_id in seen_ids
+                    or row_type != entity_type
+                ):
+                    log.warning(
+                        f"[gating] entity query for {entity_type} returned a row "
+                        f"with entity_id {row_id!r} and entity_type {row_type!r} "
+                        f"at offset {offset} that is missing, padded, repeated or of the "
+                        "wrong type — listing is unknown"
+                    )
+                    return None
+                seen_ids.add(row_id)
+            if "has_more" in page:
+                has_more = page.get("has_more")
+                if not isinstance(has_more, bool) or has_more != (
+                    len(seen_ids) < total
+                ):
+                    log.warning(
+                        f"[gating] entity query for {entity_type} reported "
+                        f"has_more={has_more!r} at offset {offset} against a "
+                        f"total of {total} — listing is unknown"
+                    )
+                    return None
+        rows = raw if isinstance(raw, list) else []
+        found.extend(e for e in rows if isinstance(e, dict))
         if limit is not None and len(found) >= limit:
             return found[:limit]
-        if len(entities) < page_size:
-            return found
-        offset += len(entities)
+        if len(rows) < page_size:
+            break
+        offset += len(rows)
+    if strict and total != len(seen_ids):
+        log.warning(
+            f"[gating] entity query for {entity_type} collected "
+            f"{len(seen_ids)} distinct rows against a reported total of "
+            f"{total!r} — listing is unknown"
+        )
+        return None
+    return found
 
 
-def checkpoints_for_task(task_entity_id: str) -> list[dict] | None:
-    """Every checkpoint_brief that names ``task_entity_id``; ``None`` on a failed read."""
+def checkpoints_for_task(
+    task_entity_id: str, *, strict: bool = False
+) -> list[dict] | None:
+    """Every checkpoint_brief that names ``task_entity_id``; ``None`` on a failed read.
+
+    ``strict`` reads the collection with ``query_all_entities(strict=True)``,
+    so a malformed row or an inconsistent listing makes the whole read
+    ``None`` rather than a silently smaller list.  The default keeps the
+    lenient read for callers that do not decide safety from the rows.
+    """
     return query_all_entities(
         "checkpoint_brief",
         snapshot_filters={"task_entity_id": {"op": "eq", "value": task_entity_id}},
+        strict=strict,
     )
 
 

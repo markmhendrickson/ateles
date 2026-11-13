@@ -32,11 +32,19 @@ FILES = (
 _EMPTY_CALLS = {"dict", "list", "tuple", "set", "str", "frozenset"}
 
 ALLOWLIST: dict[str, str] = {
+    "deploy/fly-runner/run_job.py:_load_delivery:raw.get('head_sha', '')":
+        'legacy new-delivery schema has no existing head; exact-key validation requires a nonempty valid head with pr_number',
+    "execution/daemons/apis/fly_runner.py:FlyLedger.reserve_delivery.write.keys:row.get('associated_keys', [])":
+        'legacy receipt owns its primary key without aliases; present malformed associations refuse before writing',
+    "execution/daemons/apis/fly_runner.py:FlyLedger.supersede_delivery.keys:row.get('associated_keys', [])":
+        'legacy receipt owns its primary key without aliases; present malformed associations refuse before superseding',
     "execution/daemons/apis/fly_runner.py:FlyLedger._snapshot:raw.get('deliveries', {})":
         'an older pre-delivery ledger has no bindings; present malformed bindings fail closed',
 
     'execution/daemons/apis/fly_runner.py:FlyExecutor._lease_for_cleanup:return None':
         'None is "no usable lease": the machine is left alone and the reservation kept',
+    'execution/daemons/apis/fly_runner.py:FlyExecutor._settle_from_github:return None':
+        'None is "not proven from GitHub": its caller marks the outcome unknown and the receipt is kept',
     "deploy/fly-runner/run_job.py:run_cli:exc.stderr or b''":
         'a bounded collection that timed out carries None when no output arrived; reported as a timeout',
     "deploy/fly-runner/run_job.py:run_cli:exc.stdout or b''":
@@ -45,13 +53,19 @@ ALLOWLIST: dict[str, str] = {
         'unset means the fixed job directory',
     'deploy/fly-runner/run_job.py:_readable:return True':
         'a path it cannot check counts as reachable, so the probe fails closed',
-    "deploy/fly-runner/run_job.py:auth_headers_for:jwk.get('iss') or httpsig.DEFAULT_AAUTH_ISSUER":
-        "the signer's documented default issuer",
-    "deploy/fly-runner/run_job.py:auth_headers_for:jwk.get('kid') or ''":
+    "execution/daemons/apis/fly_runner.py:role_admission:jwk.get('iss') or httpsig.DEFAULT_AAUTH_ISSUER":
+        "the signer's documented default issuer, as the runner's own signer uses",
+    "execution/daemons/apis/fly_runner.py:role_admission:jwk.get('kid') or ''":
         'a key id is optional in the signature',
-    "deploy/fly-runner/run_job.py:auth_headers_for:jwk.get('sub') or ''":
+    "execution/daemons/apis/fly_runner.py:role_admission:str(jwk.get('kid') or '').strip() or None":
+        'no key id is sent when the key has none',
+    "deploy/fly-runner/run_job.py:_role_signer:jwk.get('iss') or httpsig.DEFAULT_AAUTH_ISSUER":
+        "the signer's documented default issuer",
+    "deploy/fly-runner/run_job.py:_role_signer:jwk.get('kid') or ''":
+        'a key id is optional in the signature',
+    "deploy/fly-runner/run_job.py:_role_signer:jwk.get('sub') or ''":
         "a missing subject cannot equal the role's and is refused",
-    "deploy/fly-runner/run_job.py:auth_headers_for:str(jwk.get('kid') or '').strip() or None":
+    "deploy/fly-runner/run_job.py:_role_signer:str(jwk.get('kid') or '').strip() or None":
         'a key id is optional in the signature',
     'deploy/fly-runner/run_job.py:cap_stdout:secrets or {}':
         'a caller with no secrets has nothing to redact',
@@ -115,6 +129,8 @@ ALLOWLIST: dict[str, str] = {
         'log text only',
     'execution/daemons/apis/fly_runner.py:FlyExecutor.maybe_reap:return []':
         'a failed reaper settles nothing: every reservation stays held',
+    'execution/daemons/apis/fly_runner.py:settle_marked_reservations:return []':
+        'a failed periodic pass settles nothing: every reservation stays held',
     'execution/daemons/apis/fly_runner.py:FlyLedger.heartbeat:return':
         'no heartbeat on an unreadable ledger: liveness only gets staler, never fresher',
     "execution/daemons/apis/fly_runner.py:FlyMachinesClient._call:resp.json().get('error') or resp.text":

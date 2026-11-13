@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.ateles.worktree-prune: the ONE daily workspace check. Runs execution/scripts/worktree_prune.py with
+  the daily and apply arguments at 08:30 local time; see docs/runbooks/worktree-prune.md for what it does, what it
+  never touches, the approval list and the install steps. It replaces any older nightly cleaner on the
+  host (retire those after this merges).
+
+  Without the apply argument the job only reports (dry run), whatever else is given. The daily argument
+  turns on, together: protect-ignored; whole removal of merged, clean linked
+  worktrees (never a forced removal; keep-marked, locked, dirty, unpushed and submodule worktrees are
+  kept); deletion of regenerable cache directories (git-ignored, untracked) in idle worktrees; the
+  free-space alert (ATELES_WORKTREE_PRUNE_ALERT_GIB, default 25); and the approval list in the state
+  directory. The schedule is 08:30, outside the notifier's 22:00 to 08:00 silence window, so a warn-level
+  low-disk alert is delivered instead of being held.
+
+  This file is a TEMPLATE. Nothing installs it automatically.
+    {{HOME}}      the user's home directory
+    {{CHECKOUT}}  absolute path of the Ateles checkout that holds worktree_prune.py.
+                  The job runs whatever is in that working tree, so point it at a
+                  checkout that is kept clean and up to date (not a development clone).
+                  Following the daemon convention (docs/daemon_rc_autodeploy.md), use the
+                  deployment checkout, ~/ateles-rc-src, and run the Python in its .venv, which
+                  is provisioned from execution/scripts/daemon-requirements.txt and holds
+                  httpx, so the notifier can import.
+
+  Optional configuration is read from ATELES_WORKTREE_PRUNE_* environment variables (add them
+  to EnvironmentVariables below); see the runbook. Alert delivery uses the repo's operator notifier
+  (lib/notify) and needs an interpreter that has its dependencies and the notifier's own transport
+  environment; without them the alert is still written to alerts.jsonl in the state directory.
+
+  launchd does not create the log directory: mkdir -p {{HOME}}/.ateles-work/worktree-prune/logs
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ateles.worktree-prune</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{CHECKOUT}}/.venv/bin/python3</string>
+    <string>{{CHECKOUT}}/execution/scripts/worktree_prune.py</string>
+    <string>--daily</string>
+    <string>--apply</string>
+    <string>--max</string>
+    <string>200</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>8</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>{{HOME}}</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>{{HOME}}/.ateles-work/worktree-prune/logs/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{HOME}}/.ateles-work/worktree-prune/logs/launchd.err.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>10</integer>
+</dict>
+</plist>

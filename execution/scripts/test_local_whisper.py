@@ -35,18 +35,18 @@ def test_local_is_the_default_even_when_both_paid_keys_are_present():
     assert lw.resolve_backend(env=env) == lw.BACKEND_LOCAL
 
 
-def test_multichannel_audio_uses_elevenlabs_when_available():
+def test_multichannel_audio_uses_fluid_even_with_cloud_key():
     assert (
         lw.resolve_backend(
             channel_count=2,
             env={"ELEVENLABS_API_KEY": "configured"},
         )
-        == lw.BACKEND_ELEVENLABS
+        == lw.BACKEND_FLUID
     )
 
 
-def test_multichannel_audio_without_elevenlabs_stays_local():
-    assert lw.resolve_backend(channel_count=2, env={}) == lw.BACKEND_LOCAL
+def test_multichannel_audio_without_cloud_key_uses_fluid():
+    assert lw.resolve_backend(channel_count=2, env={}) == lw.BACKEND_FLUID
 
 
 def test_unknown_channel_count_stays_local_even_with_paid_keys():
@@ -80,23 +80,23 @@ def test_unknown_backend_raises_rather_than_guessing(bad):
         lw.resolve_backend(env={"TRANSCRIBE_BACKEND": bad})
 
 
-def test_diarization_request_selects_elevenlabs():
-    """Diarization is the one thing local cannot do, so it outranks the default."""
+def test_diarization_request_selects_local_fluid():
+    """The local diarizer preserves speaker separation without a cloud key."""
     env = {"ELEVENLABS_API_KEY": "k"}
     assert (
-        lw.resolve_backend(use_diarization=True, env=env) == lw.BACKEND_ELEVENLABS
+        lw.resolve_backend(use_diarization=True, env=env) == lw.BACKEND_FLUID
     )
 
 
-def test_record_meeting_diarize_1_selects_elevenlabs_when_key_present():
+def test_record_meeting_diarize_1_selects_fluid_when_key_present():
     env = {"ELEVENLABS_API_KEY": "k", "RECORD_MEETING_DIARIZE": "1"}
-    assert lw.resolve_backend(env=env) == lw.BACKEND_ELEVENLABS
+    assert lw.resolve_backend(env=env) == lw.BACKEND_FLUID
 
 
-def test_record_meeting_diarize_1_without_a_key_stays_local():
-    """No key means ElevenLabs cannot run; that is not a reason to pick OpenAI."""
+def test_record_meeting_diarize_1_without_a_key_uses_fluid():
+    """Local diarization never requires a cloud credential."""
     env = {"RECORD_MEETING_DIARIZE": "1"}
-    assert lw.resolve_backend(env=env) == lw.BACKEND_LOCAL
+    assert lw.resolve_backend(env=env) == lw.BACKEND_FLUID
 
 
 def test_diarization_explicitly_declined_stays_local_not_openai():

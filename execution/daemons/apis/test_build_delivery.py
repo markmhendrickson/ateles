@@ -477,6 +477,18 @@ def _created(entity_id: str, snapshot: dict):
     )
 
 
+async def _drain_background_dispatches():
+    """Wait for the dispatches `handle_event` started in the background.
+
+    The created path returns before its run starts, so a test that checks a run
+    started must wait for these first.
+    """
+    pending = list(apis._background_dispatch_tasks)
+    while pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+        pending = [t for t in apis._background_dispatch_tasks if not t.done()]
+
+
 async def _settle():
     """Let a released build's recovery sweep and its dispatches run to completion."""
     for _ in range(5):
@@ -487,11 +499,14 @@ async def _settle():
         pending = [t for t in apis._background_dispatch_tasks if not t.done()]
 
 
-def _during_build(dispatch_env, *events, fail=False, notifier=None, release=True):
+def _during_build(
+    dispatch_env, *events, fail=False, notifier=None, release=True, drain=False
+):
     """Deliver `events` while a build of the issue holds its claim; then release it.
 
     Each event's task is first put in the (stand-in) task store, as Neotoma would
-    hold it. Returns what was observed mid-build, and the notifier.
+    hold it. Returns what was observed mid-build, and the notifier. With `drain`,
+    the background dispatches are awaited, still mid-build, before observing.
     """
     _, _, store = dispatch_env
     notifier = notifier or _RecNotifier()
@@ -507,6 +522,8 @@ def _during_build(dispatch_env, *events, fail=False, notifier=None, release=True
                     if event.entity_id not in store.rows:
                         store.put(event.entity_id, event.snapshot)
                     await apis.handle_event(event, notifier)
+                if drain:
+                    await _drain_background_dispatches()
                 out["spawns_mid_build"] = list(dispatch_env[1])
                 out["writes_mid_build"] = list(dispatch_env[0])
                 out["rows_mid_build"] = {k: dict(v) for k, v in store.rows.items()}
@@ -691,13 +708,17 @@ def test_several_deferred_tasks_each_run_once(dispatch_env):
 def test_task_for_a_different_issue_is_dispatched_at_once(dispatch_env):
     _, spawns, _ = dispatch_env
     other = _local(issue_number=1449, description="Implement the spec in %s#1449." % REPO)
-    out, _ = _during_build(dispatch_env, lambda c: _created("ent_other_issue_001", other))
+    out, _ = _during_build(
+        dispatch_env, lambda c: _created("ent_other_issue_001", other), drain=True
+    )
     assert out["spawns_mid_build"] == [("cicada", "ent_other_issue_001", "created")]
 
 
 def test_task_for_a_different_repository_is_dispatched_at_once(dispatch_env):
     other = _local(repository="someone/else")
-    out, _ = _during_build(dispatch_env, lambda c: _created("ent_other_repo_0001", other))
+    out, _ = _during_build(
+        dispatch_env, lambda c: _created("ent_other_repo_0001", other), drain=True
+    )
     assert out["spawns_mid_build"] == [("cicada", "ent_other_repo_0001", "created")]
 
 
@@ -730,14 +751,18 @@ def test_operator_approved_release_is_not_second_guessed(dispatch_env, monkeypat
 def test_only_builders_are_deferred(dispatch_env):
     """A different role's task about the same issue is a different piece of work."""
     other = _local(assigned_to="fringilla")
-    out, _ = _during_build(dispatch_env, lambda c: _created("ent_other_role_0001", other))
+    out, _ = _during_build(
+        dispatch_env, lambda c: _created("ent_other_role_0001", other), drain=True
+    )
     assert [s for s, _, _ in out["spawns_mid_build"]] == ["fringilla"]
 
 
 def test_a_reference_in_prose_does_not_make_a_key_without_a_repository(dispatch_env):
     """No resolved repository, no key: nothing to defer behind."""
     snap = _local(repository="", issue_number="")
-    out, _ = _during_build(dispatch_env, lambda c: _created("ent_prose_only_0001", snap))
+    out, _ = _during_build(
+        dispatch_env, lambda c: _created("ent_prose_only_0001", snap), drain=True
+    )
     assert out["spawns_mid_build"] == [("cicada", "ent_prose_only_0001", "created")]
 
 
@@ -2479,3 +2504,285 @@ def test_a_write_that_returns_no_version_never_sends_an_unconditional_write(disp
     assert apis._write_deferral("ent_x", claim, 0) == "unversioned"
     assert [w["field"] for w in sent] == ["disposition"], "the chain went on without a token"
     assert all(w["expected_version"] for w in sent)
+
+
+# --- A further correction may supersede a settled ``not_delivered`` receipt ---
+#
+# Red on origin/main: ``supersedable_correction`` admitted only ``updated`` and
+# ``pr_failed``, so test_a_settled_undelivered_correction_is_superseded failed
+# with ``assert False`` (and the entrance kept refusing). Each refusal test
+# below passes only while its one condition is enforced.
+
+_PR_KEY = "markmhendrickson/ateles#77"
+_HEAD = "a" * 40
+_RUN = "run-not-delivered-1"
+
+
+class _FakeLedger:
+    def __init__(self, receipts, in_flight=(), fail=False):
+        self.receipts = receipts
+        self.in_flight = set(in_flight)
+        self.fail = fail
+
+    def delivery_receipts(self):
+        return self.receipts
+
+    def entry(self, run_id):
+        import fly_runner
+
+        if self.fail:
+            raise fly_runner.FlyLedgerError("unreadable")
+        return {"run_id": run_id} if run_id in self.in_flight else None
+
+
+def _undelivered_target(**over):
+    fields = {"number": 77, "branch": "cicada/fix-77", "base_branch": "main", "head_sha": _HEAD}
+    fields.update(over)
+    return build_delivery.ExistingPRTarget(**fields)
+
+
+def _undelivered_plan(target=None):
+    target = target or _undelivered_target()
+    return build_delivery.FlyDeliveryPlan(
+        repository="markmhendrickson/ateles", branch=target.branch, base_branch=target.base_branch,
+        key=_PR_KEY, issue_number=None, target=target)
+
+
+def _undelivered_receipt(**over):
+    entry = {"status": "not_delivered", "branch": "cicada/fix-77", "run_id": _RUN,
+             "commit": None, "token": "t" * 32,
+             "existing_pr": {"branch": "cicada/fix-77", "base_branch": "main",
+                             "pr_number": "77", "head_sha": _HEAD}}
+    entry.update(over)
+    return entry
+
+
+def _use_ledger(monkeypatch, entry, stored=_PR_KEY, **kw):
+    ledger = _FakeLedger({stored: entry}, **kw)
+    monkeypatch.setattr(build_delivery, "_delivery_ledger", lambda: ledger)
+    return ledger
+
+
+def test_a_settled_undelivered_correction_is_superseded(monkeypatch):
+    entry = _undelivered_receipt()
+    _use_ledger(monkeypatch, entry)
+    assert build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+    # The entrance applies the same rule, so it lets the correction through too.
+    monkeypatch.setattr(build_delivery, "fly_delivery_blocker", lambda key: "refused")
+    assert build_delivery.fly_delivery_entrance_blocker(
+        _PR_KEY, receipt_key=_PR_KEY, target=_undelivered_target()) == ""
+
+
+def test_an_empty_commit_string_counts_as_no_commit(monkeypatch):
+    entry = _undelivered_receipt(commit="")
+    _use_ledger(monkeypatch, entry)
+    assert build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+def test_an_undelivered_receipt_found_through_an_association_is_not_superseded(monkeypatch):
+    other = "markmhendrickson/ateles#task:ent_other"
+    entry = _undelivered_receipt(associated_keys=[_PR_KEY])
+    _use_ledger(monkeypatch, entry, stored=other)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), other, entry)
+
+
+def test_an_undelivered_lens_receipt_is_not_superseded(monkeypatch):
+    entry = _undelivered_receipt(kind="lens")
+    _use_ledger(monkeypatch, entry)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+def test_an_undelivered_first_delivery_is_not_superseded(monkeypatch):
+    entry = _undelivered_receipt()
+    entry.pop("existing_pr")
+    _use_ledger(monkeypatch, entry)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("pr_number", "78"), ("branch", "cicada/other"), ("base_branch", "release/v1"),
+])
+def test_an_undelivered_correction_of_another_target_is_not_superseded(monkeypatch, field, value):
+    entry = _undelivered_receipt()
+    entry["existing_pr"] = {**entry["existing_pr"], field: value}
+    _use_ledger(monkeypatch, entry)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+@pytest.mark.parametrize("status", ["unknown", "push_failed", "no_time", "launching",
+                                    "unreported", "Not_Delivered", "No_Changes"])
+def test_no_other_status_gets_the_undelivered_exception(monkeypatch, status):
+    entry = _undelivered_receipt(status=status)
+    _use_ledger(monkeypatch, entry)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+def test_an_undelivered_receipt_missing_its_commit_field_is_not_superseded(monkeypatch):
+    # A missing field is unknown evidence, not a recorded "no commit".
+    entry = _undelivered_receipt()
+    entry.pop("commit")
+    _use_ledger(monkeypatch, entry)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+def test_an_undelivered_receipt_that_records_a_commit_is_not_superseded(monkeypatch):
+    entry = _undelivered_receipt(commit="b" * 40)
+    _use_ledger(monkeypatch, entry)
+    assert not build_delivery.supersedable_correction(
+        _undelivered_plan(_undelivered_target(head_sha="b" * 40)), _PR_KEY, entry)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+def test_an_undelivered_receipt_admitted_against_another_head_is_not_superseded(monkeypatch):
+    entry = _undelivered_receipt()
+    _use_ledger(monkeypatch, entry)
+    plan = _undelivered_plan(_undelivered_target(head_sha="c" * 40))
+    assert not build_delivery.supersedable_correction(plan, _PR_KEY, entry)
+
+
+def test_an_undelivered_run_still_in_flight_is_not_superseded(monkeypatch):
+    entry = _undelivered_receipt()
+    _use_ledger(monkeypatch, entry, in_flight={_RUN})
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+    monkeypatch.setattr(build_delivery, "fly_delivery_blocker", lambda key: "refused")
+    assert build_delivery.fly_delivery_entrance_blocker(
+        _PR_KEY, receipt_key=_PR_KEY, target=_undelivered_target()) == "refused"
+
+
+@pytest.mark.parametrize("run_id", ["", None])
+def test_an_undelivered_receipt_naming_no_run_is_not_superseded(monkeypatch, run_id):
+    entry = _undelivered_receipt(run_id=run_id)
+    _use_ledger(monkeypatch, entry)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+def test_an_unreadable_ledger_keeps_the_undelivered_refusal(monkeypatch):
+    entry = _undelivered_receipt()
+    _use_ledger(monkeypatch, entry, fail=True)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+# --- A further correction may supersede a settled ``no_changes`` receipt ---
+#
+# Red before the second repair: ``supersedable_correction`` sent only
+# ``not_delivered`` to ``_undelivered_correction_settled``, so
+# test_a_settled_no_changes_correction_is_superseded failed with
+# ``assert False`` and the entrance returned "refused". The four refusal tests
+# below passed then too (everything ``no_changes`` was refused); each is the
+# guard that stays red if its one condition stops being enforced. The runner
+# returns before any import on a ``no_changes`` run, so its receipt records an
+# empty ``commit``.
+
+
+def _no_changes_receipt(**over):
+    return _undelivered_receipt(status="no_changes", commit="", **over)
+
+
+def test_a_settled_no_changes_correction_is_superseded(monkeypatch):
+    entry = _no_changes_receipt()
+    _use_ledger(monkeypatch, entry)
+    assert build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+    monkeypatch.setattr(build_delivery, "fly_delivery_blocker", lambda key: "refused")
+    assert build_delivery.fly_delivery_entrance_blocker(
+        _PR_KEY, receipt_key=_PR_KEY, target=_undelivered_target()) == ""
+
+
+def test_a_no_changes_receipt_admitted_against_another_head_is_not_superseded(monkeypatch):
+    entry = _no_changes_receipt()
+    _use_ledger(monkeypatch, entry)
+    plan = _undelivered_plan(_undelivered_target(head_sha="c" * 40))
+    assert not build_delivery.supersedable_correction(plan, _PR_KEY, entry)
+
+
+def test_a_no_changes_run_still_in_flight_is_not_superseded(monkeypatch):
+    entry = _no_changes_receipt()
+    _use_ledger(monkeypatch, entry, in_flight={_RUN})
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+    monkeypatch.setattr(build_delivery, "fly_delivery_blocker", lambda key: "refused")
+    assert build_delivery.fly_delivery_entrance_blocker(
+        _PR_KEY, receipt_key=_PR_KEY, target=_undelivered_target()) == "refused"
+
+
+def test_an_unreadable_ledger_keeps_the_no_changes_refusal(monkeypatch):
+    entry = _no_changes_receipt()
+    _use_ledger(monkeypatch, entry, fail=True)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+def test_a_first_delivery_no_changes_receipt_is_not_superseded(monkeypatch):
+    entry = _no_changes_receipt()
+    entry.pop("existing_pr")
+    _use_ledger(monkeypatch, entry)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+# The new-PR prompt as it stood before corrections stopped rewriting the
+# description; it must stay byte-identical.
+_NEW_PR_PROMPT_SHA256 = "ce45d0d1b17671ba889a628f0df5caf0a9427f0d88ed2f54a0ec3db0b8b80198"
+
+
+def test_correction_instructions_post_the_summary_and_never_name_a_description_file():
+    # Red on main: the existing-PR prompt told the builder to write
+    # `pull_request_body.md`, so the first assertion failed.
+    target = build_delivery.ExistingPRTarget(12, "codex/fix", "main", "a" * 40)
+    plan = build_delivery.FlyDeliveryPlan("owner/repo", "codex/fix", "main", "owner/repo#1", 1,
+                                          target=target)
+    text = build_delivery.fly_delivery_instructions(plan)
+    assert "pull_request_body.md" not in text
+    assert "posts it on the pull request as a comment for reviewers" in text
+    assert "what this round changed for each finding" in text
+    assert "never changes the pull request description" in text
+
+
+def test_the_new_pr_prompt_is_unchanged():
+    import hashlib
+
+    new = build_delivery.fly_delivery_instructions(
+        build_delivery.FlyDeliveryPlan("owner/repo", "codex/fix", "main", "owner/repo#1", 1))
+    assert "pull_request_body.md" not in new
+    assert hashlib.sha256(new.encode()).hexdigest() == _NEW_PR_PROMPT_SHA256
+
+
+# --- A correction's replacement description is recorded on the receipt ---
+
+
+@pytest.mark.parametrize("description", ["updated", "not_confirmed", ""])
+def test_the_receipt_stores_the_pr_description_outcome(monkeypatch, tmp_path, description):
+    from skill_runner import SkillResult
+
+    monkeypatch.setenv(build_delivery.FLY_DELIVERY_REGISTRY_ENV, str(tmp_path / "receipts.json"))
+    repo, key = "owner/repo", "owner/repo#123"
+
+    async def verify(res, plan):
+        return None
+
+    async def launch():
+        return SkillResult("cicada", True, 0, "", "", fly_delivery_status="updated",
+                           remote_run_id="run-1", fly_delivery_branch="cicada/x",
+                           fly_delivery_commit="a" * 40, fly_pr_number=12,
+                           fly_pr_url=f"https://github.com/{repo}/pull/12",
+                           fly_pr_description=description)
+
+    monkeypatch.setattr(build_delivery, "verify_fly_delivery", verify)
+    plan = build_delivery.FlyDeliveryPlan(repo, "cicada/x", "main", key, 123)
+    asyncio.run(build_delivery.run_fly_delivery(plan, launch, lambda r: r))
+    receipt = build_delivery._delivery_ledger().delivery_receipts()[key]
+    assert receipt["status"] == "updated" and receipt["pr_url"].endswith("/pull/12")
+    if description:
+        assert receipt["pr_description"] == description
+    else:
+        assert "pr_description" not in receipt
+
+
+@pytest.mark.parametrize("recorded,expected", [("updated", "updated"), ("not_confirmed", "not_confirmed"),
+                                               (None, ""), (5, "")])
+def test_the_runner_records_pr_description_reaches_the_result(recorded, expected):
+    import types
+
+    from skill_runner import _fly_delivery_fields
+
+    got = {"delivery_status": "updated", "pr_url": "https://github.com/owner/repo/pull/12"}
+    if recorded is not None:
+        got["pr_description"] = recorded
+    job = types.SimpleNamespace(delivery={"branch": "cicada/x", "pr_number": "12"}, delivery_result=got)
+    assert _fly_delivery_fields(job, unknown=False)["fly_pr_description"] == expected

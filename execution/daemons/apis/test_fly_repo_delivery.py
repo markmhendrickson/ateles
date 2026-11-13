@@ -455,6 +455,26 @@ def test_the_git_environment_inherits_nothing(monkeypatch, tmp_path):
     assert TOKEN not in str(env)
 
 
+def test_the_runner_git_starts_no_background_maintenance(tmp_path):
+    # Git 2.47+ detaches auto-maintenance after commit and fetch; one still
+    # running when the job removes its work directory fails that cleanup.
+    env = rd.git_env(tmp_path, allow="file")
+    env.update(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+    trace = tmp_path / "trace"
+    env["GIT_TRACE"] = str(trace)
+    src, dst = tmp_path / "src", tmp_path / "dst.git"
+    for args in (["init", "-q", str(src)], ["init", "-q", "--bare", str(dst)],
+                 ["-C", str(src), "commit", "-q", "--allow-empty", "-m", "x"],
+                 ["-C", str(src), "bundle", "create", "-q", str(tmp_path / "b"), "HEAD"],
+                 ["-C", str(dst), "fetch", "-q", "--no-write-fetch-head", str(tmp_path / "b"),
+                  "HEAD:refs/q"]):
+        assert subprocess.run([rd.GIT, *args], env=env, capture_output=True).returncode == 0
+    traced = trace.read_text()
+    assert "built-in: git commit" in traced and "built-in: git fetch" in traced
+    assert "maintenance" not in traced and "built-in: git gc" not in traced
+
+
 def test_the_origin_repository_is_private_to_root(world):
     assert os.stat(world["work"].origin).st_mode & 0o077 == 0
 
@@ -1417,6 +1437,91 @@ def test_a_failed_pull_request_call_is_a_fixed_reason(monkeypatch, responses, re
     assert exc.value.category == rd.PR_FAILED and str(exc.value).endswith(reason)
 
 
+OLD_HEAD, NEW_HEAD = "a" * 40, "b" * 40
+
+
+def _existing_pr(sha=OLD_HEAD, **over):
+    payload = _pr_payload(12, state="open", merged=False,
+                          head={"ref": BRANCH, "repo": {"full_name": REPO}, "sha": sha},
+                          base={"ref": "main", "repo": {"full_name": REPO}})  # fmt: skip
+    payload.update(over)
+    return payload
+
+
+def _with_existing_pr_reads(monkeypatch, reads):
+    """The repository read, then each PR read in turn (the last repeats); a
+    fake clock that moves only when the wait sleeps, so tests take no time."""
+    pr_reads, sleeps, now = [], [], [time.time()]
+
+    def fake(method, path, token, body=None):
+        assert method == "GET"
+        if path == f"/repos/{REPO}":
+            return 200, {"full_name": REPO, "default_branch": "main"}
+        pr_reads.append(path)
+        return 200, reads[min(len(pr_reads), len(reads)) - 1]
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(rd, "_api", fake)
+    monkeypatch.setattr(rd, "_clock", lambda: now[0])
+    monkeypatch.setattr(rd, "_sleep", sleep)
+    return pr_reads, sleeps
+
+
+def _require(head=NEW_HEAD, **kw):
+    return rd.require_existing_pr(repository=REPO, number=12, branch=BRANCH,
+                                  base_branch="main", head=head, token=TOKEN, **kw)
+
+
+def test_existing_pr_head_catches_up_after_push(monkeypatch):
+    reads, sleeps = _with_existing_pr_reads(monkeypatch, [_existing_pr(OLD_HEAD), _existing_pr(NEW_HEAD)])
+    pr = _require(wait_for_head=True)
+    assert pr == rd.PullRequest(12, f"https://github.com/{REPO}/pull/12", "updated")
+    assert len(reads) == 2 and sleeps == [rd.HEAD_CATCH_UP_INTERVAL_SECONDS]
+
+
+def test_existing_pr_head_never_catches_up_refuses(monkeypatch):
+    reads, sleeps = _with_existing_pr_reads(monkeypatch, [_existing_pr(OLD_HEAD)])
+    with pytest.raises(rd.RepoWorkError) as exc:
+        _require(wait_for_head=True)
+    assert exc.value.category == rd.PR_FAILED and "no longer matches" in str(exc.value)
+    assert len(reads) > 1 and sum(sleeps) <= rd.HEAD_CATCH_UP_SECONDS
+
+
+@pytest.mark.parametrize("over", [
+    {"state": "closed"},
+    {"merged": True},
+    {"base": {"ref": "main", "repo": {"full_name": "fork/repo"}}},
+    {"base": {"ref": "develop", "repo": {"full_name": REPO}}},
+    {"head": {"ref": BRANCH, "repo": {"full_name": "fork/repo"}, "sha": OLD_HEAD}},
+])
+def test_closed_existing_pr_refuses_without_waiting(monkeypatch, over):
+    reads, sleeps = _with_existing_pr_reads(monkeypatch, [_existing_pr(OLD_HEAD, **over),
+                                                          _existing_pr(NEW_HEAD)])  # fmt: skip
+    with pytest.raises(rd.RepoWorkError) as exc:
+        _require(wait_for_head=True)
+    assert exc.value.category == rd.PR_FAILED and len(reads) == 1 and sleeps == []
+
+
+def test_pre_push_read_does_not_wait(monkeypatch):
+    reads, sleeps = _with_existing_pr_reads(monkeypatch, [_existing_pr(OLD_HEAD), _existing_pr(NEW_HEAD)])
+    with pytest.raises(rd.RepoWorkError) as exc:
+        _require()
+    assert exc.value.category == rd.PR_FAILED and len(reads) == 1 and sleeps == []
+    _with_existing_pr_reads(monkeypatch, [_existing_pr(OLD_HEAD)])
+    assert _require(head=OLD_HEAD).number == 12  # an exact head still passes
+
+
+def test_existing_pr_wait_stays_within_the_delivery_deadline(monkeypatch):
+    reads, sleeps = _with_existing_pr_reads(monkeypatch, [_existing_pr(OLD_HEAD), _existing_pr(NEW_HEAD)])
+    with rd.bounded_by(time.time() + rd.HEAD_CATCH_UP_INTERVAL_SECONDS):
+        with pytest.raises(rd.RepoWorkError) as exc:
+            _require(wait_for_head=True)
+    assert exc.value.category == rd.PR_FAILED and len(reads) == 1 and sleeps == []
+
+
 @pytest.mark.parametrize("content,expected", [
     (b"# Fix it\n\nWhy.\n", ("Fix it", "Why.")),
     (b"Plain title\nline two\n", ("Plain title", "line two")),
@@ -1466,3 +1571,91 @@ def test_an_exhausted_deadline_starts_no_git_and_no_api_call(world, monkeypatch)
                 call()
             assert exc.value.category == rd.NO_TIME
     assert started == []
+
+
+def test_existing_correction_cannot_rewind_even_with_an_exact_remote_lease(world, monkeypatch):
+    """The lease is a CAS, never authority for a non-fast-forward overwrite."""
+    agent_commit(world)
+    assert deliver(world) is not None
+    remote = world["remote"]
+    git(remote, "update-ref", f"refs/heads/{BRANCH}", world["base"], home=world["home"])
+    git(world["work"].origin, "fetch", "-q", str(remote), world["old"], home=world["home"])
+    # A caller supplies a recorded older commit. The root-owned ancestry guard
+    # must refuse BEFORE send-pack, despite its matching expected remote ref.
+    git(world["work"].origin, "update-ref", f"refs/heads/{BRANCH}", world["old"], home=world["home"])
+    monkeypatch.setattr(rd, "GITHUB_REMOTE", f"file://{remote}")
+    monkeypatch.setattr(rd, "GITHUB_REMOTE_TRANSPORT", "file")
+    with pytest.raises(rd.RepoWorkError, match="not a fast-forward"):
+        rd.push_branch(world["work"], repository=REPO, branch=BRANCH,
+                       default_branch="main", head=world["old"], token=TOKEN,
+                       expected_head=world["base"])
+    assert git(remote, "rev-parse", f"refs/heads/{BRANCH}", home=world["home"]) == world["base"]
+
+
+@pytest.mark.parametrize("content,expected", [
+    (b"# Whole\n\nbody.\n", "# Whole\n\nbody."),
+    (b"   \n", ""),
+    (b"\xff\xfe not text", ""),
+    (b"x" * (64 * 1024 + 1), ""),
+    (None, ""),
+])
+def test_the_replacement_description_is_read_safely(world, content, expected):
+    path = world["work"].export / rd.PR_BODY_NAME
+    if content is not None:
+        path.write_bytes(content)
+    assert rd.read_pr_body(world["work"]) == expected
+
+
+def test_a_replacement_description_link_is_not_followed(world, tmp_path):
+    secret = tmp_path / "elsewhere.md"
+    secret.write_text("Not the agent's\n")
+    (world["work"].export / rd.PR_BODY_NAME).symlink_to(secret)
+    assert rd.read_pr_body(world["work"]) == ""
+
+
+def test_the_change_summary_is_read_whole_and_safely(world, tmp_path):
+    (world["work"].export / rd.PR_TEXT_NAME).write_text("# Round\n\nFixed finding 1.\n")
+    assert rd.read_change_summary(world["work"]) == "# Round\n\nFixed finding 1."
+    (world["work"].export / rd.PR_TEXT_NAME).unlink()
+    assert rd.read_change_summary(world["work"]) == ""
+    secret = tmp_path / "elsewhere.md"
+    secret.write_text("Not the agent's\n")
+    (world["work"].export / rd.PR_TEXT_NAME).symlink_to(secret)
+    assert rd.read_change_summary(world["work"]) == ""
+
+
+def _comment_api(calls, post_answer, get_answer):
+    """A fake ``_api`` that takes the comment POST and answers its read-back GET."""
+    def api(method, path, token, body=None):
+        calls.append((method, path, token, body))
+        return post_answer if method == "POST" else get_answer
+    return api
+
+
+def test_post_pr_comment_posts_one_comment_and_reads_it_back(monkeypatch):
+    # Red on main: post_pr_comment did not exist (AttributeError).
+    calls = []
+    monkeypatch.setattr(rd, "_api", _comment_api(calls, (201, {"id": 77}), (200, {"body": "Round."})))
+    assert rd.post_pr_comment(repository="owner/repo", number=5, token="tok", body="Round.") is True
+    assert calls == [("POST", "/repos/owner/repo/issues/5/comments", "tok", {"body": "Round."}),
+                     ("GET", "/repos/owner/repo/issues/comments/77", "tok", None)]
+    assert all("/pulls/" not in c[1] and c[0] != "PATCH" for c in calls)
+
+
+@pytest.mark.parametrize("post,get", [
+    ((201, {"id": 77}), (200, {"body": "Other."})),
+    ((201, {"id": 77}), (404, None)),
+    ((201, {"id": 77}), (200, None)),
+    ((201, {"id": True}), (200, {"body": "Round."})),
+    ((201, None), (200, {"body": "Round."})),
+])
+def test_an_unconfirmed_comment_read_back_is_false(monkeypatch, post, get):
+    monkeypatch.setattr(rd, "_api", _comment_api([], post, get))
+    assert rd.post_pr_comment(repository="owner/repo", number=5, token="tok", body="Round.") is False
+
+
+def test_a_refused_comment_raises_pr_failed_without_its_text(monkeypatch):
+    monkeypatch.setattr(rd, "_api", lambda *a, **k: (403, None))
+    with pytest.raises(rd.RepoWorkError) as exc:
+        rd.post_pr_comment(repository="owner/repo", number=5, token="tok", body="Round text.")
+    assert exc.value.category == rd.PR_FAILED and "Round text." not in str(exc.value)

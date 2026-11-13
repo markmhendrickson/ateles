@@ -21,6 +21,11 @@ on:
       - "deploy/cloud/**"
       - "execution/local_llm/**"
       - "execution/daemons/test_*.py"
+      - "execution/daemons/codex-delivery-check/**"
+      - "execution/daemons/decision-queue-reading/**"
+      - "execution/scripts/decision_queue.py"
+      - "execution/scripts/metrics/**"
+      - "lib/notify/**"
       - "execution/daemons/cotinga/**"
       - "execution/daemons/cyphorhinus/**"
       - "execution/daemons/phoenicurus-release/**"
@@ -44,6 +49,9 @@ on:
       - "lib/test_transcript_clarity.py"
       - "lib/github_app_token.py"
       - "lib/test_github_app_token.py"
+      - "lib/github_account.py"
+      - "lib/github_owner_policy.py"
+      - "lib/github_policy_control.py"
       - "execution/scripts/**"
       # The Codex turn guard's installer tests read these two inputs, so an
       # edit to either alone must re-run them.
@@ -51,6 +59,7 @@ on:
       - "templates/codex/**"
       # The scripts fixture imports the complete-profile preparation core.
       - "execution/lib/instance_profile_guard.py"
+      - "execution/lib/rendered_page_links.py"
       - "execution/lib/instance_auth_profile_guard.py"
       - "execution/lib/instance_auth_profile_adapter.py"
       - "execution/lib/instance_auth_profile_preflight.py"
@@ -100,6 +109,12 @@ jobs:
         run: uv run --extra dev python -m pytest ateles/ .claude/hooks/ -q
       - name: Run daemon runtime tests
         run: uv run --extra dev python -m pytest lib/daemon_runtime/ -q
+      # lib/notify/ was a path trigger only: its tests (held-notice routing,
+      # email budget, queue locking) ran in no lane. Blocking on purpose; the
+      # package needs httpx and apprise, both core dependencies, so the dev
+      # extra install is sufficient.
+      - name: Run notifier lib tests
+        run: uv run --extra dev python -m pytest lib/notify/ -q
       # Swarm daemon tests (qa #254 finding): test_swarm_dispatch.py and the
       # rest of the Apis daemon suite never ran in CI — the lane above is scoped
       # to ateles/**, so a daemon regression (e.g. a dangling call from a stale
@@ -108,6 +123,10 @@ jobs:
       # execution/daemons/apis/** changes.
       - name: Run swarm daemon (apis) tests
         run: uv run --extra dev python -m pytest execution/daemons/apis/ -q
+      - name: Run Codex delivery check tests
+        run: uv run --extra dev python -m pytest execution/daemons/codex-delivery-check/ -q
+      - name: Run decision queue reading tests
+        run: uv run --extra dev python -m pytest execution/daemons/decision-queue-reading/ execution/scripts/test_decision_queue.py execution/scripts/metrics/ -q
       # The Fly runner's repository delivery, run for real as root with the
       # agent as uid 10001, in a container from the runner image's base (the
       # same Python and git). Skipped in the step above, which is not root.

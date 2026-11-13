@@ -109,21 +109,37 @@ def test_creates_when_no_match(monkeypatch):
     assert wt._get_or_create_recipient("tok", 1, IBAN, "Someone") == 777
 
 
-def test_lookup_failure_falls_back_to_create(monkeypatch):
-    """A lookup outage must not block the payment — create as before."""
+def test_lookup_failure_fails_closed_and_never_creates(monkeypatch):
+    """A failed lookup is NOT "no match": it must raise, not create."""
 
     def boom(*a, **k):
         raise OSError("wise unreachable")
 
     monkeypatch.setattr(wt, "_wise_get", boom)
-    monkeypatch.setattr(wt, "_wise_post", lambda *a, **k: {"id": 777})
-    assert wt._get_or_create_recipient("tok", 1, IBAN, "Someone") == 777
+    monkeypatch.setattr(
+        wt, "_wise_post", lambda *a, **k: pytest.fail("must not create on a failed lookup")
+    )
+    with pytest.raises(wt.WiseRecipientError):
+        wt._get_or_create_recipient("tok", 1, IBAN, "Someone")
 
 
-def test_unexpected_shape_falls_back_to_create(monkeypatch):
+def test_http_401_names_an_invalid_or_expired_token(monkeypatch):
+    import urllib.error
+
+    def unauthorized(*a, **k):
+        raise urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)
+
+    monkeypatch.setattr(wt, "_wise_get", unauthorized)
+    monkeypatch.setattr(wt, "_wise_post", lambda *a, **k: pytest.fail("must not create"))
+    with pytest.raises(wt.WiseRecipientError, match="invalid or expired"):
+        wt._get_or_create_recipient("tok", 1, IBAN, "Someone")
+
+
+def test_unexpected_shape_fails_closed_and_never_creates(monkeypatch):
     monkeypatch.setattr(wt, "_wise_get", lambda *a, **k: "not-a-list")
-    monkeypatch.setattr(wt, "_wise_post", lambda *a, **k: {"id": 777})
-    assert wt._get_or_create_recipient("tok", 1, IBAN, "Someone") == 777
+    monkeypatch.setattr(wt, "_wise_post", lambda *a, **k: pytest.fail("must not create"))
+    with pytest.raises(wt.WiseRecipientError):
+        wt._get_or_create_recipient("tok", 1, IBAN, "Someone")
 
 
 def test_malformed_entries_are_skipped(monkeypatch):

@@ -1,5 +1,5 @@
 {
-  "_comment": "Public-safe synthetic scenarios for the Apis execution gate's pre-gate producer score. Each drives the real apis.dispatch_task; only Neotoma writes, the agent spawn and the model call are stubbed. The base task is a routable, low-blast, unscored task. Includes content escalation, effective-policy parity and checkpoint-driver scenarios (ateles#682).",
+  "_comment": "Public-safe synthetic scenarios for the Apis execution gate's pre-gate producer score. Each drives the real apis.dispatch_task; Neotoma reads and writes, the agent spawn and the model call are stubbed at their external boundaries. The base task is a routable, low-blast, unscored task. Includes content escalation, effective-policy parity and checkpoint-driver scenarios (ateles#682).",
   "base_task": {
     "title": "Tidy the notes index",
     "body": "Re-sort the local notes index alphabetically. Local file only.",
@@ -272,7 +272,7 @@
       "expect": {
         "outcome": "held",
         "scorer_called": false,
-        "reason": "operator-only"
+        "reason": "unclassified action type"
       }
     },
     {
@@ -936,6 +936,173 @@
           "action_type_source": "content",
           "action_blast_radius": "high"
         }
+      }
+    },
+    {
+      "id": "session_assignee_is_left_as_filed",
+      "why": "a task assigned to an interactive session is not unroutable: no status write, no page, no spawn",
+      "task": {
+        "assigned_to": "Codex session billing",
+        "tags": []
+      },
+      "expect": {
+        "outcome": "left_as_filed",
+        "notifications": 0,
+        "scorer_called": false
+      }
+    },
+    {
+      "id": "session_owner_is_left_as_filed",
+      "why": "an owner naming a session, with no assignee and no tags, is left exactly as filed",
+      "task": {
+        "assigned_to": null,
+        "owner": "Codex street coordinator chat0a1b2c3d",
+        "tags": [],
+        "due_date": "2026-11-10",
+        "action_type": "analysis"
+      },
+      "expect": {
+        "outcome": "left_as_filed",
+        "notifications": 0,
+        "scorer_called": false
+      }
+    },
+    {
+      "id": "session_owner_with_guessable_words_is_not_routed",
+      "why": "words that would infer a route never override a session owner: no gate, no brief, no spawn",
+      "task": {
+        "assigned_to": null,
+        "owner": "ateles session",
+        "title": "Reconcile the payments ledger",
+        "body": "payments wage",
+        "action_type": "code"
+      },
+      "expect": {
+        "outcome": "left_as_filed",
+        "notifications": 0,
+        "scorer_called": false
+      }
+    },
+    {
+      "id": "unknown_named_assignee_still_blocks",
+      "why": "fail closed: a named assignee that is no agent, person or session still blocks and pages",
+      "task": {
+        "assigned_to": "Jane Doe"
+      },
+      "config": {
+        "operator_profile": {"kind": "complete_negative"}
+      },
+      "expect": {
+        "outcome": "blocked",
+        "notifications": 1,
+        "any_notification_contains": [
+          "unroutable"
+        ],
+        "scorer_called": false
+      }
+    },
+    {
+      "id": "person_named_like_a_session_word_still_blocks",
+      "why": "fail closed: one marker word in a person's name is not a session, so the page is not silenced",
+      "task": {
+        "assigned_to": "Claude Martin"
+      },
+      "config": {
+        "operator_profile": {"kind": "complete_negative"}
+      },
+      "expect": {
+        "outcome": "blocked",
+        "notifications": 1,
+        "any_notification_contains": [
+          "unroutable"
+        ],
+        "scorer_called": false
+      }
+    },
+    {
+      "id": "profile_owned_person_is_left_as_filed",
+      "why": "a valid returned operator identity preserves the person's task without a gate or worker",
+      "task": {"assigned_to": "Example Person", "status": "open", "tags": ["finance"]},
+      "config": {"operator_profile": {"kind": "response", "response": {"entities": [{"entity_type": "operator_profile", "snapshot": {"display_name": "Example Person"}}], "total": 1}}},
+      "expect": {"outcome": "left_as_filed", "scorer_called": false, "notifications": 0}
+    },
+    {
+      "id": "profile_owned_person_with_session_word_is_left_as_filed",
+      "why": "a session marker word alone is not ownership evidence; a valid profile supplies person ownership",
+      "task": {"assigned_to": "Claude Martin", "status": "open", "tags": ["finance"]},
+      "config": {"operator_profile": {"kind": "response", "response": {"entities": [{"entity_type": "operator_profile", "snapshot": {"display_name": "Claude Martin"}}], "total": 1}}},
+      "expect": {"outcome": "left_as_filed", "scorer_called": false, "notifications": 0}
+    },
+    {
+      "id": "unreadable_operator_profile_preserves_unknown_ownership",
+      "why": "an unread identity source is uncertainty, not proof that the named assignee is unowned",
+      "task": {"assigned_to": "Example Person", "status": "open", "tags": ["finance"]},
+      "config": {"operator_profile": {"kind": "unreadable"}},
+      "expect": {"outcome": "left_as_filed", "scorer_called": false, "notifications": 1, "any_notification_contains": ["ownership could not be verified"]}
+    },
+    {
+      "id": "partial_operator_profile_preserves_unknown_ownership",
+      "why": "an incomplete profile collection cannot justify a no-owner task-status write",
+      "task": {"assigned_to": "Example Person", "status": "open", "tags": ["finance"]},
+      "config": {"operator_profile": {"kind": "partial"}},
+      "expect": {"outcome": "left_as_filed", "scorer_called": false, "notifications": 1, "any_notification_contains": ["ownership could not be verified"]}
+    },
+    {
+      "id": "approved_session_task_is_not_spawned",
+      "why": "an approval is not consent to put a second worker on a session's task: not spawned, one INFO line",
+      "task": {
+        "assigned_to": "Codex session billing"
+      },
+      "expect": {
+        "outcome": "left_as_filed",
+        "notifications": 1,
+        "any_notification_contains": [
+          "session-owned"
+        ],
+        "scorer_called": false
+      },
+      "dispatch": {
+        "gate_override": true
+      }
+    },
+    {
+      "id": "dispatcher_assignee_with_guessable_words_is_left_as_filed",
+      "why": "the dispatcher's own name names no owner, so words that infer a route are still only a guess: left as filed, exactly like an unassigned task",
+      "task": {
+        "assigned_to": "apis",
+        "title": "Reconcile the payments ledger",
+        "body": "payments wage",
+        "action_type": null
+      },
+      "expect": {
+        "outcome": "left_as_filed",
+        "notifications": 0,
+        "scorer_called": false
+      }
+    },
+    {
+      "id": "dispatcher_assignee_spelled_as_a_subject_is_left_as_filed",
+      "why": "the AAuth-subject spelling of the dispatcher is the same non-owner, and reading it as an owner would run the task on the guess",
+      "task": {
+        "assigned_to": "Apis@ateles-swarm",
+        "title": "Reconcile the payments ledger",
+        "body": "payments wage",
+        "action_type": null
+      },
+      "expect": {
+        "outcome": "left_as_filed",
+        "notifications": 0,
+        "scorer_called": false
+      }
+    },
+    {
+      "id": "task_closed_before_the_gate_write_is_not_overwritten",
+      "why": "a task that becomes terminal between the decision and the first gate write keeps its status: no status write, no checkpoint, no spawn",
+      "task_changes_to": "done",
+      "expect": {
+        "outcome": "left_as_filed",
+        "notifications": 0,
+        "scorer_called": false
       }
     }
   ]

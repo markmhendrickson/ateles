@@ -1869,6 +1869,9 @@ class SkillResult:
     fly_delivery_commit: str = ""
     fly_pr_number: int | None = None
     fly_pr_url: str = ""
+    # A correction's replacement description, as the runner's record said:
+    # ``updated``, ``not_confirmed``, or empty when none was supplied.
+    fly_pr_description: str = ""
     # The delivered pull request read back from GitHub (build_delivery.
     # run_fly_delivery): ``passed``, ``failed`` (the reason says which field
     # differed or why it could not be read) or ``not_applicable`` (no pull
@@ -1879,6 +1882,24 @@ class SkillResult:
     # delivery-token mint) or its launch provably did not take effect. A
     # builder may then run its delivery locally, as it would without Fly.
     fly_ineligible_before_launch: bool = False
+    # A Fly-bound run refused before launch for a reason that is its provider
+    # alone (fly_runner.FlyIneligible.provider_specific): the provider loop
+    # may try the next provider that runs on Fly in the same dispatch.
+    fly_provider_ineligible: bool = False
+    # Fly declined this run before anything launched, and the Mac may not run
+    # its provider either (not enabled locally, or gated). Nothing ran: the
+    # provider loop tries the next provider, without cooling this one (it is
+    # healthy; only where it was routed could not take this job).
+    fly_local_fallback_refused: bool = False
+    # A single-provider dispatch (an existing-PR correction) refused that way:
+    # the other Fly candidates its caller may try next, each in a fresh
+    # dispatch under its own prelaunch receipt. Empty for every other result.
+    fly_next_providers: tuple[str, ...] = ()
+    # Selected correction: retain the original result plus proven prelaunch
+    # cleanup. A known no-launch repair is held without automatic redispatch.
+    fly_delivery_not_launched: bool = False
+    fly_delivery_cleanup: str = ""
+    fly_existing_pr_number: int | None = None
     # A Fly run is not gated by the Mac's usage reading (operator ruling
     # 2026-10-15). When that reading WOULD have refused this provider
     # locally, what it said; empty when it would have allowed it.
@@ -1953,6 +1974,8 @@ def _fly_delivery_fields(job, *, unknown: bool) -> dict:
         "fly_delivery_commit": got.get("delivery_commit") or "",
         "fly_pr_number": got.get("pr_number"),
         "fly_pr_url": got.get("pr_url") or "",
+        "fly_pr_description": got["pr_description"] if isinstance(got.get("pr_description"), str) else "",
+        "fly_existing_pr_number": int(job.delivery["pr_number"]) if "pr_number" in job.delivery else None,
     }
 
 
@@ -2085,14 +2108,14 @@ def _proxy_value_has_credentials(value: str) -> bool:
     return "@" in authority
 
 
-def _make_dispatch_scratch_dir(tmp_parent: str | None = None) -> str:
+def _make_dispatch_scratch_dir(tmp_parent: str | None = None, *, prefix: str = "apis_work_") -> str:
     """A fresh, empty, owner-only directory for a dispatch that names no
     working directory, as a resolved absolute path. The caller removes it."""
     try:
         parent = Path(tmp_parent) if tmp_parent and tmp_parent.strip() else None
         if parent is not None:
             parent.mkdir(parents=True, exist_ok=True)
-        made = tempfile.mkdtemp(prefix="apis_work_", dir=str(parent) if parent else None)
+        made = tempfile.mkdtemp(prefix=prefix, dir=str(parent) if parent else None)
         os.chmod(made, 0o700)
     except OSError as exc:
         # The class only: an OSError's text can carry local paths.
@@ -2742,6 +2765,60 @@ def _requested_model(provider: str, cmd: list[str]) -> str | None:
     return None
 
 
+# ── Agent git identity for fix rounds ─────────────────────────────────────────
+# A fix round commits and pushes from a child whose HOME (and so ~/.gitconfig)
+# is the host's, so without this its commits carry the host owner's name and
+# email and are signed with the host owner's key. The agent identity comes from
+# the same configuration Apus already commits under; the name falls back to the
+# agent login exactly as there, the email has no fallback. Without an email the
+# fix round is refused rather than run under the host identity.
+AGENT_GIT_NAME_ENV = "ATELES_AGENT_GIT_NAME"
+AGENT_GIT_EMAIL_ENV = "ATELES_AGENT_GIT_EMAIL"
+_AGENT_GIT_DEFAULT_NAME = "ateles-agent"
+AGENT_GIT_IDENTITY_MISSING = (
+    f"no agent git identity configured ({AGENT_GIT_EMAIL_ENV} is unset): a fix "
+    "round would commit under the host's git identity, so it was refused"
+)
+
+
+def agent_git_identity_env(environ: dict[str, str] | None = None) -> dict[str, str] | None:
+    """The author and committer a fix-round child commits as, or None when no
+    agent identity is configured. Never reads the host's git configuration."""
+    source = os.environ if environ is None else environ
+    email = source.get(AGENT_GIT_EMAIL_ENV, "").strip()
+    if not email:
+        return None
+    name = source.get(AGENT_GIT_NAME_ENV, "").strip() or _AGENT_GIT_DEFAULT_NAME
+    return {
+        "GIT_AUTHOR_NAME": name,
+        "GIT_AUTHOR_EMAIL": email,
+        "GIT_COMMITTER_NAME": name,
+        "GIT_COMMITTER_EMAIL": email,
+    }
+
+
+def apply_agent_git_identity(env: dict[str, str], identity: dict[str, str]) -> None:
+    """Set *identity* on a child environment and turn commit and tag signing off.
+
+    Signing is disabled through ``GIT_CONFIG_COUNT`` entries, which git reads
+    above every configuration file, so a ``commit.gpgsign`` in the host's
+    global or the repository's local configuration cannot sign with a personal
+    key. Entries already present (local review sets some) are kept.
+    """
+    env.update(identity)
+    try:
+        count = int(env.get("GIT_CONFIG_COUNT", "0") or "0")
+    except ValueError:
+        # git rejects a non-numeric count outright, so no entry under it was
+        # ever in effect; replacing it with a valid count loses nothing.
+        count = 0
+    for key, value in (("commit.gpgsign", "false"), ("tag.gpgsign", "false")):
+        env[f"GIT_CONFIG_KEY_{count}"] = key
+        env[f"GIT_CONFIG_VALUE_{count}"] = value
+        count += 1
+    env["GIT_CONFIG_COUNT"] = str(count)
+
+
 def _subscription_only_env(
     env_extra: dict[str, str] | None = None,
     *,
@@ -2872,10 +2949,10 @@ def _dispatch_succeeded(
 
 # ── Single-provider runner ─────────────────────────────────────────────────────
 
-# The dispatcher must publish both the verdict and parent-issue checklist as
-# the lens App before a read-only lens may run remotely. Flip this only when
-# that dispatcher-owned path exists and is covered by an end-to-end test.
-DISPATCHER_LENS_PUBLICATION_READY = False
+# The dispatcher publishes both the verdict and parent-issue checklist as the
+# lens App before a read-only lens may run remotely (swarm_dispatch
+# `_publish_returned_lens_reviews`). Set False to refuse every remote lens.
+DISPATCHER_LENS_PUBLICATION_READY = True
 
 
 async def _run_skill_once(
@@ -2908,9 +2985,14 @@ async def _run_skill_once(
     repository: str = "",
     local_fallback_check=None,
     fly_delivery: dict | None = None,
+    agent_git_env: dict[str, str] | None = None,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
+
+    ``agent_git_env``: the agent's git author/committer (from
+    ``agent_git_identity_env``), set on the child with signing turned off.
+    ``run_skill`` supplies it only for a fix round; None leaves git untouched.
 
     ``runner`` / ``repository`` (ateles#1456): which executor runs the CLI.
     ``None`` (every call site that predates this) runs locally unless the
@@ -3042,7 +3124,11 @@ async def _run_skill_once(
     """
     model = model_tiering.validate_model_selector(model)
     _role = (role or skill).lower()
-    timeout = timeout or DISPATCH_TIMEOUT_SECONDS
+    # Whether the caller supplied a timeout is kept: a Fly job resolves its
+    # own timeout once it is bound for Fly (APIS_FLY_DISPATCH_TIMEOUT), and a
+    # local run, including a fallback from Fly, uses the shared one.
+    _caller_timeout = timeout
+    timeout = _local_timeout = timeout or DISPATCH_TIMEOUT_SECONDS
 
     if inference_only and not (provider == INFERENCE_ONLY_PROVIDER and local_review):
         # The tool-free control exists for one adapter only. Any other provider
@@ -3505,6 +3591,11 @@ async def _run_skill_once(
     _isolated_home: IsolatedHarnessHome | None = None
     # A per-dispatch working directory, made only when the caller named none.
     _scratch_dir: str | None = None
+    # A host-run read-only review (a lens or a carry-forward check) gets an
+    # empty GH_CONFIG_DIR of its own, created at the local spawn, so `gh` in the
+    # child has no keyring account to fall back on when GH_TOKEN is absent or
+    # unset. Its only GitHub identity is the token it is handed.
+    _gh_config_dir: str | None = None
     _codex_gate_token = ""
     if provider == "claude" and local_review:
         # Claude otherwise merges project/user MCP configuration. A local
@@ -3816,6 +3907,8 @@ async def _run_skill_once(
     if github_token:
         subprocess_env["GITHUB_TOKEN"] = github_token
         subprocess_env["GH_TOKEN"] = github_token
+    if agent_git_env:
+        apply_agent_git_identity(subprocess_env, agent_git_env)
 
     # Stage 3 (ateles#94): inject the Neotoma AAuth client signer env vars so
     # the dispatched child can sign its own Neotoma writes as <role>@ateles-swarm.
@@ -3858,6 +3951,8 @@ async def _run_skill_once(
             shutil.rmtree(_isolated_home.home, ignore_errors=True)
         if _scratch_dir is not None:
             shutil.rmtree(_scratch_dir, ignore_errors=True)
+        if _gh_config_dir is not None:
+            shutil.rmtree(_gh_config_dir, ignore_errors=True)
 
     # ── Executor choice (ateles#1456) ──────────────────────────────────────────
     # Local is today's code, unchanged. The fly executor takes the SAME argv,
@@ -3879,6 +3974,7 @@ async def _run_skill_once(
     # Fly is configured but a cost, capacity or time limit is invalid: a
     # refusal, never a local fallback (ateles#1456).
     _fly_disabled = False
+    _fly_provider_specific = False
     if fly_runner.wants_fly(runner, action_class):
         try:
             if (
@@ -3891,12 +3987,15 @@ async def _run_skill_once(
                     "read-only lens review needs dispatcher-owned verdict and "
                     "expectation publication before Fly dispatch"
                 )
-            _fly_job = fly_runner.build_job(
+            # In a thread: the Neotoma admission check is a blocking request.
+            _fly_job = await asyncio.to_thread(
+                fly_runner.build_job,
                 provider=provider,
                 role=_role,
                 cmd=cmd,
                 stdin=stdin_payload if stdin_payload is not None else prompt.encode(),
-                timeout=timeout,
+                timeout=_caller_timeout or None,  # 0 meant "no timeout given"
+                default_timeout=DISPATCH_TIMEOUT_SECONDS,
                 repository=repository,
                 github_requested=github_token is not None or include_github_contract,
                 mcp_config_path=_mcp_tmp_path,
@@ -3912,14 +4011,21 @@ async def _run_skill_once(
                 # read-class Fly token: the delivery contract would make
                 # build_job refuse it (no delivery plan) and send it home.
                 github_delivery_contract=include_github_contract and not github_read_only,
+                # Lets a seated read-only run go to Fly with no Neotoma tools.
+                github_read_only=github_read_only,
             )
         except fly_runner.FlyIneligible as exc:
             _fly_reason = f"not eligible for Fly: {exc}"
+            _fly_provider_specific = exc.provider_specific
         except fly_runner.FlyConfigInvalid as exc:
             _fly_reason = str(exc)
             _fly_disabled = True
+        else:
+            timeout = _fly_job.timeout  # the Fly-only timeout build_job resolved
 
-    def _fly_refusal_or_fallback(reason: str) -> SkillResult | None:
+    def _fly_refusal_or_fallback(
+        reason: str, provider_specific: bool = False
+    ) -> SkillResult | None:
         """A refusal to return, or None to run locally (logged and counted)."""
         fallback_ok = not _fly_forced and not _fly_disabled and (
             reason.startswith("not eligible")
@@ -3935,6 +4041,9 @@ async def _run_skill_once(
                 skill, False, None, "", "", error=msg, provider=provider,
                 fly_ineligible_before_launch=not _fly_disabled and reason.startswith(
                     ("not eligible", "Fly launch failed")),
+                fly_provider_ineligible=(
+                    provider_specific and not _fly_disabled
+                    and reason.startswith("not eligible")),
             )  # fmt: skip
         if local_fallback_check is not None:
             # This provider was chosen WITHOUT the Mac's usage gate because
@@ -3942,10 +4051,15 @@ async def _run_skill_once(
             # local gate again; an exemption never carries over.
             local_reason = local_fallback_check(provider)
             if local_reason:
-                msg = (f"fly runner fell back to the Mac, where {provider} may not run: "
-                       f"{local_reason}")  # fmt: skip
-                log.warning(f"[apis] {skill} not dispatched — {msg}")
-                return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+                # Name BOTH reasons: why Fly declined, and why the Mac may not
+                # run this provider either. Then hand the dispatch back to
+                # the provider loop, which tries the next provider rather
+                # than leaving a seated lens with no verdict.
+                msg = (f"fly runner fell back to the Mac ({reason}), where {provider} "
+                       f"may not run: {local_reason}")  # fmt: skip
+                log.warning(f"[apis] {skill}: {provider} not dispatched — {msg}")
+                return SkillResult(skill, False, None, "", "", error=msg, provider=provider,
+                                   fly_local_fallback_refused=True)  # fmt: skip
         count = fly_runner.get_executor().ledger.count_local_fallback()
         log.warning(
             f"[apis] {skill} running locally instead of on Fly ({reason}); "
@@ -3954,7 +4068,7 @@ async def _run_skill_once(
         return None
 
     if _fly_reason:
-        _refusal = _fly_refusal_or_fallback(_fly_reason)
+        _refusal = _fly_refusal_or_fallback(_fly_reason, _fly_provider_specific)
         if _refusal is not None:
             _cleanup_launch_artifacts()
             return _refusal
@@ -3962,7 +4076,7 @@ async def _run_skill_once(
     proc = None
 
     async def _run_local() -> tuple[int | None, bytes, bytes]:
-        nonlocal proc, _isolated_home, _scratch_dir
+        nonlocal proc, _isolated_home, _scratch_dir, _gh_config_dir
         spawn_cwd = cwd
         if _home_override_refusal is not None:
             exc = _home_override_refusal
@@ -4023,6 +4137,17 @@ async def _run_skill_once(
             subprocess_env.update(_isolated_home.env)
             log.info(f"[apis] {provider} child for {_role!r} runs in an isolated harness "
                      f"home; MCP servers: {list(_isolated_home.servers) or 'none'}")  # fmt: skip
+        if github_read_only and not local_review:
+            # `gh` reads its accounts from GH_CONFIG_DIR, else
+            # XDG_CONFIG_HOME/gh, else HOME/.config/gh, and treats an empty or
+            # unset GH_TOKEN as "use the keyring account". A lens keeps the
+            # host HOME (the Claude and Codex logins live there), so without
+            # this a child that drops its token reaches the host owner's own
+            # GitHub session. local_review already sets its own isolated one.
+            if _gh_config_dir is None:
+                _gh_config_dir = _make_dispatch_scratch_dir(
+                    (env_extra or {}).get("TMPDIR"), prefix="apis_gh_config_")
+            subprocess_env["GH_CONFIG_DIR"] = _gh_config_dir
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -4059,9 +4184,12 @@ async def _run_skill_once(
         try:
             if _fly_job is not None:
                 try:
+                    returncode, stdout, stderr = await fly_runner.get_executor().run(_fly_job)
+                    # Only once the run actually happened on Fly: a token mint
+                    # or other refusal inside run() raises before this, and
+                    # that run then goes home with its normal tools.
                     if _fly_job.neotoma_tools_unavailable:
                         _report_fly_capability(fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE)
-                    returncode, stdout, stderr = await fly_runner.get_executor().run(_fly_job)
                 except fly_runner.FlyRefusal as exc:
                     msg = f"fly runner refused: {exc}"
                     log.warning(f"[apis] {skill} dispatch deferred — {msg}")
@@ -4075,7 +4203,8 @@ async def _run_skill_once(
                         if isinstance(exc, fly_runner.FlyIneligible)
                         else f"Fly launch failed: {exc}"
                     )
-                    _refusal = _fly_refusal_or_fallback(reason)
+                    _refusal = _fly_refusal_or_fallback(
+                        reason, getattr(exc, "provider_specific", False))
                     if _refusal is not None:
                         return _refusal
                     if _fly_job.neotoma_tools_unavailable:
@@ -4089,6 +4218,7 @@ async def _run_skill_once(
                             "local run with its normal tools."
                         )
                     _fly_job = None
+                    timeout = _local_timeout  # a local run keeps the shared timeout
                     _start_ns = time.monotonic_ns()
                     returncode, stdout, stderr = await _run_local()
                 except (fly_runner.FlyUncertainLaunch, Exception) as exc:
@@ -4519,6 +4649,8 @@ async def _run_skill_once(
             shutil.rmtree(_isolated_home.home, ignore_errors=True)
         if _scratch_dir is not None:
             shutil.rmtree(_scratch_dir, ignore_errors=True)
+        if _gh_config_dir is not None:
+            shutil.rmtree(_gh_config_dir, ignore_errors=True)
 
 
 def usable_providers() -> set[str]:
@@ -4644,8 +4776,20 @@ async def run_skill(
     runner: str | None = None,
     repository: str = "",
     fly_delivery: dict | None = None,
+    agent_git_identity: bool = False,
+    exclude_providers: tuple[str, ...] = (),
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
+
+    ``agent_git_identity``: True for a fix round (a run that commits and
+    pushes to an existing pull request). The child commits as the configured
+    agent identity with signing off; with none configured the run is refused
+    before any provider is tried, so it never falls through to the host's git
+    identity. False leaves the child's environment exactly as before.
+
+    ``exclude_providers``: providers this dispatch must not select. An
+    existing-PR correction's caller names the ones Fly already refused for a
+    provider-only reason, so its next dispatch takes the next Fly candidate.
 
     ``runner`` / ``repository``: forwarded to every ``_run_skill_once``
     attempt; see that function (ateles#1456, the Fly executor).
@@ -4734,6 +4878,12 @@ async def run_skill(
     exactly as before.
     """
     model = model_tiering.validate_model_selector(model)
+    agent_git_env: dict[str, str] | None = None
+    if agent_git_identity:
+        agent_git_env = agent_git_identity_env()
+        if agent_git_env is None:
+            log.error(f"[apis] {skill}: {AGENT_GIT_IDENTITY_MISSING}")
+            return SkillResult(skill, False, None, "", "", error=AGENT_GIT_IDENTITY_MISSING)
     # One control, two reasons to apply it. The internal name stays
     # `owns_pending_gate` because `_run_skill_once`/`_run_provider_attempts`
     # use it only for the deny and deny-capable routing.
@@ -4789,6 +4939,7 @@ async def run_skill(
             model=fallback_model or model,
             precomputed_tier=precomputed_tier,
             inference_only=inference_only,
+            agent_git_env=agent_git_env,
             runner=runner,
             repository=repository,
             fly_delivery=fly_delivery,
@@ -4847,6 +4998,8 @@ async def run_skill(
         local_first=local_first,
         fly_bound=fly_bound,
         fly_extra=fly_extra,
+        single_provider=bool(fly_delivery and "pr_number" in fly_delivery),
+        exclude_providers=tuple(exclude_providers),
     )
 
 
@@ -5004,6 +5157,8 @@ async def _run_provider_attempts(
     owns_pending_gate: bool = False, local_first: bool = False,
     fallback_models_for=None,
     fly_bound: frozenset[str] = frozenset(), fly_extra: tuple[str, ...] = (),
+    single_provider: bool = False,
+    exclude_providers: tuple[str, ...] = (),
 ) -> SkillResult:
     """One selection/cooldown/failover mechanism for every harness entrypoint.
 
@@ -5059,6 +5214,8 @@ async def _run_provider_attempts(
         binaries, preferred=provider, local_first=local_first and not owns_pending_gate,
         fly_bound=fly_bound, fly_extra=fly_extra,
     )
+    if exclude_providers:
+        candidates = [p for p in candidates if p not in exclude_providers]
     if preferred_provider in candidates and provider is None:
         # A lens preference reorders the frontier providers; a local-first
         # claude-local stays ahead of them.
@@ -5167,7 +5324,7 @@ async def _run_provider_attempts(
     fallback_for = fallback_models_for or _local_fallback_models
     local_failure = ""
     fallback_models: dict[str, str] | None = None
-    pending = list(candidates)
+    pending = list(candidates[:1] if single_provider else candidates)
     if (
         local_first
         and provider is None
@@ -5211,6 +5368,46 @@ async def _run_provider_attempts(
         # ends the dispatch here too. Never failed over to another provider.
         if result.fly_delivery_status:
             return result
+        if result.fly_provider_ineligible:
+            # Fly refused this provider before anything launched, for a reason
+            # that is the provider alone. Try the next candidate that runs on
+            # Fly; that attempt is Fly-bound too, so it cannot fall back to a
+            # local run the refused one could not. No cooldown: the provider
+            # is healthy, only Fly cannot run it for this job. A pinned or
+            # preferred provider gets no other; with none left the refusal
+            # ends the dispatch as before.
+            # A single-provider dispatch (an existing-PR correction) holds one
+            # prelaunch receipt for one attempt: it does not try the next
+            # provider here, it names it, and its caller dispatches it afresh
+            # once this attempt's receipt is proven removed.
+            others = [
+                p for p in (
+                    [c for c in candidates if c not in attempted]
+                    if single_provider else pending[index:]
+                )
+                if p in fly_bound or p in fly_extra
+            ]
+            if provider is not None or preferred_provider or not others:
+                return result
+            if single_provider:
+                result.fly_next_providers = tuple(others)
+                return result
+            last_result = result
+            log.warning(
+                f"[apis] {skill}: Fly cannot run {selected} for this job "
+                f"({result.error}); trying {others[0]} on Fly"
+            )
+            pending = pending[:index] + others
+            continue
+        if result.fly_local_fallback_refused:
+            # Same failover as a launch failure, minus the cooldown. A pinned
+            # provider has no other to try.
+            if provider is not None:
+                return result
+            last_result = result
+            log.warning(f"[apis] {skill}: {selected} could run neither on Fly nor on the "
+                        f"Mac ({result.error}); trying the next provider")  # fmt: skip
+            continue
         if result.configuration_repair:
             # The isolated harness home was refused before any child started:
             # a configuration the operator must repair, not a provider failure
@@ -5354,6 +5551,11 @@ async def _run_provider_attempts(
         )
 
     assert last_result is not None  # candidates was non-empty
+    if single_provider:
+        # Preserve the one selected adapter's structured cause and diagnostics.
+        # Its existing cooldown handling above still applies; no failover or
+        # aggregate "all providers exhausted" message replaces the result.
+        return last_result
     last_result.ok = False
     last_result.error = (
         "all eligible subscription-backed harness providers were exhausted "

@@ -8,6 +8,17 @@ accumulate for a later flush; only actionable held notices (operator_decision /
 warn inside the silence window) persist, and they drain as individual deliveries
 — never as a bulk "Digest" message.
 
+Held notices go out only by a route the raising send was allowed to use. The
+queue is shared by every daemon, and a daemon that drains it is not the one
+that raised the notice, so the route is decided when the notice is held:
+    main queue   — never emailed (the raising daemon had no email, or the send
+                   said ``email_eligible=False``, or it is legacy/unknown);
+                   drained only through Apprise
+    email queue  — may be emailed, capped at HELD_EMAIL_BUDGET_PER_HOUR across
+                   all processes; over budget it waits or goes via Apprise
+A notice with no route stays queued, untouched and unlogged per item; the
+operator's harness session surfaces it via lib/notify/held_view.py.
+
 Priority levels:
     critical          — immediate, bypasses silence window
     blocker           — send now
@@ -28,10 +39,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import subprocess
 import tempfile
 import threading
+import time as time_mod
+from collections import Counter
 from datetime import datetime, time
 from enum import Enum
 from pathlib import Path
@@ -51,7 +65,17 @@ except ImportError:
 
 import httpx
 
+from . import held_view, neotoma_sink
+
 log = logging.getLogger(__name__)
+
+# A drain delivers at most this many held emails per rolling hour, summed over
+# every daemon sharing the queue. An overnight backlog drained the moment the
+# silence window ended used to arrive as one email per notice, ~1.5s apart.
+HELD_EMAIL_BUDGET_PER_HOUR = 5
+_HELD_EMAIL_WINDOW_SECONDS = 3600
+# Newest items kept per queue; a queue nobody can drain must not grow forever.
+HELD_QUEUE_MAX = 500
 
 NEOTOMA_BASE_URL = os.environ.get(
     "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
@@ -74,10 +98,9 @@ _DEFAULT_RUBRIC: dict[str, Any] = {
 }
 
 
-# Held-queue prefixes applied when operator_decision / warn are deferred
-# across the silence window. Used to classify legacy digest-queue files so
-# actionable notices survive while routine INFO listings are dropped.
-_ACTIONABLE_HELD_PREFIXES = ("⚠️", "⚠")
+# The actionable-prefix rule lives in held_view (one definition, shared with
+# the stdlib-only viewer the hooks load by path).
+_ACTIONABLE_HELD_PREFIXES = held_view.ACTIONABLE_HELD_PREFIXES
 
 
 class Priority(str, Enum):
@@ -99,8 +122,7 @@ def is_actionable_held_notice(message: str) -> bool:
     OPERATOR_DECISION items are prefixed with ⚠️; WARN with ⚠. Routine INFO
     (and any other non-prefixed legacy digest residue) is not actionable.
     """
-    text = (message or "").lstrip()
-    return text.startswith(_ACTIONABLE_HELD_PREFIXES)
+    return held_view.is_actionable(message)
 
 
 class Notifier:
@@ -162,10 +184,7 @@ class Notifier:
         # file-backed queue remains only for actionable holds across silence;
         # drain classifies first, drops non-actionable residue, and never emits
         # a bulk "📋 Digest" message (those were the noisy [Ateles] Digest emails).
-        self._digest_path = Path(
-            os.environ.get("ATELES_DIGEST_QUEUE_PATH", "").strip()
-            or Path(tempfile.gettempdir()) / "ateles-notify-digest.json"
-        )
+        self._digest_path = held_view.queue_path()
         # Repeat-condition dedupe journal (ateles#1127).
         #
         # A deterministic condition a daemon re-checks on every tick (a
@@ -189,7 +208,10 @@ class Notifier:
         # Tyto can complete independent recording watchers on worker threads.
         # Serialize the whole notification path: the persisted held queue is
         # a read-modify-write transaction, and delivery clients are shared too.
+        # Per-process only. The queue files are shared across processes and
+        # are guarded by flock sidecars (held_view.file_lock).
         self._notification_lock = threading.RLock()
+        self._last_unrouted = 0
         self._apprise: Any = None
         if HAS_APPRISE:
             self._apprise = apprise.Apprise()
@@ -280,6 +302,19 @@ class Notifier:
         tag = f"[{handler}] " if handler else ""
         full_message = f"{tag}{message}"
 
+        # Also store the alert in Neotoma for the operator's harness session
+        # (lib/notify/neotoma_sink.py). Additive and fail-open: it never
+        # changes routing or the return value and never raises or blocks.
+        try:
+            neotoma_sink.record(
+                message=message,
+                level=prio.value,
+                handler=handler,
+                dedupe_key=dedupe_key,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
         if dedupe_key and self._is_duplicate(dedupe_key):
             log.info(
                 "[notify] suppressing repeat notification for open condition "
@@ -325,7 +360,7 @@ class Notifier:
                 log.info(
                     "[notify] Operator decision in silence window — holding for later delivery"
                 )
-                self._queue_digest(f"⚠️ {full_message}")
+                self._queue_digest(f"⚠️ {full_message}", email_eligible)
                 return False
             return self._deliver(
                 f"⚠️ {full_message}", force=False, email_eligible=email_eligible
@@ -333,7 +368,7 @@ class Notifier:
 
         if prio == Priority.WARN:
             if self._in_silence_window() and not bypass_silence:
-                self._queue_digest(f"⚠ {full_message}")
+                self._queue_digest(f"⚠ {full_message}", email_eligible)
                 return False
             return self._deliver(
                 f"⚠ {full_message}", force=False, email_eligible=email_eligible
@@ -346,51 +381,68 @@ class Notifier:
     # ── Held-notice queue (file-backed; actionable only) ─────────────────────
 
     @property
-    def _digest_queue(self) -> list[str]:
-        """Read the persisted queue. Fail-open: unreadable state => empty.
+    def _email_path(self) -> Path:
+        # Derived on each use: callers (and tests) repoint _digest_path.
+        return held_view.email_queue_path(self._digest_path)
 
-        Property name kept for test/compat callers; contents are held notices
-        (and any legacy digest residue awaiting classification).
-        """
-        with self._notification_lock:
-            try:
-                raw = json.loads(self._digest_path.read_text())
-                return [str(x) for x in raw] if isinstance(raw, list) else []
-            except FileNotFoundError:
-                return []
-            except Exception as exc:  # noqa: BLE001 — never crash a notification
-                log.warning(
-                    "[notify] digest queue unreadable (%s) — treating as empty", exc
-                )
-                return []
-
-    def _persist_queue(self, items: list[str]) -> None:
-        """Atomically rewrite the queue file. Caller must hold the lock."""
+    def _read(self, path: Path) -> list[str]:
+        """Read a queue file. Fail-open: unreadable state => empty."""
         try:
-            self._digest_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._digest_path.with_suffix(".tmp")
-            if items:
-                tmp.write_text(json.dumps(items))
-                tmp.replace(self._digest_path)
-            else:
-                try:
-                    tmp.unlink(missing_ok=True)
-                except Exception:  # noqa: BLE001
-                    pass
-                try:
-                    self._digest_path.unlink(missing_ok=True)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("[notify] could not clear empty held queue: %s", exc)
-        except Exception as exc:  # noqa: BLE001
-            log.error("[notify] could not persist held queue (%s)", exc)
+            return held_view.read_queue(path)
+        except Exception as exc:  # noqa: BLE001 — never crash a notification
+            log.warning("[notify] held queue %s unreadable (%s) — treating as empty", path.name, exc)
+            return []
 
-    def _queue_digest(self, message: str) -> None:
-        """Append an actionable held notice. Never raises."""
+    @property
+    def _digest_queue(self) -> list[str]:
+        """The main (never-emailed) queue. Property name kept for compat callers."""
+        with self._notification_lock:
+            return self._read(self._digest_path)
+
+    @property
+    def _email_queue(self) -> list[str]:
+        with self._notification_lock:
+            return self._read(self._email_path)
+
+    def _persist_queue(self, items: list[str], path: Path | None = None) -> None:
+        """Atomically rewrite a queue file. Caller must hold the file lock."""
+        path = path or self._digest_path
+        try:
+            held_view.write_queue(path, items)
+        except Exception as exc:  # noqa: BLE001
+            log.error("[notify] could not persist held queue %s (%s)", path.name, exc)
+
+    def _queue_lock(self):
+        return held_view.file_lock(held_view.queue_lock_path(self._digest_path))
+
+    def _queue_digest(self, message: str, email_eligible: bool = True) -> None:
+        """Append an actionable held notice. Never raises.
+
+        The route is fixed here, by the send that raised the notice: only a
+        daemon with email armed, for a send that allowed email, may put a
+        notice on the email queue. Everything else is never emailed by
+        whichever daemon happens to drain it.
+        """
+        path = (
+            self._email_path
+            if self._email_primary and email_eligible
+            else self._digest_path
+        )
         with self._notification_lock:
             try:
-                items = self._digest_queue
-                items.append(message)
-                self._persist_queue(items)
+                with self._queue_lock():
+                    items = self._read(path)
+                    items.append(message)
+                    if len(items) > HELD_QUEUE_MAX:
+                        dropped = len(items) - HELD_QUEUE_MAX
+                        items = items[-HELD_QUEUE_MAX:]
+                        log.error(
+                            "[notify] held queue %s over %d items — dropped the %d oldest",
+                            path.name,
+                            HELD_QUEUE_MAX,
+                            dropped,
+                        )
+                    self._persist_queue(items, path)
             except Exception as exc:  # noqa: BLE001
                 # Losing the queue write must not lose the alert: say so loudly.
                 log.error(
@@ -417,19 +469,72 @@ class Notifier:
                 routine.append(item)
         return actionable, routine
 
-    def flush_digest(self) -> bool:
-        """Drain the held queue without sending a bulk digest.
+    # Held-email budget: one JSON object {"window_start": epoch, "count": n}.
+    # Persisted beside the queue so it binds every daemon, not each process.
 
-        Classifies first: routine INFO residue is dropped; actionable held
-        notices are delivered one-by-one. The queue is rewritten to only the
-        actionable items that failed to deliver. Never emits a ``📋 Digest``
-        body (those were the routine [Ateles] Digest emails).
+    def _wall_clock(self) -> float:
+        return time_mod.time()
+
+    def _budget_path(self) -> Path:
+        return held_view.budget_path(self._digest_path)
+
+    def _budget_state(self) -> tuple[float, int]:
+        """Current (window_start, count), rolled over if the window has passed."""
+        now = self._wall_clock()
+        try:
+            raw = json.loads(held_view.read_text_nofollow(self._budget_path()))
+            start, count = float(raw["window_start"]), int(raw["count"])
+        except FileNotFoundError:
+            return now, 0
+        except Exception as exc:  # noqa: BLE001 — corrupt state => fresh window
+            log.warning("[notify] held-email budget unreadable (%s) — resetting", exc)
+            return now, 0
+        # NaN never compares as elapsed and a negative count would raise the
+        # cap: neither is a state this code writes, so start over.
+        if not math.isfinite(start) or count < 0:
+            log.warning("[notify] held-email budget invalid — resetting")
+            return now, 0
+        if now - start >= _HELD_EMAIL_WINDOW_SECONDS or start > now:
+            return now, 0
+        return start, count
+
+    def _budget_remaining(self) -> int:
+        with self._queue_lock():
+            return max(0, HELD_EMAIL_BUDGET_PER_HOUR - self._budget_state()[1])
+
+    def _budget_consume(self) -> None:
+        with self._queue_lock():
+            start, count = self._budget_state()
+            try:
+                held_view.atomic_write(
+                    self._budget_path(),
+                    json.dumps({"window_start": start, "count": count + 1}),
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.error("[notify] could not persist held-email budget (%s)", exc)
+
+    def _remove_delivered(self, path: Path, delivered: list[str]) -> None:
+        """Drop delivered items from a queue, by multiset, from a fresh read.
+
+        Re-reading under the lock is what lets items another process queued
+        during the delivery survive, and keeps delivered ones from returning.
         """
-        with self._notification_lock:
-            items = self._digest_queue
-            if not items:
-                return False
+        if not delivered:
+            return
+        with self._queue_lock():
+            gone = Counter(delivered)
+            kept: list[str] = []
+            for item in self._read(path):
+                if gone[item] > 0:
+                    gone[item] -= 1
+                else:
+                    kept.append(item)
+            self._persist_queue(kept, path)
 
+    def _drop_routine(self, path: Path) -> list[str]:
+        """Remove non-actionable residue from a queue; return what remains."""
+        with self._queue_lock():
+            items = self._read(path)
             actionable, routine = self.classify_queue(items)
             if routine:
                 log.info(
@@ -437,26 +542,87 @@ class Notifier:
                     len(routine),
                     len(actionable),
                 )
+                self._persist_queue(actionable, path)
+            return actionable
 
-            if not actionable:
-                self._persist_queue([])
-                return False
+    def flush_digest(self) -> bool:
+        """Drain the held queues without sending a bulk digest.
 
-            remaining: list[str] = []
-            any_ok = False
-            for item in actionable:
-                if self._deliver(item, force=True):
-                    any_ok = True
+        Routine INFO residue is dropped; actionable held notices are delivered
+        one-by-one, each only by a route its raising send allowed (see module
+        docstring). Delivery happens outside the file lock; afterwards only the
+        delivered items are removed, so concurrent writers lose nothing. A
+        second process already draining makes this one skip rather than
+        double-send. Never emits a ``📋 Digest`` body.
+        """
+        with self._notification_lock:
+            with held_view.file_lock(
+                held_view.drain_lock_path(self._digest_path), blocking=False
+            ) as free:
+                if not free:
+                    return False
+                return self._drain()
+
+    def _drain(self) -> bool:
+        main_items = self._drop_routine(self._digest_path)
+        email_items = self._drop_routine(self._email_path)
+        if not main_items and not email_items:
+            self._last_unrouted = 0
+            return False
+
+        delivered_main: list[str] = []
+        delivered_email: list[str] = []
+        unrouted = 0
+        failed = 0
+
+        for item in main_items:
+            # Main-queue items are never emailed, whatever this daemon's flags.
+            if not self._apprise:
+                unrouted += 1
+            elif self._try_deliver(item, email_eligible=False):
+                delivered_main.append(item)
+            else:
+                failed += 1
+
+        budget = self._budget_remaining() if self._email_primary and self._notify_to else 0
+        email_down = False
+        for item in email_items:
+            if budget > 0 and not email_down:
+                if self._deliver_email(item):
+                    # Only a sent email spends budget.
+                    self._budget_consume()
+                    budget -= 1
+                    delivered_email.append(item)
+                    continue
+                email_down = True  # don't hammer a failing transport per item
+            if self._apprise:
+                if self._try_deliver(item, email_eligible=False):
+                    delivered_email.append(item)
                 else:
-                    remaining.append(item)
+                    failed += 1
+            elif email_down:
+                failed += 1
+            else:
+                unrouted += 1  # over budget, nothing else to send it by
 
-            self._persist_queue(remaining)
-            if remaining:
-                log.warning(
-                    "[notify] held-notice delivery incomplete — keeping %d actionable item(s)",
-                    len(remaining),
-                )
-            return any_ok
+        self._remove_delivered(self._digest_path, delivered_main)
+        self._remove_delivered(self._email_path, delivered_email)
+
+        # One line, and only when the picture changed: a daemon with no
+        # transport re-evaluates the queue on every send.
+        if unrouted != self._last_unrouted:
+            log.info("[notify] %d held notice(s) have no delivery route here", unrouted)
+        self._last_unrouted = unrouted
+        if failed:
+            log.warning("[notify] held-notice delivery incomplete — %d item(s) kept", failed)
+        return bool(delivered_main or delivered_email)
+
+    def _try_deliver(self, item: str, email_eligible: bool) -> bool:
+        try:
+            return bool(self._deliver(item, force=True, email_eligible=email_eligible))
+        except Exception as exc:  # noqa: BLE001 — a drain must never raise
+            log.warning("[notify] held-notice delivery error: %s", exc)
+            return False
 
     def _maybe_flush_digest(self) -> None:
         """Drain held actionable notices opportunistically.
@@ -466,7 +632,7 @@ class Notifier:
         self-flushes a bulk digest of accumulated INFO.
         """
         try:
-            if not self._digest_queue:
+            if not self._digest_queue and not self._email_queue:
                 return
             if self.should_flush_digest() or not self._in_silence_window():
                 self.flush_digest()
@@ -577,6 +743,10 @@ class Notifier:
         genuine recurrence — the condition clearing and then coming back — is
         reported again rather than staying suppressed forever. Never raises.
         """
+        try:
+            neotoma_sink.resolve(key)  # mark this process's stored alert resolved
+        except Exception:  # noqa: BLE001
+            pass
         with self._notification_lock:
             try:
                 journal = self._dedupe_journal
@@ -657,6 +827,14 @@ class Notifier:
         except Exception as exc:
             log.error(f"[notify] Delivery error: {exc}")
             return False
+
+    def in_silence_window(self) -> bool:
+        """True while warn and operator-decision notices are held, not sent.
+
+        ``send()`` returns False for a held notice and for a failed delivery
+        alike. A caller that has to tell them apart asks here.
+        """
+        return self._in_silence_window()
 
     def _in_silence_window(self) -> bool:
         now = self._now_local()

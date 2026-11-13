@@ -72,7 +72,7 @@ def test_register_payload_declares_every_field_and_identity():
 def test_definitions_catalog_shape():
     records = definitions.build_definitions()
     ids = [r["metric_id"] for r in records]
-    assert len(ids) == len(set(ids)) == 24
+    assert len(ids) == len(set(ids)) == 28
     assert all(r["status"] == "proposed" and r["default_for_kinds"] for r in records)
     # web, product-usage and newsletter definitions wait on keys that are not minted
     for r in records:

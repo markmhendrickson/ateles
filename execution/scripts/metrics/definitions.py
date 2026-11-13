@@ -65,6 +65,7 @@ def _spec(metric_id: str, title: str, description: str, source_system: str, arti
 
 _NPM = "execution/scripts/metrics/repo_baseline.py"
 _OPS = "execution/scripts/metrics/swarm_ops_baseline.py"
+_QUEUE = "execution/daemons/decision-queue-reading/decision_queue_reading.py"
 _AWAIT_USAGE = "Neotoma usage_digest emitter is not built and hosted Neotoma is unopened; forward-only once it runs."
 _AWAIT_WEB = "The Umami Cloud API key is not minted yet; history retention is unverified."
 
@@ -288,6 +289,58 @@ SPECS: list[dict[str, Any]] = [
                         "sum over the dispatches that reported, next to how many did.",
           collector=_OPS, pooling=POOLING_ENOUGH,
           probe={"expect": "completed dispatches with a duration in the last full week > 0"}),
+    # --- operator decision queue (daily read of the open checkpoint queue) -------
+    _spec("Q1", "real_decisions_waiting_over_72h",
+          "Real decisions (one per task, aged from the earlier of its oldest open hold and the first daily reading that saw it, so a re-filed hold does not restart the clock) that have waited more than 72 hours "
+          "in the open checkpoint queue. Real means the classes in decision_queue.REAL_DECISION_CLASSES.",
+          "swarm_ops", "checkpoint_queue",
+          {"read": "checkpoint_brief and task snapshots, unfiltered, cursor-paged",
+           "derive": "decision_queue.classify_queue then summarize; over-limit count"},
+          "decisions", "down_good", ["decision_queue"],
+          baseline_status="capture",
+          baseline_note="Forward-only daily reading. Detail carries the real count, oldest and median age and the "
+                        "count by class. A run whose client-side open count differs from the server's filtered "
+                        "total is invalid and stores no reading: absence is never a zero.",
+          collector=_QUEUE, pooling=POOLING_ENOUGH, cadence="daily",
+          probe={"expect": "client-side awaiting_operator count equals the server's filtered total within drift"}),
+    _spec("Q2", "automatic_holds_added_24h",
+          "Open checkpoints raised in the last 24 hours whose class is not a real decision: automatic noise added "
+          "to the queue. Detail carries the total and the real count raised in the same window.",
+          "swarm_ops", "checkpoint_queue",
+          {"read": "checkpoint_brief and task snapshots, unfiltered, cursor-paged",
+           "derive": "open checkpoints with age <= 24h, not in REAL_DECISION_CLASSES"},
+          "holds", "down_good", ["decision_queue"],
+          baseline_status="capture",
+          baseline_note="Forward-only daily reading. Age is the checkpoint's last observation time, so a hold "
+                        "touched again inside the window counts as new.",
+          collector=_QUEUE, pooling=POOLING_ENOUGH, cadence="daily",
+          probe={"expect": "client-side awaiting_operator count equals the server's filtered total within drift"}),
+    _spec("Q3", "automatic_holds_outside_fly_raised_24h",
+          "Automatic holds raised in the last 24 hours, open or already closed, that are not a real decision and "
+          "are not on the delivery lane (a session coordinates, a builder delivers). Detail carries the real "
+          "count raised in the same window and the count whose raised time could not be established.",
+          "swarm_ops", "checkpoint_queue",
+          {"read": "checkpoint_brief and task snapshots, unfiltered, cursor-paged; observations of each hold touched in the window",
+           "derive": "gate-written automatic holds with earliest observation <= 24h, bucket_raised_hold == outside_fly"},
+          "holds", "down_good", ["decision_queue"],
+          baseline_status="capture",
+          baseline_note="Forward-only daily reading. The time comes from the hold's earliest observation, not its "
+                        "last, so approving or retiring an old hold does not make it new. A hold whose time cannot "
+                        "be read is counted as unknown in detail, never as zero.",
+          collector=_QUEUE, pooling=POOLING_ENOUGH, cadence="daily",
+          probe={"expect": "client-side awaiting_operator count equals the server's filtered total within drift"}),
+    _spec("Q4", "fly_lane_holds_raised_24h",
+          "Automatic holds raised in the last 24 hours, open or already closed, on delivery-lane tasks. Counted "
+          "apart from Q3: they are expected and are not a decision for the operator.",
+          "swarm_ops", "checkpoint_queue",
+          {"read": "checkpoint_brief and task snapshots, unfiltered, cursor-paged; observations of each hold touched in the window",
+           "derive": "gate-written automatic holds with earliest observation <= 24h, bucket_raised_hold == fly_lane"},
+          "holds", "down_good", ["decision_queue"],
+          baseline_status="capture",
+          baseline_note="Forward-only daily reading. The time comes from the hold's earliest observation, not its "
+                        "last. Holds whose time cannot be read are not in this count; Q3 detail carries that number.",
+          collector=_QUEUE, pooling=POOLING_ENOUGH, cadence="daily",
+          probe={"expect": "client-side awaiting_operator count equals the server's filtered total within drift"}),
 ]
 
 

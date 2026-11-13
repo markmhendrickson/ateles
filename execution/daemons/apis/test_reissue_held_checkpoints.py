@@ -27,6 +27,7 @@ import apis  # noqa: E402
 import reissue_held_checkpoints as cli  # noqa: E402
 from lib.daemon_runtime import gating  # noqa: E402
 from lib.daemon_runtime.gating import ExecutionPolicy  # noqa: E402
+from test_checkpoint_release import CHECKPOINT_TYPE  # noqa: E402
 
 
 class _Record:
@@ -44,6 +45,7 @@ class _Record:
             entity_id="policy", loaded=True, authorization_revision="policy-v1"
         )
         self.events: list[str] = []
+        self.strict_reads: list[bool] = []
         monkeypatch.setattr(apis, "fetch_task_record", self.fetch_task)
         monkeypatch.setattr(apis, "fetch_entity_user_id", lambda _id: "tenant-a")
         monkeypatch.setattr(
@@ -54,6 +56,9 @@ class _Record:
         monkeypatch.setattr(apis, "_checkpoint_authority_state", self.authority_state)
         monkeypatch.setattr(apis, "write_checkpoint_brief", self.write_brief)
         monkeypatch.setattr(apis, "supersede_checkpoint", self.supersede)
+        # The scope gate reads the observation history strictly; these records
+        # carry no body edits, so an empty history is a readable one.
+        monkeypatch.setattr(apis, "fetch_entity_observations_strict", lambda _id: [])
 
     def add_task(self, task_id, status="awaiting_approval", **fields):
         self.tasks[task_id] = {
@@ -84,7 +89,8 @@ class _Record:
     def fetch_task(self, task_id):
         return self.tasks.get(task_id)
 
-    def for_task(self, task_id):
+    def for_task(self, task_id, *, strict=False):
+        self.strict_reads.append(strict)
         return [
             c
             for c in self.checkpoints.values()
@@ -235,7 +241,7 @@ def test_unpersisted_replacement_fails_closed_and_retires_nothing(record):
 
 def test_unreadable_checkpoint_list_is_a_failure_not_a_skip(record, monkeypatch):
     record.add_task("ent_t1")
-    monkeypatch.setattr(apis, "checkpoints_for_task", lambda _id: None)
+    monkeypatch.setattr(apis, "checkpoints_for_task", lambda _id, **_kw: None)
 
     result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
 
@@ -338,6 +344,28 @@ def test_enumeration_pages_by_offset_to_the_end_and_never_sends_a_cursor(monkeyp
     assert [p["offset"] for p in seen] == [0, 2, 4]
 
 
+def test_a_dropped_row_on_a_full_page_still_reads_the_next_page(monkeypatch):
+    """Paging counts the rows the server returned, not the ones kept: one
+    non-object row on a full page must not end paging and truncate the set for
+    a non-strict caller."""
+    monkeypatch.setattr(gating, "QUERY_PAGE_SIZE", 2)
+    pages = [
+        {"entities": [{"entity_id": "ent_a"}, "not-an-object"]},
+        {"entities": [{"entity_id": "ent_c"}]},
+    ]
+    seen: list[int] = []
+
+    def page(_type, *, snapshot_filters, offset=0, limit=None):
+        seen.append(offset)
+        return pages[len(seen) - 1]
+
+    monkeypatch.setattr(gating, "query_entities", page)
+
+    found = gating.query_all_entities("task", snapshot_filters={})
+    assert [e["entity_id"] for e in found] == ["ent_a", "ent_c"]
+    assert seen == [0, 2]
+
+
 def _run_cli(monkeypatch, *argv):
     monkeypatch.setattr(sys, "argv", ["reissue_held_checkpoints.py", *argv])
     return cli.main()
@@ -365,7 +393,7 @@ def test_cli_read_failures_exit_nonzero_and_confirmed_skips_exit_zero(
     assert '"task_id": "ent_missing"' in out and '"outcome": "failed"' in out
 
     record.add_task("ent_t1")
-    monkeypatch.setattr(apis, "checkpoints_for_task", lambda _id: None)
+    monkeypatch.setattr(apis, "checkpoints_for_task", lambda _id, **_kw: None)
     assert _run_cli(monkeypatch, "--task", "ent_t1", "--apply") == 1
 
 
@@ -436,6 +464,13 @@ def test_fresh_release_authority_never_retires_the_replacement_itself(monkeypatc
 
 def test_a_distinct_replacement_still_retires_the_prior_brief(monkeypatch):
     retired: list[str] = []
+    # The prior brief is a readable ordinary one: its original scope qualifies.
+    monkeypatch.setattr(
+        apis,
+        "fetch_checkpoint_record",
+        lambda checkpoint_id: {"entity_id": checkpoint_id, "snapshot": {}},
+    )
+    monkeypatch.setattr(apis, "fetch_entity_observations_strict", lambda _id: [])
     monkeypatch.setattr(apis, "_file_fresh_checkpoint", lambda **_kw: "ent_new")
     monkeypatch.setattr(
         apis,
@@ -799,3 +834,485 @@ def test_an_unloaded_policy_neither_replaces_nor_retires(record):
     assert result.outcome == "failed"
     assert record.writes == writes and record.events == []
     assert _awaiting(record) == [first.checkpoint_id]
+
+
+# ── a deliberately retired hold stays retired in a blanket run (ateles#1600) ──
+
+
+def _retired_hold(record):
+    """A held task whose only checkpoint was superseded on purpose."""
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_old", "ent_t1", signed=True, status="superseded")
+    record.checkpoints["ent_old"]["created_at"] = "2026-11-01T10:00:00Z"
+
+
+def _blanket(monkeypatch, *task_ids):
+    monkeypatch.setattr(cli, "iter_held_task_ids", lambda limit=None: iter(task_ids))
+
+
+def _records(out):
+    return [json.loads(line) for line in out.splitlines() if line.strip()]
+
+
+@pytest.mark.parametrize("apply_flag", [[], ["--apply"]])
+def test_blanket_run_leaves_a_superseded_hold_retired_and_reports_it(
+    record, monkeypatch, capsys, apply_flag
+):
+    _retired_hold(record)
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, *apply_flag) == 0
+    rows = _records(capsys.readouterr().out)
+
+    assert rows[0]["task_id"] == "ent_t1"
+    assert rows[0]["outcome"] == "retired"
+    assert rows[0]["checkpoint_id"] == "ent_old"
+    assert rows[-1]["summary"] == {"retired": 1}
+    assert record.writes == 0
+    assert _awaiting(record) == []
+
+
+def test_naming_a_retired_hold_with_task_refiles_it(record, monkeypatch, capsys):
+    _retired_hold(record)
+    _blanket(monkeypatch, "ent_t1")
+    assert _run_cli(monkeypatch, "--apply") == 0
+    assert _records(capsys.readouterr().out)[0]["outcome"] == "retired"
+    assert record.writes == 0
+
+    assert _run_cli(monkeypatch, "--task", "ent_t1", "--apply") == 0
+    rows = _records(capsys.readouterr().out)
+
+    assert rows[0]["outcome"] == "reissued"
+    assert record.writes == 1
+    assert _awaiting(record) == [rows[0]["checkpoint_id"]]
+
+
+def test_blanket_run_still_refiles_a_lost_hold(record, monkeypatch, capsys):
+    # No checkpoint at all, and one whose newest checkpoint is neither live nor
+    # superseded (an older superseded brief does not make it retired).
+    record.add_task("ent_none")
+    record.add_task("ent_rejected")
+    record.add_checkpoint("ent_a", "ent_rejected", signed=True, status="superseded")
+    record.checkpoints["ent_a"]["created_at"] = "2026-11-01T10:00:00Z"
+    record.add_checkpoint("ent_b", "ent_rejected", signed=True, status="rejected")
+    record.checkpoints["ent_b"]["created_at"] = "2026-11-02T10:00:00Z"
+    # A retired hold in the same run is the only one held back.
+    record.add_task("ent_retired")
+    record.add_checkpoint("ent_c", "ent_retired", signed=True, status="superseded")
+    record.checkpoints["ent_c"]["created_at"] = "2026-11-03T10:00:00Z"
+    _blanket(monkeypatch, "ent_none", "ent_rejected", "ent_retired")
+
+    assert _run_cli(monkeypatch, "--apply") == 0
+    rows = _records(capsys.readouterr().out)
+
+    assert {r["task_id"]: r["outcome"] for r in rows[:3]} == {
+        "ent_none": "reissued",
+        "ent_rejected": "reissued",
+        "ent_retired": "retired",
+    }
+    assert record.writes == 2
+
+
+def test_blanket_run_does_not_refile_when_checkpoints_cannot_be_read(
+    record, monkeypatch, capsys
+):
+    record.add_task("ent_t1")
+    monkeypatch.setattr(apis, "checkpoints_for_task", lambda _id, **_kw: None)
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 1
+    rows = _records(capsys.readouterr().out)
+
+    assert rows[0]["task_id"] == "ent_t1"
+    assert rows[0]["outcome"] == "unknown"
+    assert record.writes == 0
+
+
+# ── fail closed when retirement evidence is malformed or unordered (#1704) ──
+
+
+def _production_reader(monkeypatch, rows):
+    """Serve ``rows`` through the real collection reader, one consistent page."""
+    monkeypatch.setattr(apis, "checkpoints_for_task", gating.checkpoints_for_task)
+
+    def page(_type, *, snapshot_filters, offset=0, limit=None):
+        if offset:
+            return {"entities": [], "total": len(rows)}
+        return {"entities": list(rows), "total": len(rows)}
+
+    monkeypatch.setattr(gating, "query_entities", page)
+
+
+def test_blanket_apply_with_a_malformed_row_reports_unknown_and_files_nothing(
+    record, monkeypatch, capsys
+):
+    # The superseded newest brief comes back without an entity_id.  A lenient
+    # read keeps it and the reissue path drops it, leaving "no checkpoint", so
+    # the blanket run would refile a retired hold.
+    record.add_task("ent_t1")
+    _production_reader(
+        monkeypatch,
+        [
+            {
+                "entity_type": CHECKPOINT_TYPE,
+                "created_at": "2026-11-01T10:00:00Z",
+                "snapshot": {"task_entity_id": "ent_t1", "status": "superseded"},
+            }
+        ],
+    )
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 1
+    rows = _records(capsys.readouterr().out)
+
+    assert rows[0]["task_id"] == "ent_t1"
+    assert rows[0]["outcome"] == "unknown"
+    assert record.writes == 0
+    assert _awaiting(record) == []
+
+
+@pytest.mark.parametrize(
+    "bad_row",
+    [
+        "not-a-record",
+        {"entity_id": "", "snapshot": {"status": "superseded"}},
+        {"entity_id": "ent_x", "snapshot": {"task_entity_id": "ent_t1"}},
+    ],
+    ids=["not_a_mapping", "empty_id", "no_status"],
+)
+def test_blanket_run_treats_every_malformed_row_shape_as_unknown(
+    record, monkeypatch, capsys, bad_row
+):
+    record.add_task("ent_t1")
+    monkeypatch.setattr(apis, "checkpoints_for_task", lambda _id, **_kw: [bad_row])
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 1
+    assert _records(capsys.readouterr().out)[0]["outcome"] == "unknown"
+    assert record.writes == 0
+
+
+def test_blanket_run_reads_checkpoints_strictly_and_named_run_does_not(
+    record, monkeypatch, capsys
+):
+    _retired_hold(record)
+    _blanket(monkeypatch, "ent_t1")
+    _run_cli(monkeypatch, "--apply")
+    _run_cli(monkeypatch, "--task", "ent_t1")
+    capsys.readouterr()
+
+    assert record.strict_reads == [True, False]
+
+
+def test_malformed_stamp_on_an_older_live_row_makes_order_unknown(
+    record, monkeypatch, capsys
+):
+    # "zzz" sorts after the real stamp as a string, so string comparison would
+    # call the rejected brief newest and refile the retired hold.
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_old", "ent_t1", signed=True, status="rejected")
+    record.checkpoints["ent_old"]["created_at"] = "zzz"
+    record.add_checkpoint("ent_new", "ent_t1", signed=True, status="superseded")
+    record.checkpoints["ent_new"]["created_at"] = "2026-11-02T10:00:00Z"
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 1
+    rows = _records(capsys.readouterr().out)
+
+    assert rows[0]["outcome"] == "unknown"
+    assert record.writes == 0
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [None, "", "not-a-date", "2026-11-03T10:00:00"],
+    ids=["missing", "empty", "unparseable", "naive"],
+)
+def test_unknown_order_with_a_superseded_brief_is_unknown(
+    record, monkeypatch, capsys, stamp
+):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_a", "ent_t1", signed=True, status="superseded")
+    record.checkpoints["ent_a"]["created_at"] = "2026-11-02T10:00:00Z"
+    record.add_checkpoint("ent_b", "ent_t1", signed=True, status="rejected")
+    if stamp is not None:
+        record.checkpoints["ent_b"]["created_at"] = stamp
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 1
+    assert _records(capsys.readouterr().out)[0]["outcome"] == "unknown"
+    assert record.writes == 0
+
+
+def test_unknown_order_with_no_superseded_brief_is_refiled(
+    record, monkeypatch, capsys
+):
+    # No superseded brief means no retirement evidence: refile as before.
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_a", "ent_t1", signed=True, status="rejected")
+    record.checkpoints["ent_a"]["created_at"] = "zzz"
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 0
+    assert _records(capsys.readouterr().out)[0]["outcome"] == "reissued"
+    assert record.writes == 1
+
+
+@pytest.mark.parametrize(
+    "superseded_at, other_at, expected",
+    [
+        # The pair from the review: 11:30+01:00 is 10:30Z, so the rejected
+        # brief is newer and the hold is refiled.
+        ("2026-11-01T10:00:00Z", "2026-11-01T11:30:00+01:00", "reissued"),
+        # 09:30-02:00 is 11:30Z, newer than 10:00Z, although as a string it
+        # sorts first: string order would refile a retired hold.
+        ("2026-11-01T09:30:00-02:00", "2026-11-01T10:00:00Z", "retired"),
+        # 10:30+01:00 is 09:30Z, older than 10:00Z, although as a string it
+        # sorts last: string order would keep a lost hold retired.
+        ("2026-11-01T10:30:00+01:00", "2026-11-01T10:00:00Z", "reissued"),
+    ],
+)
+def test_stamps_in_different_offsets_are_ordered_as_datetimes(
+    record, monkeypatch, capsys, superseded_at, other_at, expected
+):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_sup", "ent_t1", signed=True, status="superseded")
+    record.checkpoints["ent_sup"]["created_at"] = superseded_at
+    record.add_checkpoint("ent_rej", "ent_t1", signed=True, status="rejected")
+    record.checkpoints["ent_rej"]["created_at"] = other_at
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 0
+    assert _records(capsys.readouterr().out)[0]["outcome"] == expected
+
+
+def test_named_task_run_ignores_retirement_evidence_and_refiles(
+    record, monkeypatch, capsys
+):
+    # Unknown order and a superseded brief: --task still refiles, unchanged.
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_a", "ent_t1", signed=True, status="superseded")
+    record.checkpoints["ent_a"]["created_at"] = "zzz"
+
+    assert _run_cli(monkeypatch, "--task", "ent_t1", "--apply") == 0
+    rows = _records(capsys.readouterr().out)
+
+    assert rows[0]["outcome"] == "reissued"
+    assert record.writes == 1
+
+
+# ── present but unrecognized values are unknown, never evidence (#1705) ──
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["unexpected", 7, ["superseded"], {"value": "superseded"}],
+    ids=["unrecognized_string", "integer", "list", "mapping"],
+)
+def test_blanket_run_treats_an_unrecognized_status_as_unknown(
+    record, monkeypatch, capsys, status
+):
+    # A lone checkpoint whose status is not one the code writes or reads is not
+    # evidence the hold was not retired: file nothing.
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_x", "ent_t1", signed=True, status=status)
+    record.checkpoints["ent_x"]["created_at"] = "2026-11-02T10:00:00Z"
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 1
+    rows = _records(capsys.readouterr().out)
+
+    assert rows[0]["task_id"] == "ent_t1"
+    assert rows[0]["outcome"] == "unknown"
+    assert record.writes == 0
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        gating.CHECKPOINT_AWAITING_OPERATOR,
+        gating.CHECKPOINT_APPROVED_NO_RELEASE,
+        gating.CHECKPOINT_REQUIRES_FRESH_APPROVAL,
+        " Rejected ",
+    ],
+)
+def test_blanket_run_still_refiles_on_every_recognized_non_retired_status(
+    record, monkeypatch, capsys, status
+):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_x", "ent_t1", signed=False, status=status)
+    record.checkpoints["ent_x"]["created_at"] = "2026-11-02T10:00:00Z"
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 0
+    assert _records(capsys.readouterr().out)[0]["outcome"] == "reissued"
+    assert record.writes == 1
+
+
+@pytest.mark.parametrize(
+    "linked_task",
+    ["ent_other", None, 42],
+    ids=["another_task", "missing", "not_a_string"],
+)
+def test_blanket_run_treats_a_row_linked_to_another_task_as_unknown(
+    record, monkeypatch, capsys, linked_task
+):
+    # The read filters on the task; a row naming another task (or none) means
+    # the listing cannot be trusted as this task's retirement evidence.
+    record.add_task("ent_t1")
+    row = {
+        "entity_id": "ent_x",
+        "entity_type": CHECKPOINT_TYPE,
+        "created_at": "2026-11-02T10:00:00Z",
+        "snapshot": {"task_entity_id": linked_task, "status": "rejected"},
+    }
+    monkeypatch.setattr(apis, "checkpoints_for_task", lambda _id, **_kw: [row])
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 1
+    assert _records(capsys.readouterr().out)[0]["outcome"] == "unknown"
+    assert record.writes == 0
+
+
+def test_named_task_run_still_refiles_with_an_unrecognized_status(
+    record, monkeypatch, capsys
+):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_x", "ent_t1", signed=True, status="unexpected")
+
+    assert _run_cli(monkeypatch, "--task", "ent_t1", "--apply") == 0
+    assert _records(capsys.readouterr().out)[0]["outcome"] == "reissued"
+    assert record.writes == 1
+
+
+# ── Original restrictive scope survives reissue ───────────────────────────────
+
+def _restrict(record, monkeypatch, checkpoint_id, extension=None):
+    """Give a pending checkpoint an authenticated restrictive envelope."""
+    import json as _json
+
+    authority = {
+        **{k: "x" for k in gating.CHECKPOINT_ORDINARY_ENVELOPE_FIELDS},
+        **(extension or {"effect_scope": "review_request_only"}),
+    }
+    record.checkpoints[checkpoint_id]["snapshot"]["body"] = _json.dumps(authority)
+    original = apis.read_authenticated_checkpoint_authorization
+    monkeypatch.setattr(
+        apis,
+        "read_authenticated_checkpoint_authorization",
+        lambda cid, rec: dict(authority) if cid == checkpoint_id else original(cid, rec),
+    )
+
+
+def test_restricted_pending_checkpoint_is_never_replaced_or_retired(
+    record, monkeypatch
+):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_restricted", "ent_t1", signed=True)
+    _restrict(record, monkeypatch, "ent_restricted")
+    # The task changed since: ordinary reasoning would call this brief stale.
+    record.tasks["ent_t1"]["observation_count"] = 9
+
+    result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+
+    assert result.outcome == "skipped"
+    assert result.checkpoint_id == "ent_restricted"
+    assert record.writes == 0
+    assert record.events == []
+    assert record.checkpoints["ent_restricted"]["snapshot"]["status"] == (
+        "awaiting_operator"
+    )
+
+
+def test_restricted_pending_checkpoint_dry_run_has_zero_effects(record, monkeypatch):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_restricted", "ent_t1", signed=True)
+    _restrict(record, monkeypatch, "ent_restricted")
+
+    result = apis.reissue_held_task_checkpoint("ent_t1", apply=False)
+
+    assert result.outcome == "skipped"
+    assert "authenticated_extension" in result.detail
+    assert "review path" in result.detail
+    assert record.writes == 0 and record.events == []
+
+
+def test_unqualifiable_scope_fails_without_replacing_or_retiring(record, monkeypatch):
+    import json as _json
+
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_odd", "ent_t1", signed=False)
+    # An envelope claiming an extension that never authenticated.
+    record.checkpoints["ent_odd"]["snapshot"]["body"] = _json.dumps(
+        {"version": 2, "effect_scope": "review_request_only"}
+    )
+
+    result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+
+    assert result.outcome == "failed"
+    assert record.writes == 0 and record.events == []
+    assert record.checkpoints["ent_odd"]["snapshot"]["status"] == "awaiting_operator"
+
+
+def test_later_ordinary_checkpoint_stays_and_stale_legacy_is_retired_beside_restricted(
+    record, monkeypatch
+):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_restricted", "ent_t1", signed=True)
+    _restrict(record, monkeypatch, "ent_restricted")
+    record.add_checkpoint("ent_legacy", "ent_t1", signed=False)
+    record.add_checkpoint("ent_ordinary", "ent_t1", signed=True)
+
+    result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+
+    assert result.outcome == "retired_stale"
+    assert result.checkpoint_id == "ent_ordinary"
+    assert result.superseded == ["ent_legacy"]
+    assert record.checkpoints["ent_restricted"]["snapshot"]["status"] == (
+        "awaiting_operator"
+    )
+    assert record.checkpoints["ent_ordinary"]["snapshot"]["status"] == (
+        "awaiting_operator"
+    )
+
+
+def _claim_unauthenticated_extension(record, checkpoint_id):
+    import json as _json
+
+    record.checkpoints[checkpoint_id]["snapshot"]["body"] = _json.dumps(
+        {"version": 2, "effect_scope": "review_request_only"}
+    )
+
+
+def test_unknown_checkpoint_beside_a_current_ordinary_one_is_reported_not_fatal(
+    record,
+):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_eeeeeeeeeeeeeeeeeeeeeeee", "ent_t1", signed=False)
+    _claim_unauthenticated_extension(record, "ent_eeeeeeeeeeeeeeeeeeeeeeee")
+    record.add_checkpoint("ent_ordinary", "ent_t1", signed=True)
+
+    result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+
+    assert result.outcome == "skipped"
+    assert result.checkpoint_id == "ent_ordinary"
+    assert "ent_eeeeeeeeeeeeeeeeeeeeeeee" in result.detail
+    assert "extension_claim_unauthenticated" in result.detail
+    assert "swarm operator" in result.detail
+    assert record.writes == 0 and record.events == []
+    assert record.checkpoints["ent_eeeeeeeeeeeeeeeeeeeeeeee"]["snapshot"]["status"] == "awaiting_operator"
+
+
+def test_unknown_checkpoint_alone_fails_with_cause_owner_and_next_step(record):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_odd", "ent_t1", signed=False)
+    _claim_unauthenticated_extension(record, "ent_odd")
+
+    result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+
+    assert result.outcome == "failed"
+    assert result.remaining == ["ent_odd"]
+    assert "extension_claim_unauthenticated" in result.detail
+    assert "re-read or re-file" in result.detail
+    assert "swarm operator" in result.detail
+    assert record.writes == 0 and record.events == []

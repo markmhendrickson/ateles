@@ -8,6 +8,7 @@ Also covers the checkbox definition-of-done changes:
 """
 
 import asyncio
+import copy
 import inspect
 import json
 import logging
@@ -60,6 +61,29 @@ from swarm_dispatch import (
     verdict_to_review_event,
     vanellus_comment_missing,
 )
+
+
+@pytest.fixture(autouse=True)
+def _readable_fly_ledger(_fly_runner_off_and_isolated):
+    """Give this file's tests a readable Fly ledger with no receipts.
+
+    A fix round reads the ledger to tell whether the PR came from Fly, and a
+    missing ledger holds the round (origin unknown), and so does a missing
+    audit file. These tests exercise
+    the local round, so the PR must be one a readable ledger does not name."""
+    import build_delivery
+    import fly_delivery_receipt
+
+    ledger = build_delivery._delivery_ledger()
+    with ledger._locked():
+        ledger._save(ledger._load())
+    fly_delivery_receipt.audit_path(ledger).write_text("")
+
+
+# A PR head branch no Fly delivery receipt names. Production triggers always
+# carry the PR's head.ref; a fix round whose trigger has none is held, because
+# whether Fly delivered the PR cannot then be decided.
+_LOCAL_FIX_BRANCH = "fix/local-fix-round"
 
 
 def _trigger(**overrides):
@@ -170,7 +194,7 @@ def test_content_digest_changes_when_content_changes():
 def test_pr_harness_event_also_upserts_canonical_pull_request(monkeypatch):
     stored = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.append((entities, idempotency_key))
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -195,7 +219,7 @@ def test_panel_reviews_use_verified_pre_panel_head_not_stale_trigger(monkeypatch
     stored = []
     superseded = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.append((entities, idempotency_key))
         return {
             "entities": [
@@ -257,7 +281,7 @@ def test_panel_reviews_seed_round_from_max_of_all_live_priors(monkeypatch):
         ]
     }
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.append(entities)
         return {"entities": [{"observation_index": 0, "entity_id": "ent_new"}]}
 
@@ -297,7 +321,7 @@ def test_security_findings_store_only_declared_fields_and_require_readback(monke
     stored = []
     reviewed_head = "b" * 40
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
         return {
             "entities": [
@@ -351,7 +375,7 @@ def test_security_findings_store_only_declared_fields_and_require_readback(monke
 
 
 def test_security_finding_missing_readback_fails_closed(monkeypatch):
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         return {"entities": [{"observation_index": 0, "entity_id": "ent_new"}]}
 
     async def no_readback(self, path, payload):
@@ -472,7 +496,7 @@ def test_panel_review_store_schema_loss_fails_before_supersession(
 ):
     calls = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         if entities and entities[0]["entity_type"] == "pr_review":
             return {
                 "entities": [{"observation_index": 0, "entity_id": "ent_new"}],
@@ -515,7 +539,7 @@ def test_panel_review_store_schema_loss_fails_before_supersession(
 
 
 def test_unverified_supersession_keeps_panel_durability_closed(monkeypatch):
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         if entities and entities[0]["entity_type"] == "pr_review":
             return {"entities": [{"observation_index": 0, "entity_id": "ent_new"}]}
         return {}
@@ -569,7 +593,7 @@ def test_failed_replacement_store_leaves_all_prior_reviews_live(monkeypatch):
         "snapshot": {"review_lens": "qa", "review_round": 2},
     }
 
-    async def failed_store(self, entities, idempotency_key):
+    async def failed_store(self, entities, idempotency_key, **_kwargs):
         return None
 
     async def fake_priors(self, trigger, lenses, current_sha):
@@ -593,6 +617,321 @@ def test_failed_replacement_store_leaves_all_prior_reviews_live(monkeypatch):
     )
 
     assert corrections == []
+
+
+# ── pr_review store: bounded retry of a temporary Neotoma failure ───────────
+
+
+class _ReviewStoreNeotoma:
+    """Fake Neotoma behind ``httpx.AsyncClient`` for the panel's review store.
+
+    ``pr_review`` stores follow ``script`` one item per attempt: an exception
+    is raised, an int is returned as that HTTP status, ``"ok"`` succeeds, and
+    ``"lost_reply"`` stores the rows and THEN times out (a write that landed
+    but whose reply never came back). Like Neotoma, a repeated idempotency key
+    replays the first result instead of creating rows again, without
+    comparing bodies, so ``bodies`` keeps a deep copy of every attempt's
+    ``/store`` JSON for tests to compare. ``pr_review`` queries read back what
+    was stored; every other call answers ``{}``.
+    """
+
+    def __init__(self, script, *, store_reply_extra=None):
+        self.script = list(script)
+        self.store_reply_extra = store_reply_extra or {}
+        self.attempts = []  # (time_limit, idempotency_key)
+        self.bodies = []  # deep copy of each attempt's /store JSON body
+        self.created = []  # (entity_id, entity) — rows actually written
+        self.by_key = {}
+
+    def client(self, timeout=None, **_kwargs):
+        return _ReviewStoreClient(self, timeout)
+
+    def _reply(self, key, entities):
+        if key not in self.by_key:
+            rows = []
+            for index, entity in enumerate(entities):
+                entity_id = f"ent_review_{len(self.created)}"
+                self.created.append((entity_id, entity))
+                rows.append({"observation_index": index, "entity_id": entity_id})
+            self.by_key[key] = {"entities": rows, **self.store_reply_extra}
+        return self.by_key[key]
+
+
+class _ReviewStoreClient:
+    def __init__(self, server, timeout):
+        self.server = server
+        self.timeout = timeout
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    @staticmethod
+    def _response(url, status, payload):
+        return httpx.Response(
+            status, json=payload, request=httpx.Request("POST", url)
+        )
+
+    async def post(self, url, json=None, **_kwargs):
+        body = json or {}
+        entities = body.get("entities") or []
+        if url.endswith("/store") and any(
+            entity.get("entity_type") == "pr_review" for entity in entities
+        ):
+            key = body["idempotency_key"]
+            self.server.attempts.append((self.timeout, key))
+            self.server.bodies.append(copy.deepcopy(body))
+            step = self.server.script.pop(0)
+            if isinstance(step, Exception):
+                raise step
+            if isinstance(step, int):
+                return self._response(url, step, {"error": "scripted"})
+            reply = self.server._reply(key, entities)
+            if step == "lost_reply":
+                raise httpx.ReadTimeout("")
+            return self._response(url, 200, reply)
+        if url.endswith("/entities/query") and body.get("entity_type") == "pr_review":
+            rows = [
+                {
+                    "entity_id": entity_id,
+                    "snapshot": _snapshot_for_review(entity),
+                }
+                for entity_id, entity in self.server.created
+            ]
+            return self._response(url, 200, {"entities": rows})
+        return self._response(url, 200, {})
+
+    async def get(self, url, **_kwargs):
+        return httpx.Response(200, json={}, request=httpx.Request("GET", url))
+
+
+def _run_panel_with_review_store(monkeypatch, server, *, clock=None):
+    """Drive ``_handle_pr`` with the REAL ``_persist_panel_reviews``.
+
+    Returns (calls, stop_reasons, pauses). Only the review store and its
+    read-back go through ``server``; the other durability legs are stubbed
+    confirmed, so the store is the one thing that decides the outcome.
+    """
+    calls = []
+    real_persist = SwarmDispatcher._persist_panel_reviews
+    dispatcher = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+    dispatcher.config.neotoma_token = "t"
+    monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", real_persist)
+
+    async def no_priors(self, trigger, lenses, current_sha):
+        return {}
+
+    async def confirmed(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(SwarmDispatcher, "_prior_live_reviews", no_priors)
+    monkeypatch.setattr(SwarmDispatcher, "_supersede_prior_reviews", confirmed)
+    monkeypatch.setattr(SwarmDispatcher, "_persist_security_findings", confirmed)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_persist_and_confirm_pull_request", confirmed
+    )
+
+    stop_reasons = []
+
+    async def record_stop(self, trigger, parent, agent, stdout, stderr, **kwargs):
+        stop_reasons.append(kwargs.get("reason"))
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_panel_session_limit", record_stop)
+    monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", server.client)
+
+    pauses = []
+
+    async def no_sleep(seconds):
+        pauses.append(seconds)
+
+    monkeypatch.setattr(swarm_dispatch._neotoma_transient, "_asleep", no_sleep)
+    if clock is not None:
+        monkeypatch.setattr(swarm_dispatch._neotoma_transient, "_monotonic", clock)
+
+    asyncio.run(dispatcher._handle_pr(_trigger(body="Closes #80.")))
+    return calls, stop_reasons, pauses
+
+
+def _assert_every_attempt_sent_the_stored_body(server):
+    """Every retry sent the first attempt's exact body, and what was stored
+    is that body: the same lenses, each at the trigger's exact head SHA."""
+    assert len(server.bodies) == len(server.attempts) >= 2
+    first = server.bodies[0]
+    assert all(body == first for body in server.bodies[1:])
+    submitted = [
+        entity for entity in first["entities"]
+        if entity.get("entity_type") == "pr_review"
+    ]
+    stored = [entity for _, entity in server.created]
+    assert stored == submitted
+    head = _trigger().head_sha
+    assert {entity["review_lens"] for entity in stored} == {
+        entity["review_lens"] for entity in submitted
+    }
+    assert stored and all(entity["head_sha"] == head for entity in stored)
+
+
+@pytest.mark.parametrize("first_failure", ["timeout", "lost_reply"])
+def test_review_store_timeout_then_success_stores_once_and_panel_finishes(
+    monkeypatch, first_failure
+):
+    first = httpx.ReadTimeout("") if first_failure == "timeout" else "lost_reply"
+    server = _ReviewStoreNeotoma([first, "ok"])
+
+    calls, stop_reasons, pauses = _run_panel_with_review_store(monkeypatch, server)
+
+    assert len(server.attempts) == 2
+    assert pauses == [2.0]
+    # The large store gets the longer per-attempt limit, not the default 30s.
+    assert [limit for limit, _ in server.attempts] == [
+        swarm_dispatch.PR_REVIEW_STORE_ATTEMPT_TIMEOUT_SECONDS
+    ] * 2
+    # One row per lens, written once even when the first write landed and
+    # only its reply was lost: the retry replayed the same idempotency key.
+    lenses = [entity["review_lens"] for _, entity in server.created]
+    assert lenses and len(lenses) == len(set(lenses))
+    # The retry resent the first attempt's body unchanged, including on the
+    # lost-reply path where the replayed key would hide a changed body.
+    _assert_every_attempt_sent_the_stored_body(server)
+    # The read-back found those reviews, so the panel reached merge readiness
+    # and no incomplete-review notice was posted.
+    assert stop_reasons == []
+    assert ("gate", None) in calls
+
+
+def test_review_store_every_attempt_uses_the_same_idempotency_key(monkeypatch):
+    server = _ReviewStoreNeotoma([httpx.ConnectError("refused"), 503, "ok"])
+
+    calls, stop_reasons, pauses = _run_panel_with_review_store(monkeypatch, server)
+
+    keys = [key for _, key in server.attempts]
+    assert len(keys) == 3
+    assert len(set(keys)) == 1 and keys[0].startswith("pr-review-")
+    _assert_every_attempt_sent_the_stored_body(server)
+    assert pauses == [2.0, 5.0]
+    assert stop_reasons == []
+
+
+@pytest.mark.parametrize("status", [429, 502])
+def test_review_store_retries_429_and_5xx(monkeypatch, status):
+    server = _ReviewStoreNeotoma([status, "ok"])
+
+    _calls, stop_reasons, _pauses = _run_panel_with_review_store(monkeypatch, server)
+
+    assert len(server.attempts) == 2
+    assert stop_reasons == []
+
+
+@pytest.mark.parametrize("failure", [400, 422, "undeclared_fields"])
+def test_review_store_4xx_or_undeclared_fields_does_not_retry(
+    monkeypatch, caplog, failure
+):
+    if failure == "undeclared_fields":
+        server = _ReviewStoreNeotoma(
+            ["ok"], store_reply_extra={"unknown_fields_count": 1}
+        )
+    else:
+        server = _ReviewStoreNeotoma([failure])
+
+    with caplog.at_level("ERROR"):
+        calls, stop_reasons, pauses = _run_panel_with_review_store(
+            monkeypatch, server
+        )
+
+    assert [limit for limit, _ in server.attempts] == [
+        swarm_dispatch.PR_REVIEW_STORE_ATTEMPT_TIMEOUT_SECONDS
+    ]
+    assert pauses == []
+    assert stop_reasons == ["durable exact-head review read-back failed"]
+    assert ("gate", None) not in calls
+    if failure != "undeclared_fields":
+        assert "HTTPStatusError" in caplog.text
+
+
+def test_review_store_attempts_spent_stops_and_logs_exception_type(
+    monkeypatch, caplog
+):
+    server = _ReviewStoreNeotoma([httpx.ReadTimeout("")] * 3)
+
+    with caplog.at_level("WARNING"):
+        calls, stop_reasons, pauses = _run_panel_with_review_store(
+            monkeypatch, server
+        )
+
+    assert len(server.attempts) == 3
+    assert pauses == [2.0, 5.0]
+    assert stop_reasons == ["durable exact-head review read-back failed"]
+    assert ("gate", None) not in calls
+    failed = [
+        record.getMessage()
+        for record in caplog.records
+        if "Neotoma store failed (pr-review-" in record.getMessage()
+    ]
+    assert failed and failed[0].endswith("ReadTimeout")
+
+
+def test_review_store_total_bound_caps_attempts_and_their_time_limits(
+    monkeypatch,
+):
+    # Each store attempt "takes" 200s on a fake clock; pauses take none.
+    now = [0.0]
+    server = _ReviewStoreNeotoma([httpx.ReadTimeout("")] * 3)
+    original_post = _ReviewStoreClient.post
+
+    async def slow_post(self, url, json=None, **kwargs):
+        try:
+            return await original_post(self, url, json=json, **kwargs)
+        finally:
+            if url.endswith("/store"):
+                now[0] += 200.0
+
+    monkeypatch.setattr(_ReviewStoreClient, "post", slow_post)
+
+    _calls, stop_reasons, pauses = _run_panel_with_review_store(
+        monkeypatch, server, clock=lambda: now[0]
+    )
+
+    attempt = swarm_dispatch.PR_REVIEW_STORE_ATTEMPT_TIMEOUT_SECONDS
+    total = swarm_dispatch.PR_REVIEW_STORE_TOTAL_SECONDS
+    # The second attempt is granted only what the bound leaves, and no third
+    # attempt starts once the bound is spent.
+    assert [limit for limit, _ in server.attempts] == [attempt, total - 200.0]
+    assert pauses == [2.0]
+    assert stop_reasons == ["durable exact-head review read-back failed"]
+
+
+def test_retried_store_sends_relationships_on_every_attempt(monkeypatch):
+    # A retried store keeps the caller's relationships in each attempt's
+    # payload, the same way the single-attempt store does.
+    server = _ReviewStoreNeotoma([503, "ok"])
+    monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", server.client)
+
+    async def no_sleep(seconds):
+        return None
+
+    monkeypatch.setattr(swarm_dispatch._neotoma_transient, "_asleep", no_sleep)
+    relationships = [
+        {"relationship_type": "REFERS_TO", "source_index": 0,
+         "target_entity_id": "ent_target"},
+    ]
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(neotoma_token="t"))
+
+    result = asyncio.run(
+        dispatcher._store_entities(
+            [_expected_pr_review()],
+            "pr-review-relationships",
+            relationships=relationships,
+            retry_transient=True,
+        )
+    )
+
+    assert result and result["entities"]
+    assert len(server.bodies) == 2
+    assert all(body.get("relationships") == relationships for body in server.bodies)
 
 
 def test_panelist_prompt_uses_verified_pre_panel_head_not_stale_trigger():
@@ -628,7 +967,7 @@ def test_vanellus_prompt_uses_verified_pre_panel_head_not_stale_trigger():
 def test_panel_reviews_without_verified_head_fail_closed(monkeypatch, caplog):
     stored = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -1784,7 +2123,7 @@ def test_route_findings_groups_by_lens_then_dispatches_cicada(monkeypatch):
         ("qa", "[NON-BLOCKING] style: minor"),
     ]
     asyncio.run(
-        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+        d._route_blocking_findings(_trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80, reviews=reviews,
                                    verdict="request_changes")
     )
     # Each lens with a blocking finding gets its owning agent invoked, then Cicada.
@@ -1823,7 +2162,7 @@ def _route_capture_cicada_guidance(monkeypatch, *, lens_result_for):
     d = SwarmDispatcher(_StubNotifier(), _config())
     reviews = [("ux", "[BLOCKING] naming: the flag is undiscoverable\nraw-ux-detail")]
     asyncio.run(
-        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+        d._route_blocking_findings(_trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80, reviews=reviews,
                                    verdict="request_changes")
     )
     return captured.get("cicada_prompt", ""), d
@@ -1883,7 +2222,7 @@ def test_route_findings_mixed_lens_outcomes_include_both_sections(monkeypatch):
         ("qa", "[BLOCKING] coverage: none\nqa-raw"),
     ]
     asyncio.run(
-        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+        d._route_blocking_findings(_trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80, reviews=reviews,
                                    verdict="request_changes")
     )
     prompt = captured.get("prompt", "")
@@ -2003,7 +2342,7 @@ def test_route_findings_cicada_auth_failure_pages_infra(monkeypatch):
     d = SwarmDispatcher(_StubNotifier(), _config())
     asyncio.run(
         d._route_blocking_findings(
-            _trigger(), parent=80,
+            _trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80,
             reviews=[("qa", "[BLOCKING] coverage: no test\nadd one")],
             verdict="request_changes",
         )
@@ -2753,7 +3092,7 @@ def test_ci_check_failure_closed_posture_files_brief_and_notifies(monkeypatch):
     ))
     stored = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.append((entities, idempotency_key))
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -2784,7 +3123,7 @@ def test_ci_check_failure_open_posture_only_logs_no_brief(monkeypatch, caplog):
     monkeypatch.setattr(swarm_dispatch, "load_policy", lambda: pol)
     stored = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.append((entities, idempotency_key))
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -3598,7 +3937,7 @@ def test_route_ci_failure_tags_cicada_dispatch_as_ci_log_triage(monkeypatch):
     )
 
     d = SwarmDispatcher(_StubNotifier(), _config())
-    asyncio.run(d._route_ci_failure(_trigger(), parent=80))
+    asyncio.run(d._route_ci_failure(_trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80))
 
     assert seen["work_class"] == "ci_log_triage"
 
@@ -3628,7 +3967,7 @@ def test_route_blocking_findings_cicada_dispatch_carries_no_work_class(monkeypat
     d = SwarmDispatcher(_StubNotifier(), _config())
     reviews = [("ux", "[BLOCKING] naming: the flag is undiscoverable\ndetail here")]
     asyncio.run(
-        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+        d._route_blocking_findings(_trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80, reviews=reviews,
                                    verdict="request_changes")
     )
 
@@ -3777,7 +4116,7 @@ def test_lanius_pr_prompt_gate_inheritance_contract_snapshot():
     merge_not_overwrite = "Legacy init MUST MERGE, never overwrite"
     never_downgrade = "never downgrade a `signed_off` gate to `pending`"
     blocked_only_when_pending = (
-        "Only emit `blocked` when `gate_status` exists AND a pre-impl gate is "
+        "emit `blocked` when `gate_status` exists AND a pre-impl gate is "
         "genuinely `pending`"
     )
 
@@ -3984,6 +4323,249 @@ def test_pr_no_parent_docs_only_does_not_trigger_bypass(monkeypatch):
 
     assert posted == []
     assert not any("bypassed the gated" in m for m in notifier.sent)
+
+
+# ── verified parent task (a PR delivered from a tracked task, not an issue) ───
+
+_TASK_ID = "ent_0123456789abcdef01234567"
+_TASK_BRANCH = "cicada/task-01234567-20261106T000000-abc123"
+
+
+def _task_receipt(**overrides):
+    entry = {
+        "status": "opened", "branch": _TASK_BRANCH, "run_id": "run-1",
+        "commit": "a" * 40, "pr_number": 87,
+        "pr_url": "https://github.com/owner/repo/pull/87", "readback": "passed",
+        "readback_reason": "", "token": "t" * 32, "recorded_at": 1_700_000_000.0,
+    }
+    entry.update(overrides)
+    return entry
+
+
+@pytest.fixture(name="task_ledger")
+def _task_ledger(monkeypatch, tmp_path):
+    """A throwaway Apis delivery ledger; tests add the receipts they need."""
+    import build_delivery
+
+    monkeypatch.setenv(
+        build_delivery.FLY_DELIVERY_REGISTRY_ENV, str(tmp_path / "ledger.json")
+    )
+    return build_delivery._delivery_ledger()
+
+
+def _task_pr_dispatcher(monkeypatch, *, lanius_stdout, vanellus_stdout):
+    """`_pr_dispatcher_with_stubs`, also recording each skill's prompt, the
+    bypass-notice attempt, and the gate-block comment."""
+    calls, prompts, posted, blocks = [], {}, [], []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout=vanellus_stdout, calls=calls
+    )
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        prompts.setdefault(skill, []).append(prompt)
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, lanius_stdout, "")
+        if skill == "vanellus":
+            return SkillResult(skill, True, 0, vanellus_stdout, "")
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    async def fake_post_bypass(self, trigger):
+        posted.append(trigger.number)
+        return True
+
+    async def fake_gate_block(self, t, parent, pending):
+        blocks.append((parent, set(pending)))
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_post_pipeline_bypass_comment", fake_post_bypass
+    )
+    monkeypatch.setattr(SwarmDispatcher, "_post_gate_block", fake_gate_block)
+    return d, calls, prompts, posted, blocks
+
+
+def test_verified_parent_task_missing_issue_block_proceeds(
+    monkeypatch, task_ledger
+):
+    """A PR Apis delivered from a task (its own ledger says so) gets no bypass
+    notice, no Lanius process block, and Vanellus is told the parent task."""
+    assert task_ledger.reserve_delivery(f"owner/repo#task:{_TASK_ID}", _task_receipt())
+    # Lanius misjudges the missing issue as a block, as observed live.
+    d, calls, prompts, posted, blocks = _task_pr_dispatcher(
+        monkeypatch,
+        lanius_stdout=("GATE_INHERITANCE: blocked\n"
+                       "GATE_BLOCK_REASON: missing_parent_issue"),
+        vanellus_stdout="**APPROVE**\nlgtm",
+    )
+    asyncio.run(d._handle_pr(_trigger(body="A delivered change.", head_ref=_TASK_BRANCH)))
+
+    assert posted == []
+    assert not any("bypassed the gated" in m for m in d.notifier.sent)
+    assert blocks == []
+    assert "VERIFIED PARENT TASK" in prompts["lanius"][0] and _TASK_ID in prompts["lanius"][0]
+    assert "overrides any role-prompt instruction to retrieve issue gates" in prompts["lanius"][0]
+    steward = prompts["vanellus"][0]
+    assert f"delivered from tracked task {_TASK_ID}" in steward
+    assert "Parent issue: none." in steward and "#unknown" not in steward
+    assert "do not record `block_kind=process`" in steward
+    assert ("gate", None) in calls  # the panel ran and reached readiness
+
+
+def test_verified_parent_task_keeps_other_lanius_block(monkeypatch, task_ledger):
+    """A receipt cannot clear pending issue gates reported for another reason."""
+    assert task_ledger.reserve_delivery(f"owner/repo#task:{_TASK_ID}", _task_receipt())
+    d, calls, prompts, posted, blocks = _task_pr_dispatcher(
+        monkeypatch,
+        lanius_stdout="GATE_INHERITANCE: blocked\nGATE_PENDING: pm, arch",
+        vanellus_stdout="**APPROVE**\nlgtm",
+    )
+    asyncio.run(d._handle_pr(_trigger(body="A delivered change.", head_ref=_TASK_BRANCH)))
+
+    assert posted == []
+    assert blocks == [(None, {"pm", "arch"})]
+    assert "vanellus" not in prompts
+    assert ("gate", None) not in calls
+
+
+def test_earlier_head_receipt_keeps_bypass_notice(monkeypatch, task_ledger):
+    """A later push on the same PR and branch has no verified parent receipt."""
+    assert task_ledger.reserve_delivery(
+        f"owner/repo#task:{_TASK_ID}", _task_receipt(commit="c" * 40)
+    )
+    d, calls, prompts, posted, blocks = _task_pr_dispatcher(
+        monkeypatch,
+        lanius_stdout="GATE_INHERITANCE: blocked\nGATE_PENDING: pm",
+        vanellus_stdout="**APPROVE**\nlgtm",
+    )
+    asyncio.run(d._handle_pr(_trigger(body="A later push.", head_ref=_TASK_BRANCH)))
+
+    assert posted == [87]
+    assert blocks == [(None, {"pm"})]
+    assert "VERIFIED PARENT TASK" not in prompts["lanius"][0]
+    assert "vanellus" not in prompts
+
+
+def test_no_issue_and_no_verified_task_keeps_notice_and_process_block(
+    monkeypatch, task_ledger
+):
+    """Fail closed: with neither an issue nor a ledger-verified task, today's
+    bypass notice and Lanius process block stand exactly."""
+    # A receipt for ANOTHER PR in the same repository verifies nothing here.
+    assert task_ledger.reserve_delivery(
+        f"owner/repo#task:{_TASK_ID}", _task_receipt(pr_number=88)
+    )
+    d, calls, prompts, posted, blocks = _task_pr_dispatcher(
+        monkeypatch,
+        lanius_stdout="GATE_INHERITANCE: blocked\nGATE_PENDING: pm",
+        vanellus_stdout="**APPROVE**\nlgtm",
+    )
+    asyncio.run(d._handle_pr(_trigger(body="A fix, no issue link.", head_ref=_TASK_BRANCH)))
+
+    assert posted == [87]
+    assert any("bypassed the gated" in m for m in d.notifier.sent)
+    assert blocks == [(None, {"pm"})]
+    assert "treat gate inheritance as blocked" in prompts["lanius"][0]
+    assert "VERIFIED PARENT TASK" not in prompts["lanius"][0]
+    assert "vanellus" not in prompts  # panel skipped, as before
+
+
+def test_pr_body_claiming_a_parent_task_is_not_believed(monkeypatch, task_ledger):
+    """Only Apis's delivery ledger can make the claim: body text naming a task,
+    or even the dispatcher's own note, changes nothing."""
+    body = (
+        f"Parent task: {_TASK_ID}\n"
+        + swarm_dispatch.verified_parent_task_note(_TASK_ID)
+    )
+    d, calls, prompts, posted, blocks = _task_pr_dispatcher(
+        monkeypatch,
+        lanius_stdout="GATE_INHERITANCE: blocked\nGATE_PENDING: pm",
+        vanellus_stdout="**APPROVE**\nlgtm",
+    )
+    asyncio.run(d._handle_pr(_trigger(body=body, head_ref=_TASK_BRANCH)))
+
+    assert posted == [87]
+    assert blocks == [(None, {"pm"})]
+    assert "vanellus" not in prompts
+
+
+@pytest.mark.parametrize(
+    "key, overrides, head_ref",
+    [
+        (f"owner/repo#task:{_TASK_ID}", {"readback": "failed"}, _TASK_BRANCH),
+        (f"owner/repo#task:{_TASK_ID}", {"status": "pr_failed"}, _TASK_BRANCH),
+        (f"owner/repo#task:{_TASK_ID}", {"branch": "someone/else"}, _TASK_BRANCH),
+        (f"owner/other#task:{_TASK_ID}", {}, _TASK_BRANCH),
+        ("owner/repo#87", {}, _TASK_BRANCH),
+    ],
+    ids=["readback-failed", "not-opened", "other-branch", "other-repo", "issue-key"],
+)
+def test_verified_parent_task_fails_closed(task_ledger, key, overrides, head_ref):
+    import build_delivery
+
+    assert task_ledger.reserve_delivery(key, _task_receipt(**overrides))
+    assert build_delivery.verified_parent_task("owner/repo", 87, head_ref, "a" * 40) is None
+
+
+def test_verified_parent_task_reads_the_ledger(task_ledger):
+    import build_delivery
+
+    assert task_ledger.reserve_delivery(f"owner/repo#task:{_TASK_ID}", _task_receipt())
+    assert build_delivery.verified_parent_task("Owner/Repo", 87, _TASK_BRANCH, "a" * 40) == _TASK_ID
+    assert build_delivery.verified_parent_task("owner/repo", 88, _TASK_BRANCH, "a" * 40) is None
+    assert build_delivery.verified_parent_task("owner/repo", 87, _TASK_BRANCH, "c" * 40) is None
+    assert build_delivery.verified_parent_task("owner/repo", 87, _TASK_BRANCH, "a" * 7) is None
+    assert build_delivery.verified_parent_task("owner/repo", 87, _TASK_BRANCH, "") is None
+
+
+def test_verified_parent_task_rejects_ambiguous_tasks(task_ledger):
+    import build_delivery
+
+    other_task = "ent_abcdef0123456789abcdef01"
+    assert task_ledger.reserve_delivery(f"owner/repo#task:{_TASK_ID}", _task_receipt())
+    assert task_ledger.reserve_delivery(f"owner/repo#task:{other_task}", _task_receipt())
+    assert build_delivery.verified_parent_task("owner/repo", 87, _TASK_BRANCH, "a" * 40) is None
+
+
+@pytest.mark.parametrize("ledger_result", [OSError("unreadable"), ["malformed"]])
+def test_verified_parent_task_unreadable_ledger(monkeypatch, task_ledger, ledger_result):
+    import build_delivery
+
+    def receipts():
+        if isinstance(ledger_result, Exception):
+            raise ledger_result
+        return ledger_result
+
+    monkeypatch.setattr(build_delivery, "_delivery_ledger", lambda: task_ledger)
+    monkeypatch.setattr(task_ledger, "delivery_receipts", receipts)
+    assert build_delivery.verified_parent_task("owner/repo", 87, _TASK_BRANCH, "a" * 40) is None
+    d, calls, prompts, posted, blocks = _task_pr_dispatcher(
+        monkeypatch,
+        lanius_stdout="GATE_INHERITANCE: blocked\nGATE_PENDING: pm",
+        vanellus_stdout="**APPROVE**\nlgtm",
+    )
+    asyncio.run(d._handle_pr(_trigger(body="A fix, no issue link.", head_ref=_TASK_BRANCH)))
+    assert posted == [87]
+    assert "VERIFIED PARENT TASK" not in prompts["lanius"][0]
+    assert blocks == [(None, {"pm"})]
+    assert "vanellus" not in prompts
+
+
+def test_verified_parent_task_does_not_clear_a_content_block(monkeypatch, task_ledger):
+    """A verified parent task changes only the parentage question: a blocking
+    content finding still routes back as request_changes and never reaches
+    merge readiness."""
+    assert task_ledger.reserve_delivery(f"owner/repo#task:{_TASK_ID}", _task_receipt())
+    d, calls, prompts, posted, blocks = _task_pr_dispatcher(
+        monkeypatch,
+        lanius_stdout="GATE_INHERITANCE: clear",
+        vanellus_stdout="**REQUEST_CHANGES**\n[BLOCKING] arch: bad contract",
+    )
+    asyncio.run(d._handle_pr(_trigger(body="A delivered change.", head_ref=_TASK_BRANCH)))
+
+    assert posted == []
+    assert ("route", "request_changes") in calls
+    assert ("gate", None) not in calls
+    assert "Every content finding still blocks" in prompts["vanellus"][0]
 
 
 # ── _token_for_repo (#95) ────────────────────────────────────────────────────
@@ -4789,7 +5371,7 @@ def test_confirm_gates_clear_on_pr_comment_retriggers_pr_pipeline(monkeypatch):
     async def fake_preregistered(self, repo, number):
         return {}
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     async def fake_post_missing(self, t, reviews, agents_by_lens, **kwargs):
@@ -5319,7 +5901,7 @@ def test_github_trigger_pr_pipeline_passes_contract(monkeypatch):
     async def fake_preregistered(self, repo, number):
         return {}
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     async def fake_post_missing(self, t, reviews, agents_by_lens, **kwargs):
@@ -6037,7 +6619,7 @@ def test_approve_from_operator_resolves_checkpoint_and_removes_reviewer(monkeypa
     stored: list[dict] = []
     http_client = _FakeHttpxClient()
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6080,7 +6662,7 @@ def test_approve_comment_body_has_no_command_tokens(monkeypatch):
     """/approve confirmation comment must not contain command tokens (self-trigger guard)."""
     comment_bodies: list[str] = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     class _CapturingClient:
@@ -6118,7 +6700,7 @@ def test_approve_from_non_operator_is_ignored(monkeypatch):
     stored: list = []
     http_calls: list = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6140,7 +6722,7 @@ def test_approve_from_bot_is_ignored(monkeypatch):
     """/approve from a bot identity must be silently ignored (self-trigger guard)."""
     stored: list = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6246,7 +6828,7 @@ def test_github_review_approved_from_operator_merges_when_flag_on(monkeypatch):
     """Operator 'Approve' review + flag ON → PR merged via the REST API."""
     client = _MergeAwareClient(merge_status=200, merged=True)
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6273,7 +6855,7 @@ def test_github_review_approved_flag_off_does_not_merge(monkeypatch):
     """Operator 'Approve' review + flag OFF → checkpoint resolved, NO merge."""
     client = _MergeAwareClient()
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6319,7 +6901,7 @@ def test_github_review_changes_requested_no_merge(monkeypatch):
     """Operator review with state != approved must not merge."""
     client = _MergeAwareClient()
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6336,7 +6918,7 @@ def test_merge_failure_reported_honestly(monkeypatch):
     """When GitHub refuses the merge (405), the swarm must NOT claim a merge."""
     client = _MergeAwareClient(merge_status=405)
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6365,7 +6947,7 @@ def test_email_approve_merges_when_flag_on(monkeypatch):
     """
     client = _MergeAwareClient(merge_status=200, merged=True)
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6407,7 +6989,7 @@ def test_approve_comment_merges_when_flag_on(monkeypatch):
     """The /approve issue comment shares the merge path (flag ON → merges)."""
     client = _MergeAwareClient(merge_status=200, merged=True)
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6572,7 +7154,7 @@ def test_reject_from_operator_records_reason_and_removes_reviewer(monkeypatch):
     stored: list[dict] = []
     http_client = _FakeHttpxClient()
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6618,7 +7200,7 @@ def test_reject_does_not_proceed_with_merge(monkeypatch):
         skill_calls.append(skill)
         return SkillResult(skill, True, 0, "", "")
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
@@ -6640,7 +7222,7 @@ def test_reject_from_non_operator_is_ignored(monkeypatch):
     """/reject from a non-operator is silently ignored."""
     stored: list = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6664,7 +7246,7 @@ def test_hold_acks_and_leaves_reviewer_in_place(monkeypatch):
     stored: list = []
     http_client = _FakeHttpxClient()
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6703,7 +7285,7 @@ def test_hold_from_non_operator_is_ignored(monkeypatch):
     stored: list = []
     http_client = _FakeHttpxClient()
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6737,7 +7319,7 @@ def test_merge_checkpoint_requests_operator_as_reviewer(monkeypatch):
 
     http_client.post = recording_post
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6763,7 +7345,7 @@ def test_merge_checkpoint_reviewer_request_failure_is_non_fatal(monkeypatch):
     """A failing reviewer request must not prevent the checkpoint from being stored."""
     stored: list = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     class _FailingClient:
@@ -6847,7 +7429,7 @@ def test_confirm_gates_clear_wins_over_approve_when_both_present(monkeypatch):
         calls.append(skill)
         return SkillResult(skill, True, 0, "Gates waived.", "")
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
@@ -7174,7 +7756,7 @@ def test_handle_pr_calls_vanellus_fallback_after_run(monkeypatch):
 
     async def fake_changed_files(self, t): return []
     async def fake_preregistered(self, repo, number): return {}
-    async def fake_store(self, entities, idempotency_key): pass
+    async def fake_store(self, entities, idempotency_key, **_kwargs): pass
     async def fake_post_missing(self, t, reviews, agents_by_lens, **kwargs): pass
     async def fake_persist(self, t, reviews, agents_by_lens, **kwargs): pass
     async def fake_merge_checkpoint(self, t, parent, lenses): pass
@@ -9697,6 +10279,534 @@ def test_handle_pr_reports_successful_and_failed_lenses(monkeypatch):
     assert deferred["reason"] == "incomplete review panel"
 
 
+# A successful roll-up that carries a verdict is a review, never a usage limit
+# or an auth failure, however much its text discusses limits or a 401. A notice
+# with no verdict, or a failed run, is still deferred or paged as before.
+
+
+_STEWARD_HEADER = "**\U0001f916 Vanellus — Ateles swarm, PR steward**"
+
+
+def _aggregation_outcomes(
+    monkeypatch, *, vanellus_ok, vanellus_stdout, vanellus_stderr="",
+    posted_comments=(), vanellus_provider="",
+):
+    calls = []
+    d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout=vanellus_stdout, calls=calls)
+
+    async def fake_scoped_comments(self, repository, number, client):
+        # A callable serves a different thread per read, so a test can make
+        # the comment vanish between the acceptance check and the verdict read.
+        if callable(posted_comments):
+            return list(posted_comments())
+        return list(posted_comments)
+
+    monkeypatch.setattr(SwarmDispatcher, "_lens_scoped_comments", fake_scoped_comments)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "vanellus":
+            return SkillResult(
+                skill, vanellus_ok, 0 if vanellus_ok else 1, vanellus_stdout,
+                vanellus_stderr, error="" if vanellus_ok else "process failed",
+                provider=vanellus_provider,
+            )
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    deferrals, auth_pages = [], []
+
+    async def fake_deferral(self, trigger, parent, agent, *args, **kwargs):
+        deferrals.append((agent, args, kwargs))
+
+    async def fake_auth(self, trigger, agent):
+        auth_pages.append(agent)
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_panel_session_limit", fake_deferral)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_panel_auth_failure", fake_auth)
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    return calls, deferrals, auth_pages
+
+
+def test_successful_aggregation_discussing_rate_limits_is_a_review(monkeypatch):
+    stdout = (
+        _STEWARD_HEADER + "\n"
+        "**APPROVE**\n"
+        "The change backs off when GitHub returns a rate limit and retries "
+        "after the window resets at the time the X-RateLimit-Reset header gives."
+    )
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout
+    )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "APPROVE") in calls, calls
+    assert ("gate", None) in calls, calls
+
+
+def test_successful_aggregation_mentioning_a_401_is_not_an_auth_failure(monkeypatch):
+    stdout = (
+        _STEWARD_HEADER + "\n"
+        "**REQUEST_CHANGES**\n"
+        "[BLOCKING] arch: a 401 invalid authentication credentials response "
+        "from the provider is swallowed instead of surfaced."
+    )
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout
+    )
+    assert auth_pages == [] and deferrals == []
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+    assert ("route", "request_changes") in calls, calls
+
+
+@pytest.mark.parametrize("ok", [True, False], ids=["success_return", "failure_return"])
+def test_limit_notice_without_verdict_still_defers(monkeypatch, ok):
+    notice = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=ok, vanellus_stdout=notice
+    )
+    assert len(deferrals) == 1, deferrals
+    agent, args, _kwargs = deferrals[0]
+    assert agent == "vanellus"
+    assert args[0] == notice  # the limit notice is what the deferral reads
+    assert auth_pages == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+def test_failed_aggregation_with_limit_notice_and_verdict_still_defers(monkeypatch):
+    # A failed run is never treated as a review, even if a verdict token appears.
+    stdout = "**APPROVE**\nusage limit reached, resets at 19:30"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=False, vanellus_stdout=stdout
+    )
+    assert len(deferrals) == 1, deferrals
+    assert deferrals[0][1][0] == stdout
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+# The review path skips the detectors for stdout only: stderr is still read,
+# so a zero-exit roll-up with a real limit or auth diagnostic there is not
+# acted on as a clean review.
+
+
+def test_successful_aggregation_with_limit_in_stderr_defers(monkeypatch):
+    stdout = "**APPROVE**\nlgtm"
+    stderr = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout, vanellus_stderr=stderr
+    )
+    assert len(deferrals) == 1, deferrals
+    agent, args, _kwargs = deferrals[0]
+    assert agent == "vanellus"
+    assert args == (stdout, stderr)  # reset parsing still sees both streams
+    assert auth_pages == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+def test_successful_aggregation_with_auth_failure_in_stderr_pages(monkeypatch):
+    stdout = "**APPROVE**\nlgtm"
+    stderr = "API Error: 401 invalid authentication credentials"
+    assert swarm_dispatch.detect_auth_failure(stderr)  # instrument check
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout, vanellus_stderr=stderr
+    )
+    assert auth_pages == ["vanellus"], auth_pages
+    assert deferrals == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+def test_successful_aggregation_mentioning_limits_with_empty_stderr_is_a_review(
+    monkeypatch,
+):
+    stdout = (
+        _STEWARD_HEADER + "\n"
+        "**APPROVE**\n"
+        "The retry loop honours the usage limit and waits until the window "
+        "resets at the time the provider reports."
+    )
+    assert swarm_dispatch.detect_session_limit(stdout)  # would match if read
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout, vanellus_stderr=""
+    )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "APPROVE") in calls, calls
+
+
+def test_verdict_only_in_stderr_is_not_a_review(monkeypatch):
+    # The verdict is read from stdout alone; a token in stderr does not make a
+    # limit notice in stdout a review.
+    notice = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=notice,
+        vanellus_stderr="**APPROVE**",
+    )
+    assert len(deferrals) == 1, deferrals
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+# Only Vanellus's verdict at the fixed position (header, then the verdict line
+# directly under it) makes a successful roll-up a review. A verdict token
+# anywhere else is incidental: the output still goes through both detectors.
+
+
+def test_limit_diagnostic_with_incidental_verdict_token_defers(monkeypatch):
+    stdout = (
+        "You've hit your session limit · resets 7:30pm (Europe/Madrid)\n"
+        "Last draft before the limit: **APPROVE**"
+    )
+    assert swarm_dispatch.parse_review_verdict(stdout) is not None  # token present
+    assert swarm_dispatch.lens_own_verdict(stdout, lens_agent="vanellus") is None
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout
+    )
+    assert len(deferrals) == 1, deferrals
+    assert deferrals[0][0] == "vanellus"
+    assert deferrals[0][1][0] == stdout
+    assert auth_pages == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+def test_auth_diagnostic_with_incidental_verdict_token_pages(monkeypatch):
+    stdout = (
+        "API Error: 401 invalid authentication credentials\n"
+        "Partial output: **APPROVE**"
+    )
+    assert swarm_dispatch.detect_auth_failure(stdout)  # instrument check
+    assert not swarm_dispatch.detect_session_limit(stdout)
+    assert swarm_dispatch.parse_review_verdict(stdout) is not None
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout
+    )
+    assert auth_pages == ["vanellus"], auth_pages
+    assert deferrals == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+def test_well_formed_roll_up_mentioning_rate_limits_is_a_review(monkeypatch):
+    stdout = (
+        _STEWARD_HEADER + "\n"
+        "**APPROVE**\n"
+        "\n"
+        "Blocking: 0. The client hits the rate limit, backs off, and retries "
+        "once the usage limit resets at the time the provider reports."
+    )
+    assert swarm_dispatch.detect_session_limit(stdout)  # would match if read
+    assert swarm_dispatch.lens_own_verdict(stdout, lens_agent="vanellus") == "approve"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout
+    )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "APPROVE") in calls, calls
+
+
+# A roll-up that posts its own comment can end with a stdout summary that is
+# not the verdict at the fixed position. When its aggregation comment for this
+# head landed during this run with the verdict at the comment's fixed position,
+# the run is a review and its stdout is not scanned. Stderr is still read, and
+# with no posted verdict stdout is still scanned (#1635, #1645).
+
+
+def _posted_aggregation(verdict_line, *, created_at="2999-01-01T00:00:00Z"):
+    body = (
+        f"<!-- vanellus-aggregation commit={'a' * 40} -->\n"
+        + _STEWARD_HEADER + "\n"
+        + verdict_line + "\n\n"
+        "[BLOCKING] qa: the retry loop ignores the rate limit reset header."
+    )
+    return {"id": 7, "body": body, "created_at": created_at, "updated_at": created_at}
+
+
+_SUMMARY_STDOUT = (
+    "Posted the roll-up comment on the PR. The blocking finding is that the "
+    "client hits the rate limit and retries before the usage limit resets."
+)
+
+
+def test_posted_verdict_with_stdout_discussing_rate_limits_does_not_defer(monkeypatch):
+    comment = _posted_aggregation("**REQUEST_CHANGES**")
+    assert swarm_dispatch.detect_session_limit(_SUMMARY_STDOUT)  # would match if read
+    assert swarm_dispatch.lens_own_verdict(_SUMMARY_STDOUT, lens_agent="vanellus") is None
+    assert swarm_dispatch.posted_comment_own_verdict(
+        comment["body"], lens_agent="vanellus"
+    ) == "request_changes"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=_SUMMARY_STDOUT,
+        posted_comments=[comment],
+    )
+    assert deferrals == [] and auth_pages == []
+    # The verdict is then recovered from the posted comment and acted on.
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+    assert ("route", "request_changes") in calls, calls
+
+
+_AUTH_SUMMARY_STDOUT = (
+    "Posted the roll-up comment on the PR. The blocking finding is that a 401 "
+    "invalid authentication credentials response from the provider is swallowed."
+)
+
+
+def test_posted_verdict_with_stdout_discussing_auth_failure_does_not_page(monkeypatch):
+    comment = _posted_aggregation("**REQUEST_CHANGES**")
+    assert swarm_dispatch.detect_auth_failure(_AUTH_SUMMARY_STDOUT)  # would match if read
+    assert not swarm_dispatch.detect_session_limit(_AUTH_SUMMARY_STDOUT)
+    assert swarm_dispatch.lens_own_verdict(
+        _AUTH_SUMMARY_STDOUT, lens_agent="vanellus"
+    ) is None
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=_AUTH_SUMMARY_STDOUT,
+        posted_comments=[comment],
+    )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+    assert ("route", "request_changes") in calls, calls
+
+
+# When the run is accepted on its posted comment, that comment's verdict is
+# the conclusion. Stdout is not parsed for a verdict on that path, even when
+# its summary names another token; an unreadable comment is incomplete, never
+# a fall-back to stdout. With no validated comment, stdout governs as before.
+
+
+def _clean_posted_aggregation(verdict_line, *, created_at="2999-01-01T00:00:00Z"):
+    body = (
+        f"<!-- vanellus-aggregation commit={'a' * 40} -->\n"
+        + _STEWARD_HEADER + "\n"
+        + verdict_line + "\n\n"
+        "All lenses cleared the current head."
+    )
+    return {"id": 9, "body": body, "created_at": created_at, "updated_at": created_at}
+
+
+def test_posted_request_changes_wins_over_approve_in_stdout_summary(monkeypatch, caplog):
+    stdout = _SUMMARY_STDOUT + "\nEarlier draft verdict was **APPROVE**."
+    assert swarm_dispatch.parse_review_verdict(stdout) == "approve"
+    assert swarm_dispatch.lens_own_verdict(stdout, lens_agent="vanellus") is None
+    with caplog.at_level("WARNING"):
+        calls, deferrals, auth_pages = _aggregation_outcomes(
+            monkeypatch, vanellus_ok=True, vanellus_stdout=stdout,
+            posted_comments=[_posted_aggregation("**REQUEST_CHANGES**")],
+        )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+    assert ("route", "request_changes") in calls, calls
+    assert ("gate", None) not in calls, calls
+    assert any(
+        "'approve'" in r.getMessage() and "'request_changes'" in r.getMessage()
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+def test_posted_approve_wins_over_request_changes_in_stdout_summary(monkeypatch):
+    stdout = (
+        _SUMMARY_STDOUT
+        + "\nThe first pass said **REQUEST_CHANGES** with [BLOCKING] qa: retries."
+    )
+    assert swarm_dispatch.parse_review_verdict(stdout) == "request_changes"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout,
+        posted_comments=[_clean_posted_aggregation("**APPROVE**")],
+    )
+    assert deferrals == [] and auth_pages == []
+    # The formal review and the routing both read the posted comment, so the
+    # stdout's [BLOCKING] mention cannot turn the APPROVE into a block.
+    assert ("review", "APPROVE") in calls, calls
+    assert ("gate", None) in calls, calls
+    assert not any(kind == "route" for kind, _ in calls), calls
+
+
+def test_posted_comment_unreadable_at_verdict_time_is_incomplete(monkeypatch):
+    stdout = _SUMMARY_STDOUT + "\nVerdict: **APPROVE**"
+    accepted = []
+    original = SwarmDispatcher._vanellus_posted_verdict_this_run
+
+    async def accept_then_remove(self, *a, **k):
+        result = await original(self, *a, **k)
+        accepted.append(result)
+        return result
+
+    monkeypatch.setattr(
+        SwarmDispatcher, "_vanellus_posted_verdict_this_run", accept_then_remove
+    )
+
+    def thread():
+        # Present for the acceptance check, gone when the verdict is read.
+        return [] if accepted else [_posted_aggregation("**REQUEST_CHANGES**")]
+
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout,
+        posted_comments=thread,
+    )
+    assert accepted == [True], accepted
+    assert auth_pages == []
+    assert len(deferrals) == 1, deferrals
+    assert deferrals[0][2].get("reason") == "no verified current-head verdict"
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls), calls
+
+
+def test_no_validated_posted_comment_keeps_stdout_verdict(monkeypatch):
+    # Stdout matches no detector, so the posted comment is never validated as
+    # the conclusion; stdout's verdict governs exactly as before.
+    stdout = "**REQUEST_CHANGES**\n[BLOCKING] arch: the cache is never invalidated."
+    assert not swarm_dispatch.detect_session_limit(stdout)
+    assert not swarm_dispatch.detect_auth_failure(stdout)
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout,
+        posted_comments=[_clean_posted_aggregation("**APPROVE**")],
+    )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+    assert ("route", "request_changes") in calls, calls
+
+
+def test_posted_verdict_with_limit_words_in_stderr_does_not_defer(monkeypatch):
+    # Changed by ateles task ent_79097958658a23663f0ad586: this test used to
+    # assert a deferral. A successful run that posted its verdict for this head
+    # during this run is a finished review from any provider, so its stderr is
+    # no longer read; the review the detectors would protect already exists.
+    stderr = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=_SUMMARY_STDOUT,
+        vanellus_stderr=stderr, posted_comments=[_clean_posted_aggregation("**APPROVE**")],
+    )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "APPROVE") in calls, calls
+
+
+# `codex exec` prints only its final message to stdout; its stderr holds the
+# prompt and session text, which on a clean exit-0 run can quote "rate limit
+# resets" or a 401. Those words in stderr are not a limit or an auth failure
+# when the run succeeded and either posted its verdict or was a Codex run.
+
+_CODEX_SESSION_STDERR = (
+    "OpenAI Codex v0.1\n--------\nuser\nIf the provider says the rate limit "
+    "resets at 19:30, wait.\n...\nuser\nIf the provider says the rate limit "
+    "resets at 19:30, wait.\n"
+)
+_CODEX_AUTH_STDERR = (
+    "OpenAI Codex v0.1\n--------\nuser\nReport any 401 invalid authentication "
+    "credentials response as an infra failure.\n"
+)
+_CLEAN_ROLL_UP = _STEWARD_HEADER + "\n**APPROVE**\nAll lenses cleared."
+
+
+@pytest.mark.parametrize(
+    "stderr, detector",
+    [
+        (_CODEX_SESSION_STDERR, "detect_session_limit"),
+        (_CODEX_AUTH_STDERR, "detect_auth_failure"),
+    ],
+    ids=["limit_words", "auth_words"],
+)
+@pytest.mark.parametrize("stdout_verdict", [True, False], ids=["stdout_verdict", "summary_stdout"])
+def test_successful_codex_roll_up_with_posted_verdict_ignores_stderr(
+    monkeypatch, stderr, detector, stdout_verdict
+):
+    assert getattr(swarm_dispatch, detector)(stderr)  # would match if read
+    stdout = _CLEAN_ROLL_UP if stdout_verdict else "Posted the roll-up comment."
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout,
+        vanellus_stderr=stderr, vanellus_provider="codex",
+        posted_comments=[_clean_posted_aggregation("**APPROVE**")],
+    )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "APPROVE") in calls, calls
+
+
+@pytest.mark.parametrize(
+    "stderr", [_CODEX_SESSION_STDERR, _CODEX_AUTH_STDERR], ids=["limit_words", "auth_words"]
+)
+def test_successful_codex_run_without_posted_verdict_ignores_stderr(monkeypatch, stderr):
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=_CLEAN_ROLL_UP,
+        vanellus_stderr=stderr, vanellus_provider="codex",
+    )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "APPROVE") in calls, calls
+
+
+def test_failed_codex_run_with_real_limit_still_defers(monkeypatch):
+    stderr = "You've hit your usage limit. Usage limit reached, resets at 19:30."
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=False, vanellus_stdout="",
+        vanellus_stderr=stderr, vanellus_provider="codex",
+    )
+    assert len(deferrals) == 1, deferrals
+    assert deferrals[0][1] == ("", stderr)
+    assert auth_pages == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+def test_failed_codex_run_with_real_auth_failure_still_pages(monkeypatch):
+    stderr = "API Error: 401 invalid authentication credentials"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=False, vanellus_stdout="",
+        vanellus_stderr=stderr, vanellus_provider="codex",
+    )
+    assert auth_pages == ["vanellus"], auth_pages
+    assert deferrals == []
+
+
+@pytest.mark.parametrize("provider", ["claude", "cursor", ""])
+def test_successful_non_codex_run_with_real_limit_in_stderr_still_defers(
+    monkeypatch, provider
+):
+    stderr = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=_CLEAN_ROLL_UP,
+        vanellus_stderr=stderr, vanellus_provider=provider,
+    )
+    assert len(deferrals) == 1, deferrals
+    assert deferrals[0][1] == (_CLEAN_ROLL_UP, stderr)
+    assert auth_pages == []
+
+
+@pytest.mark.parametrize("provider", ["claude", "cursor", ""])
+def test_successful_non_codex_run_with_real_auth_failure_in_stderr_still_pages(
+    monkeypatch, provider
+):
+    stderr = "API Error: 401 invalid authentication credentials"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=_CLEAN_ROLL_UP,
+        vanellus_stderr=stderr, vanellus_provider=provider,
+    )
+    assert auth_pages == ["vanellus"], auth_pages
+    assert deferrals == []
+
+
+def test_detector_log_names_the_stream_not_its_contents(monkeypatch, caplog):
+    stderr = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    with caplog.at_level("WARNING"):
+        _aggregation_outcomes(
+            monkeypatch, vanellus_ok=True, vanellus_stdout=_CLEAN_ROLL_UP,
+            vanellus_stderr=stderr, vanellus_provider="claude",
+        )
+    messages = [r.getMessage() for r in caplog.records if "detector matched" in r.getMessage()]
+    assert messages and messages[0].endswith("matched on stderr"), messages
+    assert not any("session limit" in m for m in messages), messages
+
+
+@pytest.mark.parametrize(
+    "posted",
+    [
+        [],
+        [_posted_aggregation("**APPROVE**", created_at="2000-01-01T00:00:00Z")],
+        [{"id": 8, "body": f"<!-- vanellus-aggregation commit={'a' * 40} -->\nreview incomplete",
+          "created_at": "2999-01-01T00:00:00Z"}],
+    ],
+    ids=["no_comment", "older_run_comment", "comment_without_verdict"],
+)
+def test_no_posted_verdict_with_limit_in_stdout_still_defers(monkeypatch, posted):
+    notice = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=notice, posted_comments=posted,
+    )
+    assert len(deferrals) == 1, deferrals
+    assert deferrals[0][0] == "vanellus"
+    assert deferrals[0][1][0] == notice
+    assert auth_pages == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
 def test_parse_limit_reset_delay_reads_the_clock():
     from datetime import datetime
     now = datetime(2026, 7, 23, 16, 45, 0)  # 4:45pm
@@ -10315,7 +11425,7 @@ def _route_fix_round_with_head(monkeypatch, *, head_before, head_after):
     reviews = [("ux", "[BLOCKING] naming: the flag is undiscoverable\ndetail")]
     asyncio.run(
         d._route_blocking_findings(
-            _trigger(), parent=80, reviews=reviews, verdict="request_changes"
+            _trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80, reviews=reviews, verdict="request_changes"
         )
     )
     return notifier, dispatched
@@ -12197,6 +13307,97 @@ class TestGateLaunchRefusalSurface:
         )
 
 
+# ── An advisory (forward-looking) lens failing must not stop a review ──────
+# The `content` lens is forward-looking: non-blocking, output to its own
+# queue. Its failure used to land in `failed_lenses`, post "Review
+# incomplete" and return before the roll-up, with every blocking lens done.
+class TestAdvisoryLensFailureDoesNotStopPanel:
+    _PANEL = [
+        Lens(agent="pavo", lens="pm", gate=None, checks="scope"),
+        Lens(
+            agent="corvus", lens="content", gate="", checks="story",
+            forward_looking=True,
+        ),
+    ]
+
+    def _run(self, monkeypatch, *, failing: set[str]):
+        calls: list = []
+        d = _pr_dispatcher_with_stubs(
+            monkeypatch, vanellus_stdout="**APPROVE**", calls=calls
+        )
+        monkeypatch.setattr(
+            swarm_dispatch, "select_panel", lambda **kwargs: list(self._PANEL)
+        )
+        vanellus_prompts: list[str] = []
+
+        async def fake_run_skill(skill, prompt, **kwargs):
+            if skill == "lanius":
+                return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+            if skill == "vanellus":
+                vanellus_prompts.append(prompt)
+                return SkillResult(skill, True, 0, "**APPROVE**", "")
+            if skill in failing:
+                return SkillResult(
+                    skill, False, 1, "", "boom", error="execution failure"
+                )
+            return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+        session_limit_calls: list = []
+
+        async def fake_session_limit(self, *args, **kwargs):
+            session_limit_calls.append(kwargs)
+
+        monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+        monkeypatch.setattr(
+            SwarmDispatcher, "_handle_panel_session_limit", fake_session_limit
+        )
+        asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+        return calls, session_limit_calls, vanellus_prompts
+
+    def test_failed_advisory_lens_reaches_roll_up(self, monkeypatch, caplog):
+        with caplog.at_level("WARNING"):
+            calls, session_limit_calls, vanellus_prompts = self._run(
+                monkeypatch, failing={"corvus"}
+            )
+        assert session_limit_calls == []  # no "Review incomplete" notice
+        assert len(vanellus_prompts) == 1  # roll-up ran
+        assert ("gate", None) in calls
+        lens_line = next(
+            line for line in vanellus_prompts[0].splitlines()
+            if line.startswith("Parent issue:")
+        )
+        assert "pm" in lens_line and "content" not in lens_line
+        assert any(
+            "advisory lens content" in r.getMessage()
+            and "corvus" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_failed_blocking_lens_still_stops_panel(self, monkeypatch):
+        calls, session_limit_calls, vanellus_prompts = self._run(
+            monkeypatch, failing={"corvus", "pavo"}
+        )
+        assert vanellus_prompts == []
+        assert len(session_limit_calls) == 1
+        assert session_limit_calls[0]["reason"] == "incomplete review panel"
+        assert [lens for lens, _ in session_limit_calls[0]["failed_lenses"]] == [
+            "pm"
+        ]
+
+    def test_successful_advisory_lens_handled_as_before(self, monkeypatch):
+        calls, session_limit_calls, vanellus_prompts = self._run(
+            monkeypatch, failing=set()
+        )
+        assert session_limit_calls == []
+        assert len(vanellus_prompts) == 1
+        assert "### review:content" in vanellus_prompts[0]
+        lens_line = next(
+            line for line in vanellus_prompts[0].splitlines()
+            if line.startswith("Parent issue:")
+        )
+        assert "pm, content" in lens_line
+
+
 # ── Regression: other incomplete-panel causes keep their EXISTING message ──
 # unchanged (usage limit / provider exhaustion / head-changed / stale). Only
 # the two named launch-refusal classes on a GATE-OWNING lens move to the new
@@ -12812,3 +14013,410 @@ class TestLabelGate:
         # confirms an operator who never sets ATELES_SWARM_REQUIRE_LABEL gets
         # exactly today's behaviour, not a hidden non-empty default.
         assert DispatchConfig(neotoma_token="", github_token="").require_label == ""
+
+
+
+# ── the check gate's green reading reaches the combined pass and Vanellus ────
+#
+# Apis holds the panel until the head's checks are green, then seats it. When
+# the gate read green for the reviewed head in this panel run, the combined
+# pm/qa/ux prompt and Vanellus's aggregation prompt state that head's SHA, so a
+# lens that could not read check status itself is not left to block on a fact
+# Apis already held. No reading, or a reading for a head that has since moved,
+# states nothing.
+
+_GREEN_NOTE = "CURRENT-HEAD CI EVIDENCE"
+
+
+def _drive_panel_with_check_gate(monkeypatch, *, real_gate, review_head="a" * 40):
+    """Run `_handle_pr` with the combined pass on; return {skill: [prompts]}.
+
+    *real_gate* runs the REAL `_hold_panel_until_checks_green` against a live
+    PR at head ``a*40`` whose checks read green; otherwise the conftest stub
+    (no gate reading at all) stays in place. *review_head* is the head the
+    dispatcher reads before seating the panel (a different value is a head
+    that moved after the gate's reading).
+    """
+    import types
+
+    import panel_check_gate
+
+    calls: list = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+    d.config.combined_review_pass = True
+    prompts: dict[str, list[str]] = {}
+
+    async def record_skill(skill, prompt, **kwargs):
+        prompts.setdefault(skill, []).append(prompt)
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "vanellus":
+            return SkillResult(skill, True, 0, "**APPROVE**\nlgtm", "")
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", record_skill)
+    monkeypatch.setattr(
+        type(d), "_pr_head_sha", lambda self, t: _async_return(review_head)
+    )
+    monkeypatch.setattr(type(d), "_lens_agent_prompt", lambda self, agent: "lens prompt")
+    if real_gate:
+        head = "a" * 40
+
+        async def fetch_pr(repo, num):
+            return {
+                "number": num, "state": "open", "draft": False,
+                "head": {"sha": head, "ref": "feat/x"}, "base": {"ref": "main"},
+                "mergeable": True, "mergeable_state": "clean",
+            }
+
+        async def read_gate(repository, head_sha, base_ref):
+            return panel_check_gate.CheckGate(head=head_sha, green=head_sha == head)
+
+        monkeypatch.setattr(d, "_fetch_pr", fetch_pr)
+        monkeypatch.setattr(d, "_read_head_check_gate", read_gate)
+        monkeypatch.setattr(
+            d,
+            "_hold_panel_until_checks_green",
+            types.MethodType(swarm_dispatch._REAL_HOLD_PANEL_UNTIL_CHECKS_GREEN, d),
+        )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    return prompts
+
+
+def _combined_prompts(prompts):
+    return [p for ps in prompts.values() for p in ps if "IN ONE PASS" in p]
+
+
+def test_a_panel_released_on_a_green_reading_states_the_head_to_combined_pass_and_vanellus(
+    monkeypatch,
+):
+    prompts = _drive_panel_with_check_gate(monkeypatch, real_gate=True)
+    combined = _combined_prompts(prompts)
+    assert combined, "the combined pm/qa/ux pass must run"
+    note = f"read every gating check on head `{'a' * 40}` as green"
+    assert all(_GREEN_NOTE in p and note in p for p in combined)
+    assert prompts.get("vanellus"), "Vanellus must aggregate"
+    assert _GREEN_NOTE in prompts["vanellus"][-1]
+    assert note in prompts["vanellus"][-1]
+
+
+def test_a_panel_with_no_gate_reading_states_nothing(monkeypatch):
+    prompts = _drive_panel_with_check_gate(monkeypatch, real_gate=False)
+    combined = _combined_prompts(prompts)
+    assert combined and prompts.get("vanellus")
+    assert not any(_GREEN_NOTE in p for ps in prompts.values() for p in ps)
+
+
+def test_a_head_that_moved_after_the_green_reading_states_nothing(monkeypatch):
+    # The gate read `a*40` green, but the head the panel reviews is `b*40`.
+    prompts = _drive_panel_with_check_gate(
+        monkeypatch, real_gate=True, review_head="b" * 40
+    )
+    combined = _combined_prompts(prompts)
+    assert combined and prompts.get("vanellus")
+    assert not any(_GREEN_NOTE in p for ps in prompts.values() for p in ps)
+
+
+def test_a_green_reading_from_an_earlier_panel_run_is_not_carried_forward():
+    # A stale entry left from a previous run must not be read as this run's.
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    t = _trigger()
+    d._panel_checks_green[(t.repository.casefold(), t.number)] = "a" * 40
+    assert d._checks_green_head(t, "a" * 40) == "a" * 40
+    assert d._checks_green_head(t, "b" * 40) == ""
+
+    async def held(trigger, *, source):
+        return True
+
+    d._hold_panel_until_checks_green = held
+    asyncio.run(d._handle_pr(t))
+    assert d._checks_green_head(t, "a" * 40) == ""
+
+
+# ── Carry parity with the approval tool (re-run what the tool will not carry) ─
+#
+# Apis's re-run selection and the approval tool's `carry_earlier_signoffs` must
+# reach the same carry decision, with the repo's declared review scope read from
+# the same place (`review_scope.fetch_scope`). Before this, Apis judged a carry
+# by `review_carry.lenses_touched` alone: a test-only delta read as touching qa
+# only, so security was carried, while the tool read the same delta as inside
+# security's declared scope and refused, and no sweep noticed.
+
+import base64 as _carry_b64  # noqa: E402
+import sys as _carry_sys  # noqa: E402
+from pathlib import Path as _CarryPath  # noqa: E402
+
+_CARRY_SCRIPTS = str(_CarryPath(__file__).resolve().parents[2] / "scripts")
+if _CARRY_SCRIPTS not in _carry_sys.path:
+    _carry_sys.path.insert(0, _CARRY_SCRIPTS)
+
+import review_carry as _rc  # noqa: E402
+import review_scope as _rs  # noqa: E402
+
+_CARRY_OLD = "b" * 40
+_CARRY_NEW = "a" * 40  # `_trigger`'s default head
+_CARRY_FIVE = ("pm", "arch", "ux", "qa", "security")
+_CARRY_TEST_FILE = "execution/daemons/apis/test_swarm_dispatch.py"
+_CARRY_SCOPE_TEXT = (
+    _CarryPath(__file__).resolve().parents[3] / ".github" / "review_scope.json"
+).read_text(encoding="utf-8")
+
+
+def _carry_comment(lens, head, cid, verdict="**SIGNED_OFF**"):
+    agent = swarm_dispatch.lens_by_name(lens).agent
+    body = (
+        f"{swarm_dispatch.compose_lens_review_marker(lens, head)}\n"
+        f"{swarm_dispatch.attribution_header(agent, f'{lens} lens panelist')}\n"
+        f"{verdict}\n\nNo blocking findings."
+    )
+    return {"id": cid, "created_at": f"2026-11-06T00:00:{cid:02d}Z",
+            "user": {"login": "ateles-agent"}, "body": body,
+            "html_url": f"https://github.com/owner/repo/pull/87#issuecomment-{cid}"}
+
+
+def _carry_aggregation(head):
+    return {"id": 99, "created_at": "2026-11-06T00:00:59Z",
+            "user": {"login": "ateles-agent"},
+            "body": (f"<!-- vanellus-aggregation commit={head} -->\n"
+                     "**🤖 Vanellus — Ateles swarm, PR steward**\n**APPROVE**\n\n"
+                     "Blocking: 0")}
+
+
+def _stranded_thread():
+    """Every lens cleared OLD; after a test-only fix, qa and arch re-ran and
+    cleared NEW, pm and ux carried, security was carried by Apis's old rule
+    and so never re-ran, and Vanellus aggregated NEW clear."""
+    comments = [_carry_comment(lens, _CARRY_OLD, i + 1) for i, lens in enumerate(_CARRY_FIVE)]
+    comments += [_carry_comment("qa", _CARRY_NEW, 20), _carry_comment("arch", _CARRY_NEW, 21)]
+    return comments + [_carry_aggregation(_CARRY_NEW)]
+
+
+class _CarryResp:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                "err", request=httpx.Request("GET", "https://x"), response=None
+            )
+
+    def json(self):
+        return self._payload
+
+
+def _carry_client(delta_files, *, scope_status=200, prs=()):
+    """A GitHub stand-in: the scope file on the base branch, three-dot compares
+    whose interdiff is exactly *delta_files*, and an open-PR list."""
+
+    class _Client:
+        def __init__(self, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, params=None):
+            if "/contents/" in url:
+                if scope_status != 200:
+                    return _CarryResp(scope_status, {"message": "boom"})
+                return _CarryResp(200, {
+                    "type": "file", "encoding": "base64",
+                    "content": _carry_b64.b64encode(_CARRY_SCOPE_TEXT.encode()).decode(),
+                })
+            if "/compare/" in url:
+                files = [{"filename": "a.txt", "patch": "+x\n", "changes": 1}]
+                if url.rsplit("...", 1)[1] == _CARRY_NEW:
+                    files += [{"filename": f, "patch": "+y\n", "changes": 1}
+                              for f in delta_files]
+                return _CarryResp(200, {"files": files})
+            if url.endswith("/pulls"):
+                return _CarryResp(200, list(prs))
+            return _CarryResp(200, {"base": {"ref": "main"}})
+
+    return _Client
+
+
+def _carry_pr():
+    return {"number": 87, "draft": False, "state": "open", "title": "t", "body": "",
+            "user": {"login": "x"}, "html_url": "https://github.com/owner/repo/pull/87",
+            "head": {"sha": _CARRY_NEW, "ref": "f"}, "base": {"ref": "main"}}
+
+
+def _carry_dispatcher(monkeypatch, comments, delta_files, *, scope_status=200, prs=()):
+    monkeypatch.setattr(
+        swarm_dispatch.httpx, "AsyncClient",
+        _carry_client(delta_files, scope_status=scope_status, prs=prs),
+    )
+
+    async def scoped(self, repository, number, client):
+        return comments
+
+    async def required(self, trigger):
+        return frozenset(_CARRY_FIVE)
+
+    monkeypatch.setattr(SwarmDispatcher, "_lens_scoped_comments", scoped)
+    monkeypatch.setattr(SwarmDispatcher, "_path_required_lenses", required)
+    return SwarmDispatcher(_StubNotifier(), _config())
+
+
+def _carry_selection(d):
+    panel = [swarm_dispatch.lens_by_name(x) for x in _CARRY_FIVE]
+    return asyncio.run(d._rereview_selection(
+        _trigger(base_ref="main"), panel, _CARRY_NEW, forced=set()
+    ))
+
+
+class TestRerunWhateverTheApprovalToolWillNotCarry:
+    def test_a_test_only_delta_re_runs_security_at_selection(self, monkeypatch):
+        # Red without the change: Apis judged by `lenses_touched` alone, read
+        # the test file as qa's only, and carried security.
+        comments = [_carry_comment(x, _CARRY_OLD, i + 1) for i, x in enumerate(_CARRY_FIVE)]
+        d = _carry_dispatcher(monkeypatch, comments, [_CARRY_TEST_FILE])
+        sel = _carry_selection(d)
+        assert sel is not None
+        assert "security" in sel.rerun
+        assert "security" not in sel.carried
+        assert "declared scope" in sel.reasons["security"]
+
+    def test_a_delta_outside_a_lens_scope_carries_and_does_not_re_run(self, monkeypatch):
+        comments = [_carry_comment(x, _CARRY_OLD, i + 1) for i, x in enumerate(_CARRY_FIVE)]
+        d = _carry_dispatcher(monkeypatch, comments, ["docs/guide.md"])
+        sel = _carry_selection(d)
+        assert sel is not None
+        assert "security" in sel.carried and "security" not in sel.rerun
+        assert sel.carried["security"].basis == "declared scope"
+        # And no sweep re-runs it: it is not stranded.
+        stranded = asyncio.run(d._stranded_carry_lenses(
+            _trigger(base_ref="main"), comments, _CARRY_NEW, frozenset(_CARRY_FIVE)
+        ))
+        assert "security" not in stranded
+
+    def test_an_unreadable_scope_re_runs_every_lens(self, monkeypatch):
+        # Red without the change: no scope was read, and the allowlist rule
+        # carried security over a docs-only delta whatever the scope file says.
+        comments = [_carry_comment(x, _CARRY_OLD, i + 1) for i, x in enumerate(_CARRY_FIVE)]
+        d = _carry_dispatcher(monkeypatch, comments, ["docs/guide.md"], scope_status=500)
+        sel = _carry_selection(d)
+        assert sel is not None
+        assert sel.rerun == frozenset(_CARRY_FIVE) and not sel.carried
+        assert "unreadable" in sel.reasons["security"]
+
+    def test_an_absent_scope_file_is_not_unreadable(self):
+        absent = _rs.ScopeLoad(None, "s", _rs.SCOPE_FILE_ABSENT)
+        broken = _rs.ScopeLoad(None, "s", "read failed (HTTP 500)")
+        assert not _rc.scope_unreadable(absent)
+        assert _rc.scope_unreadable(broken)
+
+    def test_the_startup_sweep_re_runs_only_the_stranded_lens(self, monkeypatch):
+        # Red without the change: `unseated_required_lenses` counted security
+        # as seated (it has a comment at OLD), the aggregation at NEW read as a
+        # finished panel, and nothing re-ran it.
+        comments = _stranded_thread()
+        d = _carry_dispatcher(monkeypatch, comments, [_CARRY_TEST_FILE])
+        redispatched, handled = [], []
+
+        async def fetch_pr(self, repository, number):
+            return _carry_pr()
+
+        async def allow(self, trigger, source=""):
+            return True
+
+        async def redispatch(self, repository, pr, lens):
+            redispatched.append(lens)
+
+        async def handle(self, trigger):
+            handled.append(trigger)
+
+        monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fetch_pr)
+        monkeypatch.setattr(SwarmDispatcher, "_label_gate_allows", allow)
+        monkeypatch.setattr(SwarmDispatcher, "_redispatch_missing_lens", redispatch)
+        monkeypatch.setattr(SwarmDispatcher, "_handle_pr", handle)
+        assert asyncio.run(d._panel_finished_for_pr(_trigger(base_ref="main"))) is False
+        summary = {"unreadable": 0, "finished": 0, "resumed": 0}
+        asyncio.run(d._sweep_one_labelled_pr(
+            "owner/repo", _carry_pr(), summary, repeating=False, name="startup panel sweep"
+        ))
+        assert redispatched == ["security"]
+        assert handled == [], "the whole panel must not re-run"
+        assert summary["resumed"] == 1
+
+    def test_the_missing_lens_sweep_re_runs_only_the_stranded_lens_within_its_limit(
+        self, monkeypatch
+    ):
+        # Red without the change: the aggregation at NEW is clear and every
+        # lens has a comment somewhere, so `_prs_with_missing_lens` found none.
+        comments = _stranded_thread()
+        d = _carry_dispatcher(
+            monkeypatch, comments, [_CARRY_TEST_FILE], prs=[_carry_pr()]
+        )
+        out = asyncio.run(d._prs_with_missing_lens("owner/repo"))
+        assert [(p["number"], lenses) for p, lenses in out] == [(87, ["security"])]
+
+        redispatched = []
+
+        async def allow(self, trigger, source=""):
+            return True
+
+        async def no_hold(self, trigger, source=""):
+            return False
+
+        async def redispatch(self, repository, pr, lens):
+            redispatched.append(lens)
+
+        monkeypatch.setattr(SwarmDispatcher, "_label_gate_allows", allow)
+        monkeypatch.setattr(SwarmDispatcher, "_hold_panel_until_checks_green", no_hold)
+        monkeypatch.setattr(SwarmDispatcher, "_redispatch_missing_lens", redispatch)
+        monkeypatch.setenv("APIS_MISSING_LENS_MAX_RETRIES", "2")
+        for _ in range(4):
+            asyncio.run(d.resume_missing_lens_reviews(["owner/repo"]))
+        assert redispatched == ["security", "security"], "bounded by the retry limit"
+        assert any("security" in m for m in d.notifier.sent), "escalated once"
+
+    def test_a_carried_lens_is_not_re_run_on_restart(self, monkeypatch):
+        comments = [_carry_comment(x, _CARRY_OLD, i + 1) for i, x in enumerate(_CARRY_FIVE)]
+        comments += [_carry_comment("ux", _CARRY_NEW, 20), _carry_aggregation(_CARRY_NEW)]
+        d = _carry_dispatcher(monkeypatch, comments, ["docs/guide.md"])
+        stranded = asyncio.run(d._stranded_carry_lenses(
+            _trigger(base_ref="main"), comments, _CARRY_NEW, frozenset(_CARRY_FIVE)
+        ))
+        assert "security" not in stranded
+
+    @pytest.mark.parametrize("delta", [
+        [_CARRY_TEST_FILE],
+        ["docs/guide.md"],
+        ["execution/daemons/apis/swarm_dispatch.py"],
+        ["docs/guide.md", "execution/daemons/apis/test_review_carry.py"],
+    ])
+    def test_apis_carries_exactly_what_the_approval_tool_carries(self, monkeypatch, delta):
+        import approve_pr_as_app as tool
+
+        comments = [_carry_comment(x, _CARRY_OLD, i + 1) for i, x in enumerate(_CARRY_FIVE)]
+        d = _carry_dispatcher(monkeypatch, comments, delta)
+        sel = _carry_selection(d)
+        assert sel is not None
+
+        monkeypatch.setattr(tool, "_github_headers", lambda repo=None: {})
+        client = _carry_client(delta)()
+        load = asyncio.run(tool.fetch_review_scope(client, "owner/repo", "main"))
+        assert load.scope is not None
+        pending = [
+            tool.LensOutcome(x, agent=swarm_dispatch.lens_by_name(x).agent,
+                             head_matched=False, verdict=None, passed=False,
+                             reason="no verdict at this head")
+            for x in _CARRY_FIVE
+        ]
+        outcomes = asyncio.run(tool.carry_earlier_signoffs(
+            client, repo="owner/repo", base_ref="main", head_sha=_CARRY_NEW,
+            comments=comments, lens_outcomes=pending,
+            authors=frozenset({"ateles-agent"}), load=load,
+        ))
+        tool_carried = {o.lens for o in outcomes if o.passed}
+        assert set(sel.carried) == tool_carried
+        assert sel.rerun == frozenset(_CARRY_FIVE) - tool_carried

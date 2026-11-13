@@ -1231,7 +1231,13 @@ def _extract_paths(segment: str):
     sibling_repo_worktree_guard.py's own stated limitation)."""
     out = []
     try:
-        decoded = [text for kind, text in _lex(segment) if kind == "word"]
+        spans = []
+        tokens = _lex(segment, spans)
+        decoded = [
+            (text, _raw_word_is_literal(segment[start:end]))
+            for (kind, text), (start, end) in zip(tokens, spans)
+            if kind == "word"
+        ]
         lexed = True
     except ValueError:
         decoded, lexed = [], False
@@ -1264,8 +1270,9 @@ def _extract_paths(segment: str):
     # locale quoting removed and quoted pieces joined, then every operand
     # shape a reader accepts (attached flag values, `--opt=path`, `key=path`,
     # `@path`, path lists, brace alternatives, globs).
-    for position, word in enumerate(decoded):
-        for cand in _operand_candidates(word):
+    budget = _OperandBudget()
+    for position, (word, literal) in enumerate(decoded):
+        for cand in _operand_candidates(word, expand_shell=not literal, budget=budget):
             if (
                 "/" in cand
                 or "." in cand
@@ -1278,37 +1285,76 @@ def _extract_paths(segment: str):
 
 _GLOB_CHARS = "*?["
 _MAX_GLOB_MATCHES = 256
+_MAX_OPERAND_STEPS = 512
+_MAX_OPERAND_CHARS = 1024 * 1024
+_MAX_BRACE_DEPTH = 64
+_COMPLEX_OPERAND = "an operand exceeding the credential inspection budget"
+_COMPLEX_OPERAND_REASON = (
+    "Credential inspection could not safely finish this operand's expansion. "
+    "Split the command or use a script file instead of a large inline program; "
+    "the command was not allowed without inspection."
+)
 
 
-def _operand_candidates(word: str):
+class _InspectionLimitExceeded(Exception):
+    pass
+
+
+class _OperandBudget:
+    def __init__(self):
+        self.steps = 0
+        self.chars = 0
+
+    def take(self, value: str):
+        self.steps += 1
+        self.chars += len(value)
+        if self.steps > _MAX_OPERAND_STEPS or self.chars > _MAX_OPERAND_CHARS:
+            raise _InspectionLimitExceeded
+
+
+def _operand_candidates(word: str, *, expand_shell: bool = True, budget=None):
     """Every path a decoded shell *word* may hand a reader: the word itself;
     the value of an attached short flag (`-f<path>`), a long flag
     (`--opt=<path>`) or an assignment (`if=<path>`); an `@<path>` file
     reference; each member of a `:` or `,` list; each brace alternative; and
     what a glob expands to on disk."""
-    forms = [word]
-    if word.startswith("@"):
-        forms.append(word[1:])
-    if word.startswith("--") and "=" in word:
-        forms.append(word.split("=", 1)[1])
-    elif word.startswith("-") and not word.startswith("--") and len(word) > 2:
-        forms.extend(word[cut:] for cut in range(2, len(word)))
-    if "=" in word:
-        forms.append(word.split("=", 1)[1])
-        forms.append(word.rsplit("=", 1)[1])
-    for separator in (":", ","):
-        for form in list(forms):
+    budget = budget if budget is not None else _OperandBudget()
+
+    def initial():
+        yield word
+        if word.startswith("@"):
+            yield word[1:]
+        if word.startswith("--") and "=" in word:
+            yield word.split("=", 1)[1]
+        elif word.startswith("-") and not word.startswith("--") and len(word) > 2:
+            for cut in range(2, len(word)):
+                yield word[cut:]
+        if "=" in word:
+            yield word.split("=", 1)[1]
+            yield word.rsplit("=", 1)[1]
+
+    def split_forms(forms, separator):
+        for form in forms:
+            yield form
             if separator in form and "://" not in form:
-                forms.extend(part for part in form.split(separator) if part)
-    expanded: list[str] = []
-    for form in forms:
-        expanded.extend(_glob_alternatives(form) if "{" in form else [form])
-    out: list[str] = []
-    for form in expanded:
-        out.append(form)
-        if any(ch in form for ch in _GLOB_CHARS):
-            out.extend(_glob_matches(form))
-    return list(dict.fromkeys(f for f in out if f))
+                yield from (part for part in form.split(separator) if part)
+
+    seen = set()
+    for form in split_forms(split_forms(initial(), ":"), ","):
+        budget.take(form)
+        # Quoted/escaped literals are not shell brace or glob expressions.
+        # Expanding an inline Python/JSON program here used to manufacture a
+        # Cartesian product of its dictionaries, retaining every result.
+        alternatives = _glob_alternatives(form, budget=budget) if expand_shell else (form,)
+        for alternative in alternatives:
+            candidates = [alternative]
+            if expand_shell and any(ch in alternative for ch in _GLOB_CHARS):
+                candidates.extend(_glob_matches(alternative))
+            for candidate in candidates:
+                budget.take(candidate)
+                if candidate and candidate not in seen:
+                    seen.add(candidate)
+                    yield candidate
 
 
 def _glob_matches(pattern: str) -> list[str]:
@@ -1399,6 +1445,29 @@ def _interpreter_inline_credential_hit(segment: str) -> str | None:
     for cand in _extract_embedded_paths(segment):
         if is_credential_path(cand):
             return cand
+    return None
+
+
+def _decoded_inline_credential_hit(command: str) -> str | None:
+    """Inspect the inline program before coarse segment splitting loses its
+    shell quoting (including quote concatenation around string literals).
+    Literal programs need no shell expansion, but their credential references
+    must still receive the existing inline-interpreter check.
+    """
+    for words, _redirects in _parsed_commands(command):
+        index = _command_index(words)
+        if index is None:
+            continue
+        name = _basename(words[index])
+        for position in range(index + 1, len(words) - 1):
+            flag = words[position]
+            if flag not in {"-c", "-e", "-pe", "-ne"}:
+                continue
+            if not _INTERPRETER_INLINE_RE.search(f"{name} {flag} "):
+                continue
+            for candidate in _extract_embedded_paths(words[position + 1]):
+                if is_credential_path(candidate):
+                    return candidate
     return None
 
 
@@ -2529,11 +2598,18 @@ def check_bash(command: str, cwd: str | None = None):
     # directory, the hook's own, and each literal `cd` target in the command,
     # so a reader cannot reach a credential by naming it relative to a
     # directory this process does not run in.
-    with _judging_from(_possible_directories(command, cwd)):
-        return _check_bash(command, cwd)
+    try:
+        with _judging_from(_possible_directories(command, cwd)):
+            return _check_bash(command, cwd)
+    except _InspectionLimitExceeded:
+        return _COMPLEX_OPERAND
 
 
 def _check_bash(command: str, cwd: str | None):
+
+    hit = _decoded_inline_credential_hit(command)
+    if hit:
+        return hit
 
     # Checked FIRST and against the WHOLE command text: a remote-exec
     # wrapper's carried command is almost always one quoted string
@@ -2665,20 +2741,30 @@ def check_read(tool_input: dict, cwd: str | None = None):
 # ---------------------------------------------------------------------------
 
 
-def _glob_alternatives(glob: str):
+def _glob_alternatives(glob: str, *, budget=None, depth=0):
     """Yield *glob* with one level of ``{a,b}`` alternation expanded, so
     ``{.env,notes.txt}`` is judged as ``.env`` and ``notes.txt``."""
+    budget = budget if budget is not None else _OperandBudget()
+    budget.take(glob)
+    if depth > _MAX_BRACE_DEPTH:
+        raise _InspectionLimitExceeded
     match = re.search(r"\{([^{}]*)\}", glob)
     if not match:
         yield glob
         return
     for option in match.group(1).split(","):
-        yield from _glob_alternatives(glob[: match.start()] + option + glob[match.end() :])
+        yield from _glob_alternatives(
+            glob[: match.start()] + option + glob[match.end() :],
+            budget=budget, depth=depth + 1,
+        )
 
 
 def check_grep(tool_input: dict, cwd: str | None = None):
-    with _judging_from(_initial_directories(cwd)):
-        return _check_grep(tool_input, cwd)
+    try:
+        with _judging_from(_initial_directories(cwd)):
+            return _check_grep(tool_input, cwd)
+    except _InspectionLimitExceeded:
+        return _COMPLEX_OPERAND
 
 
 def _check_grep(tool_input: dict, cwd: str | None):
@@ -2732,6 +2818,8 @@ def main() -> int:
         command = tool_input.get("command")
         hit = check_bash(command, cwd=cwd)
         if hit:
+            if hit == _COMPLEX_OPERAND:
+                return deny(_COMPLEX_OPERAND_REASON)
             shown = _describe_hit(hit)
             log(f"blocking Bash read of credential content: {shown}")
             return deny(_safe_alternative(shown, tool="Bash"))
@@ -2748,6 +2836,8 @@ def main() -> int:
     if tool == "Grep":
         hit = check_grep(tool_input, cwd=cwd)
         if hit:
+            if hit == _COMPLEX_OPERAND:
+                return deny(_COMPLEX_OPERAND_REASON)
             shown = _describe_hit(hit)
             log(f"blocking Grep content-mode read of credential file: {shown}")
             return deny(_safe_alternative(shown, tool="Grep"))

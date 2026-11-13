@@ -345,6 +345,8 @@ def test_every_tracked_plist_source_renders_without_credentials(path):
     text = path.read_text(encoding="utf-8")
     # The autodeploy template uses its own {{HOME}} marker.
     text = text.replace("{{HOME}}", rdp.HOME_PLACEHOLDER)
+    # The worktree-prune template also names the checkout that holds its script.
+    text = text.replace("{{CHECKOUT}}", "/opt/example/ateles")
     result = rdp.render(text, home="/Users/example")
     assert result.dropped_credential_keys == (), (
         f"{path.name} carries credential-named EnvironmentVariables"
@@ -652,3 +654,20 @@ def test_credential_named_variables_are_still_dropped_not_refused():
     result = _render_environment({"HOME": "/h", "EXAMPLE_SERVICE_TOKEN": _AUTH_MARKER})
     assert result.dropped_credential_keys == ("EXAMPLE_SERVICE_TOKEN",)
     assert _AUTH_MARKER.encode() not in result.content
+
+
+@pytest.mark.parametrize("name", [
+    "TYTO_NATIVE_RECORDING_RETRY_STATE",
+    "TYTO_RECORDING_RETRY_STATE",
+    "TYTO_RUNTIME_LOCK",
+])
+def test_recording_state_paths_render_without_bypassing_credential_guards(name):
+    path = "/synthetic/recording-runtime-state"
+    result = _render_environment({name: path, "EXAMPLE_SERVICE_TOKEN": _AUTH_MARKER})
+
+    assert plistlib.loads(result.content)["EnvironmentVariables"] == {name: path}
+    assert result.dropped_credential_keys == ("EXAMPLE_SERVICE_TOKEN",)
+    assert _AUTH_MARKER.encode() not in result.content
+    with pytest.raises(rdp.PlistRenderError) as excinfo:
+        _render_environment({name: f"Authorization: Bearer {_AUTH_MARKER}"})
+    assert _AUTH_MARKER not in str(excinfo.value)

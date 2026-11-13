@@ -880,3 +880,69 @@ def test_actual_signed_preparation_is_bounded_and_reaped_for_loader(monkeypatch)
     while time.monotonic() < limit and {c.pid for c in multiprocessing.active_children()} - before:
         time.sleep(0.01)
     assert {child.pid for child in multiprocessing.active_children()} <= before
+
+
+# ── a daemon's own startup waits longer for a slow Neotoma ───────────────────
+#
+# Startup (``load_agent_definition_or_exit``) loads under ``STARTUP_LOAD_BUDGET``:
+# 150 s in total, 30 s per request and growing waits. Every other load keeps the
+# 25 s deadline. The definition is still found only by the list query, which
+# refuses unless exactly one definition carries the name.
+
+
+def test_startup_outlasts_list_query_timeouts_and_loads_the_definition(neotoma):
+    """Today's limits give up after three attempts; startup keeps going."""
+    neotoma["script"] = ["timeout", "timeout", "timeout", "real"]
+
+    d = al.load_agent_definition_or_exit("pavo")
+
+    assert d.entity_id == "ent_real"
+    assert d.tools == ["Read", "Bash(gh pr:*)"]
+    assert neotoma["calls"] == 4
+    assert neotoma["sleeps"] == [1.0, 2.0, 4.0]
+
+
+def test_startup_still_refuses_two_definitions_with_the_same_name(neotoma, monkeypatch):
+    twin = {
+        "entity_id": "ent_twin",
+        "snapshot": dict(REAL["entities"][0]["snapshot"], tool_allowlist=["*"]),
+    }
+    calls = {"n": 0}
+
+    def post(url, **kwargs):
+        calls["n"] += 1
+        return _Resp({"entities": [REAL["entities"][0], twin]})
+
+    monkeypatch.setattr(al.httpx, "post", post)
+    with pytest.raises(SystemExit) as raised:
+        al.load_agent_definition_or_exit("pavo")
+    assert raised.value.code == 1
+    assert calls["n"] == 1  # an unreadable answer is final, not retried
+
+
+def test_startup_that_never_gets_an_answer_refuses_after_the_longer_budget(monkeypatch):
+    clock = _VClock()
+    _virtual(monkeypatch, clock, [HANG])
+
+    with pytest.raises(SystemExit) as raised:
+        al.load_agent_definition_or_exit("pavo")
+
+    assert raised.value.code == 1
+    # 30 + 1 + 30 + 2 + 30 + 4 + 30 + 8 = 135 s, then the 15 s that are left.
+    assert [t for t, _ in clock.launched] == [30.0, 30.0, 30.0, 30.0, 15.0]
+    assert clock.elapsed == pytest.approx(150.0)
+
+
+def test_a_load_outside_startup_keeps_the_25_second_deadline(monkeypatch):
+    clock = _VClock()
+    _virtual(monkeypatch, clock, [HANG])
+    with pytest.raises(SystemExit):
+        al.load_agent_definition_or_exit("pavo")
+
+    clock.launched.clear()
+    clock.now = clock.start = 10_000.0
+    with pytest.raises(AgentDefinitionUnavailable):
+        AgentLoader("pavo").load()
+
+    assert [t for t, _ in clock.launched] == [10.0, 10.0, 3.0]
+    assert clock.elapsed == pytest.approx(25.0)

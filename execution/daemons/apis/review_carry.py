@@ -53,7 +53,7 @@ from urllib.parse import quote
 import model_tiering
 import review_delta
 from review_panel import LENSES
-from review_scope import ReviewScope
+from review_scope import SCOPE_FILE_ABSENT, ReviewScope, ScopeLoad
 
 log = logging.getLogger("apis.review_carry")
 
@@ -286,6 +286,83 @@ def select_rerun(
     return RerunSelection(frozenset(rerun), carried, reasons)
 
 
+def scope_unreadable(load: ScopeLoad) -> bool:
+    """True when the repo's scope file exists but could not be read or used.
+
+    A missing file (``SCOPE_FILE_ABSENT``) is a repo that declares no scope:
+    the default allowlist rule applies. Anything else with no scope (an HTTP
+    error, a malformed file, an unknown base branch) is unknown."""
+    return load.scope is None and load.error != SCOPE_FILE_ABSENT
+
+
+def select_rerun_for_load(
+    panel: Iterable[str],
+    records: Mapping[str, Sequence[LensRecord]],
+    current_head: str,
+    deltas: Mapping[str, review_delta.Delta | None],
+    *,
+    load: ScopeLoad,
+    forced: Iterable[str] = (),
+) -> RerunSelection:
+    """``select_rerun`` with the scope the approval gate reads, as Apis applies it.
+
+    The approval gate (``approve_pr_as_app.carry_earlier_signoffs``) calls this
+    same function with the same ``review_scope.fetch_scope`` load, so Apis and
+    the gate agree. For a readable or absent scope file this is ``select_rerun``
+    with ``scope=load.scope``. When the file exists but is unreadable, the
+    allowlist rule could carry a lens the file would have re-run, and which is
+    unknown, so this carries nothing and re-runs every lens (fail closed).
+    """
+    names = list(panel)
+    if not scope_unreadable(load):
+        return select_rerun(
+            names, records, current_head, deltas, forced=forced, scope=load.scope
+        )
+    reason = (
+        f"the repo's review scope is unreadable ({load.error or 'unknown'}), so "
+        "whether the approval gate would carry it is unknown; re-run this lens"
+    )
+    return RerunSelection(frozenset(names), {}, {lens: reason for lens in names})
+
+
+def awaiting_carry(
+    required: Iterable[str],
+    records: Mapping[str, Sequence[LensRecord]],
+    current_head: str,
+) -> list[str]:
+    """Required lenses seated at an earlier head with no verdict at
+    *current_head*, sorted: the ones only a carry can clear."""
+    current = (current_head or "").lower()
+    return sorted(
+        lens
+        for lens in {str(r).lower() for r in required}
+        if records.get(lens)
+        and not any(r.head == current for r in records.get(lens, ()))
+    )
+
+
+def stranded_lenses(
+    required: Iterable[str],
+    records: Mapping[str, Sequence[LensRecord]],
+    current_head: str,
+    deltas: Mapping[str, review_delta.Delta | None],
+    *,
+    load: ScopeLoad,
+) -> list[str]:
+    """Required lenses with no verdict at *current_head* and no carry the shared
+    rule accepts, sorted: the approval gate must refuse each, and no verdict for
+    it will arrive on its own. Only a lens seated at some earlier head counts: a
+    lens never seated is `unseated_required_lenses`'s case. A lens with any
+    comment at the current head is not stranded (its verdict, whatever it says,
+    is the panel's to act on)."""
+    current = (current_head or "").lower()
+    pending = awaiting_carry(required, records, current)
+    if not pending:
+        return []
+    selection = select_rerun_for_load(pending, records, current, deltas, load=load)
+    return sorted(selection.rerun)
+
+
 async def fetch_interdiff(
     client,
     *,
@@ -349,15 +426,9 @@ def strip_trailing_artifact(block: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def split_combined_reply(stdout: str | None, lenses: Sequence[str]) -> dict[str, str]:
-    """Each lens's own block from a combined reply; a lens whose block is
-    missing or duplicated is absent from the result (the caller runs it alone).
-
-    A block is the text between its delimiter line and the next delimiter. It
-    is returned as written: the caller validates it with the same reader the
-    approval gate uses, and this function never repairs a block.
-    """
-    text = stdout or ""
+def _combined_positions(text: str, lenses: Sequence[str]) -> list[tuple[int, str]]:
+    """(offset, lens) of each lens's delimiter line that appears exactly once,
+    in reply order. A lens whose delimiter is missing or repeated is absent."""
     positions: list[tuple[int, str]] = []
     for lens in lenses:
         found = [m.start() for m in re.finditer(
@@ -366,6 +437,44 @@ def split_combined_reply(stdout: str | None, lenses: Sequence[str]) -> dict[str,
             continue
         positions.append((found[0], lens))
     positions.sort()
+    return positions
+
+
+def split_combined_reply_raw(
+    stdout: str | None, lenses: Sequence[str]
+) -> tuple[dict[str, str], str]:
+    """Each lens's block from a return-only combined reply exactly as received,
+    plus the text before the first delimiter.
+
+    Return-only combined replies are validated exactly as received; nothing is
+    removed before validation. So every byte of the reply is either inside a
+    lens's block (the exact text between its delimiter line and the next
+    delimiter, or the end) or in the returned leading text, which the caller
+    must check. A delimiter line with nothing after it gives that lens an
+    empty block, which no validator accepts."""
+    text = stdout or ""
+    positions = _combined_positions(text, lenses)
+    leading = text[: positions[0][0]] if positions else text
+    blocks: dict[str, str] = {}
+    for i, (start, lens) in enumerate(positions):
+        end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
+        line_end = text.find("\n", start, end)
+        blocks[lens] = "" if line_end < 0 else text[line_end + 1 : end]
+    return blocks, leading
+
+
+def split_combined_reply(stdout: str | None, lenses: Sequence[str]) -> dict[str, str]:
+    """Each lens's own block from a combined reply; a lens whose block is
+    missing or duplicated is absent from the result (the caller runs it alone).
+
+    A block is the text between its delimiter line and the next delimiter. It
+    is returned with trailing attribution lines and outer blank lines removed;
+    the caller validates it with the same reader the approval gate uses. Used
+    only for a local (not return-only) pass, whose lenses post their own
+    comments; a return-only pass uses `split_combined_reply_raw`.
+    """
+    text = stdout or ""
+    positions = _combined_positions(text, lenses)
     blocks: dict[str, str] = {}
     for i, (start, lens) in enumerate(positions):
         line_end = text.find("\n", start)

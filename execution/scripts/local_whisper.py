@@ -57,9 +57,10 @@ except ImportError:  # pragma: no cover - path-dependent import
 
 # --- Backend selection ------------------------------------------------------
 BACKEND_LOCAL = "local"
+BACKEND_FLUID = "fluid"
 BACKEND_ELEVENLABS = "elevenlabs"
 BACKEND_OPENAI = "openai"
-VALID_BACKENDS = (BACKEND_LOCAL, BACKEND_ELEVENLABS, BACKEND_OPENAI)
+VALID_BACKENDS = (BACKEND_LOCAL, BACKEND_FLUID, BACKEND_ELEVENLABS, BACKEND_OPENAI)
 TRANSCRIPTION_ENGINE_LOCAL = "local_whisper_cpp"
 
 # The env var that names a backend outright. Highest precedence, because an
@@ -122,14 +123,10 @@ def resolve_backend(
 
     1. ``explicit`` — a caller (CLI ``--backend``) naming a backend outright.
     2. ``TRANSCRIBE_BACKEND`` — the same decision made in the environment.
-    3. ``use_diarization`` true, or ``RECORD_MEETING_DIARIZE=1`` with a key
-       present → ElevenLabs. Diarization is the one capability local genuinely
-       lacks, and meeting recordings need speaker separation, so this stays
-       ahead of the local default rather than behind it. Regressing
-       multi-speaker meetings to a diarization-less backend would silently
-       destroy the thing ``record_meeting`` and ``analyze-meeting`` exist for.
-    4. Multi-channel audio with a key present → ElevenLabs.
-    5. Mono or unknown-channel audio → local.
+    3. A diarization request selects local FluidAudio, independent of API keys.
+    4. Multiple channels select FluidAudio and preserve channel identity unless
+       diarization was explicitly disabled.
+    5. Mono or unknown-channel audio without a diarization request uses Whisper.
 
     The metered OpenAI path is reachable ONLY through steps 1 and 2. It is never
     selected implicitly and never used as a fallback: an unavailable free
@@ -155,13 +152,14 @@ def resolve_backend(
             )
         return from_env
 
-    has_key = bool((env.get("ELEVENLABS_API_KEY") or "").strip())
     if use_diarization is True:
-        return BACKEND_ELEVENLABS
-    if use_diarization is None and has_key and env.get("RECORD_MEETING_DIARIZE") == "1":
-        return BACKEND_ELEVENLABS
-    if use_diarization is None and has_key and channel_count is not None and channel_count >= 2:
-        return BACKEND_ELEVENLABS
+        return BACKEND_FLUID
+    if use_diarization is False or env.get("RECORD_MEETING_DIARIZE") == "0":
+        return BACKEND_LOCAL
+    if use_diarization is None and env.get("RECORD_MEETING_DIARIZE") == "1":
+        return BACKEND_FLUID
+    if use_diarization is None and channel_count is not None and channel_count >= 2:
+        return BACKEND_FLUID
 
     return BACKEND_LOCAL
 

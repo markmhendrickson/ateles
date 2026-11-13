@@ -5,7 +5,19 @@ A delivery that launched on Fly leaves a durable receipt in the Fly ledger, and
 while it exists every re-dispatch for that issue or task is refused and nothing
 falls back to the local path. After inspecting the remote branch and the run
 record and reconciling what happened, the operator clears the receipt here.
-Nothing clears a receipt automatically.
+One receipt is replaced automatically, and only one kind: a settled correction
+of an existing pull request (status ``updated`` or ``pr_failed``) whose recorded
+commit is exactly the head a further correction was admitted against, after
+that correction's admission read the live PR head. The dispatcher then replaces
+it with the new reservation under the ledger lock, and first appends the old
+receipt's identity to the same audit file as a ``superseding`` event
+(``action: supersede_delivery_receipt``); if that append fails nothing is
+replaced. A settled ``not_delivered`` or ``no_changes`` correction that
+recorded no commit and was admitted against the very head the further
+correction declares is replaced the same way, once its run holds no ledger
+entry still in flight. Every other receipt (a first delivery, an unsettled or
+unknown one, one with another commit, and the rest) stays until it is cleared
+here.
 
 The same ledger holds lens-review entries (``lens_receipts``), keyed
 ``lens:OWNER/REPO#PR@HEAD:LENS``, each recording one lens run on one pull
@@ -59,6 +71,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_delivery  # noqa: E402
@@ -80,6 +93,25 @@ def describe(key: str, entry: dict) -> str:
         f"commit:    {entry.get('commit') or 'not reported'}\n"
         f"recorded:  {_iso(entry.get('recorded_at'))}"
     )
+    target = entry.get("existing_pr")
+    if isinstance(target, dict):
+        text += (
+            f"\nadmitted PR: #{target.get('pr_number') or 'not reported'}"
+            f"\nadmitted base: {target.get('base_branch') or 'not reported'}"
+            f"\nadmitted branch: {target.get('branch') or 'not reported'}"
+            f"\nadmitted old head: {target.get('head_sha') or 'not reported'}")
+        evidence = SimpleNamespace(fly_delivery_reason=entry.get("reason") or "",
+                                   fly_delivery_status=entry.get("status") or "")
+        text += "\npush evidence: " + build_delivery.delivery_push_state(evidence)
+        text += " (the commit field alone is not push confirmation)"
+        if entry.get("associated_keys"):
+            text += "\nsource associations: " + ", ".join(entry["associated_keys"])
+        for label, field in (("failure", "reason"), ("readback", "readback"), ("readback cause", "readback_reason")):
+            if entry.get(field):
+                text += f"\n{label}: {entry[field]}"
+        text += ("\nRecovery: inspect and reconcile this exact target first. Clearing this receipt alone "
+                 "does not refresh the old head, renew exhausted/noop attempts or release a held task. "
+                 "A later permitted dispatch needs fresh current task/target/checkpoint and target-policy qualification.")
     if entry.get("kind") == "lens":
         text += (
             f"\nlens:      {entry.get('lens') or 'not reported'}\n"
@@ -121,7 +153,8 @@ def _find(receipts: dict, key: str) -> tuple[str, dict] | None:
     """The stored (key, receipt) for the canonical *key*, whatever spelling
     the ledger holds it under."""
     for stored, entry in receipts.items():
-        if stored == key or build_delivery.canonical_key(stored) == key:
+        if (stored == key or build_delivery.canonical_key(stored) == key
+                or key in {build_delivery.canonical_key(k) for k in entry.get("associated_keys", [])}):
             return stored, entry
     return None
 
@@ -176,6 +209,13 @@ def main(argv: list[str] | None = None, *, ledger=None, out=None, err=None) -> i
         "commit": entry.get("commit"),
         "recorded_at": entry.get("recorded_at"),
     }
+    if entry.get("kind") != "lens":
+        # A correction filed from this line later is PART_OF this task.
+        identity["source_task"] = build_delivery.receipt_source_task(stored, entry)
+        if isinstance(entry.get("existing_pr"), dict):
+            # A correction receipt: its key names the correction task, never the
+            # parent, so readers take the parent from other lines.
+            identity["correction"] = True
     if entry.get("kind") == "lens":
         identity.update({"kind": "lens", "lens": entry.get("lens"), "pr": entry.get("pr"),
                          "head": entry.get("head"), "notified_at": entry.get("notified_at")})

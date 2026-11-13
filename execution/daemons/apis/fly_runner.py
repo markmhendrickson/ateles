@@ -62,12 +62,23 @@ from typing import Any, Callable
 
 import httpx
 
+import model_tiering
+
 log = logging.getLogger("apis.fly_runner")
 
 FLY_API_BASE_DEFAULT = "https://api.machines.dev/v1"
 GITHUB_API = "https://api.github.com"
 JOB_DIR = "/run/job"
 RESULT_ENTITY_TYPE = "fly_runner_result"
+# The job entrypoint's exit status when Neotoma refused the result record with
+# HTTP 401/403 (deploy/fly-runner/run_job.py EXIT_RECORD_REFUSED); equality is
+# asserted by a test, since the image does not import this module.
+EXIT_RECORD_REFUSED = 92
+RECORD_REFUSED_MESSAGE = (
+    "result record refused by Neotoma (HTTP 401/403): for 401 the signature or key "
+    "was not accepted; for 403 the role's agent grant likely lacks "
+    f"store_structured {RESULT_ENTITY_TYPE}"
+)
 # run_job.py keeps the LAST this-many bytes of stdout (STDOUT_CAP_BYTES there).
 RUNNER_STDOUT_CAP_BYTES = 256 * 1024
 MCP_CONFIG_PLACEHOLDER = "@@ATELES_JOB_MCP_CONFIG@@"
@@ -119,7 +130,15 @@ MAX_RECORD_COUNT = 10**9
 
 class FlyIneligible(Exception):
     """This job cannot run on Fly (no own identity, no App, unsupported
-    shape). The reason names what is missing, never a value."""
+    shape). The reason names what is missing, never a value.
+
+    ``provider_specific``: the reason is this job's provider and nothing
+    else about the job, so the same job on another provider may still be
+    eligible (skill_runner then tries that provider in the same dispatch)."""
+
+    def __init__(self, *args, provider_specific: bool = False):
+        super().__init__(*args)
+        self.provider_specific = provider_specific
 
 
 def _command_too_large(provider: str, size: int) -> "FlyConfigInvalid":
@@ -178,6 +197,19 @@ class FlyApiError(Exception):
         safe = redact_nonces(_OPAQUE_RUN.sub("[redacted]", str(message)))[:200]
         super().__init__(f"Fly API HTTP {status}: {safe}")
         self.status = status
+        self.detail = safe  # Fly's own text, already redacted and capped
+
+
+def fly_refusal_reason(detail: str) -> str:
+    """A label from a closed set for Fly's refusal text, so a log line or
+    refusal message can say why without carrying Fly's own words (which
+    could echo something secret the redaction above missed)."""
+    text = str(detail).lower()
+    if "insufficient memory" in text or "overcommit" in text:
+        return "host_memory"
+    if "version" in text:  # also covers "current_version"
+        return "version_conflict"
+    return "other"
 
 
 class FlyLeaseBusy(FlyApiError):
@@ -384,6 +416,18 @@ FIXED_LIMITS: tuple[Limit, ...] = (
     Limit("rootfs_gb", "rootfs_gb", float, 0.1, 500.0, DEFAULT_ROOTFS_GB),
 )
 
+# Settings that may be left unset with no default: unset means "no setting of
+# this kind", never a value. A supplied value is parsed exactly like a LIMITS
+# one, and an invalid one disables Fly the same way.
+#
+# APIS_FLY_DISPATCH_TIMEOUT is the Fly-only execution timeout and ceiling.
+# Unset, a Fly job keeps the shared dispatch timeout (APIS_DISPATCH_TIMEOUT)
+# exactly as before; set, a Fly job with no caller timeout runs with it, and a
+# shorter caller timeout is kept. Local runs never read it.
+FLY_DISPATCH_TIMEOUT = Limit("APIS_FLY_DISPATCH_TIMEOUT", "dispatch_timeout_seconds", int, 1,
+                             MAX_JOB_TIMEOUT_SECONDS, None)  # fmt: skip
+OPTIONAL_LIMITS: tuple[Limit, ...] = (FLY_DISPATCH_TIMEOUT,)
+
 _SETTING_PATTERN = {int: re.compile(r"[0-9]{1,12}", re.ASCII),
                     float: re.compile(r"[0-9]{1,12}(\.[0-9]{1,12})?", re.ASCII)}  # fmt: skip
 
@@ -412,6 +456,39 @@ def parse_setting(limit: Limit, env: Any) -> float:
     return value if limit.scale == 1 else value / limit.scale
 
 
+def parse_optional_setting(limit: Limit, env: Any) -> float | None:
+    """``parse_setting`` for an ``OPTIONAL_LIMITS`` setting: None when it is
+    unset, otherwise the same strict parse (``FlyConfigInvalid`` naming the
+    setting, never its value)."""
+    if limit.env not in env:
+        return None
+    return parse_setting(limit, env)
+
+
+def resolve_dispatch_timeout(config: "FlyConfig", caller_timeout: int | None,
+                             shared_default: int | None = None) -> int:  # fmt: skip
+    """The timeout a Fly job runs with, decided once the job is bound for Fly.
+
+    With ``APIS_FLY_DISPATCH_TIMEOUT`` unset this is the prior behaviour: the
+    caller's timeout, else the shared dispatch timeout. Set, it is the
+    default for a caller that gave none (None) and the ceiling for one that
+    did: a shorter caller timeout is kept, a longer one is lowered to the
+    ceiling (logged), so no caller runs past it. A caller value that is not
+    a valid number is returned unchanged for ``build_job`` to refuse.
+    ``config`` must already have passed ``require_valid_limits``."""
+    shared = DISPATCH_TIMEOUT_DEFAULT if shared_default is None else shared_default
+    ceiling = config.dispatch_timeout_seconds
+    if caller_timeout is None:
+        return shared if ceiling is None else int(ceiling)
+    if ceiling is None:
+        return caller_timeout
+    if _finite_number(caller_timeout, 1, MAX_JOB_TIMEOUT_SECONDS) and caller_timeout > ceiling:
+        log.warning(f"[fly] caller timeout {int(caller_timeout)}s is above "
+                    f"{FLY_DISPATCH_TIMEOUT.env}; the Fly job runs with {int(ceiling)}s")  # fmt: skip
+        return int(ceiling)
+    return caller_timeout
+
+
 def _csv(raw: str) -> list[str]:
     return [part.strip() for part in (raw or "").split(",") if part.strip()]
 
@@ -420,7 +497,17 @@ def _csv(raw: str) -> list[str]:
 # remote outcome as terminal (no retry, no re-dispatch, no failover). Only
 # these can be opted in through APIS_FLY_RUNNER_CLASSES; adding one means
 # checking every retry lane that can re-dispatch it.
-FLY_VETTED_CLASSES: frozenset[str] = frozenset({"carry_forward_check", "open_or_merge_pr"})
+#
+# ``lens_review:<lens>`` is vetted on this basis: a lens on Fly holds a
+# read-only GitHub token and no Neotoma tools, and the dispatcher publishes
+# its verdict from the Mac only after the run returns. A lost or unknown run
+# therefore has no effects, and the bounded same-head sweeps re-running it
+# cannot double-post (nothing reserves a lens receipt before launch).
+FLY_VETTED_CLASSES: frozenset[str] = frozenset({
+    "carry_forward_check",
+    "open_or_merge_pr",
+    *(model_tiering.lens_review_class(lens) for lens in model_tiering.KNOWN_LENSES),
+})
 # Classes that may be listed (the operator's opt-in) but are never routed by
 # class alone: only a builder's delivery path, which forces ``runner="fly"``
 # with a delivery spec, sends them to Fly. Every retry lane that can re-run a
@@ -501,6 +588,8 @@ class FlyConfig:
     login_volume_gb: float = DEFAULT_LOGIN_VOLUME_GB
     rootfs_gb: float = DEFAULT_ROOTFS_GB
     cursor_login_dirs: tuple[str, ...] = (".cursor", ".config/cursor")
+    # The Fly-only dispatch timeout (FLY_DISPATCH_TIMEOUT), or None when unset.
+    dispatch_timeout_seconds: int | None = None
     # Problems found while loading the limit settings (names, never values).
     setting_problems: tuple[str, ...] = ()
 
@@ -516,6 +605,12 @@ class FlyConfig:
                 problems.append(str(exc))
                 # Never a default: a NaN fails every limit check, and
                 # admission refuses on ``problems`` before any check runs.
+                limits[limit.attr] = math.nan
+        for limit in OPTIONAL_LIMITS:
+            try:
+                limits[limit.attr] = parse_optional_setting(limit, env)
+            except FlyConfigInvalid as exc:
+                problems.append(str(exc))
                 limits[limit.attr] = math.nan
         login = {}
         for provider in sorted(LOGIN_PROVIDERS):
@@ -561,10 +656,12 @@ class FlyConfig:
         the problems found when loading, plus a check of the fields
         themselves (a config may be constructed directly)."""
         out = list(self.setting_problems)
-        for limit in (*LIMITS, *FIXED_LIMITS):
+        for limit in (*LIMITS, *FIXED_LIMITS, *OPTIONAL_LIMITS):
             if any(p.startswith(limit.env + " ") for p in out):
                 continue
             value = getattr(self, limit.attr)
+            if value is None and limit in OPTIONAL_LIMITS:
+                continue  # unset: no setting of this kind
             if limit.kind is int and (isinstance(value, bool) or not isinstance(value, int)):
                 out.append(f"{limit.env} is not an int")
             elif not _finite_number(value, limit.low / limit.scale, limit.high / limit.scale):
@@ -579,6 +676,15 @@ class FlyConfig:
                 "Fly is disabled: " + "; ".join(problems)
                 + ". Fix the setting; no Fly launches until then."
             )
+
+    def longest_default_run_seconds(self) -> int:
+        """The dispatch timeout charged for a Fly machine whose own window is
+        unknown: the longer of the shared default and the Fly-only timeout,
+        so a longer Fly timeout is never under-charged."""
+        ceiling = self.dispatch_timeout_seconds
+        if ceiling is None or not _finite_number(ceiling, 1, MAX_JOB_TIMEOUT_SECONDS):
+            return DISPATCH_TIMEOUT_DEFAULT
+        return max(DISPATCH_TIMEOUT_DEFAULT, int(ceiling))
 
     def monthly_storage_usd(self) -> float:
         """Volume plus stopped-rootfs storage of the long-lived login machines."""
@@ -852,6 +958,8 @@ class FlyLedger:
         if not isinstance(deliveries, dict) or not all(
             isinstance(key, str) and isinstance(value, dict)
             and isinstance(value.get("status"), str)
+            and ("associated_keys" not in value or (isinstance(value["associated_keys"], list)
+                 and all(isinstance(k, str) and k for k in value["associated_keys"])))
             for key, value in deliveries.items()
         ):
             raise FlyLedgerError(f"Fly ledger {name}: delivery receipts are unreadable")
@@ -944,7 +1052,16 @@ class FlyLedger:
             raise FlyLedgerError("delivery receipt has no status")
 
         def write(receipts: dict) -> bool:
-            if key in receipts:
+            import build_delivery
+
+            def keys(name, row):
+                aliases = row.get("associated_keys", [])
+                if not isinstance(aliases, list) or not all(isinstance(a, str) and a for a in aliases):
+                    raise FlyLedgerError("delivery receipt associations are malformed")
+                return {build_delivery.canonical_key(k) for k in (name, *aliases)}
+
+            requested = keys(key, entry)
+            if any(requested & keys(stored, held) for stored, held in receipts.items()):
                 return False
             receipts[key] = entry
             return True
@@ -964,8 +1081,14 @@ class FlyLedger:
             if key not in receipts or receipts[key].get("token") != token:
                 return False
             current = receipts[key]
-            receipts[key] = ({**entry, "notified_at": current["notified_at"]}
-                             if "notified_at" in current else entry)
+            # Keep the task id the reservation recorded: the in-flight check
+            # finds a run by it after the task's repository changes.
+            kept = {**entry, **({"associated_keys": current["associated_keys"]}
+                               if "associated_keys" in current else {}),
+                    **({"task_id": current["task_id"]}
+                       if "task_id" in current and "task_id" not in entry else {})}
+            receipts[key] = ({**kept, "notified_at": current["notified_at"]}
+                             if "notified_at" in current else kept)
             return True
 
         return self._write_delivery(key, write)
@@ -981,10 +1104,54 @@ class FlyLedger:
         def write(receipts: dict) -> bool:
             if receipts.get(key) != expected:
                 return False
-            receipts[key] = entry
+            receipts[key] = {**entry, **({"associated_keys": expected["associated_keys"]}
+                                        if "associated_keys" in expected else {})}
             return True
 
         return self._write_delivery(key, write)
+
+    def supersede_delivery(self, stored: str, expected: dict, key: str, entry: dict, *,
+                           before=None) -> bool:
+        """Swap the receipt held under *stored* for the reservation *entry*
+        under *key*, only if it still equals *expected* in full; otherwise
+        leave it untouched and return False. Two dispatches that read the same
+        receipt cannot both succeed. *entry*'s keys must not collide with any
+        OTHER receipt (the same rule ``reserve_delivery`` applies). *before* is
+        called under the lock once the compare matched and before anything is
+        written; if it raises, nothing changes. An exception raised from the
+        write may come after the file was replaced: the outcome is uncertain.
+
+        Called only for a settled existing-PR correction that the new
+        correction was declared against (``build_delivery``'s
+        ``_supersede_settled_correction`` decides that); it is the one path
+        that replaces a receipt without the operator's clear."""
+        if not isinstance(entry.get("status"), str):
+            raise FlyLedgerError("delivery receipt has no status")
+        import build_delivery
+
+        def keys(name, row):
+            aliases = row.get("associated_keys", [])
+            if not isinstance(aliases, list) or not all(isinstance(a, str) and a for a in aliases):
+                raise FlyLedgerError("delivery receipt associations are malformed")
+            return {build_delivery.canonical_key(k) for k in (name, *aliases)}
+
+        with self._locked():
+            data = self._load()
+            receipts = data.get("deliveries")
+            if not isinstance(receipts, dict) or receipts.get(stored) != expected:
+                return False
+            requested = keys(key, entry)
+            if any(requested & keys(name, held) for name, held in receipts.items() if name != stored):
+                return False
+            if before is not None:
+                before()
+            receipts.pop(stored)
+            receipts[key] = entry
+            self._save(data)
+            after = self._snapshot(self._clock()).deliveries
+            if after.get(key) != entry or (stored != key and stored in after):
+                raise FlyLedgerError("delivery receipt did not read back")
+            return True
 
     def release_delivery(self, key: str, token: str,
                          statuses: tuple[str, ...] = ("launching",)) -> bool:
@@ -1224,7 +1391,8 @@ class FlyLedger:
             snap = self._snapshot(now)
             if run_id not in snap.entries:
                 return 0.0
-            cost = _charged_seconds(snap.entries[run_id], now) * config.rate_per_second_usd
+            cost = (_charged_seconds(snap.entries[run_id], now, config.longest_default_run_seconds())
+                    * config.rate_per_second_usd)
             if not _finite_number(cost, 0, MAX_RECORD_NUMBER):
                 # Keep the reservation (and its full reserved cost) rather
                 # than charge an unreadable amount.
@@ -1794,6 +1962,119 @@ def delivery_result_from_record(record: dict) -> dict:
     return out
 
 
+# ── Settling a delivery from GitHub when its record never arrived ───────────
+#
+# A delivering run can push its branch and open its pull request and still
+# lose its result record (Neotoma overloaded at the moment it was written).
+# What GitHub shows for the job's OWN branch can then prove a FIRST delivery:
+# only a pull request opened by the PR-opener App is ever settled this way. A
+# correction (the job targets an existing pull request) is never settled from
+# GitHub: its branch can move for reasons other than this run (another push to
+# the same pull request), and nothing GitHub shows proves that this run pushed
+# the new head, so a correction with a lost record stays unknown. A missing
+# record is never read as ``no_changes`` or as a failure, and anything
+# unproven stays an unknown outcome.
+
+GITHUB_SETTLED_REASON = "settled from GitHub: the run's result record was not received"
+_SHA_RE = re.compile(r"[0-9a-f]{40}", re.ASCII)
+
+
+def github_delivery_proof(job: "FlyJob", branch_commit: Any, pulls: Any,
+                          opener_login: str) -> dict | None:  # fmt: skip
+    """The delivery result GitHub proves for *job*, or None.
+
+    *branch_commit* is the head commit of ``job.delivery["branch"]`` on the
+    job's repository (None when the branch does not exist); *pulls* is every
+    pull request whose head is that branch, in any state. Proven when exactly
+    one pull request, open or merged, has that exact head branch in that
+    repository, its head commit is the branch's, and its author is the
+    PR-opener App (*opener_login*). Only a first delivery is ever proven: for
+    a correction (``pr_number`` in the delivery plan) this is always None,
+    because a moved branch does not prove that this run pushed it."""
+    delivery = job.delivery
+    if not isinstance(delivery, dict) or not isinstance(delivery.get("branch"), str):
+        return None
+    if "pr_number" in delivery:
+        return None
+    branch, repository = delivery["branch"], job.repository
+    if not isinstance(branch_commit, str) or not _SHA_RE.fullmatch(branch_commit):
+        return None
+    if not isinstance(pulls, list):
+        return None
+    matching = []
+    for pr in pulls:
+        if not isinstance(pr, dict) or not isinstance(pr.get("head"), dict):
+            return None
+        head = pr["head"]
+        head_repo = head.get("repo") if isinstance(head.get("repo"), dict) else {}
+        if head.get("ref") == branch and head_repo.get("full_name") == repository:
+            matching.append(pr)
+    if len(matching) != 1:
+        return None
+    pr = matching[0]
+    number = pr.get("number")
+    if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+        return None
+    if not (pr.get("state") == "open" or pr.get("merged_at")):
+        return None
+    base = pr.get("base") if isinstance(pr.get("base"), dict) else {}
+    base_repo = base.get("repo") if isinstance(base.get("repo"), dict) else {}
+    if base_repo.get("full_name") != repository:
+        return None
+    if pr["head"].get("sha") != branch_commit:
+        return None
+    user = pr.get("user") if isinstance(pr.get("user"), dict) else {}
+    if not opener_login or user.get("login") != opener_login:
+        return None
+    return {
+        "delivery_status": "opened",
+        "delivery_reason": GITHUB_SETTLED_REASON,
+        "delivery_branch": branch,
+        "delivery_commit": branch_commit,
+        "pr_number": number,
+        "pr_url": f"https://github.com/{repository}/pull/{number}",
+        "settled_from": "github",
+    }
+
+
+def read_github_delivery(job: "FlyJob") -> tuple[str | None, list]:
+    """GitHub's answer for the job's own branch: its head commit (None when
+    the branch is absent) and every pull request with that head. Read as the
+    PR-opener App for exactly the job's repository. Raises on any failed read
+    other than an absent branch."""
+    import urllib.parse
+
+    from lib import github_app_token as gat
+
+    repository = _delivery_repository(job.repository)
+    branch = job.delivery["branch"]
+    token = gat.identity_token(gat.PR_OPENER_IDENTITY, repository)
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("no PR-opener token for the delivery read")
+    quoted = urllib.parse.quote(branch, safe="")
+    try:
+        ref = _github_request("GET", f"/repos/{repository}/branches/{quoted}", token)
+    except RuntimeError as exc:
+        if str(exc).endswith("HTTP 404"):
+            return None, []
+        raise
+    commit = ref.get("commit") if isinstance(ref, dict) else None
+    sha = commit.get("sha") if isinstance(commit, dict) else None
+    owner = repository.split("/", 1)[0]
+    head = urllib.parse.quote(f"{owner}:{branch}", safe="")
+    pulls = _github_request(
+        "GET", f"/repos/{repository}/pulls?state=all&per_page=100&head={head}", token)
+    if not isinstance(pulls, list):
+        raise RuntimeError("the pull request list is not a list")
+    return sha, pulls
+
+
+def pr_opener_login() -> str:
+    from lib import github_app_token as gat
+
+    return gat.identity_bot_login(gat.PR_OPENER_IDENTITY)
+
+
 # ── Job assembly ─────────────────────────────────────────────────────────────
 
 
@@ -1818,6 +2099,9 @@ class FlyJob:
     neotoma_jwk_name: str = ""
     neotoma_base_url: str = ""
     neotoma_tools_unavailable: bool = False
+    # "proxy" when the CLI's Neotoma MCP server is the runner's loopback
+    # signing proxy (run_job.py signs each request with the role's key).
+    neotoma_mcp: str = ""
     probe_env_names: list[str] = field(default_factory=list)
     # Claude's system prompt, shipped as a job file instead of an argument.
     system_prompt: str = field(repr=False, default="")
@@ -1855,9 +2139,70 @@ def runner_argv(provider: str, cmd: list[str], mcp_config_path: str | None) -> l
     the Mac's temporary MCP config path (which may name the shared bearer)
     replaced by a placeholder ``run_job.py`` fills from the role's own token."""
     argv = [RUNNER_BINARIES[provider], *cmd[1:]]
-    if mcp_config_path:
-        argv = [MCP_CONFIG_PLACEHOLDER if a == mcp_config_path else a for a in argv]
+    slot = mcp_config_slot(argv, mcp_config_path)
+    if slot is not None:
+        argv[slot] = MCP_CONFIG_PLACEHOLDER
     return argv
+
+
+def mcp_config_slot(argv: list[str], mcp_config_path: str | None) -> int | None:
+    """The index of the ``--mcp-config`` flag's value when that value is
+    *mcp_config_path*, else ``None``. The path in any other position is no
+    slot: ``run_job.py`` supplies the config only through that flag."""
+    if not mcp_config_path:
+        return None
+    for i in range(1, len(argv) - 1):
+        if argv[i] == "--mcp-config" and argv[i + 1] == mcp_config_path:
+            return i + 1
+    return None
+
+
+# Providers whose CLI reaches Neotoma on Fly through the runner's loopback
+# signing proxy when the role ships its AAuth key (no static bearer is ever
+# minted for it). Codex and Cursor have no per-run MCP config path.
+FLY_NEOTOMA_PROXY_PROVIDERS = frozenset({"claude"})
+
+# Providers whose seated, read-only run may go to Fly with no Neotoma tools.
+# Cursor stays on the Mac (it cannot deny a single MCP tool).
+SEATED_FLY_PROVIDERS = ("claude", "codex")
+
+
+def without_neotoma_mcp(provider: str, argv: list[str]) -> list[str]:
+    """A seated run's shipped argv with no Neotoma MCP server at all.
+
+    The Mac's ``--mcp-config`` is removed, so ``run_job.prepare_child`` finds
+    no placeholder and writes no config, and ``--strict-mcp-config`` keeps the
+    CLI from reading any other. The runner's own Neotoma identity (for its
+    result record) is never in the child's environment. Codex has no
+    ``--mcp-config``: its home is the login volume, so only a ``-c`` or
+    ``--config`` override naming an MCP server could grant one, and any such
+    argv is refused. Raises ``FlyIneligible`` when it cannot hold."""
+    if provider not in SEATED_FLY_PROVIDERS:
+        raise FlyIneligible(f"a seated {provider} run stays on the Mac")
+    out: list[str] = []
+    skip = False
+    for i, arg in enumerate(argv):
+        if skip:
+            skip = False
+            continue
+        if arg == "--mcp-config":
+            if i + 1 >= len(argv) or argv[i + 1] != MCP_CONFIG_PLACEHOLDER:
+                raise FlyIneligible("a seated run carries an MCP config that is not the Mac's own")
+            skip = True
+            continue
+        if arg == "--strict-mcp-config":
+            continue
+        out.append(arg)
+    # Only option values can grant a server (the system prompt text may say
+    # anything), so look at what follows `-c` / `--config` and `--config=...`.
+    for i, arg in enumerate(out):
+        value = arg.split("=", 1)[1] if arg.startswith("--config=") else (
+            out[i + 1] if arg in ("-c", "--config") and i + 1 < len(out) else "")
+        if "mcp_servers" in value or "mcp-config" in arg or MCP_CONFIG_PLACEHOLDER in arg:
+            raise FlyIneligible("a seated run's argv names an MCP server; it gets none on Fly")
+    if provider == "claude":
+        out.append("--strict-mcp-config")
+    return out
 
 
 def externalize_system_prompt(provider: str, argv: list[str]) -> tuple[list[str], str]:
@@ -1881,6 +2226,100 @@ def role_jwk_path(role: str) -> Path | None:
         return None
     path = Path(keys_dir) / f"{role}.jwk.json"
     return path if path.is_file() else None
+
+
+# How long `role_admission` trusts Neotoma's answer for one role key. A
+# refusal is re-checked sooner, so a newly activated grant is seen quickly.
+ADMISSION_ADMITTED_TTL_SECONDS = 600.0
+ADMISSION_REFUSED_TTL_SECONDS = 60.0
+ADMISSION_TIMEOUT_SECONDS = 5.0
+# The same short, safe label shape the runner's proxy repeats from Neotoma.
+_SAFE_ADMISSION_REASON = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
+# (role, key thumbprint, Neotoma base URL) -> (expires_at, admitted, reason)
+_ADMISSION_CACHE: dict[tuple[str, str, str], tuple[float, bool, str]] = {}
+_ADMISSION_LOCK = threading.Lock()
+
+
+def _admission_http_client() -> httpx.Client:
+    """The client `role_admission` uses when none is given (tests replace it)."""
+    return httpx.Client(timeout=ADMISSION_TIMEOUT_SECONDS, follow_redirects=False)
+
+
+def _httpsig():
+    try:  # package import (daemon runtime) with script-import fallback
+        from lib.daemon_runtime import aauth_httpsig
+    except ImportError:  # pragma: no cover
+        import aauth_httpsig  # type: ignore
+    return aauth_httpsig
+
+
+def role_admission(role: str, jwk: dict, base_url: str, *, client: httpx.Client | None = None,
+                   clock: Callable[[], float] = time.time) -> tuple[bool, str]:  # fmt: skip
+    """Whether Neotoma admits *role*'s AAuth key: an active ``agent_grant``
+    pins it. Asked from the Mac with a signed ``GET /session``, so a job whose
+    key would be refused on the runner never launches.
+
+    Returns ``(admitted, reason)``. Cached per role, key and Neotoma instance
+    (*base_url*): an admission for
+    ``ADMISSION_ADMITTED_TTL_SECONDS``, a refusal for
+    ``ADMISSION_REFUSED_TTL_SECONDS``. A network failure, a 5xx or a 429 is
+    never cached. It blocks for up to ``ADMISSION_TIMEOUT_SECONDS``, so an
+    async caller runs ``build_job`` in a thread. The
+    reason is Neotoma's ``admission_reason`` when it is a short safe label,
+    never header or key material."""
+    httpsig = _httpsig()
+    try:
+        cache_key = (role, httpsig.jwk_thumbprint(httpsig.public_part_of(jwk)),
+                     base_url.rstrip("/"))
+    except (KeyError, httpsig.AAuthSigningError):
+        return False, "the role key has no public thumbprint"
+    now = clock()
+    with _ADMISSION_LOCK:
+        cached = _ADMISSION_CACHE.get(cache_key)
+    if cached is not None and now < cached[0]:
+        return cached[1], cached[2]
+    url = f"{base_url.rstrip('/')}/session"
+    try:
+        signer = httpsig.HttpSigSigner(
+            private_jwk=jwk, sub=str(jwk["sub"]),  # checked by `_validated_role_jwk`
+            iss=str(jwk.get("iss") or httpsig.DEFAULT_AAUTH_ISSUER),
+            kid=str(jwk.get("kid") or "").strip() or None,
+        )  # fmt: skip
+        headers = signer.sign_headers(method="GET", url=url, body=None, content_type=None)
+    except Exception as exc:  # noqa: BLE001 -- never echo key material
+        return False, f"the role key could not sign ({type(exc).__name__})"
+    http = client if client is not None else _admission_http_client()
+    try:
+        resp = http.request("GET", url, headers={"accept": "application/json", **headers})
+    except httpx.HTTPError:
+        return False, "Neotoma unreachable"
+    finally:
+        if client is None:
+            http.close()
+    admitted, reason = False, f"Neotoma /session answered {resp.status_code}"
+    if resp.status_code == 200:
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+        aauth = data.get("aauth") if isinstance(data, dict) else None
+        raw = aauth.get("admission_reason") if isinstance(aauth, dict) else None
+        if raw is None and isinstance(data, dict):
+            raw = data.get("admission_reason")
+        admitted = isinstance(aauth, dict) and aauth.get("admitted") is True
+        if admitted:
+            reason = ""
+        elif raw is None:
+            reason = "Neotoma /session returned no readable admission decision"
+        else:
+            reason = raw if isinstance(raw, str) and _SAFE_ADMISSION_REASON.fullmatch(raw) \
+                else "unrecognized"
+    if resp.status_code >= 500 or resp.status_code == 429:
+        return False, reason  # a passing outage, like a network error: not cached
+    ttl = ADMISSION_ADMITTED_TTL_SECONDS if admitted else ADMISSION_REFUSED_TTL_SECONDS
+    with _ADMISSION_LOCK:
+        _ADMISSION_CACHE[cache_key] = (now + ttl, admitted, reason)
+    return admitted, reason
 
 
 def _validated_role_jwk(role: str, jwk: Any) -> bool:
@@ -1919,7 +2358,7 @@ def build_job(
     role: str,
     cmd: list[str],
     stdin: bytes,
-    timeout: int,
+    timeout: int | None,
     repository: str,
     github_requested: bool,
     mcp_config_path: str | None,
@@ -1933,9 +2372,16 @@ def build_job(
     delivery: dict | None = None,
     neotoma_tools_granted: bool = False,
     github_delivery_contract: bool = False,
+    github_read_only: bool = False,
+    default_timeout: int | None = None,
 ) -> FlyJob:
     """Check eligibility and assemble the job, minus the GitHub token (which
     is minted at launch). Raises ``FlyIneligible`` with the reason.
+
+    ``timeout`` is the caller's own timeout, or None when it gave none;
+    ``default_timeout`` is the shared dispatch timeout a local run would use.
+    The job's timeout is resolved here, once the config is validated, by
+    ``resolve_dispatch_timeout`` and carried on ``FlyJob.timeout``.
 
     ``delivery``: a builder's delivery spec (``DELIVERY_SPEC_KEYS``). The job
     then carries no read-class token; a delivery token for the one repository
@@ -1949,24 +2395,30 @@ def build_job(
     # Configured but with an invalid limit: Fly is disabled, and this is a
     # refusal (no local fallback), not an ineligibility.
     config.require_valid_limits()
+    timeout = resolve_dispatch_timeout(config, timeout, default_timeout)
     if not _finite_number(timeout, 1, MAX_JOB_TIMEOUT_SECONDS):
         raise FlyConfigInvalid(
             f"the dispatch timeout is outside 1 to {MAX_JOB_TIMEOUT_SECONDS} seconds")
     if provider not in RUNNER_BINARIES:
-        raise FlyIneligible(f"provider {provider!r} has no Fly runner")
+        raise FlyIneligible(f"provider {provider!r} has no Fly runner", provider_specific=True)
     for flag, why in (
         (local_review, "local_review runs stay on the Mac"),
         (inference_only, "inference_only runs stay on the Mac"),
         (bool(command_wrapper), "a command_wrapper (macOS sandbox) cannot run on Fly"),
         (codex_outer_sandboxed, "an outer-sandboxed Codex run cannot run on Fly"),
         (bool(cwd), "a dispatch with a working directory needs a local worktree"),
-        (owns_pending_gate, "seated and gate-owning runs stay on the Mac"),
     ):
         if flag:
             raise FlyIneligible(why)
+    if owns_pending_gate and not (github_read_only and provider in SEATED_FLY_PROVIDERS):
+        # A seated run keeps its Neotoma `correct` denial on the Mac. On Fly
+        # the only seated run allowed is a read-only one that gets no Neotoma
+        # tools at all, so there is nothing to deny (see `without_neotoma_mcp`).
+        raise FlyIneligible("seated and gate-owning runs stay on the Mac")
     if provider in LOGIN_PROVIDERS and provider not in config.login_machines:
         raise FlyIneligible(
-            f"no {provider} login machine configured ({login_machine_setting(provider)})"
+            f"no {provider} login machine configured ({login_machine_setting(provider)})",
+            provider_specific=True,
         )
 
     secrets: dict[str, str] = {}
@@ -2004,6 +2456,10 @@ def build_job(
             f"role {role!r} has no Neotoma identity of its own ({token_name} or an AAuth "
             "key); the shared daemon bearer never leaves the Mac"
         )
+    if owns_pending_gate and jwk_text:
+        # A seated run's child has no Neotoma tools. The runner's own record
+        # is signed with the key, so the role's static token stays home.
+        own_token = ""
     if jwk_text:
         secrets[AAUTH_JWK_JOB_NAME] = jwk_text
     if own_token:
@@ -2019,6 +2475,31 @@ def build_job(
     base_url = os.environ.get("NEOTOMA_BASE_URL", "").strip().rstrip("/")
     if not base_url.startswith("https://"):
         raise FlyIneligible("NEOTOMA_BASE_URL must be an https URL for a Fly run")
+    # A role granted Neotoma tools goes to Fly only when its tools can be
+    # given there: through the signing proxy with a key Neotoma admits, or the
+    # legacy own token on Claude. A seated run gets no Neotoma tools on Fly
+    # (see `without_neotoma_mcp`), so it is not judged here.
+    if neotoma_tools_granted and not owns_pending_gate:
+        # Both paths give the tools through the CLI's MCP config slot, which
+        # `runner_argv` turns into the placeholder the runner fills. A local
+        # config-write failure leaves no slot, and the job would run toolless.
+        if provider == "claude" and mcp_config_slot(cmd, mcp_config_path) is None:
+            raise FlyIneligible(
+                f"role {role!r} is granted Neotoma tools but its MCP config could not be "
+                "provided (no --mcp-config slot)")
+        if jwk_text:
+            if provider not in FLY_NEOTOMA_PROXY_PROVIDERS:
+                raise FlyIneligible(
+                    f"the Fly runner cannot yet give a {provider} job its Neotoma tools",
+                    provider_specific=True)
+            admitted, reason = role_admission(role, jwk, base_url)
+            if not admitted:
+                raise FlyIneligible(
+                    f"role {role!r}'s AAuth key is not admitted by Neotoma ({reason})")
+        elif not (own_token and provider == "claude"):
+            raise FlyIneligible(
+                f"role {role!r} is granted Neotoma tools but has no AAuth key or own "
+                "Neotoma identity")
 
     probe = list(dict.fromkeys([
         "NEOTOMA_BEARER_TOKEN", "TELEGRAM_BOT_TOKEN", "APIS_GITHUB_WEBHOOK_SECRET",
@@ -2038,6 +2519,8 @@ def build_job(
             "a job that delivers to GitHub needs a delivery plan and the PR-opener "
             "token; it cannot run on Fly without one")
     argv = runner_argv(provider, cmd, mcp_config_path)
+    if owns_pending_gate:
+        argv = without_neotoma_mcp(provider, argv)
     argv, system_prompt = externalize_system_prompt(provider, argv)
     if delivery is not None:
         delivery = _check_delivery(delivery, repository=repository, stdin=stdin,
@@ -2047,6 +2530,13 @@ def build_job(
     if largest > MAX_ARGV_ELEMENT_BYTES:
         # Refused before any token, reservation or machine.
         raise _command_too_large(provider, largest)
+    # The role's key wins over a legacy token: the CLI's MCP server is the
+    # runner's signing proxy. Only when the argv still has an MCP config slot
+    # (a seated run's was removed above, and it gets no Neotoma tools).
+    neotoma_mcp = ""
+    if (jwk_text and neotoma_tools_granted and provider in FLY_NEOTOMA_PROXY_PROVIDERS
+            and MCP_CONFIG_PLACEHOLDER in argv):
+        neotoma_mcp = "proxy"
     return FlyJob(
         run_id=f"fly-{uuid.uuid4().hex[:16]}",
         role=role,
@@ -2062,7 +2552,9 @@ def build_job(
         neotoma_token_name=token_name if own_token else "",
         neotoma_jwk_name=AAUTH_JWK_JOB_NAME if jwk_text else "",
         neotoma_base_url=base_url,
-        neotoma_tools_unavailable=bool(neotoma_tools_granted and not own_token),
+        neotoma_tools_unavailable=bool(neotoma_tools_granted and not own_token
+                                       and not neotoma_mcp),
+        neotoma_mcp=neotoma_mcp,
         probe_env_names=probe,
         system_prompt=system_prompt,
         delivery=delivery,
@@ -2073,11 +2565,15 @@ def _check_delivery(delivery: Any, *, repository: str, stdin: bytes, github_requ
                     timeout: float) -> dict:  # fmt: skip
     """A delivery spec the job runner will accept, or ``FlyIneligible`` (the
     builder then runs locally, as today)."""
-    if not isinstance(delivery, dict) or tuple(sorted(delivery)) != tuple(sorted(DELIVERY_SPEC_KEYS)):
+    keys = set(delivery) if isinstance(delivery, dict) else set()
+    if keys not in (set(DELIVERY_SPEC_KEYS), set(DELIVERY_SPEC_KEYS) | {"pr_number", "head_sha"}):
         raise FlyIneligible("the delivery spec is malformed")
-    if not all(isinstance(delivery[k], str) and delivery[k] for k in DELIVERY_SPEC_KEYS):
+    if not all(isinstance(delivery[k], str) and delivery[k] for k in keys):
         raise FlyIneligible("the delivery spec has an empty field")
     _delivery_repository(repository)
+    if "pr_number" in delivery and (not re.fullmatch(r"[1-9][0-9]*", delivery["pr_number"])
+                                     or not re.fullmatch(r"[0-9a-f]{40}", delivery["head_sha"])):
+        raise FlyIneligible("the existing PR number or exact head is malformed")
     if github_requested:
         raise FlyIneligible("a delivering job carries no read-class GitHub token")
     if not isinstance(stdin, bytes) or PR_FILE_PLACEHOLDER.encode() not in stdin:
@@ -2127,6 +2623,7 @@ def job_files(job: FlyJob, config: FlyConfig) -> list[dict]:
         "neotoma_jwk_name": job.neotoma_jwk_name,
         "neotoma_base_url": job.neotoma_base_url,
         "probe_env_names": job.probe_env_names,
+        **({"neotoma_mcp": job.neotoma_mcp} if job.neotoma_mcp else {}),
         **({"delivery": job.delivery} if job.delivery is not None else {}),
     }
     if job.provider == "claude" and job.login:
@@ -2331,6 +2828,60 @@ class _LaunchState:
     lease_nonce: str = field(default="", repr=False)  # a secret: never logged
 
 
+class _ScrubRefused(Exception):
+    """Fly refused a login machine's clean-up update (409/412): nothing was
+    stored, and a later attempt from a fresh read may succeed."""
+
+    def __init__(self, error: "FlyApiError"):
+        super().__init__(str(error))
+        self.error = error
+
+
+class _AdmissionHold:
+    """The admission lock pair (in-process ``asyncio.Lock`` plus the flock on
+    ``<ledger>.admission.lock``), taken and let go explicitly so a holder can
+    pause. ``release`` is a no-op when nothing is held."""
+
+    def __init__(self, lock: asyncio.Lock, path: Path):
+        self._lock = lock
+        self._path = path
+        self._fh: Any = None
+
+    async def acquire(self) -> None:
+        await self._lock.acquire()
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            fh = open(self._path, "a+")
+            try:
+                # Non-blocking attempts with a short sleep: a cancelled waiter
+                # leaves no thread stuck inside flock().
+                while True:
+                    try:
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        await asyncio.sleep(0.05)
+            except BaseException:
+                fh.close()
+                raise
+        except BaseException:
+            self._lock.release()
+            raise
+        self._fh = fh
+
+    def release(self) -> None:
+        fh, self._fh = self._fh, None
+        if fh is None:
+            return
+        try:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                fh.close()
+        finally:
+            self._lock.release()
+
+
 @dataclass
 class FlyHandle:
     job: FlyJob
@@ -2376,8 +2927,14 @@ class FlyExecutor:
         read_result: Callable[[str], Any] = read_result_record,
         clock: Callable[[], float] = time.time,
         mint_delivery: Callable[..., "DeliveryToken"] = mint_delivery_github_token,
+        sleep: Callable[[float], Any] = asyncio.sleep,
+        read_github: Callable[["FlyJob"], tuple] = read_github_delivery,
+        opener_login: Callable[[], str] = pr_opener_login,
     ):
         self.config = config
+        self._read_github = read_github
+        self._opener_login = opener_login
+        self._sleep = sleep  # the clean-up retry's backoff (a fake clock in tests)
         self._mint_delivery = mint_delivery
         self.client = client or FlyMachinesClient(config)
         self.ledger = ledger or FlyLedger(config.ledger_path)
@@ -2412,26 +2969,28 @@ class FlyExecutor:
         """Admission and reaping are serialised across coroutines in this
         process AND across processes sharing the ledger (an flock on a
         dedicated file, polled without blocking so the event loop never
-        waits behind another process)."""
-        async with self._admission_lock():
-            path = self.ledger.path.with_name(self.ledger.path.name + ".admission.lock")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fh = open(path, "a+")
-            try:
-                # Non-blocking attempts with a short sleep: a cancelled waiter
-                # leaves no thread stuck inside flock().
-                while True:
-                    try:
-                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        break
-                    except BlockingIOError:
-                        await asyncio.sleep(0.05)
-                try:
-                    yield
-                finally:
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-            finally:
-                fh.close()
+        waits behind another process).
+
+        Yields ``pause(seconds)``: let go of both locks, sleep, then take
+        them again. Only a caller that still excludes other work on its
+        machine by other means (a live run holding its login lock, lease and
+        reservation) may pause; everything it read before must be read again
+        afterwards. If the pause is cancelled the locks stay released."""
+        hold = _AdmissionHold(
+            self._admission_lock(),
+            self.ledger.path.with_name(self.ledger.path.name + ".admission.lock"),
+        )
+        await hold.acquire()
+
+        async def pause(seconds: float) -> None:
+            hold.release()
+            await self._sleep(seconds)
+            await hold.acquire()
+
+        try:
+            yield pause
+        finally:
+            hold.release()
 
     async def _heartbeat_loop(self) -> None:
         while True:
@@ -2561,7 +3120,7 @@ class FlyExecutor:
             for name in ("GITHUB_TOKEN", "GH_TOKEN"):
                 if name not in job.child_credential_names:
                     job.child_credential_names.append(name)
-        async with self._admission():
+        async with self._admission() as pause:
             # build_job refused a login provider with no machine configured.
             login_id = self.config.login_machines[job.provider] if job.login else ""
             self.ledger.reserve(self.config, run_id=job.run_id, owner=self.instance_id,
@@ -2592,7 +3151,13 @@ class FlyExecutor:
                         # cut short of the lease's expiry, and at the deadline
                         # the machine is stopped and the run settled.
                         deadline = min(deadline, expires - LEASE_SAFETY_SECONDS)
-                    await self._write_login_config(login_id, job, deadline, launch, nonce)
+                    # This run holds its login lock, lease and reservation, so
+                    # a refused claim may wait with the admission lock let go.
+                    await self._write_login_config(login_id, job, deadline, launch, nonce,
+                                                   pause=pause)  # fmt: skip
+                    # Never start past the deadline: run() then clears the
+                    # written config and releases the lease and reservation.
+                    self._refuse_past_deadline(job, deadline, "start")
                     await self._request(launch, self.client.start(login_id, nonce=nonce), job)
                     machine_id, instance_id = login_id, ""
                 else:
@@ -2700,7 +3265,8 @@ class FlyExecutor:
         return machine
 
     async def _write_login_config(self, machine_id: str, job: FlyJob, deadline: float,
-                                  launch: "_LaunchState", nonce: str) -> None:  # fmt: skip
+                                  launch: "_LaunchState", nonce: str, *,
+                                  pause: Callable[[float], Any]) -> None:  # fmt: skip
         """Install this run's job on a login machine, compare-and-set against
         the machine's LIVE state (the ledger is not the source of truth for
         what a machine is running: it can be lost, unshared, or on another
@@ -2713,10 +3279,133 @@ class FlyExecutor:
         written. The update carries the machine version read here as a
         precondition, and the stored config is read back afterwards: unless
         it is this run's, the launch fails closed before any start.
+
+        Fly can refuse the update (409/412): the machine changed between the
+        read and the write, or, most often, Fly began the update and reverted
+        it because the host had no room for the machine just then. Nothing
+        was stored, so after each of ``LOGIN_CLAIM_BACKOFF_SECONDS`` in turn
+        the claim starts again from a fresh read, settle and free check; once
+        the waits are spent it is a retry-later refusal naming Fly's status
+        and a reason label. Each wait goes through *pause* (the admission
+        hold's), so unrelated dispatches and the reaper are not stalled; this
+        run's login lock, lease and reservation stay held, so no other job
+        can claim the machine meanwhile. Each refusal is logged with its
+        status and a closed-set reason label only (``fly_refusal_reason``),
+        never Fly's text, the request body or the config.
+
+        Nothing goes past *deadline*: a wait that would reach it is not
+        started, the retry's read and settle and the read-back after the
+        update are bounded by the time remaining, and the deadline is
+        checked again immediately before every update (and, in the caller,
+        before start). Past it, the claim is refused with nothing
+        further written, through the same cleanup as any other refusal.
+        Every attempt sends the same lease nonce: it is this run's ownership
+        token for the machine (still held across attempts), not a
+        per-request replay guard, so a retried update is not a replay.
         """
-        machine = await self._read_login_machine(machine_id, job)  # re-read under the lease
-        if machine is not None:
-            machine = await self._settle_login_machine(machine)
+        waits = LOGIN_CLAIM_BACKOFF_SECONDS
+        for attempt in range(1, len(waits) + 2):
+            refused = await self._try_write_login_config(machine_id, job, deadline, launch,
+                                                         nonce, retry=attempt > 1)  # fmt: skip
+            if refused is None:
+                break
+            label = fly_refusal_reason(refused.detail)
+            last = attempt > len(waits)
+            wait = 0.0 if last else waits[attempt - 1]
+            out_of_time = not last and self._clock() + wait >= deadline
+            log.warning(
+                f"[fly] run={job.run_id} login machine {machine_id} refused the claim update "
+                f"(attempt {attempt}, status {refused.status}, reason {label})"
+                + ("; giving up" if last else
+                   "; the run's deadline comes first" if out_of_time else
+                   f"; retrying in {wait:g}s")
+            )
+            if last:
+                raise FlyRefusal(
+                    f"Fly refused the {job.provider} login machine update "
+                    f"({refused.status}, reason {label}); {self._refile_action(job, machine_id)}",
+                    _render_wall(self._clock() + 300),
+                )
+            if out_of_time:
+                self._refuse_past_deadline(job, deadline, "another claim", now=deadline)
+            await pause(wait)
+        # Read back once the update has settled (a transitional state right
+        # after the write is not a refusal); one that never settles fails
+        # closed before any start.
+        async def read_back() -> dict | None:
+            after = await self.client.get(machine_id)
+            if after is not None:
+                after = await self._settle_login_machine(after)
+            return after
+
+        after = await self._within_deadline(read_back(), job, deadline, "start")
+        if after is None or after["state"] in LOGIN_SETTLING_STATES:
+            raise FlyApiError(409, "login machine did not settle to stopped after the write")
+        if after["state"] != "stopped" or _config_run_id(after["config"]) != job.run_id:
+            raise FlyApiError(409, "login machine config is not this run's after the write")
+
+    def _refuse_past_deadline(self, job: FlyJob, deadline: float, what: str, *,
+                              now: float | None = None) -> None:  # fmt: skip
+        """Refuse once the run's *deadline* has come, before *what* is sent;
+        the caller's cleanup clears anything already written. The refusal
+        names the recovery (``_refile_action``)."""
+        if (self._clock() if now is None else now) >= deadline:
+            # Every caller is a login claim, so the provider has a login
+            # machine; an absent one is named as absent, not as a machine.
+            machine_id = self.config.login_machines.get(job.provider)
+            raise FlyRefusal(
+                f"{job.provider} login machine claim reached the run's deadline before "
+                f"{what}; nothing further was written or started; "
+                f"{self._refile_action(job, machine_id)}",
+                _render_wall(self._clock() + 300),
+            )
+
+    @staticmethod
+    def _refile_action(job: FlyJob, machine_id: str | None) -> str:
+        """The recovery a refused claim needs, in the refusal's own text (so
+        it survives filtered warnings): the task never launched and is not
+        retried automatically, so it must be refiled. The job carries no task
+        id, so the run and machine name it; a missing machine id is said to
+        be missing rather than given a placeholder name."""
+        if machine_id:
+            where = f"machine {machine_id}"
+        else:
+            where = f"no {job.provider} login machine configured"
+        return (f"the task never launched and is not retried automatically: refile it "
+                f"(run {job.run_id}, {where})")
+
+    async def _within_deadline(self, coro, job: FlyJob, deadline: float, what: str) -> Any:
+        """Await *coro* (reads only) for no longer than the time left before
+        *deadline*; a run out of time is ``_refuse_past_deadline``'s refusal."""
+        remaining = deadline - self._clock()
+        if remaining <= 0:
+            coro.close()
+            self._refuse_past_deadline(job, deadline, what, now=deadline)
+        try:
+            return await asyncio.wait_for(coro, remaining)
+        except asyncio.TimeoutError:
+            self._refuse_past_deadline(job, deadline, what, now=deadline)
+            raise  # unreachable: the refusal above always raises
+
+    async def _try_write_login_config(self, machine_id: str, job: FlyJob, deadline: float,
+                                      launch: "_LaunchState", nonce: str, *,
+                                      retry: bool = False) -> "FlyApiError | None":  # fmt: skip
+        """One claim attempt for ``_write_login_config``: read, settle, refuse
+        unless free, then the version-checked update. None once the update is
+        accepted; Fly's refusal (409/412, nothing stored) is returned for the
+        caller to retry; every other outcome raises. On a *retry*
+        the read and settle are bounded by the time left before *deadline*;
+        on every attempt the deadline is checked again just before the update."""
+        async def read() -> dict | None:
+            machine = await self._read_login_machine(machine_id, job)  # re-read under the lease
+            if machine is not None:
+                machine = await self._settle_login_machine(machine)
+            return machine
+
+        if retry:
+            machine = await self._within_deadline(read(), job, deadline, "another claim")
+        else:
+            machine = await read()
         if machine is None:
             raise FlyApiError(404, f"{job.provider} login machine not found")
         self._refuse_unless_free(machine, job)
@@ -2732,29 +3421,18 @@ class FlyExecutor:
         # already refused a machine whose answer carried no usable version.
         body: dict = {"config": cfg, "skip_launch": True,
                       "current_version": machine["instance_id"]}  # fmt: skip
+        self._refuse_past_deadline(job, deadline, "another claim" if retry else "the claim")
         launch.config_written = True  # from here the stored config may hold this job
         try:
             await self.client.update(machine_id, body, nonce=nonce)
         except FlyApiError as exc:
             if exc.status in (409, 412):
-                # The machine changed between the check and the write.
-                raise FlyRefusal(
-                    f"{job.provider} login machine changed while being claimed; retry later",
-                    _render_wall(self._clock() + 300),
-                ) from None
+                return exc  # refused (changed or reverted): nothing was stored
             raise
-        # Read back once the update has settled (a transitional state right
-        # after the write is not a refusal); one that never settles fails
-        # closed before any start.
-        after = await self.client.get(machine_id)
-        if after is not None:
-            after = await self._settle_login_machine(after)
-        if after is None or after["state"] in LOGIN_SETTLING_STATES:
-            raise FlyApiError(409, "login machine did not settle to stopped after the write")
-        if after["state"] != "stopped" or _config_run_id(after["config"]) != job.run_id:
-            raise FlyApiError(409, "login machine config is not this run's after the write")
+        return None
 
-    async def _scrub_login_machine(self, machine_id: str, run_id: str, nonce: str = "") -> bool:
+    async def _scrub_login_machine(self, machine_id: str, run_id: str, nonce: str = "", *,
+                                   pause: Callable[[float], Any] | None = None) -> bool:  # fmt: skip
         """Remove THIS run's files from a stopped login machine's stored
         config, then read it back. True only when the config verifiably no
         longer carries this run's job.
@@ -2765,61 +3443,105 @@ class FlyExecutor:
         config with job files but no run marker cannot be attributed, so it
         is left alone and the result is False. Callers hold the admission lock
         and still own the reservation, so no other dispatcher can be writing
-        this machine meanwhile."""
+        this machine meanwhile.
+
+        Fly can refuse the update (409/412) when the host cannot fit the
+        stopped machine's reservation at that moment. With *pause* (the
+        admission hold's), a refused update is retried after each step of
+        ``SCRUB_RETRY_SECONDS``, every attempt from a fresh read, version and
+        ownership check; without it (the reaper, a launch reconciling the
+        machine, the periodic step) one attempt is made per call. Each
+        refusal is logged with its status and a reason label
+        (``fly_refusal_reason``) only, never Fly's text."""
+        delays = SCRUB_RETRY_SECONDS if pause is not None else ()
+        for attempt in range(len(delays) + 1):
+            try:
+                return await self._scrub_once(machine_id, run_id, nonce)
+            except _ScrubRefused as refused:
+                exc = refused.error
+                # Only the status and a closed-set reason label: never Fly's
+                # own text (which could echo something the redaction missed),
+                # the request body or the config, which carry the job's files.
+                reason = fly_refusal_reason(exc.detail)
+                last = attempt == len(delays)
+                log.warning(
+                    f"[fly] run={run_id} login machine {machine_id} refused the clean-up "
+                    f"update (attempt {attempt + 1}, status {exc.status}, reason {reason})"
+                    + ("; giving up" if last else f"; retrying in {delays[attempt]:g}s")
+                )
+                if last:
+                    return False
+            except Exception as exc:  # noqa: BLE001 — unknown state keeps the reservation
+                log.warning(f"[fly] could not clear job files from login machine: "
+                            f"{type(exc).__name__}")  # fmt: skip
+                return False
+            try:
+                await pause(delays[attempt])
+            except Exception as exc:  # noqa: BLE001 — unknown state keeps the reservation
+                log.warning(f"[fly] clean-up retry pause failed: {type(exc).__name__}")
+                return False
+        return False  # not reached: the last attempt always returns
+
+    async def _scrub_once(self, machine_id: str, run_id: str, nonce: str) -> bool:
+        """One ``_scrub_login_machine`` attempt; raises on a failed call."""
         # Positive evidence only: every read below is fully validated (a missing
         # or null config is INVALID, never "empty"), and only an explicit 404
         # means the machine is gone.
-        try:
-            machine = await self.client.get(machine_id)
-            if machine is not None:
-                machine = await self._settle_login_machine(machine)
-            if machine is None:
-                return True
-            cfg = copy.deepcopy(machine["config"])
-            owner = _config_run_id(cfg)
-            if owner and owner != run_id:
-                return True  # positively another run's config: this run's job is not stored
-            if not owner and _has_job_config(cfg):
-                log.warning(f"[fly] login machine {machine_id} holds an unattributed job config")
-                return False
-            if owner == run_id:
-                if machine["state"] not in LOGIN_NOT_RUNNING_STATES:
-                    # Never rewrite a machine that may be running.
-                    log.warning(f"[fly] login machine {machine_id} is {machine['state']}; "
-                                "this run's job files were not cleared")  # fmt: skip
-                    return False
-                cfg["files"] = []
-                cfg["env"] = {}
-                if "metadata" in cfg:
-                    cfg["metadata"] = {k: v for k, v in cfg["metadata"].items()
-                                       if k != "ateles_run_id"}  # fmt: skip
-                body: dict = {"config": cfg, "skip_launch": True,
-                              "current_version": machine["instance_id"]}  # fmt: skip
-                await self.client.update(machine_id, body, nonce=nonce)
-            after = await self.client.get(machine_id)
-            if after is not None:
-                after = await self._settle_login_machine(after)
-            if after is None:
-                return True
-            # Cleared means: a validated, present config carrying no job at all.
-            if _has_job_config(after["config"]):
-                log.warning(f"[fly] login machine {machine_id} still holds job files after "
-                            "the clear")  # fmt: skip
-                return False
+        machine = await self.client.get(machine_id)
+        if machine is not None:
+            machine = await self._settle_login_machine(machine)
+        if machine is None:
             return True
-        except Exception as exc:  # noqa: BLE001 — unknown state keeps the reservation
-            log.warning(f"[fly] could not clear job files from login machine: {type(exc).__name__}")
+        cfg = copy.deepcopy(machine["config"])
+        owner = _config_run_id(cfg)
+        if owner and owner != run_id:
+            return True  # positively another run's config: this run's job is not stored
+        if not owner and _has_job_config(cfg):
+            log.warning(f"[fly] login machine {machine_id} holds an unattributed job config")
             return False
+        if owner == run_id:
+            if machine["state"] not in LOGIN_NOT_RUNNING_STATES:
+                # Never rewrite a machine that may be running.
+                log.warning(f"[fly] login machine {machine_id} is {machine['state']}; "
+                            "this run's job files were not cleared")  # fmt: skip
+                return False
+            cfg["files"] = []
+            cfg["env"] = {}
+            if "metadata" in cfg:
+                cfg["metadata"] = {k: v for k, v in cfg["metadata"].items()
+                                   if k != "ateles_run_id"}  # fmt: skip
+            body: dict = {"config": cfg, "skip_launch": True,
+                          "current_version": machine["instance_id"]}  # fmt: skip
+            try:
+                await self.client.update(machine_id, body, nonce=nonce)
+            except FlyApiError as exc:
+                if exc.status in (409, 412):
+                    raise _ScrubRefused(exc) from None
+                raise
+        after = await self.client.get(machine_id)
+        if after is not None:
+            after = await self._settle_login_machine(after)
+        if after is None:
+            return True
+        # Cleared means: a validated, present config carrying no job at all.
+        if _has_job_config(after["config"]):
+            log.warning(f"[fly] login machine {machine_id} still holds job files after "
+                        "the clear")  # fmt: skip
+            return False
+        return True
 
     async def _release_unstarted(self, run_id: str, launch: "_LaunchState") -> None:
         """A launch that provably started nothing. If a login machine's config
         was written, clear it (verified) BEFORE releasing, under the admission
         lock; if that cannot be verified, keep the reservation unconfirmed so
         no other dispatcher can take the machine while it holds this job."""
-        async with self._admission():
+        async with self._admission() as pause:
+            # This run still holds its login lock, lease and reservation, so a
+            # refused clean-up may wait with the admission lock let go.
             if launch.config_written and launch.machine_id:
                 if not await self._scrub_login_machine(launch.machine_id, run_id,
-                                                       launch.lease_nonce):  # fmt: skip
+                                                       launch.lease_nonce,
+                                                       pause=pause):  # fmt: skip
                     self.ledger.mark_unconfirmed(run_id, reason="job config not cleared")
                     return
             if launch.lease_nonce and launch.machine_id:
@@ -2847,8 +3569,26 @@ class FlyExecutor:
             raise asyncio.TimeoutError()
         try:
             record = await self._read_result(job.run_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — unreadable: settled below or unknown
+            record, read_error = None, exc
+        else:
+            read_error = None
+        try:
             if not record:
+                settled = await self._settle_from_github(job)
+                if settled is not None:
+                    return settled
                 job.outcome_unknown = True
+                if read_error is not None:
+                    raise read_error
+                if await self._record_was_refused(handle):
+                    log.error(f"[fly] run={job.run_id}: {RECORD_REFUSED_MESSAGE}")
+                    return 1, b"", (
+                        f"fly runner: no result recorded for run {job.run_id}: "
+                        f"{RECORD_REFUSED_MESSAGE}"
+                    ).encode()
                 return 1, b"", f"fly runner: no result recorded for run {job.run_id}".encode()
             return self._result_from_record(job, record)
         except asyncio.CancelledError:
@@ -2860,6 +3600,55 @@ class FlyExecutor:
                 f"fly runner: the result of run {job.run_id} could not be read "
                 f"({type(exc).__name__}); the run's outcome is unknown"
             ).encode()
+
+    async def _record_was_refused(self, handle: FlyHandle) -> bool:
+        """Whether the machine's last exit status says Neotoma refused the
+        record. Evidence only: any read problem answers False, so the generic
+        message stays for every other cause."""
+        try:
+            machine = await self.client.get(handle.machine_id)
+        except Exception:  # noqa: BLE001 — absent evidence keeps the generic message
+            return False
+        events = machine.get("events") if machine else None
+        if not isinstance(events, list):
+            return False
+        for event in events:  # Fly lists the newest first
+            if not isinstance(event, dict) or event.get("type") != "exit":
+                continue
+            request = event.get("request")
+            exit_event = request.get("exit_event") if isinstance(request, dict) else None
+            code = exit_event.get("exit_code") if isinstance(exit_event, dict) else None
+            return code == EXIT_RECORD_REFUSED
+        return False
+
+    async def _settle_from_github(self, job: FlyJob) -> tuple[int, bytes, bytes] | None:
+        """A finished delivering run with no readable record, settled from what
+        GitHub proves for its own branch (``github_delivery_proof``); None when
+        nothing is proven or any read fails, so the outcome stays unknown. A
+        correction is never settled from GitHub, so GitHub is not read for one."""
+        if job.delivery is None or "pr_number" in job.delivery:
+            return None
+        try:
+            sha, pulls = await asyncio.to_thread(self._read_github, job)
+            opener = await asyncio.to_thread(self._opener_login)
+            got = github_delivery_proof(job, sha, pulls, opener)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — an unread GitHub proves nothing
+            log.warning(f"[fly] run={job.run_id}: no result record, and GitHub could not be "
+                        f"read to settle it ({type(exc).__name__}); outcome unknown")
+            return None
+        if got is None:
+            log.warning(f"[fly] run={job.run_id}: no result record, and GitHub does not prove "
+                        "a delivery on its branch; outcome unknown")
+            return None
+        job.delivery_result = got
+        log.warning(f"[fly] run={job.run_id}: no result record; delivery settled from GitHub "
+                    f"as {got['delivery_status']} {got['pr_url']} at {got['delivery_commit']}")
+        return 0, (
+            f"fly runner: run {job.run_id} {GITHUB_SETTLED_REASON}; "
+            f"{got['delivery_status']} {got['pr_url']}\n"
+        ).encode(), b""
 
     def _result_from_record(self, job: FlyJob, record: dict) -> tuple[int, bytes, bytes]:
         """The CLI's result, from a VALIDATED record. A record that is not
@@ -2901,15 +3690,24 @@ class FlyExecutor:
     async def _settle(self, run_id: str) -> bool:
         """``_settle_locked`` under the admission lock (the lock a run's own
         completion, its launch failure, the reaper and login reconciliation
-        all share)."""
-        async with self._admission():
-            return await self._settle_locked(run_id)
+        all share).
 
-    async def _settle_locked(self, run_id: str) -> bool:
+        Called for a run that a live ``run()`` still holds (its login lock,
+        lease and reservation keep every other job off its machine), so a
+        refused clean-up update is retried with the admission lock let go
+        between attempts: unrelated Fly dispatches are not stalled behind it."""
+        async with self._admission() as pause:
+            # Only a run live here may pause; anything else gets one attempt.
+            live = run_id in self._active
+            return await self._settle_locked(run_id, pause=pause if live else None)
+
+    async def _settle_locked(self, run_id: str, *,
+                             pause: Callable[[float], Any] | None = None) -> bool:  # fmt: skip
         """``_settle_steps``; an unusable ledger keeps the reservation as it
-        is (nothing is charged or released) and reports it unconfirmed."""
+        is (nothing is charged or released) and reports it unconfirmed.
+        *pause* is ``_settle``'s only (see ``_scrub_login_machine``)."""
         try:
-            confirmed = await self._settle_steps(run_id)
+            confirmed = await self._settle_steps(run_id, pause=pause)
         except FlyLedgerError as exc:
             log.error(f"[fly] run={run_id}: ledger unusable ({exc}); reservation kept")
             # Accounting stays frozen, but a machine this process launched is
@@ -2967,7 +3765,8 @@ class FlyExecutor:
                 done.append(run_id)
         return done
 
-    async def _settle_steps(self, run_id: str) -> bool:
+    async def _settle_steps(self, run_id: str, *,
+                            pause: Callable[[float], Any] | None = None) -> bool:  # fmt: skip
         """The one release path, in a strict order, with the admission lock
         held and the reservation still owned throughout:
 
@@ -3011,7 +3810,8 @@ class FlyExecutor:
                 if confirmed:
                     confirmed = await self._terminate(machine_id, login=login, nonce=nonce)
                 if confirmed and login:
-                    confirmed = await self._scrub_login_machine(machine_id, run_id, nonce)
+                    confirmed = await self._scrub_login_machine(machine_id, run_id, nonce,
+                                                                pause=pause)  # fmt: skip
             elif verdict == "idle":
                 confirmed = True  # a stopped login machine holding no job at all
             else:
@@ -3276,7 +4076,7 @@ class FlyExecutor:
             if (mid in login_ids or mid in tracked_machines or machine.get("state") == "destroyed"
                     or (run_id and (run_id in current or run_id in self._active))):  # fmt: skip
                 continue
-            cap = DISPATCH_TIMEOUT_DEFAULT + APIS_DEADLINE_GRACE_SECONDS
+            cap = self.config.longest_default_run_seconds() + APIS_DEADLINE_GRACE_SECONDS
             created = _parse_ts(machine["created_at"]) if "created_at" in machine else None
             key = self.ledger.record_untracked(
                 machine_id=mid, run_id=run_id, owner=self.instance_id, config=self.config,
@@ -3289,6 +4089,44 @@ class FlyExecutor:
                 settled.append(key)
         if settled:
             log.warning(f"[fly] reaper settled {settled}")
+        return settled
+
+    async def settle_marked(self) -> list[str]:
+        """Apis's periodic step: settle reservations marked for the reaper
+        (``unconfirmed``) without waiting for the next launch to reap them.
+
+        Each marked reservation no live run holds (``_reapable``) goes once
+        through the reaper's own recovery, ``_settle_locked`` under the
+        admission lock: stop if needed, clear the job config, release the
+        lease, then settle. A machine that cannot be read, is running, or
+        holds another run's or an unattributable job keeps its reservation,
+        still marked. A login machine a job in this process holds is skipped,
+        as the reaper skips it. Nothing is done, and no Fly call made, when
+        no reservation is marked."""
+        settled: list[str] = []
+        marked = [rid for rid, e in self.ledger.snapshot()["in_flight"].items()
+                  if e.get("unconfirmed") is True]  # fmt: skip
+        if not marked:
+            return settled
+        async with self._admission():
+            now = self._clock()
+            for run_id in marked:
+                fresh = self.ledger.snapshot(now)  # settlements may have run
+                if run_id not in fresh["in_flight"]:
+                    continue
+                entry = fresh["in_flight"][run_id]
+                if entry.get("unconfirmed") is not True:
+                    continue
+                if not self._reapable(run_id, entry, now, fresh["owners"]):
+                    continue
+                provider = next((p for p, m in self.config.login_machines.items()
+                                 if m == entry.get("machine_id")), "")  # fmt: skip
+                if provider and _login_lock(provider, self.config.ledger_path.parent).locked():
+                    continue  # a job holds that machine; its launch reconciles first
+                if await self._settle_locked(run_id):  # admission is held
+                    settled.append(run_id)
+        if settled:
+            log.warning(f"[fly] periodic step settled marked reservations {settled}")
         return settled
 
 
@@ -3318,6 +4156,22 @@ LOGIN_NOT_RUNNING_STATES = frozenset({"stopped", "created"})
 LOGIN_SETTLE_WAIT_SECONDS = 20
 LOGIN_SETTLE_POLLS = 5
 LOGIN_SETTLE_POLL_SECONDS = 1.0
+# Fly can refuse the update that installs a job on a stopped login machine
+# (409/412). Most often nothing else touched the machine: Fly began the
+# update and reverted it, typically because the host had no memory for the
+# machine at that moment, which clears in a minute or two. The claim starts
+# again from a fresh read after each of these waits in turn (about four
+# minutes, seven updates in all), with the admission lock let go during
+# each wait. A wait that would reach the run's deadline is not started.
+LOGIN_CLAIM_BACKOFF_SECONDS = (2.0, 5.0, 15.0, 30.0, 60.0, 120.0)
+# Fly can refuse the clean-up update of a stopped login machine (409/412, e.g.
+# "insufficient memory available to fulfill request" while the host has no
+# room for the machine's reservation); a later attempt can succeed. A run's
+# own settlement retries after each of these pauses (about two minutes in
+# all), re-reading the machine every time; the admission lock is let go
+# during each pause. The reaper and the periodic step make one attempt per
+# pass.
+SCRUB_RETRY_SECONDS = (2.0, 5.0, 15.0, 30.0, 60.0)
 # A short lease taken only to clear a stopped login machine whose run's own
 # lease has expired (recovery of an unconfirmed reservation).
 LOGIN_CLEANUP_LEASE_TTL = 120
@@ -3439,14 +4293,16 @@ def project_machine_status(provider: str, machine: Any, *, absent: bool = False)
 DISPATCH_TIMEOUT_DEFAULT = 1800
 
 
-def _charged_seconds(entry: dict, now: float) -> float:
+def _charged_seconds(entry: dict, now: float,
+                     default_timeout: int = DISPATCH_TIMEOUT_DEFAULT) -> float:  # fmt: skip
     """Machine-seconds to charge for an entry released after the fact: its
     elapsed time, capped at its reserved window. An entry whose times cannot
-    be read is charged the whole default window, never nothing."""
+    be read is charged the whole default window (default_timeout plus
+    the grace), never nothing."""
     try:
         entry = validate("ledger_entry", entry)
     except FlyInvalid:
-        return float(DISPATCH_TIMEOUT_DEFAULT + APIS_DEADLINE_GRACE_SECONDS)
+        return float(default_timeout + APIS_DEADLINE_GRACE_SECONDS)
     window = entry["deadline"] - entry["started_at"]  # not negative: validated
     if not now >= entry["started_at"]:
         # The clock reads earlier than the start: the elapsed time is
@@ -3475,6 +4331,21 @@ def get_executor() -> FlyExecutor:
         log_limit_check(config)
         _EXECUTOR = FlyExecutor(config)
     return _EXECUTOR
+
+
+async def settle_marked_reservations() -> list[str]:
+    """``FlyExecutor.settle_marked`` for Apis's periodic sweep. Does nothing
+    while no class is opted onto Fly and no executor was built in this
+    process. Never raises: a failed pass settles nothing and every
+    reservation stays held for the next pass or the reaper."""
+    if _EXECUTOR is None and not runner_classes():
+        return []
+    try:
+        return await get_executor().settle_marked()
+    except Exception as exc:  # noqa: BLE001 — a failed pass releases nothing
+        log.warning(f"[fly] periodic settlement of marked reservations failed: "
+                    f"{type(exc).__name__}")  # fmt: skip
+        return []
 
 
 def log_limit_check(config: FlyConfig | None = None) -> list[str]:

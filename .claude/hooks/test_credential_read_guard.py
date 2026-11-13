@@ -25,6 +25,7 @@ import string
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,94 @@ def run(tool_name, tool_input, env=None):
 
 def run_bash(cmd):
     return run("Bash", {"command": cmd})
+
+
+def _bounded_expansion_result(tool_name, tool_input):
+    """Keep a regression on the old eager expansion from exhausting the host."""
+    import ctypes
+
+    if sys.platform == "darwin":
+        lib = ctypes.CDLL("/usr/lib/libproc.dylib")
+        lib.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+
+        def physical_bytes(pid):
+            usage = ctypes.create_string_buffer(512)
+            if lib.proc_pid_rusage(pid, 0, ctypes.byref(usage)) != 0:
+                return None
+            # rusage_info_v0.ri_phys_footprint, not resident memory: swapped
+            # or compressed allocations must still count against this test.
+            return int.from_bytes(usage.raw[72:80], sys.byteorder)
+    elif sys.platform.startswith("linux"):
+        def physical_bytes(pid):
+            try:
+                values = Path(f"/proc/{pid}/statm").read_text().split()
+                return int(values[1]) * os.sysconf("SC_PAGE_SIZE")
+            except (OSError, IndexError):
+                return None
+    else:
+        pytest.skip("physical memory watchdog requires macOS or Linux")
+
+    assert physical_bytes(os.getpid()) > 0  # validate the measuring instrument
+    payload = json.dumps({"tool_name": tool_name, "tool_input": tool_input})
+    proc = subprocess.Popen(
+        [sys.executable, HOOK], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    peak, stop = 0, ""
+    try:
+        proc.stdin.write(payload)
+        proc.stdin.close()
+        started = time.monotonic()
+        while proc.poll() is None:
+            measured = physical_bytes(proc.pid)
+            peak = max(peak, measured or 0)
+            if peak > 96 * 1024 * 1024:
+                stop = "physical memory budget"
+                break
+            if time.monotonic() - started > 5:
+                stop = "time budget"
+                break
+            time.sleep(0.005)
+        if stop:
+            proc.kill()  # only this test's exclusively owned child
+        proc.wait(timeout=3)
+        stdout, stderr = proc.stdout.read(), proc.stderr.read()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=3)
+    assert not stop, f"credential inspection exceeded {stop} (peak {peak} bytes)"
+    assert "internal error" not in stderr, stderr
+    return proc.returncode, stdout
+
+
+def test_quoted_inline_dicts_are_literal_not_a_cartesian_product():
+    import shlex
+
+    program = "print([" + ",".join(["{'alpha':1,'beta':2}"] * 24) + "])"
+    rc, _ = _bounded_expansion_result("Bash", {"command": "python3 -c " + shlex.quote(program)})
+    assert rc == 0
+
+
+@pytest.mark.parametrize("tool,tool_input", [
+    ("Bash", {"command": "cat " + "{safe,ordinary}" * 20 + "/{notes.txt,.env}"}),
+    ("Bash", {"command": "cat -" + "x" * 8000 + ENV}),
+    ("Grep", {"path": str(FIXTURE_ROOT), "glob": "{a,b}" * 20 + "/{notes.txt,.env}",
+              "output_mode": "content"}),
+])
+def test_expansion_limit_refuses_without_missing_a_late_credential(tool, tool_input):
+    rc, stdout = _bounded_expansion_result(tool, tool_input)
+    assert rc == 2
+    assert json.loads(stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_literal_inline_program_still_refuses_a_credential_reference():
+    import shlex
+
+    program = "print([" + ",".join(["{'alpha':1,'beta':2}"] * 24) + "]); open(" + repr(ENV) + ")"
+    rc, stdout = _bounded_expansion_result("Bash", {"command": "python3 -c " + shlex.quote(program)})
+    assert rc == 2
+    assert json.loads(stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 # ---------------------------------------------------------------------------

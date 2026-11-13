@@ -96,6 +96,11 @@ GitHub trigger layer (ateles#80 — see github_gateway.py / swarm_dispatch.py):
                                    outside a rotation
   APIS_GITHUB_WEBHOOK_PORT    Webhook listen port (default: 8742)
   APIS_PANEL_MAX              Max review panelists per PR (default: 6)
+  APIS_PANEL_SWEEP_INTERVAL_S Seconds between repeating sweeps that re-drive
+                              stranded labelled-PR review panels while Apis
+                              runs (default: 600). 0 turns the repeating sweep
+                              off; a value that is not a whole number (or is
+                              negative) also turns it off, with a warning
   APIS_AUTONOMY_AUTO_MERGE    "1" lets the dispatcher merge after verified
                               review receipt + CI (default: 0 — checkpoint)
   GITHUB_TOKEN                Token for changed-files / issue-comment reads
@@ -113,6 +118,7 @@ import hashlib
 import logging
 import math
 import os
+import re
 import stat
 import sys
 import time
@@ -251,14 +257,20 @@ from lib.daemon_runtime import (  # noqa: E402
     resolve_policy_for_agent,
     write_checkpoint_brief,
 )
+from lib.daemon_runtime import label_gate as _label_gate  # noqa: E402
 from lib.daemon_runtime.action_type import (  # noqa: E402
     AGENT_ACTION_TYPE_PRIOR,
+    SOURCE_AGENT_PRIOR,
     ResolvedActionType,
+    infer_action_type_from_text,
     resolve_gate_action_type,
 )
 from lib.daemon_runtime.gating import (  # noqa: E402
+    _snapshot_with_tenant,
     ExecutionPolicy,
     checkpoint_already_dispatched,
+    checkpoint_effect_scope_with_reason,
+    checkpoint_scope_permits_ordinary_effects,
     checkpoints_for_task,
     close_checkpoint_without_release,
     entity_record_digest,
@@ -278,6 +290,12 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     query_all_entities,
     require_fresh_checkpoint_approval,
     stamp_checkpoint_dispatched,
+    CHECKPOINT_APPROVED_NO_RELEASE,
+    CHECKPOINT_APPROVED_STATES,
+    CHECKPOINT_AWAITING_OPERATOR,
+    CHECKPOINT_REJECTED_STATES,
+    CHECKPOINT_REQUIRES_FRESH_APPROVAL,
+    CHECKPOINT_SUPERSEDED,
     supersede_checkpoint,
 )
 from lib.daemon_runtime.task_lifecycle import (  # noqa: E402
@@ -326,6 +344,10 @@ log = logging.getLogger("apis")
 # an exception-draining callback for the rest of the daemon process lifetime.
 _background_dispatch_tasks: set[asyncio.Task[None]] = set()
 _background_checkpoint_tasks: set[asyncio.Task[None]] = set()
+# Task ids whose detached run is still in progress. `_seen_created` evicts old
+# ids, so a `task.created` redelivered after eviction would otherwise start a
+# second run alongside the first. Removed when the run ends, however it ends.
+_detached_runs_in_progress: set[str] = set()
 
 
 def _background_dispatch_done(task: asyncio.Task[None]) -> None:
@@ -333,9 +355,12 @@ def _background_dispatch_done(task: asyncio.Task[None]) -> None:
     try:
         task.result()
     except asyncio.CancelledError:
-        log.warning("[%s] detached dispatch was cancelled", DAEMON_NAME)
+        log.warning(
+            "[%s] detached dispatch %s was cancelled", DAEMON_NAME, task.get_name()
+        )
     except Exception:
-        log.exception("[%s] detached dispatch failed", DAEMON_NAME)
+        # The task name carries the task id (apis-dispatch-<id>-<trigger>).
+        log.exception("[%s] detached dispatch %s failed", DAEMON_NAME, task.get_name())
 
 
 def _background_checkpoint_done(task: asyncio.Task[None]) -> None:
@@ -567,7 +592,10 @@ GITHUB_WEBHOOK_SECRET_NEXT = os.environ.get("APIS_GITHUB_WEBHOOK_SECRET_NEXT", "
 from routing import (  # noqa: E402
     DOMAIN_ROUTES as _DOMAIN_ROUTES,
     HUMAN_OWNED as _HUMAN_OWNED,
+    OperatorIdentityUnavailable,
+    SESSION_OWNED as _SESSION_OWNED,
     canonical_assignee as _canonical_assignee,
+    deciding_assignee as _deciding_assignee,
     infer_tags_from_text as _infer_tags_from_text,
     resolve_role as _resolve_role,
     resolve_skill as _resolve_skill,
@@ -578,6 +606,7 @@ import github_gateway  # noqa: E402
 import build_delivery  # noqa: E402
 import model_tiering  # noqa: E402
 import producer_confidence  # noqa: E402
+from red_conditions import ApisNotifier  # noqa: E402
 from skill_runner import SkillResult, _redact_secrets, run_skill  # noqa: E402
 from swarm_dispatch import SwarmDispatcher, _token_for_agent_on_repo  # noqa: E402
 from task_reconciler import TaskReconciler  # noqa: E402
@@ -778,6 +807,11 @@ def _dispatch_mode_from_snapshot(snapshot: dict) -> str | None:
 # ── T4 dispatch ────────────────────────────────────────────────────────────────
 
 
+
+def _correction_not_started(skill: str, reason: str):
+    return SkillResult(skill, False, None, "", "", error=reason,
+                       fly_delivery_not_launched=True, fly_delivery_cleanup="not_reserved")
+
 async def _spawn_harness_skill(
     skill: str,
     entity_id: str,
@@ -788,6 +822,8 @@ async def _spawn_harness_skill(
     role: str | None = None,
     run_conversation_id: str | None = None,
     run_agent_session_id: str | None = None,
+    _lifecycle_version: str | None = None,
+    _lifecycle_provenance: _ApprovedCorrectionLifecycle | None = None,
 ) -> "object":
     """
     Spawn a T4 agent for a task event. The subprocess mechanics live in
@@ -841,6 +877,19 @@ async def _spawn_harness_skill(
     # never a reference found in the task's prose.
     repository = _dispatch_repo_from_snapshot(snapshot)
     key = build_delivery.issue_key(snapshot, repository)
+    try:
+        target = (build_delivery.existing_pr_target(snapshot, repository)
+                  if build_delivery.is_delivery_dispatch(skill, action_class)
+                  or snapshot.get("task_type") == "existing_pr_correction" else None)
+        if target and not build_delivery.is_delivery_dispatch(skill, action_class):
+            raise build_delivery.BuildWorktreeError("existing PR correction is not a permitted delivery dispatch")
+    except build_delivery.BuildWorktreeError as exc:
+        if snapshot.get("task_type") == "existing_pr_correction":
+            return _correction_not_started(skill, f"build not started: {exc.reason}")
+        return SkillResult(skill, False, None, "", "", error=f"build not started: {exc.reason}")
+    if target:
+        if key and build_delivery.active_build(*key):
+            return _correction_not_started(skill, "the correction source already has an active builder")
     if build_delivery.is_delivery_dispatch(skill, action_class):
         if not repository:
             log.warning(
@@ -848,10 +897,16 @@ async def _spawn_harness_skill(
                 "names no repository — running without worktree or network"
             )
         else:
-            blocker = build_delivery.fly_delivery_blocker(
+            # A further correction whose settled receipt qualifies proceeds to
+            # run_fly_delivery, which supersedes it; every other receipt refuses
+            # here, with no local fallback (the same supersedable_correction).
+            blocker = build_delivery.fly_delivery_entrance_blocker(
                 build_delivery.fly_delivery_key(
                     repository, key[1] if key else None, entity_id
-                )
+                ),
+                receipt_key=(build_delivery.fly_delivery_key(repository, target.number)
+                             if target else ""),
+                target=target,
             )
             if blocker:
                 return SkillResult(skill, False, None, "", "", error=blocker,
@@ -863,7 +918,9 @@ async def _spawn_harness_skill(
             fly_result = await _run_fly_delivery_task(
                 skill, prompt, entity_id=entity_id, role=role, repository=repository,
                 key=key, run_agent_session_id=run_agent_session_id, notifier=notifier,
-                action_class=action_class,
+                action_class=action_class, target=target, task_snapshot=snapshot,
+                task_lifecycle_version=_lifecycle_version,
+                task_lifecycle_provenance=_lifecycle_provenance,
             )  # fmt: skip
             if fly_result is not None:
                 return fly_result
@@ -887,9 +944,11 @@ async def _spawn_harness_skill(
 
     with contextlib.ExitStack() as stack:
         if delivery and key:
-            claim = stack.enter_context(
-                build_delivery.claim_build(*key, f"task:{entity_id}")
-            )
+            try:
+                claim = stack.enter_context(
+                    build_delivery.claim_build(*key, f"task:{entity_id}"))
+            except build_delivery.BuildWorktreeError as exc:
+                return SkillResult(skill, False, None, "", "", error=exc.reason)
             prompt = (
                 f"{prompt}\n\n{build_delivery.worktree_instructions(worktree)}"
                 f"\n\n{build_delivery.tracking_instructions(claim)}"
@@ -914,33 +973,332 @@ def _fly_receipt_key(snapshot: dict, entity_id: str) -> str:
     repository = _dispatch_repo_from_snapshot(snapshot)
     if not repository:
         return ""
-    issue = build_delivery.issue_key(snapshot, repository)
+    try:
+        target = build_delivery.existing_pr_target(snapshot, repository)
+    except build_delivery.BuildWorktreeError:
+        target = None  # The spawn refuses malformed placement before any effects.
+    issue = ((repository.lower(), target.number) if target
+             else build_delivery.issue_key(snapshot, repository))
     return build_delivery.fly_delivery_key(repository, issue[1] if issue else None, entity_id)
+
+
+def _fly_run_in_flight(snapshot: dict, entity_id: str) -> bool | None:
+    """Whether the Fly ledger shows a delivery run in flight for this task.
+
+    True: the task's delivery receipt is still ``launching`` (held for the
+    whole run) or names a run whose reservation is still in flight. False: the
+    ledger was read and no live receipt is, or could be, this task's. None:
+    whether a run is in flight for this task is unknown, either because the
+    ledger could not be read, or because a live issue- or PR-keyed receipt
+    records no task id, so it could be this task's run under a key the task no
+    longer derives. A task with no delivery key (its repository field is gone)
+    is still checked by task id below, so losing the repository mid-run cannot
+    hide the run. Reads the ledger once, through ``FlyLedger.snapshot``; never
+    settles or writes anything."""
+    return _fly_run_state(snapshot, entity_id)[0]
+
+
+def _fly_run_state(snapshot: dict, entity_id: str) -> tuple[bool | None, str]:
+    """``(in_flight, unowned_key)``: ``in_flight`` as ``_fly_run_in_flight``
+    returns it, and, when it is None because of a live receipt that records no
+    task id, that receipt's stored key (else ``""``). The key is only for the
+    refusal's wording; the receipt's contents are never logged."""
+    import fly_runner
+
+    key = _fly_receipt_key(snapshot, entity_id)
+    try:
+        doc = build_delivery._delivery_ledger().snapshot()
+    except (OSError, fly_runner.FlyLedgerError):
+        return None, ""
+    receipts = doc.get("deliveries", {})
+
+    def _live(entry: dict) -> bool:
+        run_id = entry.get("run_id")
+        return entry.get("status") == "launching" or bool(run_id and run_id in doc["in_flight"])
+
+    entry = build_delivery._receipt_for(build_delivery.canonical_key(key), receipts) if key else None
+    if entry is not None and _live(entry):
+        return True, ""
+    # The key is derived from the task as it is now, so a task whose repository
+    # changed mid-run, or was cleared (no key at all), misses its own receipt
+    # above. A receipt reserved for a task records that task's id
+    # (``task_id``), and a task-keyed receipt ("owner/name#task:<id>") names it
+    # in its key, so any live receipt naming this task's id is this task's run
+    # whatever repository it was launched against.
+    task_id = str(entity_id).strip()
+    task_suffix = f"#task:{task_id}"
+
+    def _names_task(stored: object, other: dict) -> bool:
+        return (str(other.get("task_id") or "").strip() == task_id
+                or str(stored).strip().endswith(task_suffix))
+
+    live = [(stored, other) for stored, other in receipts.items()
+            if isinstance(other, dict) and _live(other)]
+    if task_id and any(_names_task(stored, other) for stored, other in live):
+        return True, ""
+    # A live issue- or PR-keyed receipt with no task id (reserved before task
+    # ids were recorded) names no task, so it could be this task's run under a
+    # key the task no longer derives. Whose run it is cannot be told, so this
+    # is unknown, and callers refuse as they do for an unreadable ledger. The
+    # cost: while such a receipt is live, every task dispatch is refused until
+    # it settles. A settled receipt with no task id changes nothing. Lens
+    # review receipts ("lens:..." keys, kind "lens") are review runs on a pull
+    # request, never a task's delivery run, so they are not counted here.
+    for stored, other in live:
+        if (str(other.get("task_id") or "").strip()
+                or build_delivery._TASK_KEY_MARK in str(stored)
+                or other.get("kind") == "lens" or str(stored).startswith("lens:")):
+            continue
+        return None, str(stored)
+    return False, ""
+
+
+def _fly_run_held_by_other_task(snapshot: dict, entity_id: str) -> "build_delivery.BuildClaim | None":
+    """The in-process build claim on this task's issue when ANOTHER task holds it.
+
+    Distinguishes a Fly run in flight for a different task sharing this task's
+    delivery key (a correction holding the source issue as an alias) from this
+    task's own run. Uses the same key and registry as the deferral path below,
+    whose holder names its task as ``task:<id>``. None when no claim is held, or
+    the claim is this task's own: either way the caller cannot defer and refuses."""
+    key = build_delivery.issue_key(snapshot, _dispatch_repo_from_snapshot(snapshot))
+    holder = build_delivery.active_build(*key) if key else None
+    if holder is None or holder.holder == f"task:{entity_id}":
+        return None
+    return holder
+
+
+def _fly_defer_holder(snapshot: dict, entity_id: str) -> "build_delivery.BuildClaim | None":
+    """The other task's claim this task must be deferred behind, or None.
+
+    Set only when the Fly ledger shows a run in flight on this task's key AND
+    a DIFFERENT task holds this task's issue in the build registry. The one
+    test both entrances (``handle_event``'s early task.created check and
+    ``dispatch_task``) use to let such a task through to the deferral path, so
+    they cannot disagree. An unreadable ledger (None) or this task's own run
+    gives None, and the caller refuses as before.
+    So does an unknown answer (None), whatever its cause."""
+    if _fly_run_in_flight(snapshot, entity_id) is not True:
+        return None
+    return _fly_run_held_by_other_task(snapshot, entity_id)
+
+
+def _fly_run_refuses_dispatch(snapshot: dict, entity_id: str, trigger: str) -> bool:
+    """True when a task must not be dispatched because a Fly run is in flight
+    for it, or that is unknown (the ledger could not be read, or a live receipt
+    records no task id). Logs why, naming such a receipt by its key only."""
+    in_flight, unowned_key = _fly_run_state(snapshot, entity_id)
+    if in_flight is False:
+        return False
+    if in_flight is None and unowned_key:
+        why = (f"a live Fly receipt with no task id ({unowned_key!r}) could be this task's "
+               "run, so whether a run is in flight for it is unknown")
+    elif in_flight is None:
+        why = "the Fly ledger could not be read, so whether a run is in flight is unknown"
+    elif _fly_receipt_names_other_task(snapshot, entity_id) and _fly_run_held_by_other_task(
+            snapshot, entity_id) is None:
+        why = ("a Fly run is in flight on this task's delivery key, but its receipt names "
+               "another task and that task's build claim is unavailable, so whose run it "
+               "is is uncertain")
+    else:
+        why = "a Fly run is in flight for this task"
+    log.warning(f"[{DAEMON_NAME}] {trigger} for {entity_id}: {why} — not routing")
+    return True
+
+
+def _fly_receipt_names_other_task(snapshot: dict, entity_id: str) -> bool:
+    """Whether the receipt on this task's delivery key records a different
+    task's id. Only chooses warning wording; False when it cannot tell."""
+    key = _fly_receipt_key(snapshot, entity_id)
+    if not key:
+        return False
+    try:
+        receipts = build_delivery._delivery_ledger().snapshot().get("deliveries", {})
+        entry = build_delivery._receipt_for(build_delivery.canonical_key(key), receipts)
+    except Exception:  # noqa: BLE001 — wording only; never changes the refusal
+        return False
+    owner = str((entry or {}).get("task_id") or "").strip()
+    return bool(owner) and owner != str(entity_id).strip()
+
+
+def _watchdog_fly_guard(entity_id: str, snapshot: dict) -> bool:
+    """The watchdog's guard: refuse to touch a task whose Fly run is in flight
+    or unknown (an unreadable ledger), before any watchdog state write."""
+    return _fly_run_refuses_dispatch(snapshot, entity_id, "watchdog")
+
+
+def _correction_policy_reader(entity_id, snapshot, repository, target, claim, *, lifecycle_version=None,
+                              lifecycle_provenance=None):
+    """Bind the explicit owner policy read to this current exclusive invocation.
+
+    Upstream normal task/checkpoint admission remains authoritative. A fresh
+    version/scope read here detects changes while the separate control read is
+    awaited; its result is never a reusable approval or task-supplied proof.
+    """
+    import copy
+    import json
+    from lib.github_account import validate_login
+    from lib.github_policy_control import read_owner_policy
+    from lib.daemon_runtime.artifact_resolver import qualify_default_protection
+
+    bound = {}
+
+    async def current_record():
+        if lifecycle_version is not None:
+            if (not isinstance(lifecycle_provenance, _ApprovedCorrectionLifecycle)
+                    or lifecycle_provenance.task_id != entity_id
+                    or lifecycle_provenance.version != lifecycle_version):
+                return None, None
+            return await asyncio.to_thread(_read_correction_lifecycle_record, lifecycle_provenance)
+        return await asyncio.to_thread(fetch_task_snapshot_and_version, entity_id)
+
+    def context_shape(row, *, lifecycle_transition=False):
+        # Compare the complete JSON task shape, including key presence and
+        # JSON types. Only the existing dispatch->executing lifecycle fields
+        # may differ initially; unknown/new scope keys must not be adopted.
+        ignored = {"status", "updated_at", "updated_date", "result"} if lifecycle_transition else set()
+        return json.dumps({key: value for key, value in row.items() if key not in ignored},
+                          sort_keys=True, allow_nan=False, separators=(",", ":"))
+
+    async def current():
+        try:
+            if not bound or os.environ.get("APIS_OPERATOR_LOGIN", "") != bound["login"]:
+                return "the explicit owner policy context changed or is missing"
+            fresh, version = await current_record()
+            if version != bound["version"] or context_shape(fresh) != context_shape(bound["snapshot"]):
+                return "the current task changed during the owner policy read"
+            for repo, number in ((claim.repository, claim.number), *claim.aliases):
+                held = build_delivery.active_build(repo, number)
+                if not held or held.run_id != claim.run_id or held.holder != claim.holder:
+                    return "the correction no longer owns its source/PR exclusion"
+        except Exception:
+            return "the current owner policy invocation could not be revalidated"
+        return None
+
+    async def read():
+        try:
+            configured_login = os.environ.get("APIS_OPERATOR_LOGIN", "")
+            if not configured_login.strip():
+                return ("control configuration is missing APIS_OPERATOR_LOGIN for the existing account; "
+                        "verify that binding before normal re-admission; all other gates remain held")
+            login = validate_login(configured_login)
+            fresh, version = await current_record()
+            if not isinstance(snapshot, dict) or not isinstance(fresh, dict) or not version:
+                return "the current correction task could not be bound for the policy read"
+            # Executing is the existing normal admission/lifecycle entrance;
+            # this reader cannot turn a held/pending checkpoint into execution.
+            if normalize_status(fresh.get("status")) != TaskStatus.EXECUTING.value:
+                return "the correction task is not in its admitted executing state"
+            if lifecycle_version is not None:
+                context_matches = (version == lifecycle_version
+                                   and context_shape(snapshot) == context_shape(fresh))
+            else:
+                context_matches = (context_shape(snapshot, lifecycle_transition=True)
+                                   == context_shape(fresh, lifecycle_transition=True))
+            if not context_matches:
+                return ("the correction scope/actor/source/attempt/history changed before the policy read; "
+                        "normal re-admission is required")
+            if (build_delivery.existing_pr_target(fresh, repository) != target
+                    or _dispatch_repo_from_snapshot(fresh) != repository):
+                return "the current correction target changed before the policy read"
+            bound.update(login=login, version=version, snapshot=copy.deepcopy(fresh))
+            reason = await current()
+            if reason:
+                return reason
+            # Explicit selection for this predicate only. PR/source and job
+            # delivery continue under their normal App, never this credential.
+            evidence = await asyncio.to_thread(read_owner_policy, repository, login)
+            if (evidence.get("principal") != login or evidence.get("host") != "github.com"
+                    or isinstance(evidence.get("principal_id"), bool)
+                    or not isinstance(evidence.get("principal_id"), int) or evidence["principal_id"] <= 0
+                    or str(evidence.get("repository", "")).lower() != repository.lower()):
+                return "the explicit owner policy response does not match the current invocation"
+            if evidence["default_branch"] == target.branch:
+                return "the correction target became the repository default branch"
+            details = evidence["details"]
+            ids = [row.get("id") for row in details if isinstance(row, dict)]
+            if len(ids) != len(details) or len(set(ids)) != len(ids):
+                return "the explicit owner policy details are malformed"
+            by_id = {row["id"]: row for row in details}
+            reason = qualify_default_protection(repository, evidence["rulesets"], by_id.get)
+            if reason:
+                return reason
+            reason = await current()
+            if reason:
+                return reason
+            log.info("[%s] selected explicit owner policy read for correction: principal=%s principal_id=%s repo=%s; delivery remains App-owned",
+                     DAEMON_NAME, evidence["principal"], evidence["principal_id"], repository)
+            return None
+        except Exception:
+            return "the explicit owner policy read was not qualified; no delivery started"
+
+    return read, current
 
 
 async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, role: str | None,
                                  repository: str, key, run_agent_session_id: str | None,
-                                 notifier, action_class: str):  # fmt: skip
+                                 notifier, action_class: str, target=None, task_snapshot=None,
+                                 task_lifecycle_version=None, task_lifecycle_provenance=None):  # fmt: skip
     """A task-routed build delivered on Fly, or None to run it locally."""
-    plan = build_delivery.plan_fly_delivery(
-        repository, f"task-{entity_id[-8:]}",
-        key=build_delivery.fly_delivery_key(repository, key[1] if key else None, entity_id),
-        issue_number=key[1] if key else None,
-    )
+    try:
+        receipt_key = build_delivery.fly_delivery_key(
+            repository, target.number if target else key[1] if key else None, entity_id)
+        source_key = (build_delivery.fly_delivery_key(repository, key[1])
+                      if target and key and key[1] != target.number else "")
+        plan = build_delivery.plan_fly_delivery(
+            repository, f"task-{entity_id[-8:]}", key=receipt_key,
+            issue_number=key[1] if key else None, target=target, source_key=source_key,
+            task_id=entity_id,
+        )
+    except build_delivery.BuildWorktreeError as exc:
+        if target:
+            return _correction_not_started(skill, f"build not started: {exc.reason}")
+        return SkillResult(skill, False, None, "", "", error=f"build not started: {exc.reason}")
     if plan is None:
         return None
     with contextlib.ExitStack() as stack:
         fly_prompt = f"{prompt}\n\n{build_delivery.fly_delivery_instructions(plan)}"
-        if key:
-            claim = stack.enter_context(build_delivery.claim_build(*key, f"task:{entity_id}"))
+        claim_key = (repository, target.number) if target else key
+        if claim_key:
+            try:
+                claim = stack.enter_context(build_delivery.claim_build(
+                    *claim_key, f"task:{entity_id}", exclusive=bool(target),
+                    aliases=(key,) if target and key and key != claim_key else ()))
+            except build_delivery.BuildWorktreeError as exc:
+                return (_correction_not_started(skill, exc.reason) if target
+                        else SkillResult(skill, False, None, "", "", error=exc.reason))
             fly_prompt += f"\n\n{build_delivery.tracking_instructions(claim)}"
 
+        async def verify_correction():
+            # The task's authorization, its owner policy and the PR target, read
+            # fresh each time: before the first attempt and before every further one.
+            try:
+                binding = ({"lifecycle_version": task_lifecycle_version,
+                            "lifecycle_provenance": task_lifecycle_provenance}
+                           if task_lifecycle_version is not None else {})
+                policy_read, policy_current = _correction_policy_reader(
+                    entity_id, task_snapshot, repository, target, claim, **binding)
+                return await build_delivery.verify_existing_pr_target(
+                    repository, target, lambda repo: _token_for_agent_on_repo(skill, repo),
+                    policy_reader=policy_read, policy_current=policy_current)
+            except build_delivery.BuildWorktreeError as exc:
+                return exc.reason
+
+        if target:
+            reason = await verify_correction()
+            if reason:
+                return _correction_not_started(skill, f"existing PR correction not started: {reason}")
+
+        # Providers Fly refused for this correction before anything launched.
+        refused_providers: tuple[str, ...] = ()
+
         async def launch():
+            extra = {"exclude_providers": refused_providers} if refused_providers else {}
             return await run_skill(
                 skill, fly_prompt, role=role or skill, task_entity_id=entity_id,
                 agent_session_id=run_agent_session_id or "", notifier=notifier,
                 action_class=action_class, repository=repository, runner="fly",
-                fly_delivery=plan.spec(),
+                fly_delivery=plan.spec(), **extra,
             )  # fmt: skip
 
         refusals: list[str] = []
@@ -951,6 +1309,37 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
                                fly_delivery_status="unknown")  # fmt: skip
 
         result = await build_delivery.run_fly_delivery(plan, launch, refused)
+        # A correction is dispatched to one provider at a time. When Fly refused
+        # that provider before anything launched, for a reason that is the
+        # provider alone, and this attempt's own prelaunch receipt was proven
+        # removed, the next Fly candidate runs in a fresh dispatch under its
+        # own receipt, as a first delivery's provider loop would try it. Any
+        # other outcome (a launch, an unknown launch, an unproven cleanup,
+        # another refusal, no candidate left) keeps the result as it is.
+        while (target and not refusals and result is not None
+               and result.fly_delivery_not_launched
+               and result.fly_delivery_cleanup == "released"
+               and result.fly_provider_ineligible and result.fly_next_providers):
+            newly = tuple(dict.fromkeys(
+                p for p in (*result.attempted_providers, result.provider)
+                if p and p not in refused_providers))
+            if not newly:
+                break  # nothing new to exclude: another try could only repeat it
+            reason = await verify_correction()
+            if reason:
+                # The task, its policy or the PR changed during the refused
+                # attempt. Its receipt was already released (checked above), so
+                # stopping here leaves nothing behind and launches nothing.
+                return _correction_not_started(skill, f"existing PR correction not started: {reason}")
+            refused_providers = (*refused_providers, *newly)
+            log.warning(f"[{DAEMON_NAME}] {skill} task {entity_id}: Fly cannot run "
+                        f"{result.provider} for this correction ({result.error}); "
+                        f"trying {result.fly_next_providers[0]} on Fly")
+            result = await build_delivery.run_fly_delivery(plan, launch, refused)
+            if result is not None:
+                result.attempted_providers = (
+                    *refused_providers,
+                    *(p for p in result.attempted_providers if p not in refused_providers))
     if refusals:
         # Nothing was launched here: keep the refusal's own text (the recorded
         # delivery's status, run, branch and the recovery steps).
@@ -975,8 +1364,9 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
             result.ok = True
         else:
             result.ok = False
-            result.error = (f"Fly delivery not verified: {unverified}. {summary}"
-                            if unverified else summary)
+            if not (target and result.fly_delivery_not_launched):
+                result.error = (f"Fly delivery not verified: {unverified}. {summary}"
+                                if unverified else summary)
         if result.fly_delivery_readback == "passed":
             log.info(f"[{DAEMON_NAME}] {skill} task {entity_id}: {summary} Read-back: passed.")
         elif result.fly_delivery_readback == "failed":
@@ -984,7 +1374,124 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
                      f"Read-back FAILED: {result.fly_delivery_readback_reason}.")
         else:
             log.info(f"[{DAEMON_NAME}] {skill} task {entity_id}: {summary}")
+        if (not target and result.ok and result.fly_delivery_status == "opened"
+                and result.fly_pr_number):
+            await _label_canary_pull_request(skill, entity_id, repository,
+                                             result.fly_pr_number, task_snapshot)
     return result
+
+
+def _canary_label_for_task(task_snapshot) -> str:
+    """The configured canary label when this task declares itself canary-lane
+    work, else "".
+
+    The declaration is the task's own ``tags`` list carrying exactly the label
+    the swarm label gate is configured with. Nothing about the pull request
+    (title, body, branch, author, repository) counts: adding the label opts the
+    pull request into automatic swarm work. A gate that is off labels nothing."""
+    label = _label_gate.required_label()
+    if not label or not isinstance(task_snapshot, dict):
+        return ""
+    tags = task_snapshot.get("tags")
+    if not isinstance(tags, (list, tuple)):
+        return ""
+    return label if _label_gate.carries_label(label, tags) else ""
+
+
+def _gh_pr_labels(repo: str, number: int, token: str, label: str | None = None) -> tuple[int, str]:
+    """Add *label* to the pull request (or, with no label, read its labels) as
+    (returncode, stdout). Argv only, never a shell; the token is passed in the
+    environment and never logged. The one place the canary labelling talks to
+    GitHub; tests replace it."""
+    import subprocess
+
+    argv = ["gh", "api", f"repos/{repo}/issues/{number}/labels"]
+    if label is not None:
+        argv += ["-X", "POST", "-f", f"labels[]={label}"]
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False,
+                          env={**os.environ, "GH_TOKEN": token, "GITHUB_TOKEN": token})
+    return proc.returncode, proc.stdout or ""
+
+
+async def _label_canary_pull_request(skill: str, entity_id: str, repository: str,
+                                     number: int, task_snapshot) -> str:
+    """Add the canary label to a pull request Fly just opened for a canary-lane
+    task, then read the labels back. One attempt, never a retry, never a
+    removal. Returns the label state it can actually show, and logs it in one
+    line naming the pull request:
+
+    * ``"confirmed"``: the read-back lists the label.
+    * ``"absent"``: no request was sent, GitHub refused it with a 4xx, or the
+      read-back succeeded and does not list the label.
+    * ``"unknown"``: the request timed out, raised, or failed without a 4xx;
+      or it succeeded and the read-back failed, was empty or was malformed.
+      The label may or may not be on the pull request, and the label is what
+      admits it to automatic review, so this is never reported as unlabelled.
+    * ``""``: the task is not canary-lane work and nothing was attempted.
+
+    Never raises, so the delivery result is unchanged in every case."""
+    import json
+
+    label = _canary_label_for_task(task_snapshot)
+    if not label:
+        return ""
+    where = f"{repository}#{number}"
+    head = f"[{DAEMON_NAME}] {skill} task {entity_id}:"
+
+    def absent(why: str) -> str:
+        log.warning(f"{head} canary label {label!r} is absent from pull request {where} "
+                    f"({why}); this run did not place it in the canary lane")
+        return "absent"
+
+    def unknown(why: str) -> str:
+        log.warning(f"{head} canary label {label!r} state is UNKNOWN on pull request {where} "
+                    f"({why}); it may or may not be in the canary lane. Check its labels")
+        return "unknown"
+
+    def refusal_status(out: str) -> int | None:
+        # gh api prints GitHub's error body on stdout; its "status" is the
+        # only evidence of a definite refusal. Anything else is not one.
+        try:
+            status = int(json.loads(out).get("status"))
+        except Exception:  # noqa: BLE001 - no readable status means no refusal shown
+            return None
+        return status if 400 <= status < 500 else None
+
+    try:
+        token = _token_for_agent_on_repo(skill, repository)
+    except Exception as exc:  # noqa: BLE001 - labelling must never fail the delivery
+        return absent(f"no label request was sent: credential lookup failed ({exc})")
+    if not token:
+        return absent("no label request was sent: no GitHub write credential for this repository")
+    try:
+        code, out = await asyncio.to_thread(_gh_pr_labels, repository, number, token, label)
+    except Exception as exc:  # noqa: BLE001 - timeout or no response
+        return unknown(f"label request raised without a response: {exc!r}")
+    if code != 0:
+        status = refusal_status(out)
+        if status is not None:
+            return absent(f"label request refused with HTTP {status}")
+        return unknown(f"label request exited {code} without a refusal status")
+    try:
+        code, out = await asyncio.to_thread(_gh_pr_labels, repository, number, token)
+    except Exception as exc:  # noqa: BLE001 - labelling must never fail the delivery
+        return unknown(f"label request succeeded but the read-back raised: {exc!r}")
+    if code != 0:
+        return unknown(f"label request succeeded but the read-back exited {code}")
+    if not (out or "").strip():
+        return unknown("label request succeeded but the read-back was empty")
+    try:
+        raw = json.loads(out)
+    except ValueError:
+        raw = None
+    if not (isinstance(raw, list) and all(
+            isinstance(lbl, dict) and isinstance(lbl.get("name"), str) for lbl in raw)):
+        return unknown("label request succeeded but the read-back was malformed")
+    if not _label_gate.carries_label(label, [lbl["name"] for lbl in raw]):
+        return absent("the read-back succeeded and does not list the label")
+    log.info(f"{head} canary label {label!r} confirmed on pull request {where}. "
+             f"Read-back: present.")
+    return "confirmed"
 
 
 CONFIDENCE_DRIVERS_MISSING = (
@@ -1738,7 +2245,481 @@ async def _redispatch_deferred(
         _recovering.discard(entity_id)
 
 
-async def dispatch_task(
+# ── Restart before launch: a Fly delivery left executing with no record ──────
+#
+# A Fly delivery task becomes EXECUTING well before its delivery receipt is
+# reserved: the run session is opened, the build claim taken and (for a
+# correction) the PR re-read first. An Apis restart in that window (the
+# redeploy after a merge to main is the usual cause, and its wait reads only
+# the Fly ledger) leaves the task EXECUTING with no receipt, no run and nobody
+# awaiting it. Seen on 2026-11-06: approved, dispatched, restarted 12 s later,
+# and no run followed.
+#
+# The startup sweep below finds exactly those tasks, once per process, and
+# names each to the operator. It never relaunches one: whether a stranded run
+# launched or finished is not confirmed (the sweep does not take a Fly receipt
+# as proof of a run), and resuming would reuse an approval the dispatcher
+# already consumed. It runs at every startup whatever the current Fly opt-in,
+# reports every task of a Fly delivery class (or whose routing it cannot
+# determine) and writes nothing; the operator checks for an earlier run and,
+# if none ran, files a new task with a different title for the same work and
+# releases its checkpoint.
+
+# Task ids inside ``dispatch_task`` in this process: the sweep leaves them to
+# the dispatch already running (an event can arrive while the sweep runs).
+_tasks_in_dispatch: dict[str, int] = {}
+
+
+_REPO_ROUTING_FIELDS = ("repo", "dispatch_repo", "github_repo", "repository")
+# Routing fields a task may omit, but that the routing reads when present.
+_OPTIONAL_ROUTING_FIELDS = ("owner", "action_type")
+
+
+def _exact_text(value: object) -> bool:
+    """A non-empty string equal to its own ``.strip()``: the only shape a
+    field may have to count toward a silent-case proof (nothing is stripped)."""
+    return isinstance(value, str) and bool(value) and value == value.strip()
+
+
+_REPO_PART = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _well_formed_repository(value: object) -> bool:
+    """Exactly ``owner/name``: one ``/``, each side non-empty and made only of
+    ``[A-Za-z0-9._-]``, and neither side ``.`` or ``..``. Nothing is stripped,
+    so a padded value is not well formed."""
+    if not isinstance(value, str) or value.count("/") != 1:
+        return False
+    return all(_REPO_PART.fullmatch(part) and part not in (".", "..")
+               for part in value.split("/"))
+
+
+def _fly_routed_delivery(snapshot: object) -> tuple[bool | None, str]:
+    """``(routed, why)``: whether this task's row names a Fly delivery, judged
+    only on code-defined facts.
+
+    ``routed`` is False only on proof: the row is an object, its ``assigned_to``
+    and repository routing fields are present and well formed (a repository is
+    exactly ``owner/name``), and the action class ``dispatch_task`` computes
+    from the row is not in ``fly_runner.DELIVERY_ONLY_CLASSES``. The current
+    opt-in (``APIS_FLY_RUNNER_CLASSES``) is never read: a task sent to Fly
+    under an earlier configuration must not look non-Fly after a restart
+    without it. A missing, empty or malformed routing field, or a check that
+    raises, gives None with ``why`` naming the cause (an exception by type
+    only, never its message, which can carry values). True: a delivery-class
+    task. Never raises."""
+    if not isinstance(snapshot, dict):
+        return None, "its task record could not be read"
+    assignee = snapshot.get("assigned_to")
+    if not _exact_text(assignee):
+        return None, "its assigned_to field is missing, empty or malformed"
+    present = [key for key in _REPO_ROUTING_FIELDS if key in snapshot]
+    if not present:
+        return None, "it has no repository field, so its routing cannot be confirmed"
+    for key in present:
+        if not _well_formed_repository(snapshot.get(key)):
+            return None, f"its {key} field is not exactly owner/name"
+    # Read by the routing below when present: each must then be exact too.
+    for key in _OPTIONAL_ROUTING_FIELDS:
+        if key in snapshot and not _exact_text(snapshot.get(key)):
+            return None, f"its {key} field is empty or malformed"
+    try:
+        import fly_runner
+
+        tags = _routing_tags(snapshot)
+        assigned = _canonical_assignee(assignee)
+        # dispatch_task ignores ``owner`` for some lifecycles (a correction, a
+        # released build), so the class is judged both ways and the task is a
+        # delivery if either is. A person or session owner gives no agent
+        # prior, so the operator-login setting cannot change the class.
+        for owner in {snapshot.get("owner"), None}:
+            skill = _resolve_skill(tags, assigned_to=assigned, owner=owner)
+            if skill in (_HUMAN_OWNED, _SESSION_OWNED):
+                skill = None
+            action_class = _dispatch_action_class(skill, snapshot)
+            if action_class in fly_runner.DELIVERY_ONLY_CLASSES:
+                return True, ""
+        return False, ""
+    except Exception as exc:  # noqa: BLE001 — unknown, and reported as unknown
+        return None, ("whether it routes to Fly could not be determined (the routing "
+                      f"check raised {type(exc).__name__})")
+
+
+def _unlaunched_silence(entity_id: str, snapshot: object) -> tuple[str, str]:
+    """``(silent_count, why)`` for one EXECUTING task: the counter to bump when
+    the sweep may stay silent, else ``""`` and the reason for the notice.
+
+    Silent ONLY on one of these proofs; every other case is reported:
+      (a) the readable row's routing fields are well formed and give an
+          action class that is not a Fly delivery class
+          (``_fly_routed_delivery`` False);
+      (b) a Fly run for exactly this task id is live in this process.
+    A Fly ledger receipt, settled or not, is never taken as proof that this
+    task's run happened: tying a receipt to exactly one task needs ownership
+    checks across several key formats, so a task with a receipt is reported.
+    """
+    # (b) a dispatch of this task, by its exact id, is running in this process.
+    if _exact_text(entity_id) and (entity_id in _tasks_in_dispatch
+                                   or entity_id in _detached_runs_in_progress):
+        return "recorded", ""
+    routed, why = _fly_routed_delivery(snapshot)
+    # (a) positively routed away from Fly.
+    if routed is False:
+        return "not_fly", ""
+    if routed is None:
+        return "", why
+    return "", "no Fly run of it is live in this process"
+
+
+def _unrecovered_notice(notifier: Notifier, entity_id: str, title: str, why: str) -> None:
+    """Name one task the restart sweep left executing and did not relaunch.
+
+    The sweep does not read the Fly ledger, so no notice claims a run never
+    launched or never finished; each asks the operator to look for an earlier
+    run and its pull request before refiling."""
+    notifier.send(
+        f"Executing task may be stranded after an Apis restart: {title[:70]}\n"
+        f"  task={entity_id} is executing, and whether its Fly run launched or finished "
+        f"is not confirmed. It was not relaunched because {why}. Nothing was dispatched; "
+        "check for an earlier Fly run of this task and its pull request before refiling. "
+        "If none ran, file a new task with a different title for the same work and "
+        "release its checkpoint.",
+        priority=Priority.WARN, handler=DAEMON_NAME,
+    )
+
+
+async def recover_unlaunched_fly_tasks(notifier: Notifier) -> dict:
+    """Report Fly delivery tasks a restart left EXECUTING before launch.
+
+    Every EXECUTING task is named to the operator once unless one of the
+    proofs in ``_unlaunched_silence`` holds; nothing is written and nothing is
+    dispatched. ``complete`` is False when the executing-task inventory could
+    not be fully read, in which case one notice says so and no task is judged.
+    Never raises."""
+    counts = {"complete": False, "examined": 0, "not_fly": 0, "recorded": 0,
+              "unrecovered": 0}
+    try:
+        # Runs whatever the current Fly opt-in: a task sent to Fly under an
+        # earlier configuration is stranded all the same.
+        # strict: a dropped row, a malformed page, a short count or an id that
+        # is not exactly itself could be the stranded task, so the inventory
+        # is unknown rather than smaller.
+        rows = await asyncio.to_thread(
+            query_all_entities, "task",
+            snapshot_filters={"status": {"op": "eq", "value": TaskStatus.EXECUTING.value}},
+            strict=True)
+    except Exception as exc:  # noqa: BLE001 — never raise out of the sweep
+        rows, reason = None, f"{type(exc).__name__}: {exc}"
+    else:
+        reason = "the task query failed or returned rows it could not read"
+    if not isinstance(rows, list):
+        log.error(f"[{DAEMON_NAME}] unlaunched Fly task recovery: {reason}")
+        notifier.send(
+            "Apis could not fully read the executing-task inventory after a restart, so "
+            f"a Fly delivery cut off before launch may be stranded ({reason}). To find "
+            "them, query Neotoma for entities of type task with status executing assigned "
+            f"to the builder ({', '.join(sorted(build_delivery.BUILDER_SKILLS))}), and "
+            "check each for a Fly run.",
+            priority=Priority.WARN, handler=DAEMON_NAME)
+        return counts
+    for row in rows:
+        entity_id = row.get("entity_id") if isinstance(row, dict) else None
+        # The id is used exactly as listed, never normalized, so two listed
+        # ids can never be judged as one task.
+        if not isinstance(entity_id, str) or not entity_id or entity_id != entity_id.strip():
+            # An unreadable row could be a stranded task: name it, never skip it.
+            counts["examined"] += 1
+            counts["unrecovered"] += 1
+            _unrecovered_notice(notifier, "(unknown)", "(unreadable task row)",
+                                "its task record could not be read")
+            continue
+        try:
+            await _recover_unlaunched_fly_task(entity_id, _record_snapshot(row) or row,
+                                               notifier, counts)
+        except Exception:  # noqa: BLE001 — one task must never stop the sweep
+            log.exception(f"[{DAEMON_NAME}] examining task {entity_id} crashed")
+            counts["unrecovered"] += 1
+            _unrecovered_notice(notifier, entity_id, "(untitled)",
+                                "examining it after the restart failed")
+    counts["complete"] = True
+    if counts["examined"]:
+        log.info(f"[{DAEMON_NAME}] unlaunched Fly task recovery: {counts}")
+    return counts
+
+
+async def _recover_unlaunched_fly_task(entity_id: str, listed: dict, notifier: Notifier,
+                                       counts: dict) -> None:
+    """Judge one listed EXECUTING task and report it unless a proof clears it
+    (``_unlaunched_silence``). Reads only."""
+    counts["examined"] += 1
+    silent, why = _unlaunched_silence(entity_id, listed)
+    if silent:
+        counts[silent] += 1
+        return
+    title = str(listed.get("title") or "(untitled)") if isinstance(listed, dict) else "(untitled)"
+    # Not cleared by the listing's view: re-read, so a task that moved on since
+    # the listing (or started dispatching) is not reported.
+    fresh = await asyncio.to_thread(fetch_task_snapshot, entity_id)
+    if not isinstance(fresh, dict):
+        counts["unrecovered"] += 1
+        _unrecovered_notice(notifier, entity_id, title, "it could not be re-read")
+        return
+    title = str(fresh.get("title") or title)
+    status = fresh.get("status")
+    # The re-read row names a recognized status other than executing: it is no
+    # longer this sweep's task. A missing or unrecognized status proves nothing.
+    if (isinstance(status, str)
+            and normalize_status(status) in {s.value for s in TaskStatus}
+            and normalize_status(status) != TaskStatus.EXECUTING.value):
+        counts["recorded"] += 1
+        return
+    silent, why = _unlaunched_silence(entity_id, fresh)
+    if silent:
+        counts[silent] += 1
+        return
+    counts["unrecovered"] += 1
+    _unrecovered_notice(notifier, entity_id, title, why)
+
+
+@dataclasses.dataclass(frozen=True)
+class _ApprovedCorrectionLifecycle:
+    """Invocation-local input from the authenticated checkpoint consumer.
+
+    JSON retains exact presence/types without aliasing the admitted task. This
+    is never loaded from task fields and is not a persisted approval or permit.
+    """
+
+    task_id: str
+    snapshot_json: str
+    version: str
+    release_key: str
+    principal: str
+    provenance_json: str
+
+
+def _correction_lifecycle_shape(snapshot):
+    import json
+
+    return json.dumps(snapshot, sort_keys=True, allow_nan=False, separators=(",", ":"))
+
+
+def _correction_provenance_shape(record):
+    """Retain raw tenant presence and JSON types before any snapshot projection."""
+    layers = []
+    current = record
+    while isinstance(current, dict):
+        layers.append({"user_id": current["user_id"]} if "user_id" in current else {})
+        current = current.get("snapshot")
+    return _correction_lifecycle_shape(layers)
+
+
+def _read_correction_lifecycle_record(binding):
+    """Verify the current raw record, then project that SAME record for this run."""
+    record = fetch_task_record(binding.task_id)
+    if (not isinstance(record, dict)
+            or _correction_provenance_shape(record) != binding.provenance_json
+            or read_verified_entity_owner(binding.task_id, record,
+                                          expected_user_id=binding.principal) != binding.principal):
+        return None, None
+    version = record.get("entity_version")
+    if not isinstance(version, str) or not version:
+        return None, None
+    return _snapshot_with_tenant(record), version
+
+
+def _advance_correction_lifecycle(binding, status, *, clear_reason=False):
+    """Condition each controller write on the exact admitted/previous state.
+
+    A conflict, ambiguous reply or missing next token ends the sequence. A fresh
+    token is never fetched to resume after failure, and no new hold is erased.
+    """
+    import json
+
+    try:
+        expected = json.loads(binding.snapshot_json)
+        fresh, version = _read_correction_lifecycle_record(binding)
+        if (not isinstance(fresh, dict) or version != binding.version
+                or _correction_lifecycle_shape(fresh) != binding.snapshot_json):
+            return None
+        changes = [("status", status.value)]
+        if clear_reason:
+            changes.append(("blocked_reason", ""))
+        for field, value in changes:
+            committed = set_task_field_if_version(
+                binding.task_id, field, value, expected_version=version,
+                handler=DAEMON_NAME,
+                key_suffix=f"{status.value}-approved-{binding.release_key}",
+            )
+            if not committed or not committed.version:
+                return None
+            expected[field] = value
+            expected_shape = _correction_lifecycle_shape(expected)
+            fresh, version = _read_correction_lifecycle_record(binding)
+            if (not isinstance(fresh, dict) or version != committed.version
+                    or _correction_lifecycle_shape(fresh) != expected_shape):
+                return None
+        return dataclasses.replace(binding, snapshot_json=expected_shape, version=version)
+    except Exception:
+        return None
+
+
+# Statuses that mean "filed, nothing has happened to it yet". An allow-list: a
+# status the lifecycle does not know, or any started one (routed, executing,
+# failed, blocked, ...), keeps its normal dispatch path. `open` is what some
+# producers write for a new task.
+_NOT_STARTED_STATUSES = frozenset({"", TaskStatus.PENDING.value, "open"})
+
+
+def _never_started(status) -> bool:
+    """True only for a task that has not entered the lifecycle yet."""
+    return normalize_status(status) in _NOT_STARTED_STATUSES
+
+
+def _stored_tags(snapshot: dict) -> list:
+    """The tags the task itself carries (set by neotoma-agent hygiene)."""
+    tags = snapshot.get("tags", []) or []
+    if isinstance(tags, str):
+        import json as _json
+
+        try:
+            tags = _json.loads(tags)
+        except (ValueError, TypeError):
+            return []
+    return tags if isinstance(tags, list) else []
+
+
+def _routing_tags(snapshot: dict) -> list:
+    """The tags that route a task: stored, plus inferred when those cannot route.
+
+    `dispatch_task` routes on this and the readings after a hold judge on it, so
+    they name the same skill.
+
+    Inference used to run only when the stored tags were EMPTY, which made tags
+    that are present but unmapped strictly worse than no tags at all: they
+    suppressed inference entirely and the task went straight to BLOCKED. That
+    is not hypothetical — a well-formed task carrying
+    ['apis','swarm','gates','observability','ateles-682'] (action_type=fix,
+    confidence=0.9) blocked on exactly this, because none of those five is a
+    DOMAIN_ROUTES key. Tags a human or agent wrote for their own bookkeeping
+    are not a routing decision; asking the text is what we already do when the
+    field is blank, and an unroutable tag set is the same state of knowledge.
+
+    Inference AUGMENTS rather than replaces: the stored tags are kept ahead of
+    the inferred ones so an explicit routable tag always keeps precedence, and
+    so the escalation reason still reports what the task actually carried.
+    """
+    tags = _stored_tags(snapshot)
+    if any(tag in _DOMAIN_ROUTES for tag in tags):
+        return tags
+    title = snapshot.get("title", "(untitled)")
+    body = snapshot.get("body", "") or snapshot.get("description", "")
+    inferred = _infer_tags_from_text(title, body)
+    return tags + [tag for tag in inferred if tag not in tags]
+
+
+def _guessed_owner_is_low_stakes(skill: str, snapshot: dict) -> bool:
+    """True only when leaving a guessed-owner task as filed is safe.
+
+    An allow-list on the gate's own verdict, not a list of actions to refuse:
+    the policy resolved here is the one the execution gate resolves for this
+    skill, and the action is the gate's resolved action, so the two cannot
+    disagree about what is reserved. Two things qualify:
+
+      1. The gate classifies the action LOW blast.
+      2. The guessed owner is the builder, the task declares no action and its
+         text escalates nothing, so the action is only the builder's own prior
+         (`open_or_merge_pr`) and nothing about this task. That label comes from
+         the guess alone, so holding on it asks the operator to approve work
+         nobody owns. A declared `open_or_merge_pr`, a text-escalated action and
+         every other specialist's prior (payment, send, publish) do not qualify.
+
+    Anything else (HIGH, NEVER, unrecognised), an empty action, a policy that
+    cannot be read, or any exception returns False and keeps today's hold.
+    """
+    try:
+        policy = resolve_policy_for_agent(skill)
+        resolved = _resolve_gate_action_type(skill, snapshot, policy)
+        action = (resolved.value or "").strip().lower()
+        if not action:
+            return False
+        if policy.blast_radius_for(action) == BlastRadius.LOW:
+            return True
+        key = (skill or "").strip().lower()
+        if not (
+            key in build_delivery.BUILDER_SKILLS
+            and resolved.source == SOURCE_AGENT_PRIOR
+            and action == (_AGENT_ACTION_TYPE.get(key) or "").strip().lower()
+        ):
+            return False
+        # The resolver only escalates text that is STRICTER than the prior, and
+        # the builder's prior is already high blast, so it never reports text
+        # naming a payment, send or publish. Ask the text directly: any outward
+        # action named there means this is not just the builder's default.
+        return (
+            infer_action_type_from_text(
+                snapshot.get("title"),
+                snapshot.get("body"),
+                snapshot.get("description"),
+                verdict=lambda at: policy.blast_radius_for(at).value,
+            )
+            is None
+        )
+    except Exception:  # noqa: BLE001 — undeterminable means keep today's hold
+        return False
+
+
+async def _task_status_still(entity_id: str, expected_status, step: str) -> bool:
+    """Re-read the task and say whether a gate write may still land.
+
+    A create/dispatch decision is drawn from a snapshot read before it writes;
+    a closure or other status write can land in between (13 Nov 2026: a bulk
+    correction of old tasks had closures reverted and statuses flipped to
+    blocked / awaiting_approval from a stale snapshot). True only when the
+    re-read succeeds, the task is not terminal, and its status is still the one
+    the decision was based on. An unreadable task is False (fail closed): no
+    overwrite on an unread state. Skips are logged, never silent.
+    """
+    fresh = await asyncio.to_thread(fetch_task_snapshot, entity_id)
+    if not isinstance(fresh, dict):
+        log.warning(
+            f"[{DAEMON_NAME}] task {entity_id!r}: could not re-read before {step} "
+            "— not writing on a state that could not be confirmed"
+        )
+        return False
+    now = fresh.get("status")
+    if is_terminal(now):
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} became terminal "
+            f"(status={normalize_status(now)!r}) before {step} — not overwriting"
+        )
+        return False
+    expected = getattr(expected_status, "value", expected_status)
+    if normalize_status(now) != normalize_status(expected):
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} changed under the decision "
+            f"(status {normalize_status(expected)!r} -> {normalize_status(now)!r}) "
+            f"before {step} — not overwriting"
+        )
+        return False
+    return True
+
+
+async def dispatch_task(entity_id: str, *args, **kwargs) -> bool | None:
+    """``_dispatch_task`` (its docstring has the contract), with the task held
+    in ``_tasks_in_dispatch`` until it returns, so the restart-recovery sweep
+    never reports a task this process is dispatching right now."""
+    _tasks_in_dispatch[entity_id] = _tasks_in_dispatch.get(entity_id, 0) + 1
+    try:
+        return await _dispatch_task(entity_id, *args, **kwargs)
+    finally:
+        left = _tasks_in_dispatch.get(entity_id, 1) - 1
+        if left > 0:
+            _tasks_in_dispatch[entity_id] = left
+        else:
+            _tasks_in_dispatch.pop(entity_id, None)
+
+
+async def _dispatch_task(
     entity_id: str,
     snapshot: dict,
     trigger: str,
@@ -1746,7 +2727,9 @@ async def dispatch_task(
     gate_override: bool = False,
     snapshot_hydrated: bool | None = None,
     detach_after_accept: bool = False,
-) -> None:
+    _approved_correction_lifecycle: _ApprovedCorrectionLifecycle | None = None,
+    release_key: str = "",
+) -> bool | None:
     """
     Route a task to the appropriate T4 skill and spawn it via a bundled-plan CLI.
 
@@ -1771,9 +2754,29 @@ async def dispatch_task(
             EXECUTING, while completing the harness run in the background.
             Used by the request/response checkpoint-release path so client
             cancellation cannot abort work that the operator already released.
+        release_key:   The checkpoint whose approval releases this task. Keys the
+            routed/executing writes to that release, so a task released, failed,
+            re-held and released again through a NEW checkpoint really writes
+            instead of replaying the first release's idempotency key, while a
+            replay of the SAME checkpoint stays idempotent.
     """
     title = snapshot.get("title", "(untitled)")
     current_status = snapshot.get("status")
+    correction_lifecycle = None
+    lifecycle_key = f"{trigger}-{release_key}" if release_key else trigger
+    if gate_override and snapshot.get("task_type") == "existing_pr_correction":
+        try:
+            binding = _approved_correction_lifecycle
+            if (not isinstance(binding, _ApprovedCorrectionLifecycle)
+                    or trigger != "approved" or binding.task_id != entity_id
+                    or not binding.version
+                    or binding.snapshot_json != _correction_lifecycle_shape(snapshot)):
+                raise ValueError("missing authenticated lifecycle input")
+            correction_lifecycle = binding
+        except (TypeError, ValueError):
+            log.warning("[%s] correction %s lacks its checkpoint lifecycle binding — not dispatching",
+                        DAEMON_NAME, entity_id)
+            return
 
     # ── Terminal guard: a finished task is not dispatchable (ateles#1038) ────
     #
@@ -1820,6 +2823,24 @@ async def dispatch_task(
         )
         return
 
+    # A task whose Fly run is still in flight is not dispatched again, from ANY
+    # entrance: SSE events, checkpoint release, deferred recovery, the watchdog
+    # and the reconciler all reach here. Before every state write, so a
+    # re-dispatch can never move such a task to ROUTED (seen 2026-11-06: a
+    # replay after an Apis restart moved a running task back to routed). An
+    # unreadable ledger leaves the same doubt and refuses the same way.
+    #
+    # One exception: the in-flight run belongs to a DIFFERENT task that holds
+    # this task's issue in the build registry (a correction holding its source
+    # issue). Then this task is independent work that must resume when that run
+    # ends, so it falls through to the deferral path below, which records the
+    # deferral and returns without spawning. `fly_defer_holder` makes sure it
+    # never gets further than that path.
+    fly_defer_holder = None if gate_override else _fly_defer_holder(snapshot, entity_id)
+    if fly_defer_holder is None and _fly_run_refuses_dispatch(
+            snapshot, entity_id, f"dispatch (trigger={trigger})"):
+        return
+
     # A task the deferral mechanism marked is owned by its recovery sweep: nothing
     # else may dispatch it (an SSE redelivery, the reconciler, the watchdog), or it
     # would run twice. Only the sweep's own re-dispatch (`build_released`) and an
@@ -1836,64 +2857,109 @@ async def dispatch_task(
         )
         return
 
+    # ── Already held: a held task is not gated a second time ─────────────────
+    # `task.created` is redelivered by Neotoma (including after corrections) and
+    # `_seen_created` dedupes only within one process. Without this guard a task
+    # already at AWAITING_APPROVAL was re-routed, re-held and re-briefed on every
+    # redelivery: the previous signed envelope went stale and the operator's
+    # queue gained another brief for a decision already waiting on them (about
+    # half of 2,030 gate decisions over 974 tasks, 22 Oct to 5 Nov 2026).
+    #
+    # `gate_override` DOES pass: that flag is the operator's approval releasing
+    # this very hold, the one path that must still reach the ROUTED write below.
+    # Nothing is written here — no status, no brief, no notification — because
+    # the existing hold and its checkpoint are already the record. Re-issuing a
+    # lost or stale checkpoint is the job of `reissue_held_task_checkpoint`,
+    # which does not enter dispatch_task.
+    if (
+        not gate_override
+        and normalize_status(current_status) == TaskStatus.AWAITING_APPROVAL.value
+    ):
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} is already held for operator "
+            f"approval (trigger={trigger}) — not gating it again"
+        )
+        return
+
+    if entity_id in _detached_runs_in_progress:
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} already has a detached run in "
+            f"progress (trigger={trigger}) — not starting a second run"
+        )
+        return
+
     # The snapshot read fine, so any prior unreadable streak for this task is
     # over; forget it so a later blip starts counting from zero rather than
     # inheriting an old streak and reporting prematurely.
     if snapshot_hydrated:
         _unroutable.clear_unreadable(entity_id)
 
-    # Prefer tags already in snapshot (set by neotoma-agent hygiene)
-    existing_tags: list[str] = snapshot.get("tags", []) or []
-    if isinstance(existing_tags, str):
-        import json as _json
-
-        try:
-            existing_tags = _json.loads(existing_tags)
-        except (ValueError, TypeError):
-            existing_tags = []
-
-    # Fall back to local inference when the tags we have cannot route.
-    #
-    # This used to run only when `existing_tags` was EMPTY, which made tags that
-    # are present but unmapped strictly worse than no tags at all: they
-    # suppressed inference entirely and the task went straight to BLOCKED. That
-    # is not hypothetical — a well-formed task carrying
-    # ['apis','swarm','gates','observability','ateles-682'] (action_type=fix,
-    # confidence=0.9) blocked on exactly this, because none of those five is a
-    # DOMAIN_ROUTES key. Tags a human or agent wrote for their own bookkeeping
-    # are not a routing decision; asking the text is what we already do when the
-    # field is blank, and an unroutable tag set is the same state of knowledge.
-    #
-    # Inference AUGMENTS rather than replaces: the stored tags are kept ahead of
-    # the inferred ones so an explicit routable tag always keeps precedence, and
-    # so the escalation reason still reports what the task actually carried.
-    if not any(tag in _DOMAIN_ROUTES for tag in existing_tags):
-        body = snapshot.get("body", "") or snapshot.get("description", "")
-        inferred = _infer_tags_from_text(title, body)
-        existing_tags = existing_tags + [
-            tag for tag in inferred if tag not in existing_tags
-        ]
+    # What the task itself carried, before inference adds guesses (guard B below).
+    stored_routable_tag = any(tag in _DOMAIN_ROUTES for tag in _stored_tags(snapshot))
+    existing_tags = _routing_tags(snapshot)
 
     # An explicit assigned_to (set by Sylvia/Turdus) wins over tag inference.
     # Canonicalize first: a stored value may carry capitalization, whitespace,
     # or an AAuth-subject suffix, and the "unassigned" sentinel family must read
-    # as absence rather than as an owner. Doing this here (not only inside
-    # resolve_skill) matters because `assigned_to` is ALSO used as a bare
-    # truthiness test for the readiness gate below — the literal string
-    # "unassigned" is truthy, so it used to satisfy `has_owner` while naming
-    # nobody any dispatcher could resolve.
+    # as absence rather than as an owner. `assigned_to` is what this function
+    # reports, so it keeps the name the task carries.
     assigned_to = _canonical_assignee(snapshot.get("assigned_to"))
-    skill = _resolve_skill(existing_tags, assigned_to=assigned_to)
-    # resolve_role returns the same string as resolve_skill in this codebase;
-    # computed here for explicitness and to thread through to skill_runner so
-    # agent_definition loading asks for "the role" rather than "the skill".
-    role = _resolve_role(existing_tags, assigned_to=assigned_to)
+    # Whether anybody owns the task is a different question, and every reader of
+    # task ownership takes it from `deciding_assignee`: a task assigned to the
+    # dispatcher names no owner, because the dispatcher is what is asking.
+    deciding_assignee = _deciding_assignee(snapshot.get("assigned_to"))
+    # `owner` is read only to recognise a session (see the session-owned block
+    # below). The `build_released` re-dispatch and `existing_pr_correction`
+    # lifecycles own their own handling, so for them it is not consulted.
+    owner_for_routing = (
+        None
+        if trigger == "build_released"
+        or snapshot.get("task_type") == "existing_pr_correction"
+        else snapshot.get("owner")
+    )
+    ownership_read_condition = f"{DAEMON_NAME}:ownership-read-unavailable:{entity_id}"
+    try:
+        skill = _resolve_skill(
+            existing_tags, assigned_to=assigned_to, owner=owner_for_routing
+        )
+        # A non-agent ownership answer is one read, not two possibly
+        # contradictory profile reads. Real agents keep role resolution.
+        role = skill if skill in (None, _HUMAN_OWNED, _SESSION_OWNED) else _resolve_role(
+            existing_tags, assigned_to=assigned_to, owner=owner_for_routing
+        )
+    except OperatorIdentityUnavailable:
+        # An unread identity source is not evidence that a named assignee
+        # has no owner. Keep its state and effects untouched until a real
+        # routing answer is available; never guess another agent from tags.
+        log.warning(
+            "[%s] task %s operator identity is unreadable; leaving as filed, "
+            "not routing, gating or marking no route/owner", DAEMON_NAME, entity_id,
+        )
+        # Created events may already be deduped, so a log alone would leave
+        # no recovery signal. Use the notifier's existing deduped warning
+        # path; neither task content nor the server's error text is echoed.
+        notifier.send(
+            f"Task ownership could not be verified: {entity_id}\n"
+            "  The operator profile is unreadable. The task was left as filed; "
+            "its dispatch needs rechecking when that read recovers.",
+            priority=Priority.WARN,
+            handler=DAEMON_NAME,
+            dedupe_key=ownership_read_condition,
+        )
+        return
+
+    # A qualified ownership answer closes this condition, including a known
+    # person/agent/session or a complete negative read. An unread task is not
+    # recovery evidence. Clearing the existing notifier key permits a later
+    # genuine recurrence without another notification ledger.
+    if snapshot_hydrated is not False:
+        notifier.clear_dedupe(ownership_read_condition)
 
     # ── Human-owned: a routing ANSWER, not a routing failure ─────────────────
     # Must come before EVERY truthy-skill path (activity, ROUTED, readiness,
     # execution gate, spawn) and before the `skill is None` escalation, because
-    # it is neither: the task has an owner, that owner is a person. Parking it
-    # for the operator is the correct terminal state — spawning an agent onto
+    # it is neither: the task has an owner, that owner is a person. Its state
+    # belongs to that person — spawning an agent onto
     # work the operator deliberately reserved (merge approvals, auth-path
     # changes) is the failure this closes. `gate_override` does NOT bypass this:
     # operator approval of some earlier checkpoint is not consent to hand a
@@ -1901,23 +2967,83 @@ async def dispatch_task(
     if skill == _HUMAN_OWNED:
         log.info(
             f"[{DAEMON_NAME}] task {entity_id!r} is human-owned "
-            f"(assigned_to={assigned_to}) — parking for the operator, not spawning"
+            f"(assigned_to={assigned_to}) — leaving as filed, not spawning"
         )
-        set_task_status(
-            entity_id,
-            TaskStatus.AWAITING_INPUT,
-            handler=DAEMON_NAME,
-            from_status=current_status,
-            reason=f"human-owned (assigned_to={assigned_to})",
-            key_suffix=trigger,
+        _unroutable.forget(entity_id)
+        return
+
+    # ── Session-owned: an interactive session owns this, so leave it alone ───
+    # Interactive sessions own many tasks and no dispatcher can spawn one. Such
+    # a task used to fall to the `skill is None` escalation below (an
+    # `assigned_to` naming a session) or to be read as no-owner (an `owner` that
+    # nothing read), and was written BLOCKED "no route/owner" with live work
+    # underway; or, when its words matched tag inference, a route was guessed
+    # and the task gated or held for an agent, risking a second worker on
+    # session-owned work. The owning session writes its own state, so nothing is
+    # written here: no status, no blocked_reason, no ROUTED, no gate, no brief,
+    # no ledger entry, no spawn. The task stays exactly as filed.
+    #
+    # `gate_override` does NOT bypass this, the same stance as human-owned: an
+    # approval is not consent to put a second worker on a session's task. It
+    # only earns one INFO line so the approval does not look silently ignored.
+    # A forgotten ledger entry keeps the standing-backlog re-report from
+    # repeating a task that is no longer unroutable.
+    if skill == _SESSION_OWNED:
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} is session-owned "
+            f"(trigger={trigger}) — leaving it as filed, not dispatching"
         )
-        # Title + id + reason only. The body may carry auth or merge details,
-        # and this page is a notification channel, not a place to echo them.
-        notifier.send(
-            f"Human-owned task awaiting you: {title[:70]}\n"
-            f"  assigned_to={assigned_to} task={entity_id}",
-            priority=Priority.OPERATOR_DECISION,
-            handler=DAEMON_NAME,
+        _unroutable.forget(entity_id)
+        if gate_override:
+            notifier.send(
+                f"Approved task is session-owned and was not dispatched: "
+                f"{title[:70]}\n  Its session continues it; message that session "
+                f"to move it.\n  task={entity_id}",
+                priority=Priority.INFO,
+                handler=DAEMON_NAME,
+            )
+        return
+
+    # ── A guessed owner is not an owner: leave the task as filed ─────────────
+    # With no real `assigned_to` and no STORED tag that routes, the skill above
+    # came only from `_infer_tags_from_text` — a guess from the task's words. Of
+    # 974 first gate decisions (22 Oct to 5 Nov 2026) about 54% were such tasks,
+    # nearly all held and a few run on that guess. Holding asks the operator to
+    # approve work nobody owns; running it hands the task to an agent chosen by
+    # keyword. Neither is warranted, so the task is left exactly as filed: no
+    # status write, no ROUTED, no gate, no brief, no notification, no spawn.
+    #
+    # This only ever REDUCES what holds or runs. It applies where the gate's own
+    # classification of the task's action is LOW blast, with one exception: a
+    # guessed BUILDER whose only action is the builder's own default
+    # (`open_or_merge_pr`, no declared action, nothing in the text escalating it)
+    # is also left as filed, because that label comes from the guess and nothing
+    # about the task. A declared or text-escalated action, and the payment, send
+    # and publish defaults of the other specialists, keep today's hold, as does
+    # every other tier and any action or tier that cannot be determined.
+    #
+    # Scoped to tasks that have not started (a task already routed, failed or
+    # executing was dispatched on purpose and belongs to the watchdog), to
+    # hydrated snapshots (an unread snapshot keeps its deferral below), and not
+    # to `existing_pr_correction` tasks or a `build_released` re-dispatch, whose
+    # lifecycles own their own handling. `gate_override` is not consulted: an
+    # approved release is of a task that was already routed to a real owner and
+    # held, and guard A has already let it through.
+    if (
+        skill is not None
+        and not deciding_assignee
+        and not stored_routable_tag
+        and snapshot_hydrated is not False
+        and trigger != "build_released"
+        and snapshot.get("task_type") != "existing_pr_correction"
+        and _never_started(current_status)
+        and _guessed_owner_is_low_stakes(skill, snapshot)
+    ):
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} left as filed: no assignee that "
+            f"owns it and no stored routable tag, so the owner {skill!r} would only be a "
+            f"guess from its text (trigger={trigger}) — not routing, gating or "
+            "notifying"
         )
         return
 
@@ -1958,6 +3084,8 @@ async def dispatch_task(
             f"(trigger={trigger}, tags={existing_tags}, assigned_to={assigned_to}) "
             "— unroutable (no owner)"
         )
+        if not await _task_status_still(entity_id, current_status, "no-owner block"):
+            return
         set_task_status(
             entity_id,
             TaskStatus.BLOCKED,
@@ -2013,20 +3141,41 @@ async def dispatch_task(
                 schedule_deferred_recovery()
             return
 
+    # Let through the in-flight guard only to be deferred, and not deferred
+    # above (not a builder, or the claim ended meanwhile): the Fly run is still
+    # in flight, so refuse rather than spawn a second run on its key.
+    if fly_defer_holder is not None:
+        log.warning(
+            f"[{DAEMON_NAME}] dispatch (trigger={trigger}) for {entity_id}: a Fly run "
+            f"held by {fly_defer_holder.holder!r} is in flight on this task's key "
+            "and the task was not deferred — not routing"
+        )
+        return
+
     job = _activity.started(f"routing task {entity_id} → {skill}: {title[:60]}")
 
     # Lifecycle: the dispatcher resolved an owner — record ROUTED so the task can
     # never read "pending" while it is actually in flight.
-    set_task_status(
-        entity_id,
-        TaskStatus.ROUTED,
-        handler=DAEMON_NAME,
-        from_status=current_status,
-        # An approved release consumes the prior hold. Supplying the empty
-        # reason produces taskreason-apis-{task_id}-routed-approved.
-        reason="" if gate_override else None,
-        key_suffix=trigger,
-    )
+    if correction_lifecycle is not None:
+        correction_lifecycle = _advance_correction_lifecycle(
+            correction_lifecycle, TaskStatus.ROUTED, clear_reason=True)
+        if correction_lifecycle is None:
+            log.warning("[%s] correction %s routed lifecycle release could not be verified — not spawning",
+                        DAEMON_NAME, entity_id)
+            notifier.send(f"Approved correction {entity_id} lifecycle release could not be verified; "
+                          "this attempt was not started. Reconcile current task/admission state.",
+                          priority=Priority.BLOCKER, handler=DAEMON_NAME)
+            job.failed(f"task {entity_id} lifecycle release was not qualified")
+            return
+    else:
+        if not await _task_status_still(entity_id, current_status, "routed write"):
+            job.failed(f"task {entity_id} changed before routing — not routed")
+            return
+        set_task_status(
+            entity_id, TaskStatus.ROUTED, handler=DAEMON_NAME,
+            from_status=current_status, reason="" if gate_override else None,
+            key_suffix=lifecycle_key,
+        )
     if gate_override and not _release_lifecycle_proven(entity_id, TaskStatus.ROUTED):
         log.warning(
             f"[{DAEMON_NAME}] approved task {entity_id} did not read back as "
@@ -2047,10 +3196,14 @@ async def dispatch_task(
     if READINESS_GATE and not gate_override:
         assessment = assess_readiness(
             snapshot,
-            has_owner=bool(assigned_to) or skill is not None,
+            has_owner=bool(deciding_assignee) or skill is not None,
             relationship_count=int(snapshot.get("relationship_count", 0) or 0),
         )
         if not assessment.ready:
+            if correction_lifecycle is None and not await _task_status_still(
+                    entity_id, TaskStatus.ROUTED, "readiness write"):
+                job.failed(f"task {entity_id} changed before readiness write")
+                return
             write_assessment(entity_id, assessment)
             ask = missing_request(assessment, title)
             set_task_status(
@@ -2100,7 +3253,7 @@ async def dispatch_task(
             action_type.strip().lower()
             in (policy.low_blast_action_types | policy.high_blast_action_types)
         )
-        has_owner = bool(assigned_to) or skill is not None
+        has_owner = bool(deciding_assignee) or skill is not None
         relationship_count = int(snapshot.get("relationship_count", 0) or 0)
         # ateles#1142: a task nobody scored gets a real producer score on a
         # cheap tier BEFORE the gate reads it, so the gate decides on a
@@ -2235,6 +3388,10 @@ async def dispatch_task(
             # approve.  The authenticated checkpoint binds the complete
             # read-back record after this hold lands; creating it first would
             # make our own lifecycle writes invalidate it immediately.
+            if correction_lifecycle is None and not await _task_status_still(
+                    entity_id, TaskStatus.ROUTED, "gate hold and checkpoint"):
+                job.failed(f"task {entity_id} changed before gate hold")
+                return
             set_task_status(
                 entity_id,
                 TaskStatus.AWAITING_APPROVAL,
@@ -2333,16 +3490,25 @@ async def dispatch_task(
         job.finished(
             f"task {entity_id} → {skill} routed (dry-run, gate: {_gate_label})"
         )
-        return
+        return True if correction_lifecycle is not None else None
 
     # Lifecycle: about to spawn the T4 agent.
-    set_task_status(
-        entity_id,
-        TaskStatus.EXECUTING,
-        handler=DAEMON_NAME,
-        from_status=TaskStatus.ROUTED.value,
-        key_suffix=trigger,
-    )
+    if correction_lifecycle is not None:
+        correction_lifecycle = _advance_correction_lifecycle(
+            correction_lifecycle, TaskStatus.EXECUTING)
+        if correction_lifecycle is None:
+            log.warning("[%s] correction %s executing lifecycle handoff could not be verified — not spawning",
+                        DAEMON_NAME, entity_id)
+            notifier.send(f"Approved correction {entity_id} lifecycle handoff could not be verified; "
+                          "this attempt was not started. Reconcile current task/admission state.",
+                          priority=Priority.BLOCKER, handler=DAEMON_NAME)
+            job.failed(f"task {entity_id} executing handoff was not qualified")
+            return
+    else:
+        set_task_status(
+            entity_id, TaskStatus.EXECUTING, handler=DAEMON_NAME,
+            from_status=TaskStatus.ROUTED.value, key_suffix=lifecycle_key,
+        )
     if gate_override and not _release_lifecycle_proven(entity_id, TaskStatus.EXECUTING):
         log.warning(
             f"[{DAEMON_NAME}] approved task {entity_id} did not read back as "
@@ -2355,7 +3521,10 @@ async def dispatch_task(
         )
         return
 
+    completed = False
+
     async def _finish_dispatch() -> None:
+        nonlocal completed
         # E1/E2: this run's thread. run_key keys it to the attempt so SSE
         # replays reuse it while a genuine retry opens a fresh run.
         run_key = (
@@ -2434,15 +3603,24 @@ async def dispatch_task(
         )
 
         try:
+            lifecycle_binding = {}
+            dispatch_snapshot = snapshot
+            if correction_lifecycle is not None:
+                import json
+
+                dispatch_snapshot = json.loads(correction_lifecycle.snapshot_json)
+                lifecycle_binding["_lifecycle_version"] = correction_lifecycle.version
+                lifecycle_binding["_lifecycle_provenance"] = correction_lifecycle
             result = await _spawn_harness_skill(
                 skill,
                 entity_id,
-                snapshot,
+                dispatch_snapshot,
                 trigger,
                 notifier,
                 role=role,
                 run_conversation_id=run_conversation_id,
                 run_agent_session_id=run_agent_session_id,
+                **lifecycle_binding,
             )
         except Exception as exc:
             # Unexpected crash in the spawn machinery itself → record as a
@@ -2935,6 +4113,7 @@ async def dispatch_task(
                     f"task {entity_id} dispatched → {skill} "
                     f"(gate: {_gate_label}; {note})"
                 )
+                completed = True
                 return
             _run_stage(
                 "assistant", f"{skill} completed (trigger={trigger}).", stage="done"
@@ -2949,11 +4128,25 @@ async def dispatch_task(
                 ),
                 key_suffix=trigger,
             )
+            if correction_lifecycle is not None:
+                # A completed non-detached invocation cannot be acknowledged
+                # from its earlier EXECUTING state after a failed terminal write.
+                saved = fetch_task_snapshot(entity_id) or {}
+                completed = (normalize_status(saved.get("status")) == TaskStatus.DONE.value
+                             and saved.get("result") == pending_result.replace(
+                                 "provenance=unverified", "provenance=verified"))
+                if not completed:
+                    notifier.send(
+                        f"{skill} completion on {entity_id} could not be verified. "
+                        "Reconcile current task/admission state before another dispatch.",
+                        priority=Priority.BLOCKER, handler=DAEMON_NAME)
+                    job.failed(f"task {entity_id} → {skill} completion was not verified")
+                    return
             job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
         elif getattr(result, "fly_delivery_status", ""):
-            reason = result.error or build_delivery.fly_delivery_summary(
-                result, _fly_receipt_key(snapshot, entity_id)
-            )
+            reason = build_delivery.fly_delivery_summary(result, _fly_receipt_key(snapshot, entity_id))
+            if result.error and result.error not in reason:
+                reason = result.error + "\n" + reason
             _run_stage("assistant", reason, stage="blocked")
             if run_session:
                 update_run_session_status(run_session, status="failed")
@@ -2974,6 +4167,27 @@ async def dispatch_task(
             )
             notifier.send(notice, priority=Priority.OPERATOR_DECISION, handler=DAEMON_NAME)
             job.failed(f"task {entity_id} → {skill} Fly delivery ended")
+        elif (getattr(result, "fly_delivery_not_launched", False)
+              and getattr(result, "fly_delivery_cleanup", "") in {"released", "not_reserved"}):
+            reason = _redact_secrets(build_delivery.fly_prelaunch_failure_summary(result))
+            _run_stage("assistant", reason, stage="blocked")
+            if run_session:
+                update_run_session_status(run_session, status="failed")
+            set_task_status(
+                entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
+                from_status=TaskStatus.EXECUTING.value, reason=reason,
+                result=reason, key_suffix=trigger)
+            try:
+                saved = fetch_task_snapshot(entity_id) or {}
+                held = (normalize_status(saved.get("status")) == TaskStatus.BLOCKED.value
+                        and saved.get("result") == reason)
+            except Exception:
+                held = False
+            notice = reason if held else (
+                "Known no launch; the technical hold could not be read back. "
+                "Reconcile current task/admission before any later dispatch.\n" + reason)
+            notifier.send(notice, priority=Priority.BLOCKER, handler=DAEMON_NAME)
+            job.failed(f"task {entity_id} → {skill} prelaunch technical repair")
         elif getattr(result, "remote_outcome_unknown", False):
             # ateles#1456: the remote run may have done its work. BLOCKED, not
             # FAILED: the watchdog retries FAILED tasks and leaves BLOCKED ones
@@ -3027,14 +4241,28 @@ async def dispatch_task(
             job.failed(f"task {entity_id} → {skill} failed: {reason[:60]}")
 
     if detach_after_accept:
+        # Re-checked here with no await since the create_task below, so two
+        # dispatches that both passed the early check cannot both detach.
+        if entity_id in _detached_runs_in_progress:
+            log.info(
+                f"[{DAEMON_NAME}] task {entity_id!r} already has a detached run "
+                f"in progress (trigger={trigger}) — not starting a second run"
+            )
+            return None
         task = asyncio.create_task(
             _finish_dispatch(), name=f"apis-dispatch-{entity_id}-{trigger}"
         )
+        _detached_runs_in_progress.add(entity_id)
         _background_dispatch_tasks.add(task)
+        # Done callbacks run on success, failure and cancellation alike.
+        task.add_done_callback(
+            lambda _t: _detached_runs_in_progress.discard(entity_id)
+        )
         task.add_done_callback(_background_dispatch_done)
-        return
+        return True if correction_lifecycle is not None else None
 
     await _finish_dispatch()
+    return completed if correction_lifecycle is not None else None
 
 
 # ── Checkpoint resolution ───────────────────────────────────────────────────
@@ -3096,8 +4324,171 @@ def _checkpoint_denial_persisted(checkpoint_id: str) -> bool:
     return marker is not None and _valid_checkpoint_denial_marker(marker)
 
 
+def _original_checkpoint_scope_with_reason(
+    checkpoint_id: str, checkpoint_record: dict | None = None
+) -> tuple[str, str]:
+    """The ORIGINAL authenticated effect scope of a checkpoint, read again, and why.
+
+    Every consuming sink asks this itself rather than trusting what its caller
+    passed, so an omitted or stale context cannot widen a restrictive scope.
+    """
+    return checkpoint_effect_scope_with_reason(
+        checkpoint_id,
+        checkpoint_record if isinstance(checkpoint_record, dict) else None,
+        read_authorization=lambda cid, rec: read_authenticated_checkpoint_authorization(
+            cid, rec
+        ),
+        read_observations=lambda cid: fetch_entity_observations_strict(cid),
+    )
+
+
+def _original_checkpoint_scope(
+    checkpoint_id: str, checkpoint_record: dict | None = None
+) -> str:
+    return _original_checkpoint_scope_with_reason(checkpoint_id, checkpoint_record)[0]
+
+
+# A held checkpoint's own record is exactly the untrusted one, so nothing read
+# from it reaches an operator message or a log line unless it is an entity id.
+_SAFE_ENTITY_ID = re.compile(r"ent_[0-9a-f]{24}")
+
+
+def _safe_entity_id(value: object) -> str:
+    """The id when it is a well-formed entity id, else ``unknown``."""
+    if isinstance(value, str) and _SAFE_ENTITY_ID.fullmatch(value):
+        return value
+    return "unknown"
+
+
+_HELD_CAUSES = {
+    "authenticated_extension": (
+        "it was issued with a restricted scope, so this approve/reject path "
+        "cannot act on it"
+    ),
+    "history_unreadable": (
+        "its change history could not be read, so whether it was restricted "
+        "cannot be confirmed"
+    ),
+    "extension_in_history_envelope_changed": (
+        "an earlier version of it carried a restriction and it was edited since"
+    ),
+    "extension_claim_unauthenticated": (
+        "its text claims a restriction that could not be authenticated"
+    ),
+    "record_unavailable": "the checkpoint could not be read",
+    "scope_reader_error": "its scope could not be read because the reader failed",
+}
+
+
+def _held_checkpoint_explanation(scope: str, reason: str) -> str:
+    """Plain cause and next step for a held checkpoint (never changes a decision)."""
+    cause = _HELD_CAUSES.get(reason, "its original scope could not be confirmed")
+    reason = reason if reason in _HELD_CAUSES else "unrecognized"
+    if scope == "restricted":
+        step = (
+            "Next step: resolve it through the review path that issued it; do "
+            "not approve or reject it here"
+        )
+    else:
+        step = (
+            "Next step: re-read or re-file the checkpoint; if it stays held, "
+            "escalate to the swarm operator, who owns clearing it"
+        )
+    return f"{cause} (reason: {reason}). {step}."
+
+
+def _held_checkpoint_dedupe_key(raw_checkpoint_id: object) -> str:
+    """Notifier dedupe key from the RAW id, so two malformed ids stay distinct.
+
+    The message prints the sanitised id (``unknown`` for any malformed one);
+    the key must not, or one malformed held checkpoint would hide the rest.
+    """
+    digest = hashlib.sha256(str(raw_checkpoint_id).encode("utf-8", "replace"))
+    return f"{DAEMON_NAME}:held_checkpoint:{digest.hexdigest()[:16]}"
+
+
+def _notify_held_checkpoint(
+    notifier,
+    checkpoint_id: str,
+    *,
+    task_id: str | None,
+    scope: str,
+    reason: str,
+    effect: str,
+    decision: str | None = None,
+) -> bool:
+    """The ONE notice every held outcome sends.  Notice only: no status write."""
+    dedupe_key = _held_checkpoint_dedupe_key(checkpoint_id)
+    checkpoint_id = _safe_entity_id(checkpoint_id)
+    task_id = _safe_entity_id(task_id)
+    decision = decision if decision in ("approved", "rejected") else None
+    log.warning(
+        "[%s] checkpoint %s held (scope=%s, reason=%s): %s not taken",
+        DAEMON_NAME,
+        checkpoint_id,
+        scope,
+        reason if reason in _HELD_CAUSES else "unrecognized",
+        effect,
+    )
+    if notifier is None:
+        return False
+    applied = f"The {decision} decision" if decision else "The requested action"
+    try:
+        # The notifier's journal-backed dedupe: one notice per held checkpoint
+        # until its key is cleared, across poll ticks AND restarts.  The key
+        # is marked inside the notifier's send lock, so a send that raises
+        # before routing is not recorded as told.
+        notifier.send(
+            f"Checkpoint {checkpoint_id} (task {task_id}) is held: "
+            f"{applied} was NOT applied and nothing was closed, replaced, retired "
+            f"or released ({effect}). "
+            + _held_checkpoint_explanation(scope, reason),
+            priority=Priority.WARN,
+            handler=DAEMON_NAME,
+            dedupe_key=dedupe_key,
+        )
+    except Exception:  # noqa: BLE001 - a failed notice never widens scope
+        log.exception("[%s] could not send held-checkpoint notice", DAEMON_NAME)
+        return False
+    return True
+
+
+def _checkpoint_may_take_ordinary_effects(
+    checkpoint_id: str,
+    checkpoint_record: dict | None = None,
+    *,
+    effect: str,
+    notifier=None,
+    task_id: str | None = None,
+    decision: str | None = None,
+) -> bool:
+    """False, with ONE notice, unless the original scope is ordinary or legacy."""
+    scope, reason = _original_checkpoint_scope_with_reason(
+        checkpoint_id,
+        checkpoint_record
+        if isinstance(checkpoint_record, dict)
+        else fetch_checkpoint_record(checkpoint_id),
+    )
+    if checkpoint_scope_permits_ordinary_effects(scope):
+        return True
+    _notify_held_checkpoint(
+        notifier,
+        checkpoint_id,
+        task_id=task_id,
+        scope=scope,
+        reason=reason,
+        effect=effect,
+        decision=decision,
+    )
+    return False
+
+
 def _persist_checkpoint_denial(checkpoint_id: str) -> bool:
     """Persist a cross-process replay deny when Neotoma writes both fail."""
+    if not _checkpoint_may_take_ordinary_effects(
+        checkpoint_id, effect="host denial marker"
+    ):
+        return False
     marker = _checkpoint_denial_marker(checkpoint_id)
     if marker is None:
         return False
@@ -3138,8 +4529,19 @@ def _persist_checkpoint_denial(checkpoint_id: str) -> bool:
     return _valid_checkpoint_denial_marker(marker)
 
 
-def _deny_checkpoint_release(checkpoint_id: str, *, reason: str) -> None:
+def _deny_checkpoint_release(
+    checkpoint_id: str, *, reason: str, notifier=None, task_id: str | None = None
+) -> None:
     """Consume a denied approval with durable cross-process fallbacks."""
+    if not _checkpoint_may_take_ordinary_effects(
+        checkpoint_id,
+        effect="close, fallback stamp or denial marker",
+        notifier=notifier,
+        task_id=task_id,
+    ):
+        # A restrictive (or unqualifiable) original scope stays held: no close,
+        # no fallback stamp, no host marker.
+        return
     if close_checkpoint_without_release(
         checkpoint_id, handler=DAEMON_NAME, reason=reason
     ):
@@ -3229,20 +4631,24 @@ def _gate_confidence(
     )
 
 
+def _gate_skill(task_snapshot: dict) -> str | None:
+    """The skill a task is judged under after it was held.
+
+    The hold was signed under the policy and action of the skill `dispatch_task`
+    resolved, and an approved release goes back through `dispatch_task`, so the
+    readings in between must name that same skill. Reading stored tags alone
+    judged a task routed only by its words under no skill at all: the policy of
+    the agent that would run it did not bind the re-check or the replacement
+    checkpoint. A task assigned to the dispatcher names no owner, so its tags and
+    words decide here as they do there.
+    """
+    assignee = _deciding_assignee(task_snapshot.get("assigned_to"))
+    return assignee or _resolve_skill(_routing_tags(task_snapshot))
+
+
 def _task_gate_context(task_snapshot: dict, *, bound_confidence: float | None = None):
     """The skill, action type, live policy and gate decision for a task as it is."""
-    assigned_to = _canonical_assignee(task_snapshot.get("assigned_to"))
-    skill = assigned_to
-    if not skill:
-        tags = task_snapshot.get("tags", []) or []
-        if isinstance(tags, str):
-            import json as _json
-
-            try:
-                tags = _json.loads(tags)
-            except (ValueError, TypeError):
-                tags = []
-        skill = _resolve_skill(tags, assigned_to=assigned_to)
+    skill = _gate_skill(task_snapshot)
     policy = resolve_policy_for_agent(skill)
     action_type = _resolve_gate_action_type(skill or "", task_snapshot, policy).value
     confidence, confidence_unscored = _gate_confidence(
@@ -3354,6 +4760,13 @@ def _require_fresh_release_authority(
     reason: str,
 ) -> str | None:
     """Create replacement authority before retiring the stale approval."""
+    if not _checkpoint_may_take_ordinary_effects(
+        checkpoint_id,
+        effect="ordinary replacement and retirement",
+        notifier=notifier,
+        task_id=task_id,
+    ):
+        return None
     replacement_id = _file_fresh_checkpoint(
         prior_checkpoint_id=checkpoint_id,
         task_id=task_id,
@@ -3419,6 +4832,14 @@ def migrate_checkpoint_authority(
             DAEMON_NAME,
             checkpoint_id,
         )
+        return None
+    if not _checkpoint_may_take_ordinary_effects(
+        checkpoint_id,
+        checkpoint_record,
+        effect="legacy migration",
+        notifier=notifier,
+        task_id=str(snapshot.get("task_entity_id") or "") or None,
+    ):
         return None
     if read_authenticated_checkpoint_authorization(checkpoint_id, checkpoint_record):
         log.error(
@@ -3550,7 +4971,112 @@ _BLOCKER_SUMMARIES = {
 }
 
 
-def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
+def _checkpoint_created_at(item: dict) -> datetime | None:
+    """A brief's creation time as an aware UTC datetime; ``None`` when unknown.
+
+    Only an ISO 8601 stamp that carries an offset (``Z`` accepted) is a known
+    time.  A missing, unparseable or naive stamp gives ``None``: its place in
+    the order is unknown, never guessed from string comparison.
+    """
+    raw = item.get("created_at")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        stamp = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        return None
+    return stamp.astimezone(timezone.utc)
+
+
+# Every status a checkpoint_brief is written with or read as, normalized
+# (stripped, lower case).  A status outside this set is unrecognized: it is not
+# evidence either way about whether a hold was retired.
+_RECOGNIZED_CHECKPOINT_STATUSES = frozenset(
+    {
+        CHECKPOINT_AWAITING_OPERATOR,
+        CHECKPOINT_SUPERSEDED,
+        CHECKPOINT_APPROVED_NO_RELEASE,
+        CHECKPOINT_REQUIRES_FRESH_APPROVAL,
+    }
+    | CHECKPOINT_APPROVED_STATES
+    | CHECKPOINT_REJECTED_STATES
+)
+
+
+def _malformed_checkpoint_row(item: object, task_id: str) -> bool:
+    """True when a checkpoint row cannot carry evidence about retirement.
+
+    A row is malformed when it is not a record, has no string ``entity_id``,
+    has no snapshot, names a task other than ``task_id`` (the read filters on
+    the task, so a foreign row means the listing cannot be trusted), or has a
+    status that is not a string or not one of the recognized checkpoint
+    statuses.  A present but unrecognized value is unknown, never evidence.
+    """
+    if not isinstance(item, dict):
+        return True
+    checkpoint_id = item.get("entity_id")
+    if not isinstance(checkpoint_id, str) or not checkpoint_id.strip():
+        return True
+    snapshot = _record_snapshot(item)
+    if snapshot is None:
+        return True
+    linked_task = snapshot.get("task_entity_id")
+    if not isinstance(linked_task, str) or linked_task.strip() != task_id:
+        return True
+    status = snapshot.get("status")
+    if not isinstance(status, str):
+        return True
+    return status.strip().lower() not in _RECOGNIZED_CHECKPOINT_STATUSES
+
+
+def _newest_checkpoint_superseded(
+    checkpoints: list[dict],
+) -> tuple[str, str | None]:
+    """Whether the task's newest checkpoint was superseded on purpose.
+
+    Returns ``("retired", id)`` when the newest brief is ``superseded``,
+    ``("not_retired", None)`` when it is not (or there are no briefs), and
+    ``("unknown", None)`` when retirement cannot be decided.
+
+    A hold retired on purpose with ``supersede_checkpoint`` leaves its newest
+    brief at ``superseded``.  Newest is judged by creation time, compared as
+    UTC datetimes parsed from ISO 8601 stamps with an offset.  When any stamp
+    is missing, unparseable or naive, or the newest time is shared by briefs
+    of different status, the order is unknown: if any brief is superseded the
+    result is ``unknown`` (fail closed, nothing is refiled); if none is, there
+    is no retirement evidence and the result is ``not_retired``.  Callers must
+    reject malformed rows (``_malformed_checkpoint_row``) before calling.
+    """
+    if not checkpoints:
+        return ("not_retired", None)
+
+    def _status(item: dict) -> str:
+        return str((_record_snapshot(item) or {}).get("status") or "").strip().lower()
+
+    any_superseded = any(_status(c) == CHECKPOINT_SUPERSEDED for c in checkpoints)
+    if not any_superseded:
+        return ("not_retired", None)
+    stamped = [(_checkpoint_created_at(c), c) for c in checkpoints]
+    if any(stamp is None for stamp, _ in stamped):
+        return ("unknown", None)
+    newest_at = max(stamp for stamp, _ in stamped)
+    newest = [c for stamp, c in stamped if stamp == newest_at]
+    newest_statuses = {_status(c) for c in newest}
+    if len(newest_statuses) > 1:
+        return ("unknown", None)
+    if newest_statuses == {CHECKPOINT_SUPERSEDED}:
+        return ("retired", str(max(str(c["entity_id"]) for c in newest)))
+    return ("not_retired", None)
+
+
+def reissue_held_task_checkpoint(
+    task_id: str, *, apply: bool, keep_retired: bool = False
+) -> ReissueResult:
     """Give one still-held task a fresh, signed, resolvable checkpoint.
 
     The recovery for tasks that were left at ``awaiting_approval`` with no
@@ -3579,6 +5105,20 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
         be assessed or fixed.  A checkpoint or authorization read that fails is
         reported here and never treated as proof a brief is stale.
 
+    With ``keep_retired`` (a blanket run that did not name the task):
+      * ``retired`` - the task has no live checkpoint and its newest one was
+        superseded on purpose; it is not refiled, so a clean-up stays done.
+        ``checkpoint_id`` is that superseded checkpoint.  Naming the task
+        (``keep_retired=False``) refiles it as before;
+      * ``unknown`` - whether the hold was retired cannot be decided, so
+        nothing is filed: the checkpoints could not be read (they are read
+        strictly), a row is malformed (not a record, no ``entity_id``, a
+        status that is missing, not a string or not a recognized checkpoint
+        status, or a ``task_entity_id`` naming another task), or a checkpoint was superseded but the order is unknown (a
+        creation time is missing, unparseable or has no offset, or the newest
+        time is shared).  With no superseded checkpoint there is no retirement
+        evidence and the task is refiled as before.
+
     Guarantees, each pinned by a test:
       * only a task at ``awaiting_approval`` right now is touched, so a done,
         declined, superseded, blocked, or running task is never re-issued;
@@ -3601,17 +5141,61 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
     if status != TaskStatus.AWAITING_APPROVAL.value:
         return ReissueResult(task_id, "skipped", f"not held (status={status or 'unset'})")
 
-    existing = checkpoints_for_task(task_id)
+    # A blanket run decides "retired or lost" from these rows, so it reads them
+    # strictly: a malformed row fails the whole read instead of vanishing.
+    existing = (
+        checkpoints_for_task(task_id, strict=True)
+        if keep_retired
+        else checkpoints_for_task(task_id)
+    )
     if existing is None:
+        if keep_retired:
+            # A failed read is never "no checkpoint": a retired hold would be
+            # refiled.  Report it as unknown and file nothing.
+            return ReissueResult(
+                task_id,
+                "unknown",
+                "checkpoint list could not be read; whether the hold was "
+                "retired is unknown, nothing was filed",
+            )
         return ReissueResult(task_id, "failed", "checkpoint list could not be read")
+    if keep_retired and any(
+        _malformed_checkpoint_row(item, task_id) for item in existing
+    ):
+        # A row with no id, an unrecognized status or a foreign task link could
+        # hide the superseded newest brief; counting it could refile a retired
+        # hold.
+        return ReissueResult(
+            task_id,
+            "unknown",
+            "checkpoint list holds a malformed row (not a record, no id, a "
+            "missing or unrecognized status, or a different task); whether the "
+            "hold was retired is unknown, nothing was filed",
+        )
     current_id: str | None = None
     stale_pending: list[str] = []
+    restricted_pending: list[tuple[str, str]] = []
+    unknown_pending: list[tuple[str, str]] = []
     for item in existing:
         checkpoint_id = str(item.get("entity_id") or "")
         item_snapshot = _record_snapshot(item) or {}
         item_status = str(item_snapshot.get("status") or "").strip().lower()
         if not checkpoint_id:
             continue
+        if item_status == CHECKPOINT_AWAITING_OPERATOR:
+            scope, scope_reason = _original_checkpoint_scope_with_reason(
+                checkpoint_id, item
+            )
+            if scope == "unknown":
+                # Never replaced, retired or counted as authority; reported
+                # separately so a separate ordinary checkpoint is not blocked.
+                unknown_pending.append((checkpoint_id, scope_reason))
+                continue
+            if scope == "restricted":
+                # Its original restrictive scope is preserved: never replaced
+                # or retired as "stale", and never counted as ordinary authority.
+                restricted_pending.append((checkpoint_id, scope_reason))
+                continue
         if (
             read_checkpoint_resolution(item_snapshot) == "approved"
             and not checkpoint_already_dispatched(item_snapshot)
@@ -3621,7 +5205,7 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
                 "skipped",
                 f"approved checkpoint {checkpoint_id} is awaiting release",
             )
-        if item_status != "awaiting_operator":
+        if item_status != CHECKPOINT_AWAITING_OPERATOR:
             continue
         state = _checkpoint_authority_state(checkpoint_id, record)
         if state == "unreadable":
@@ -3638,6 +5222,60 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
         else:
             stale_pending.append(checkpoint_id)
 
+    if keep_retired and current_id is None:
+        retirement, retired_id = _newest_checkpoint_superseded(existing)
+        if retirement == "unknown":
+            return ReissueResult(
+                task_id,
+                "unknown",
+                "a checkpoint was superseded but the order of the checkpoints "
+                "is unknown (a creation time is missing, unparseable, has no "
+                "offset, or is shared); whether the hold was retired is "
+                "unknown, nothing was filed",
+            )
+        if retirement == "retired":
+            return ReissueResult(
+                task_id,
+                "retired",
+                f"newest checkpoint {retired_id} was superseded on purpose; "
+                "not refiled (name the task with --task to refile it)",
+                checkpoint_id=retired_id,
+            )
+
+    held_notes = [
+        f"checkpoint {_safe_entity_id(held_id)} is held ({scope_name}): "
+        + _held_checkpoint_explanation(scope_name, held_reason)
+        for scope_name, group in (
+            ("restricted", restricted_pending),
+            ("unknown", unknown_pending),
+        )
+        for held_id, held_reason in group
+    ]
+    held_note = " ".join(held_notes)
+
+    def _noted(detail: str) -> str:
+        return " ".join(part for part in (detail, held_note) if part)
+
+    if unknown_pending and current_id is None:
+        # An unqualified checkpoint may be a restricted one: filing an ordinary
+        # replacement beside it could widen its scope, so nothing is filed or
+        # retired until it is cleared.  A separate ordinary checkpoint that is
+        # already current is untouched by this and proceeds below.
+        return ReissueResult(
+            task_id,
+            "failed",
+            "no ordinary checkpoint exists and a held one could not be "
+            "qualified; nothing was replaced or retired. " + held_note,
+            remaining=[held_id for held_id, _ in unknown_pending],
+        )
+    if restricted_pending and current_id is None:
+        return ReissueResult(
+            task_id,
+            "skipped",
+            "no ordinary replacement was filed; " + held_note,
+            checkpoint_id=restricted_pending[0][0],
+        )
+
     blocker = _approval_cannot_release(snapshot)
     blocker_outcome = _BLOCKER_OUTCOMES.get(blocker or "")
 
@@ -3652,7 +5290,7 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
         return ReissueResult(
             task_id,
             "skipped",
-            f"already has a resolvable checkpoint {current_id}",
+            _noted(f"already has a resolvable checkpoint {current_id}"),
             checkpoint_id=current_id,
         )
 
@@ -3764,7 +5402,7 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
     return ReissueResult(
         task_id,
         "reissued" if reissued else "retired_stale",
-        "",
+        _noted(""),
         checkpoint_id=current_id,
         superseded=retired,
     )
@@ -3894,6 +5532,26 @@ async def handle_checkpoint_brief(
             )
             return False
 
+        # The checkpoint's ORIGINAL authenticated scope decides whether any
+        # ordinary consuming effect (decline, close, replace, retire, stamp,
+        # marker) may follow.  It is read from the checkpoint itself, never from
+        # the current task, so a changed task kind, an invalid resolution or a
+        # missing caller context cannot widen it.
+        original_scope, original_reason = _original_checkpoint_scope_with_reason(
+            entity_id, checkpoint_record
+        )
+        if not checkpoint_scope_permits_ordinary_effects(original_scope):
+            _notify_held_checkpoint(
+                notifier,
+                entity_id,
+                task_id=str(task_id),
+                scope=original_scope,
+                reason=original_reason,
+                effect=f"{resolution} decision",
+                decision=resolution,
+            )
+            return False
+
         title = snapshot.get("title", "(untitled)")
 
         if resolution == "rejected":
@@ -3934,6 +5592,8 @@ async def handle_checkpoint_brief(
                 )
                 _deny_checkpoint_release(
                     entity_id,
+                    notifier=notifier,
+                    task_id=task_id,
                     reason="rejection lacks authenticated required-resolver authority",
                 )
                 return False
@@ -3994,19 +5654,8 @@ async def handle_checkpoint_brief(
             GateAction.CHECKPOINT.value,
             GateAction.CHECKPOINT_WITH_ALTERNATIVES.value,
         }
-        assigned_to = _canonical_assignee(task_snapshot.get("assigned_to"))
-        safety_skill = assigned_to
-        if not safety_skill:
-            task_tags = task_snapshot.get("tags", []) or []
-            if isinstance(task_tags, str):
-                import json as _json
-
-                try:
-                    task_tags = _json.loads(task_tags)
-                except (ValueError, TypeError):
-                    task_tags = []
-            safety_skill = _resolve_skill(task_tags, assigned_to=assigned_to)
-
+        # Judge the task under the skill and policy `dispatch_task` held it under.
+        safety_skill = _gate_skill(task_snapshot)
         current_policy = resolve_policy_for_agent(safety_skill)
         current_action_type = _resolve_gate_action_type(
             safety_skill or "", task_snapshot, current_policy
@@ -4139,6 +5788,28 @@ async def handle_checkpoint_brief(
             )
             return False
 
+        correction_lifecycle = None
+        if task_snapshot.get("task_type") == "existing_pr_correction":
+            task_version = task_record.get("entity_version")
+            if (not isinstance(task_version, str) or not task_version
+                    or not isinstance(task_snapshot.get("blocked_reason"), str)):
+                log.warning("[%s] correction %s has no exact lifecycle reason/version binding",
+                            DAEMON_NAME, task_id)
+                return False
+            # Use the SAME tenant-preserving view as the existing versioned
+            # reader, derived from this already authenticated record. Raw
+            # snapshots can omit provenance carried by the record envelope.
+            # This is a copy; no fresh scope or task-supplied proof is adopted.
+            lifecycle_snapshot = _snapshot_with_tenant(task_record)
+            try:
+                correction_lifecycle = _ApprovedCorrectionLifecycle(
+                    task_id, _correction_lifecycle_shape(lifecycle_snapshot), task_version,
+                    hashlib.sha256(f"{entity_id}:{version}:{task_version}".encode()).hexdigest()[:16],
+                    task_user_id, _correction_provenance_shape(task_record))
+            except (TypeError, ValueError):
+                return False
+            task_snapshot = lifecycle_snapshot
+
         log.info(
             f"[{DAEMON_NAME}] checkpoint {entity_id} APPROVED — re-dispatching task "
             f"{task_id} with gate override"
@@ -4159,14 +5830,20 @@ async def handle_checkpoint_brief(
                 "dispatched — not releasing task"
             )
             return False
-    await dispatch_task(
+    lifecycle_binding = ({"_approved_correction_lifecycle": correction_lifecycle}
+                         if correction_lifecycle is not None else {})
+    dispatched = await dispatch_task(
         task_id,
         task_snapshot,
         trigger="approved",
         notifier=notifier,
         gate_override=True,
         detach_after_accept=detach_after_accept,
+        release_key=entity_id,
+        **lifecycle_binding,
     )
+    if correction_lifecycle is not None and dispatched is not True:
+        return False
     final_task = fetch_task_snapshot(task_id)
     if final_task is None or final_task.get("blocked_reason") != "":
         return False
@@ -4215,7 +5892,12 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
     log.info(f"[{DAEMON_NAME}] Event: {entity_type}/{entity_id} action={action}")
 
     if entity_type == "checkpoint_brief":
-        await handle_checkpoint_brief(entity_id, snapshot, notifier)
+        # Detach the released run: reading, the replay guard and the stamp stay
+        # on the stream, one event at a time; only the agent run itself (up to
+        # 30 minutes) leaves it, so the stream keeps hearing events meanwhile.
+        await handle_checkpoint_brief(
+            entity_id, snapshot, notifier, detach_after_accept=True
+        )
         return
 
     if entity_type != "task":
@@ -4224,6 +5906,16 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
 
     title = snapshot.get("title", "(untitled)")
     status = snapshot.get("status", "")
+
+    # dispatch_task itself refuses a task whose Fly run is in flight. This
+    # earlier check stays for task.created only, because it also keeps a replay
+    # from announcing "Task created" again and from claiming the created dedupe.
+    # A task whose in-flight run is held by a DIFFERENT task carries on, so it
+    # reaches dispatch_task's deferral path and resumes when that run ends; the
+    # test is the one dispatch_task uses (`_fly_defer_holder`).
+    if (action == "created" and _fly_defer_holder(snapshot, entity_id) is None
+            and _fly_run_refuses_dispatch(snapshot, entity_id, "task.created")):
+        return
 
     if action == "created":
         # Neotoma redelivers `task.created` for the same entity — measured
@@ -4260,12 +5952,15 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
                 priority=Priority.INFO,
                 handler=DAEMON_NAME,
             )
+        # Reading, scoring, the gate and the hold path stay on the stream; only
+        # the run after the task durably enters EXECUTING is detached.
         await dispatch_task(
             entity_id,
             snapshot,
             trigger="created",
             notifier=notifier,
             snapshot_hydrated=event.hydrated,
+            detach_after_accept=True,
         )
 
     elif action == "updated":
@@ -4304,6 +5999,174 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+
+
+PANEL_SWEEP_INTERVAL_DEFAULT_S = 600
+
+
+def panel_sweep_interval_s(environ=None) -> int:
+    """Seconds between repeating labelled-panel sweeps; 0 means off.
+
+    Read from ``APIS_PANEL_SWEEP_INTERVAL_S`` (default 600). A value that is
+    not a whole number, or is negative, turns the sweep off with a warning
+    rather than guessing a cadence.
+    """
+    env = os.environ if environ is None else environ
+    raw = env.get("APIS_PANEL_SWEEP_INTERVAL_S")
+    if raw is None or raw.strip() == "":
+        return PANEL_SWEEP_INTERVAL_DEFAULT_S
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        value = -1
+    if value < 0:
+        log.warning(
+            f"[{DAEMON_NAME}] APIS_PANEL_SWEEP_INTERVAL_S={raw!r} is not a "
+            "whole number of seconds — the repeating panel sweep is off"
+        )
+        return 0
+    return value
+
+
+async def repeating_panel_sweep(dispatcher: SwarmDispatcher, interval_s: int) -> None:
+    """Re-drive stranded labelled-PR panels every `interval_s` seconds while running.
+
+    The startup sweep covers what a restart drops; this covers a webhook GitHub
+    timed out and never resent (a lost ``check_suite/completed`` strands a
+    held panel). The first pass waits one interval, so it never overlaps the
+    startup sweep's own pass, and the dispatcher's lock keeps two passes from
+    running at once. A failed pass is logged and the loop waits for the next;
+    it never stops Apis. ``interval_s <= 0`` returns at once.
+    """
+    if interval_s <= 0:
+        log.info(f"[{DAEMON_NAME}] repeating panel sweep: off")
+        return
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            await dispatcher.repeat_labelled_panel_sweep(
+                list(dispatcher.config.resume_repositories)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — never stop the loop
+            log.error(
+                f"[{DAEMON_NAME}] repeating panel sweep failed: {exc} — "
+                "will retry next interval",
+                exc_info=True,
+            )
+
+
+async def deferred_review_sweep_pass(dispatcher: SwarmDispatcher) -> None:
+    """One pass of Apis's periodic review sweep (``main``'s
+    ``deferred_review_sweep`` runs it every APIS_DEFERRED_REVIEW_SWEEP_SECONDS).
+    Each step is fail-open: a broken one is logged and the next still runs."""
+    # 0. Fly reservations marked for the reaper. A run whose login
+    #    machine clean-up Fly refused keeps its reservation, marked,
+    #    and only a later launch's reaper would settle it, so
+    #    fly_jobs_in_flight.py kept holding daemon deploys behind a job
+    #    that had ended. Each pass retries the reaper's own recovery;
+    #    a machine that is unreadable, running or not provably this
+    #    run's keeps its reservation. Nothing to do without Fly.
+    try:
+        import fly_runner
+
+        await fly_runner.settle_marked_reservations()
+    except Exception as exc:  # noqa: BLE001 — never stop the loop
+        log.error(
+            f"[{DAEMON_NAME}] Fly marked-reservation step failed: {exc}",
+            exc_info=True,
+        )
+    # Head-scoped review supersession (#507). Webhook synchronize and
+    # reopen events retire stale verdicts synchronously; this pass is
+    # the bounded backup for missed deliveries. It shares the review
+    # sweep cadence, so secondary invalidation lag is at most
+    # APIS_DEFERRED_REVIEW_SWEEP_SECONDS (600s by default).
+    try:
+        await dispatcher.supersede_stale_review_verdicts(
+            list(dispatcher.config.resume_repositories)
+        )
+    except Exception as exc:
+        log.error(
+            f"[{DAEMON_NAME}] review-supersession sweep failed: {exc}",
+            exc_info=True,
+        )
+    try:
+        await dispatcher.resume_deferred_reviews(
+            list(dispatcher.config.resume_repositories)
+        )
+    except Exception as exc:
+        log.error(
+            f"[{DAEMON_NAME}] deferred-review sweep failed: {exc}",
+            exc_info=True,
+        )
+    # 3. Stalled reviews. The deferred sweep only rescues PRs that got
+    #    far enough to post a deferral marker. A review that dies
+    #    earlier leaves NOTHING — no marker, no formal review, no error
+    #    anyone reads — and with auto-merge keyed on a formal approval
+    #    the PR just sits (ateles#408: two days, every check green,
+    #    zero reviews, found by a human). Same cadence and the same
+    #    fail-open discipline; runs after the deferred pass so a PR
+    #    with a live deferral is never double-handled.
+    try:
+        await dispatcher.resume_stalled_reviews(
+            list(dispatcher.config.resume_repositories)
+        )
+    except Exception as exc:
+        log.error(
+            f"[{DAEMON_NAME}] stalled-review sweep failed: {exc}",
+            exc_info=True,
+        )
+    # 4. Missing lens verdicts. The two sweeps above cover a review that
+    #    never ran and one that died mid-flight. This covers a THIRD
+    #    state neither can see: the panel ran, aggregated `Blocking: 0`,
+    #    and merge is withheld only because one declared lens produced
+    #    no verdict (neotoma#2153, security). The hold is correct — CI
+    #    green is not a lens judgement — but nothing re-ran the absent
+    #    lens, so a content-clear PR sat with no mechanism watching it.
+    #    Re-dispatches ONLY that lens; same cadence, same fail-open
+    #    discipline, runs last so a PR the earlier passes already
+    #    re-dispatched is not handled twice in one tick.
+    try:
+        await dispatcher.resume_missing_lens_reviews(
+            list(dispatcher.config.resume_repositories)
+        )
+    except Exception as exc:
+        log.error(
+            f"[{DAEMON_NAME}] missing-lens sweep failed: {exc}",
+            exc_info=True,
+        )
+    # 5. Unactioned revisions (ateles#511). The three sweeps above all
+    #    carry a PR TOWARD a verdict. This is the first that carries one
+    #    PAST a verdict: a PR at CHANGES_REQUESTED whose author pushed
+    #    the fix and whose review never looked again. Measured
+    #    2026-08-31: 23 of 47 open ateles PRs in that state, median 33d.
+    #    `resume_stalled_reviews` excludes them by design (it requires
+    #    ZERO reviews), so until now nothing watched this state at all.
+    #    Same cadence, same fail-open discipline.
+    try:
+        await dispatcher.resume_unactioned_revisions(
+            list(dispatcher.config.resume_repositories)
+        )
+    except Exception as exc:
+        log.error(
+            f"[{DAEMON_NAME}] revision sweep failed: {exc}",
+            exc_info=True,
+        )
+    # 6. Approved-unmerged visibility (ateles#565). Reports only — it
+    #    never merges. An APPROVED PR presents as done, so nothing was
+    #    watching while three of them rotted CLEAN → DIRTY over 33-53
+    #    days. Runs last: it reports on the state the sweeps above have
+    #    already had their chance to change this tick.
+    try:
+        await dispatcher.report_pr_review_queue(
+            list(dispatcher.config.resume_repositories)
+        )
+    except Exception as exc:
+        log.error(
+            f"[{DAEMON_NAME}] approved-unmerged report failed: {exc}",
+            exc_info=True,
+        )
 
 
 async def main() -> None:
@@ -4351,7 +6214,7 @@ async def main() -> None:
         )
 
     # 3. Load notification rubric
-    notifier = Notifier.from_neotoma()
+    notifier = ApisNotifier.from_neotoma()
     notifier.send(
         f"{DAEMON_NAME} started (task dispatch, dry_run={DRY_RUN})",
         priority=Priority.INFO,
@@ -4389,7 +6252,7 @@ async def main() -> None:
     # 6. Stall watchdog (task #2): out-of-band sweeper that retries FAILED tasks
     #    with backoff, resumes tasks left mid-flight by a restart, and escalates
     #    once attempts are exhausted — without blocking the SSE loop.
-    watchdog = TaskWatchdog()
+    watchdog = TaskWatchdog(fly_in_flight_guard=_watchdog_fly_guard)
 
     async def watchdog_dispatch(task_id: str, snapshot: dict, trigger: str) -> None:
         await dispatch_task(task_id, snapshot, trigger, notifier=notifier)
@@ -4424,6 +6287,19 @@ async def main() -> None:
         except Exception as exc:  # noqa: BLE001 — never let recovery kill startup
             log.error(
                 f"[{DAEMON_NAME}] deferred-task recovery sweep failed: {exc}",
+                exc_info=True,
+            )
+
+    # 6d. Fly deliveries cut off before launch: a task dispatched to Fly is
+    #     EXECUTING before its ledger receipt exists, so a restart in that
+    #     window strands it with nothing to resume it (2026-11-06). Report
+    #     those once, at startup; see recover_unlaunched_fly_tasks.
+    async def unlaunched_fly_recovery_sweep() -> None:
+        try:
+            await recover_unlaunched_fly_tasks(notifier)
+        except Exception as exc:  # noqa: BLE001 — never let recovery kill startup
+            log.error(
+                f"[{DAEMON_NAME}] unlaunched Fly task recovery failed: {exc}",
                 exc_info=True,
             )
 
@@ -4465,6 +6341,26 @@ async def main() -> None:
                 "— will retry next boot; housekeeping independent of resume",
                 exc_info=True,
             )
+
+    # 7a2. Labelled-PR panel restore. A restart forgets panels held until
+    #    checks go green (in-memory holds), kills a panel mid-run and loses
+    #    webhooks delivered while down. With the label gate set, this one pass
+    #    re-enters review for each labelled open PR whose head has no finished
+    #    panel; the normal readiness logic rebuilds the hold or runs it.
+    #    Fire-and-forget and fail-open, like the sweeps around it.
+    async def labelled_panel_sweep() -> None:
+        try:
+            await dispatcher.resume_labelled_panels(
+                list(dispatcher.config.resume_repositories)
+            )
+        except Exception as exc:  # never let a sweep failure kill startup
+            log.error(
+                f"[{DAEMON_NAME}] startup panel sweep failed: {exc}",
+                exc_info=True,
+            )
+        # 7a3. The same sweep, repeated while running, for webhooks GitHub
+        #      timed out and never resent (APIS_PANEL_SWEEP_INTERVAL_S).
+        await repeating_panel_sweep(dispatcher, panel_sweep_interval_s())
 
     # 7b. Workflow gate-owner drift check (ateles#441). The workflow_definition
     #     entities name the agent owning each gate; dispatch picks agents from
@@ -4522,96 +6418,7 @@ async def main() -> None:
 
     async def deferred_review_sweep() -> None:
         while True:
-            # Head-scoped review supersession (#507). Webhook synchronize and
-            # reopen events retire stale verdicts synchronously; this pass is
-            # the bounded backup for missed deliveries. It shares the review
-            # sweep cadence, so secondary invalidation lag is at most
-            # APIS_DEFERRED_REVIEW_SWEEP_SECONDS (600s by default).
-            try:
-                await dispatcher.supersede_stale_review_verdicts(
-                    list(dispatcher.config.resume_repositories)
-                )
-            except Exception as exc:
-                log.error(
-                    f"[{DAEMON_NAME}] review-supersession sweep failed: {exc}",
-                    exc_info=True,
-                )
-            try:
-                await dispatcher.resume_deferred_reviews(
-                    list(dispatcher.config.resume_repositories)
-                )
-            except Exception as exc:
-                log.error(
-                    f"[{DAEMON_NAME}] deferred-review sweep failed: {exc}",
-                    exc_info=True,
-                )
-            # 3. Stalled reviews. The deferred sweep only rescues PRs that got
-            #    far enough to post a deferral marker. A review that dies
-            #    earlier leaves NOTHING — no marker, no formal review, no error
-            #    anyone reads — and with auto-merge keyed on a formal approval
-            #    the PR just sits (ateles#408: two days, every check green,
-            #    zero reviews, found by a human). Same cadence and the same
-            #    fail-open discipline; runs after the deferred pass so a PR
-            #    with a live deferral is never double-handled.
-            try:
-                await dispatcher.resume_stalled_reviews(
-                    list(dispatcher.config.resume_repositories)
-                )
-            except Exception as exc:
-                log.error(
-                    f"[{DAEMON_NAME}] stalled-review sweep failed: {exc}",
-                    exc_info=True,
-                )
-            # 4. Missing lens verdicts. The two sweeps above cover a review that
-            #    never ran and one that died mid-flight. This covers a THIRD
-            #    state neither can see: the panel ran, aggregated `Blocking: 0`,
-            #    and merge is withheld only because one declared lens produced
-            #    no verdict (neotoma#2153, security). The hold is correct — CI
-            #    green is not a lens judgement — but nothing re-ran the absent
-            #    lens, so a content-clear PR sat with no mechanism watching it.
-            #    Re-dispatches ONLY that lens; same cadence, same fail-open
-            #    discipline, runs last so a PR the earlier passes already
-            #    re-dispatched is not handled twice in one tick.
-            try:
-                await dispatcher.resume_missing_lens_reviews(
-                    list(dispatcher.config.resume_repositories)
-                )
-            except Exception as exc:
-                log.error(
-                    f"[{DAEMON_NAME}] missing-lens sweep failed: {exc}",
-                    exc_info=True,
-                )
-            # 5. Unactioned revisions (ateles#511). The three sweeps above all
-            #    carry a PR TOWARD a verdict. This is the first that carries one
-            #    PAST a verdict: a PR at CHANGES_REQUESTED whose author pushed
-            #    the fix and whose review never looked again. Measured
-            #    2026-08-31: 23 of 47 open ateles PRs in that state, median 33d.
-            #    `resume_stalled_reviews` excludes them by design (it requires
-            #    ZERO reviews), so until now nothing watched this state at all.
-            #    Same cadence, same fail-open discipline.
-            try:
-                await dispatcher.resume_unactioned_revisions(
-                    list(dispatcher.config.resume_repositories)
-                )
-            except Exception as exc:
-                log.error(
-                    f"[{DAEMON_NAME}] revision sweep failed: {exc}",
-                    exc_info=True,
-                )
-            # 6. Approved-unmerged visibility (ateles#565). Reports only — it
-            #    never merges. An APPROVED PR presents as done, so nothing was
-            #    watching while three of them rotted CLEAN → DIRTY over 33-53
-            #    days. Runs last: it reports on the state the sweeps above have
-            #    already had their chance to change this tick.
-            try:
-                await dispatcher.report_pr_review_queue(
-                    list(dispatcher.config.resume_repositories)
-                )
-            except Exception as exc:
-                log.error(
-                    f"[{DAEMON_NAME}] approved-unmerged report failed: {exc}",
-                    exc_info=True,
-                )
+            await deferred_review_sweep_pass(dispatcher)
             await asyncio.sleep(deferred_interval)
 
     # Keep the App installation token minted so GitHub writes never fall back to
@@ -4651,7 +6458,9 @@ async def main() -> None:
         watchdog.run(notifier, watchdog_dispatch),
         reconciler.run(reconcile_dispatch),
         deferred_recovery_sweep(),
+        unlaunched_fly_recovery_sweep(),
         resume_sweep(),
+        labelled_panel_sweep(),
         clear_closed_issue_markers_sweep(),
         deferred_review_sweep(),
         workflow_drift_check(),

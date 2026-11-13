@@ -15,6 +15,20 @@ for p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_operator_profile(monkeypatch):
+    """Ownership tests never read the host's live operator profile.
+
+    A profile-specific test replaces this inert read after the fixture runs.
+    Other tests retain the established no-profile/unknown-assignee control.
+    """
+    from lib.capabilities import neotoma_http
+
+    monkeypatch.setattr(neotoma_http, "request_json", lambda *_a, **_k: {"entities": [], "total": 0})
+    monkeypatch.delenv("OPERATOR_NAME", raising=False)
+    monkeypatch.delenv("APIS_OPERATOR_LOGIN", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_dispatch_failure_logs(monkeypatch, tmp_path):
     """Never let a test write diagnostics into the operator's real log directory.
 
@@ -172,9 +186,12 @@ def _fly_runner_off_and_isolated(monkeypatch, tmp_path):
     """The Fly executor is off by default (ateles#1456): no test inherits an
     operator's ``APIS_FLY_RUNNER_CLASSES``, and none touches the real ledger."""
     import fly_runner
+    import build_delivery
 
     monkeypatch.delenv("APIS_FLY_RUNNER_CLASSES", raising=False)
-    monkeypatch.setenv("APIS_FLY_LEDGER_FILE", str(tmp_path / "isolated-fly-ledger.json"))
+    ledger_path = (tmp_path / "isolated-fly-ledger.json").resolve()
+    monkeypatch.setenv("APIS_FLY_LEDGER_FILE", str(ledger_path))
+    assert Path(build_delivery._registry_path()).resolve() == ledger_path
     monkeypatch.setattr(fly_runner, "_EXECUTOR", None)
     fly_runner._LOGIN_LOCKS.clear()
 
@@ -255,3 +272,55 @@ def _panel_check_hold_off_by_default(monkeypatch):
         classes.add(package_copy.SwarmDispatcher)
     for cls in classes - {None}:
         monkeypatch.setattr(cls, "_hold_panel_until_checks_green", _not_held)
+
+
+@pytest.fixture(autouse=True)
+def _path_required_lenses_off_by_default(monkeypatch):
+    """The approval tool's path-required lenses are read from GitHub; no
+    unrelated test may.
+
+    `SwarmDispatcher._path_required_lenses` fetches the PR, its base branch's
+    `.github/review_scope.json`, its file list and the repository's default
+    branch before a panel is chosen, so every test that drives `_handle_pr` or a
+    review sweep without stubbing GitHub would otherwise hit the network (and,
+    failing closed, seat the full panel). Default it to "no extra lens", which
+    is the panel `select_panel` picks on its own. The tests of the union itself
+    (`test_review_panel.py`) restore the real method from
+    `swarm_dispatch._REAL_PATH_REQUIRED_LENSES` and script GitHub.
+
+    Patched on every `SwarmDispatcher` class a test can reach, for the same
+    reasons as `_panel_check_hold_off_by_default` above.
+    """
+    import swarm_dispatch
+
+    current = swarm_dispatch.SwarmDispatcher
+    real = getattr(current, "_path_required_lenses", None)
+
+    async def _none_extra(self, trigger):
+        return frozenset()
+
+    monkeypatch.setattr(
+        swarm_dispatch, "_REAL_PATH_REQUIRED_LENSES", real, raising=False
+    )
+    classes = {current, _FIRST_DISPATCHER_CLASS}
+    package_copy = sys.modules.get("execution.daemons.apis.swarm_dispatch")
+    if package_copy is not None:
+        classes.add(package_copy.SwarmDispatcher)
+    for cls in classes - {None}:
+        if hasattr(cls, "_path_required_lenses"):
+            monkeypatch.setattr(cls, "_path_required_lenses", _none_extra)
+
+
+@pytest.fixture(autouse=True)
+def _gate_reread_sees_no_change(monkeypatch):
+    """The gate's pre-write re-read of the task (`_task_status_still`) would hit
+    the network in every dispatch test, and fails closed there. Dispatch tests
+    exercise routing and gating, not that guard, so it is inert by default;
+    test_correction_is_not_creation.py restores the real one and owns its tests.
+    """
+    import apis
+
+    async def _unchanged(*_a, **_k):
+        return True
+
+    monkeypatch.setattr(apis, "_task_status_still", _unchanged)

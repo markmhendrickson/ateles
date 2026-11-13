@@ -151,9 +151,18 @@ _PROTECTED_BRANCH_RE = re.compile(r"(?i)(?:main|master|trunk|develop|release[/_-
 _REPOSITORY_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}", re.ASCII)
 # The agent's pull request text: <export>/pull_request.md, first line the title.
 PR_TEXT_NAME = "pull_request.md"
+PR_BODY_NAME = "pull_request_body.md"  # never applied; a correction that writes it is reported "ignored"
 MAX_PR_TEXT_BYTES = 64 * 1024
 MAX_PR_TITLE_CHARS = 256
 API_TIMEOUT_SECONDS = 30
+# GitHub moves a pull request's head shortly after a push, not at once. After
+# our own push, a PR whose only difference is its head is read again every
+# interval for at most this long in total, within the delivery deadline.
+HEAD_CATCH_UP_SECONDS = 30.0
+HEAD_CATCH_UP_INTERVAL_SECONDS = 5.0
+# The clock and sleep the catch-up wait uses; tests replace them.
+_clock = time.time
+_sleep = time.sleep
 
 WITHDRAWAL_CONFIRMED = ("the quarantine ref could not be removed; the branch record was withdrawn "
                         "and read back absent; nothing may be pushed")  # fmt: skip
@@ -322,6 +331,11 @@ def git_env(home: Path, *, allow: str, config: list[tuple[str, str]] = ()) -> di
         ("core.fsmonitor", "false"),
         ("transfer.fsckObjects", "true"),
         ("fetch.fsckObjects", "true"),
+        # No automatic maintenance: git 2.47+ runs it detached after fetch and
+        # commit, and a background git still writing (its lock file, a repack)
+        # makes ``remove_work`` fail with the work directory left behind.
+        ("maintenance.auto", "false"),
+        ("gc.auto", "0"),
         ("protocol.allow", "never"),
         *[(f"protocol.{name}.allow", "always") for name in allow.split(":")],
         *config,
@@ -446,12 +460,17 @@ def _size(path: Path) -> int:
 
 @_boundary(CLONE_FAILED)
 def clone_origin(work: Work, *, url: str, base_branch: str, token: str,
-                 allow: str = "https", max_bytes: int = MAX_ORIGIN_BYTES) -> str:  # fmt: skip
+                 allow: str = "https", max_bytes: int = MAX_ORIGIN_BYTES,
+                 expected_head: str = "") -> str:  # fmt: skip
     """Fetch the base branch (depth 1) into a fresh root-owned ``origin.git``
     and return its commit. The token reaches only the fetching process."""
     _check_work(work)
-    if not isinstance(base_branch, str) or not BASE_BRANCH_RE.fullmatch(base_branch) \
-            or ".." in base_branch:  # fmt: skip
+    if expected_head:
+        if not isinstance(expected_head, str) or not _OID_RE.fullmatch(expected_head.encode("ascii", "replace")):
+            raise RepoWorkError(CLONE_REFUSED, "the admitted head is not an object id")
+        check_branch(base_branch, existing=True)
+    if (not expected_head and (not isinstance(base_branch, str) or not BASE_BRANCH_RE.fullmatch(base_branch)
+                              or ".." in base_branch)):  # fmt: skip
         raise RepoWorkError(CLONE_REFUSED, "the base branch name is not acceptable")
     _require_time()
     plain = git_env(work.home, allow=allow)
@@ -467,19 +486,23 @@ def clone_origin(work: Work, *, url: str, base_branch: str, token: str,
          category=CLONE_FAILED, reason="setting the origin head")  # fmt: skip
     if _size(work.origin) > max_bytes:
         raise RepoWorkError(CLONE_REFUSED, "the clone is larger than the accepted size")
-    return _oid(_git([*origin, "rev-parse", "--verify", f"refs/heads/{base_branch}^{{commit}}"],
+    head = _oid(_git([*origin, "rev-parse", "--verify", f"refs/heads/{base_branch}^{{commit}}"],
                      env=plain, category=CLONE_FAILED, reason="reading the base"),
                 CLONE_FAILED, "reading the base")  # fmt: skip
+    if expected_head and head != expected_head:
+        raise RepoWorkError(CLONE_REFUSED, "the existing branch moved from its admitted head")
+    return head
 
 
 @_boundary(CHECKOUT_FAILED)
 def make_checkout(work: Work, *, branch: str, base_branch: str, repository: str,
-                  ident: tuple[int, int] | None, author: tuple[str, str]) -> None:  # fmt: skip
+                  ident: tuple[int, int] | None, author: tuple[str, str],
+                  existing: bool = False) -> None:  # fmt: skip
     """The agent's checkout of ``origin.git`` on its assigned branch, handed to
     the agent's user with its export directory. Its remote names the plain
     https URL; it carries no credential."""
     _check_work(work)
-    check_branch(branch)
+    check_branch(branch, existing=existing)
     env = git_env(work.home, allow="file")
     checkout = ["-C", str(work.checkout)]
     _require_time()
@@ -490,8 +513,9 @@ def make_checkout(work: Work, *, branch: str, base_branch: str, repository: str,
                        ("user.name", author[0]), ("user.email", author[1])):  # fmt: skip
         _git([*checkout, "config", key, value], env=env, category=CHECKOUT_FAILED,
              reason="configuring the checkout")  # fmt: skip
-    _git([*checkout, "checkout", "-q", "-b", branch], env=env, category=CHECKOUT_FAILED,
-         reason="creating the assigned branch")  # fmt: skip
+    if not existing:
+        _git([*checkout, "checkout", "-q", "-b", branch], env=env, category=CHECKOUT_FAILED,
+             reason="creating the assigned branch")  # fmt: skip
     work.export.mkdir(mode=0o700)
     if ident is not None:
         for path in (work.checkout, work.export):
@@ -501,8 +525,15 @@ def make_checkout(work: Work, *, branch: str, base_branch: str, repository: str,
                     os.chown(os.path.join(dirpath, name), *ident, follow_symlinks=False)
 
 
-def check_branch(branch: str) -> str:
-    if not isinstance(branch, str) or not BRANCH_RE.fullmatch(branch):
+def check_branch(branch: str, *, existing: bool = False) -> str:
+    matched = isinstance(branch, str) and BRANCH_RE.fullmatch(branch)
+    if existing:
+        matched = (isinstance(branch, str)
+                   and re.fullmatch(r"(?:cicada|codex)/[A-Za-z0-9][A-Za-z0-9._/-]*", branch)
+                   and not any(x in branch for x in ("..", "//"))
+                   and not branch.endswith(("/", ".", ".lock"))
+                   and not any(p.startswith(".") or p.endswith(".lock") for p in branch.split("/")))
+    if not matched:
         raise RepoWorkError(BRANCH_REFUSED, "the branch name does not match the builder pattern")
     return branch
 
@@ -512,12 +543,12 @@ def check_branch(branch: str) -> str:
 
 @_boundary(EXPORT_FAILED)
 def export_agent_work(work: Work, *, branch: str, base: str,
-                      ident: tuple[int, int] | None) -> bool:  # fmt: skip
+                      ident: tuple[int, int] | None, existing: bool = False) -> bool:  # fmt: skip
     """Run AS THE AGENT: bundle the assigned branch's commits after *base*
     into the export directory. False when the branch adds nothing. What it
     writes is untrusted; ``import_agent_work`` checks all of it."""
     _check_work(work)
-    check_branch(branch)
+    check_branch(branch, existing=existing)
     env = git_env(work.home, allow="file")
     env["HOME"] = str(work.export)
     checkout = ["-C", str(work.checkout)]
@@ -652,12 +683,13 @@ def _drop_quarantine(origin: list[str], env: dict[str, str]) -> bool:
 def import_agent_work(work: Work, *, branch: str, base: str,
                       max_bundle_bytes: int = MAX_BUNDLE_BYTES,
                       max_commits: int = MAX_COMMITS,
-                      max_blob_bytes: int = MAX_BLOB_BYTES) -> Imported:  # fmt: skip
+                      max_blob_bytes: int = MAX_BLOB_BYTES,
+                      existing: bool = False) -> Imported:  # fmt: skip
     """Root's side: check the agent's bundle and, only if every check passes,
     point ``refs/heads/<branch>`` in ``origin.git`` at its head. See the
     module's import contract."""
     _check_work(work)
-    check_branch(branch)
+    check_branch(branch, existing=existing)
     if not isinstance(base, str) or not _OID_RE.fullmatch(base.encode("ascii", "replace")):
         raise RepoWorkError(IMPORT_REFUSED, "the base is not an object id")
     _require_time()
@@ -668,7 +700,7 @@ def import_agent_work(work: Work, *, branch: str, base: str,
     # exit path: a refusal or failure while copying, an interrupt, or success.
     try:
         _copy_export(work, max_bundle_bytes, copy)
-        imported = _import_copy(origin, env, copy, branch, base, max_commits, max_blob_bytes)
+        imported = _import_copy(origin, env, copy, branch, base, max_commits, max_blob_bytes, existing)
     finally:
         removed = _removed(copy)
     if not removed:
@@ -678,7 +710,7 @@ def import_agent_work(work: Work, *, branch: str, base: str,
 
 
 def _import_copy(origin: list[str], env: dict[str, str], bundle: Path, branch: str, base: str,
-                 max_commits: int, max_blob_bytes: int) -> Imported:  # fmt: skip
+                 max_commits: int, max_blob_bytes: int, existing: bool = False) -> Imported:  # fmt: skip
     heads = _git([*origin, "bundle", "list-heads", str(bundle)], env=env,
                  category=IMPORT_REFUSED, reason="the bundle could not be read")  # fmt: skip
     lines = [line for line in heads.split(b"\n") if line]
@@ -690,7 +722,7 @@ def _import_copy(origin: list[str], env: dict[str, str], bundle: Path, branch: s
     try:
         imported = _validate_and_record(origin, env, bundle, branch, base,
                                         listed[0].decode("ascii"), max_commits,
-                                        max_blob_bytes)  # fmt: skip
+                                        max_blob_bytes, existing)  # fmt: skip
         refused = False
     finally:
         if refused:
@@ -699,14 +731,24 @@ def _import_copy(origin: list[str], env: dict[str, str], bundle: Path, branch: s
         return imported
     # Recorded but not clean: delete the branch record and read it back. The
     # error says "withdrawn" only when the branch was read back absent.
-    _run([*origin, "update-ref", "-d", f"refs/heads/{branch}", imported.head], env=env)
-    gone = _ref_present(origin, env, f"refs/heads/{branch}") is False
+    if existing:
+        # Restore only our own imported ref; preserve the original admitted WIP.
+        restored = _run([*origin, "update-ref", f"refs/heads/{branch}", base, imported.head], env=env)
+        readback = _run([*origin, "rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}"], env=env)
+        gone = (not isinstance(restored, str) and restored.returncode == 0
+                and not isinstance(readback, str) and readback.returncode == 0
+                and readback.stdout.strip() == base.encode("ascii"))
+    else:
+        _run([*origin, "update-ref", "-d", f"refs/heads/{branch}", imported.head], env=env)
+        gone = _ref_present(origin, env, f"refs/heads/{branch}") is False
+    if existing and gone:
+        raise RepoWorkError(QUARANTINE_FAILED, "the quarantine ref could not be removed; the original admitted branch was restored and read back")
     raise RepoWorkError(QUARANTINE_FAILED, WITHDRAWAL_CONFIRMED if gone else WITHDRAWAL_UNRESOLVED)
 
 
 def _validate_and_record(origin: list[str], env: dict[str, str], bundle: Path, branch: str,
                          base: str, listed_head: str, max_commits: int,
-                         max_blob_bytes: int) -> Imported:  # fmt: skip
+                         max_blob_bytes: int, existing: bool = False) -> Imported:  # fmt: skip
     _git([*origin, "fetch", "-q", "--no-tags", "--no-write-fetch-head", str(bundle),
           f"+refs/heads/{branch}:{QUARANTINE_REF}"], env=env, category=IMPORT_REFUSED,
          reason="the bundle could not be imported")  # fmt: skip
@@ -731,7 +773,7 @@ def _validate_and_record(origin: list[str], env: dict[str, str], bundle: Path, b
         raise RepoWorkError(IMPORT_REFUSED, "the branch contains a merge commit")
     _check_changes(origin, env, [c.decode("ascii") for c in commits])
     _check_objects(origin, env, base, head, max_blob_bytes)
-    _git([*origin, "update-ref", f"refs/heads/{branch}", head, _ZERO], env=env,
+    _git([*origin, "update-ref", f"refs/heads/{branch}", head, base if existing else _ZERO], env=env,
          category=IMPORT_FAILED, reason="recording the branch")  # fmt: skip
     return Imported(head=head, commits=len(commits))
 
@@ -808,10 +850,10 @@ def check_repository(repository: str) -> str:
     return repository
 
 
-def check_push_branch(branch: str, default_branch: str) -> str:
+def check_push_branch(branch: str, default_branch: str, *, existing: bool = False) -> str:
     """The branch a delivery may push: the builder pattern, never the
     repository's default branch, never a release-looking name."""
-    check_branch(branch)
+    check_branch(branch, existing=existing)
     leaf = branch.split("/", 1)[1]
     if branch == default_branch or _PROTECTED_BRANCH_RE.fullmatch(branch) \
             or _PROTECTED_BRANCH_RE.fullmatch(leaf):  # fmt: skip
@@ -821,14 +863,15 @@ def check_push_branch(branch: str, default_branch: str) -> str:
 
 @_boundary(PUSH_FAILED)
 def push_branch(work: Work, *, repository: str, branch: str, default_branch: str,
-                head: str, token: str) -> None:  # fmt: skip
+                head: str, token: str, expected_head: str = "") -> None:  # fmt: skip
     """Push exactly ``refs/heads/<branch>`` from ``origin.git`` to GitHub: no
-    force, so only a new branch or a fast-forward lands; no tags, no other
+    unconditional force: new deliveries use an ordinary push; corrections
+    require both ancestry and an exact-old-ref lease. No tags, no other
     ref. Refused while the quarantine ref exists or when the branch does not
     point at *head*. One retry when git reports a connection-level failure."""
     _check_work(work)
     check_repository(repository)
-    check_push_branch(branch, default_branch)
+    check_push_branch(branch, default_branch, existing=bool(expected_head))
     if not isinstance(head, str) or not _OID_RE.fullmatch(head.encode("ascii", "replace")):
         raise RepoWorkError(PUSH_REFUSED, "the head is not an object id")
     _require_time()
@@ -840,13 +883,28 @@ def push_branch(work: Work, *, repository: str, branch: str, default_branch: str
                     env=plain, category=PUSH_REFUSED, reason="the branch is not recorded")  # fmt: skip
     if _oid(recorded, PUSH_REFUSED, "the branch is not recorded") != head:
         raise RepoWorkError(PUSH_REFUSED, "the recorded branch is not the imported head")
+    if expected_head:
+        if not _OID_RE.fullmatch(expected_head.encode("ascii", "replace")):
+            raise RepoWorkError(PUSH_REFUSED, "the admitted head is not an object id")
+        if expected_head == head:
+            raise RepoWorkError(PUSH_REFUSED, "the correction adds no commits")
+        ancestry = _run([*origin, "merge-base", "--is-ancestor", expected_head, head], env=plain)
+        if ancestry == NO_TIME:
+            raise RepoWorkError(NO_TIME, NO_TIME_REASON)
+        if isinstance(ancestry, str) or ancestry.returncode != 0:
+            raise RepoWorkError(PUSH_REFUSED, "the correction is not a fast-forward of the admitted head")
     env = git_env(work.home, allow=GITHUB_REMOTE_TRANSPORT,
                   config=[("push.followTags", "false"), ("push.recurseSubmodules", "no"),
                           *auth_config(token)])  # fmt: skip
     url = GITHUB_REMOTE.format(repository=repository)
     args = [*origin, "push", "--no-verify", "--quiet", url,
             f"refs/heads/{branch}:refs/heads/{branch}"]  # fmt: skip
-    for attempt in range(2):
+    if expected_head:
+        # The ancestry check above forbids rewinds. An explicit lease makes the
+        # fast-forward conditional on the EXACT admitted remote ref, including
+        # a competing update after the final PR read; no tracking-ref inference.
+        args.insert(-2, f"--force-with-lease=refs/heads/{branch}:{expected_head}")
+    for attempt in range(1 if expected_head else 2):
         done = _run(args, env=env)
         if done == NO_TIME:
             raise RepoWorkError(NO_TIME, NO_TIME_REASON)
@@ -915,6 +973,57 @@ def _pr_from(payload: object, repository: str, branch: str, default_branch: str)
     return PullRequest(number=number, url=url, action="")
 
 
+
+@_boundary(PR_FAILED)
+def require_existing_pr(*, repository: str, number: int, branch: str,
+                        base_branch: str, head: str, token: str,
+                        wait_for_head: bool = False) -> PullRequest:
+    """Read one exact, open, same-repository PR; never create or edit its text.
+
+    With *wait_for_head* (only after this run's own push), a PR that matches
+    in every way but its head is re-read for up to ``HEAD_CATCH_UP_SECONDS``
+    while GitHub catches up; every other mismatch refuses at once."""
+    check_repository(repository)
+    check_push_branch(branch, base_branch, existing=True)
+    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+        raise RepoWorkError(PR_FAILED, "the existing PR number is invalid")
+    if not isinstance(head, str) or not _OID_RE.fullmatch(head.encode("ascii", "replace")):
+        raise RepoWorkError(PR_FAILED, "the existing PR head is invalid")
+    _require_time()
+    status, repo = _api("GET", f"/repos/{repository}", token)
+    if (status != 200 or not isinstance(repo, dict)
+            or str(repo.get("full_name", "")).lower() != repository.lower()
+            or not isinstance(repo.get("default_branch"), str) or not repo["default_branch"]
+            or branch == repo["default_branch"]):
+        raise RepoWorkError(PR_FAILED, "the existing PR source is not confirmed distinct from the default branch")
+    mismatch = RepoWorkError(PR_FAILED, "the existing PR no longer matches the admitted open target")
+    started = _clock()
+    retries = int(HEAD_CATCH_UP_SECONDS // HEAD_CATCH_UP_INTERVAL_SECONDS)
+    while True:
+        _require_time()
+        status, payload = _api("GET", f"/repos/{repository}/pulls/{number}", token)
+        pr = _pr_from(payload, repository, branch, base_branch) if status == 200 else None
+        if (pr is None or pr.number != number or payload.get("state") != "open"
+                or payload.get("merged") is not False
+                or not isinstance(payload["base"].get("repo"), dict)
+                or str(payload["base"]["repo"].get("full_name", "")).lower() != repository.lower()):
+            raise mismatch
+        if payload["head"].get("sha") == head:
+            return PullRequest(pr.number, pr.url, "updated")
+        # Only the head differs. Before our push that is a refusal; after it,
+        # GitHub may not have caught up yet, so wait a bounded time. A head
+        # that never arrives may be someone else's push: refuse as before.
+        if not wait_for_head or retries <= 0:
+            raise mismatch
+        elapsed = _clock() - started
+        if elapsed + HEAD_CATCH_UP_INTERVAL_SECONDS > HEAD_CATCH_UP_SECONDS:
+            raise mismatch
+        if _DEADLINE and (_DEADLINE[-1] - _clock() - HEAD_CATCH_UP_INTERVAL_SECONDS
+                          < MIN_CALL_SECONDS):
+            raise mismatch
+        retries -= 1
+        _sleep(HEAD_CATCH_UP_INTERVAL_SECONDS)
+
 @_boundary(PR_FAILED)
 def open_or_update_pr(*, repository: str, branch: str, default_branch: str, token: str,
                       title: str, body: str) -> PullRequest:  # fmt: skip
@@ -951,6 +1060,38 @@ def open_or_update_pr(*, repository: str, branch: str, default_branch: str, toke
     return PullRequest(number=created.number, url=created.url, action="opened")
 
 
+def _read_export_text(work: Work, name: str) -> str:
+    """The agent's text file *name* in ``<export>``, read without following a
+    link, only as a regular file and size-capped. Missing, oversized, not
+    UTF-8, or unreadable text gives ``""``."""
+    _check_work(work)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    fd = -1
+    try:
+        dfd = os.open(work.export, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+        try:
+            fd = os.open(name, os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0),
+                         dir_fd=dfd)  # fmt: skip
+        finally:
+            os.close(dfd)
+    except OSError:
+        fd = -1
+    if fd < 0:
+        return ""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ""
+        raw = os.read(fd, MAX_PR_TEXT_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(raw) > MAX_PR_TEXT_BYTES:
+        return ""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+
+
 @_boundary(PR_FAILED)
 def read_pr_text(work: Work) -> tuple[str, str]:
     """The agent's pull request text from ``<export>/pull_request.md``: the
@@ -958,32 +1099,47 @@ def read_pr_text(work: Work) -> tuple[str, str]:
     following a link and size-capped. Missing, oversized, not UTF-8, or
     unreadable text gives ``("", "")``: the delivery goes ahead with a
     default title."""
-    _check_work(work)
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    fd = -1
-    try:
-        dfd = os.open(work.export, os.O_RDONLY | os.O_DIRECTORY | nofollow)
-        try:
-            fd = os.open(PR_TEXT_NAME, os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0),
-                         dir_fd=dfd)  # fmt: skip
-        finally:
-            os.close(dfd)
-    except OSError:
-        fd = -1
-    if fd < 0:
-        return "", ""
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return "", ""
-        raw = os.read(fd, MAX_PR_TEXT_BYTES + 1)
-    finally:
-        os.close(fd)
-    if len(raw) > MAX_PR_TEXT_BYTES:
-        return "", ""
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
+    text = _read_export_text(work, PR_TEXT_NAME)
+    if not text:
         return "", ""
     first, _, rest = text.strip().partition("\n")
     title = first.lstrip("#").strip()[:MAX_PR_TITLE_CHARS]
     return title, rest.strip()
+
+
+@_boundary(PR_FAILED)
+def read_pr_body(work: Work) -> str:
+    """Whatever a builder wrote to ``<export>/pull_request_body.md``, read
+    the same way as ``read_pr_text``. The runner never applies it to a pull
+    request; it is read only so a correction can report it was ignored."""
+    return _read_export_text(work, PR_BODY_NAME).strip()
+
+
+@_boundary(PR_FAILED)
+def read_change_summary(work: Work) -> str:
+    """The builder's whole change summary, ``<export>/pull_request.md``, read
+    the same way as ``read_pr_text``. Missing, empty, oversized, not UTF-8, or
+    unreadable gives ``""``."""
+    return _read_export_text(work, PR_TEXT_NAME).strip()
+
+
+@_boundary(PR_FAILED)
+def post_pr_comment(*, repository: str, number: int, token: str, body: str) -> bool:
+    """Add *body* as one comment on PR *number*; the description and title are
+    never touched. The comment is then read back by the id GitHub returned:
+    ``True`` only when its body equals *body*. A refused POST raises. Neither
+    text is ever printed or raised."""
+    check_repository(repository)
+    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+        raise RepoWorkError(PR_FAILED, "the existing PR number is invalid")
+    _require_time()
+    status, made = _api("POST", f"/repos/{repository}/issues/{number}/comments", token, {"body": body})
+    if status != 201:
+        raise RepoWorkError(PR_FAILED, "the pull request comment could not be posted",
+                            _status_word(status))  # fmt: skip
+    comment_id = made.get("id") if isinstance(made, dict) else None
+    if isinstance(comment_id, bool) or not isinstance(comment_id, int) or comment_id <= 0:
+        return False
+    _require_time()
+    status, payload = _api("GET", f"/repos/{repository}/issues/comments/{comment_id}", token)
+    return status == 200 and isinstance(payload, dict) and payload.get("body") == body

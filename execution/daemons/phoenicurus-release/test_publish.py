@@ -693,7 +693,7 @@ def test_email_approval_publishes_from_pending_approval(monkeypatch):
     _stub_publish_steps(monkeypatch)
     flips = []
     monkeypatch.setattr(publish, "set_release_status",
-                        lambda v, s, extra=None: flips.append((v, s)))
+                        lambda v, s, extra=None, entity_id=None: flips.append((v, s)))
     # should flip to approved, then run (no raise)
     publish.publish_release(_release("pending_approval"), "v0.20.0",
                             dry_run=False, force=False, email_approval=True)
@@ -725,7 +725,7 @@ def test_email_approval_dry_run_does_not_flip_status(monkeypatch):
     _stub_publish_steps(monkeypatch)
     flips = []
     monkeypatch.setattr(publish, "set_release_status",
-                        lambda v, s, extra=None: flips.append((v, s)))
+                        lambda v, s, extra=None, entity_id=None: flips.append((v, s)))
     publish.publish_release(_release("pending_approval"), "v0.20.0",
                             dry_run=True, force=False, email_approval=True)
     assert flips == []  # dry-run makes no state change

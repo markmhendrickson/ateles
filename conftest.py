@@ -31,8 +31,11 @@ shared with the launchd plist renderer; credential-named names
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -67,6 +70,18 @@ def scrub_credential_env(environ) -> list[str]:
 
 def pytest_configure(config):  # noqa: ARG001 — pytest hook signature
     scrub_credential_env(os.environ)
+    # Daemons build a module-level Notifier at import, during collection and
+    # before any fixture runs; Notifier reads its queue path when constructed.
+    # Set the session-wide private paths here so those instances (and child
+    # processes) never resolve to the live queue in the system temp dir. Set
+    # after the scrub, which would otherwise be free to drop them.
+    state = tempfile.mkdtemp(prefix="ateles-test-notify-")
+    atexit.register(shutil.rmtree, state, ignore_errors=True)
+    os.environ["ATELES_DIGEST_QUEUE_PATH"] = str(Path(state) / "digest.json")
+    os.environ["ATELES_DEDUPE_JOURNAL_PATH"] = str(Path(state) / "dedupe.json")
+    # The Neotoma alert sink (lib/notify/neotoma_sink.py) records to a local
+    # directory in its default shadow mode; keep that out of the live one.
+    os.environ["ATELES_NOTIFY_SINK_DIR"] = str(Path(state) / "notify-sink")
 
 
 @pytest.fixture(autouse=True)
@@ -77,3 +92,21 @@ def _scrub_credential_environment(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     for name, value in updates.items():
         monkeypatch.setenv(name, value)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_notifier_state(monkeypatch, tmp_path_factory):
+    """Point every Notifier at a private held queue and dedupe journal.
+
+    Both default to files in the system temp dir that every daemon on the host
+    shares. A test that sends a held notice (or drains one) without repointing
+    them writes fake notices into, or delivers real notices out of, the live
+    queue. A test that sets its own paths afterwards is unaffected.
+    """
+    root = tmp_path_factory.mktemp("notify-state")
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(root / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(root / "dedupe.json"))
+    monkeypatch.setenv("ATELES_NOTIFY_SINK_DIR", str(root / "notify-sink"))
+    from lib.notify import neotoma_sink  # noqa: PLC0415
+
+    neotoma_sink._reset_for_tests()

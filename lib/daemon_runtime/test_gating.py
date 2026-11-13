@@ -142,6 +142,122 @@ def test_fetch_entity_user_id_requires_complete_stable_pages(
         assert calls == [0, 100, 0]
 
 
+class _ObservationResponse:
+    def __init__(self, data, status_code=200):
+        self.data = data
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import httpx
+
+            request = httpx.Request("GET", "https://neotoma.test/observations")
+            raise httpx.HTTPStatusError(
+                f"status {self.status_code}",
+                request=request,
+                response=httpx.Response(self.status_code, request=request),
+            )
+
+    def json(self):
+        return self.data
+
+
+def _observation_page(rows, *, total=None, offset=0, limit=100):
+    return {
+        "observations": rows,
+        "total": len(rows) if total is None else total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@pytest.fixture
+def observation_reads(monkeypatch):
+    """Route observation page requests to a scripted ``get`` with no sleeping."""
+    from lib.daemon_runtime import neotoma_transient
+
+    sleeps = []
+    monkeypatch.setattr(neotoma_transient, "_sleep", sleeps.append)
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    def install(get):
+        monkeypatch.setattr(gating_module.httpx, "get", get)
+
+    install.sleeps = sleeps
+    return install
+
+
+def test_observations_read_retries_a_timed_out_page(observation_reads):
+    import httpx
+
+    rows = [{"id": "obs-1"}, {"id": "obs-2"}]
+    calls = []
+
+    def get(url, *, headers, params, timeout):
+        calls.append(params["offset"])
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("The read operation timed out")
+        return _ObservationResponse(_observation_page(rows))
+
+    observation_reads(get)
+    assert gating_module.fetch_entity_observations_strict("ent_task") == rows
+    assert calls == [0, 0]
+    assert observation_reads.sleeps == [2.0]
+
+
+def test_observations_read_gives_up_after_bounded_timeouts(observation_reads):
+    import httpx
+
+    from lib.daemon_runtime import neotoma_transient
+
+    calls = []
+
+    def get(url, *, headers, params, timeout):
+        calls.append(params["offset"])
+        raise httpx.ReadTimeout("The read operation timed out")
+
+    observation_reads(get)
+    assert gating_module.fetch_entity_observations_strict("ent_task") is None
+    assert len(calls) == len(neotoma_transient.RETRY_PAUSES_SECONDS) + 1
+    assert observation_reads.sleeps == list(neotoma_transient.RETRY_PAUSES_SECONDS)
+
+
+@pytest.mark.parametrize("mode", ["wrong_total", "repeated_id"])
+def test_observations_read_does_not_retry_an_inconsistent_page(
+    observation_reads, mode
+):
+    calls = []
+
+    def get(url, *, headers, params, timeout):
+        calls.append(params["offset"])
+        if mode == "wrong_total":
+            return _ObservationResponse(
+                _observation_page([{"id": "obs-1"}], total=2)
+            )
+        return _ObservationResponse(
+            _observation_page([{"id": "obs-1"}, {"id": "obs-1"}])
+        )
+
+    observation_reads(get)
+    assert gating_module.fetch_entity_observations_strict("ent_task") is None
+    assert calls == [0]
+    assert observation_reads.sleeps == []
+
+
+@pytest.mark.parametrize("status", [404, 503])
+def test_observations_read_does_not_retry_an_http_status(observation_reads, status):
+    calls = []
+
+    def get(url, *, headers, params, timeout):
+        calls.append(params["offset"])
+        return _ObservationResponse({}, status_code=status)
+
+    observation_reads(get)
+    assert gating_module.fetch_entity_observations_strict("ent_task") is None
+    assert calls == [0]
+    assert observation_reads.sleeps == []
+
+
 def test_high_conf_low_blast_auto_executes():
     d = evaluate_gate(confidence=0.9, action_type="local_edit", policy=_default())
     assert d.action == GateAction.AUTO_EXECUTE
@@ -945,6 +1061,9 @@ def test_non_releasable_checkpoint_close_requires_exact_readback(
     monkeypatch, readback_status, expected
 ):
     monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(
+        gating_module, "fetch_entity_observations_strict", lambda _id: []
+    )
 
     class _Response:
         def raise_for_status(self):
@@ -977,6 +1096,9 @@ def test_fresh_approval_transition_requires_exact_readback(
     monkeypatch, readback_status, expected
 ):
     monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(
+        gating_module, "fetch_entity_observations_strict", lambda _id: []
+    )
 
     class _Response:
         def raise_for_status(self):
@@ -1913,3 +2035,256 @@ def test_envelope_binds_the_estimate_only_for_an_unscored_hold():
     scored = _envelope_for(False)
     assert "confidence" not in scored
     assert "confidence_unscored" not in scored
+
+
+def _serve_pages(monkeypatch, pages, page_size=2):
+    """Serve ``pages`` in order from ``query_entities``, with a small page size
+    so a multi-page listing needs only a few rows."""
+    monkeypatch.setattr(gating_module, "QUERY_PAGE_SIZE", page_size)
+    offsets: list[int] = []
+
+    def _page(entity_type, *, snapshot_filters, offset=0, limit=None):
+        offsets.append(offset)
+        return pages[min(len(offsets), len(pages)) - 1]
+
+    monkeypatch.setattr(gating_module, "query_entities", _page)
+    return offsets
+
+
+def _rows(*ids):
+    return [{"entity_id": i} for i in ids]
+
+
+@pytest.mark.parametrize("pages", [
+    [{"entities": _rows("a")}],
+    [{"entities": _rows("a"), "total": "1"}],
+    [{"entities": _rows("a"), "total": 1.0}],
+    [{"entities": _rows("a"), "total": True}],
+    [{"entities": _rows("a"), "total": -1}],
+    [{"entities": _rows("a", "b"), "total": 3}, {"entities": _rows("c"), "total": 4}],
+    [{"entities": _rows("a", "b"), "total": 3}, {"entities": _rows("c")}],
+    [{"entities": _rows("a"), "total": 2}],
+    [{"entities": _rows("a"), "total": 1, "has_more": True}],
+    [{"entities": _rows("a"), "total": 1, "has_more": "no"}],
+], ids=[
+    "short_page_no_total", "string_total", "float_total", "bool_total",
+    "negative_total", "total_changes_between_pages", "total_dropped_on_later_page",
+    "short_of_total", "has_more_disagrees", "has_more_not_bool",
+])
+def test_strict_listing_without_a_consistent_total_is_incomplete(monkeypatch, pages):
+    _serve_pages(monkeypatch, pages)
+    assert gating_module.query_all_entities(
+        "task", snapshot_filters={}, strict=True) is None
+
+
+@pytest.mark.parametrize("pages,expected", [
+    ([{"entities": _rows("a"), "total": 1}], ["a"]),
+    ([{"entities": [], "total": 0, "has_more": False}], []),
+    ([{"entities": _rows("a", "b"), "total": 3, "has_more": True},
+      {"entities": _rows("c"), "total": 3, "has_more": False}], ["a", "b", "c"]),
+    ([{"entities": _rows("a", "b"), "total": 2},
+      {"entities": [], "total": 2}], ["a", "b"]),
+], ids=["single_page", "empty", "two_pages_with_has_more", "exact_full_page"])
+def test_strict_listing_matching_its_total_is_complete(monkeypatch, pages, expected):
+    _serve_pages(monkeypatch, pages)
+    found = gating_module.query_all_entities("task", snapshot_filters={}, strict=True)
+    assert [row["entity_id"] for row in found] == expected
+
+
+def test_non_strict_listing_without_a_total_is_unchanged(monkeypatch):
+    offsets = _serve_pages(
+        monkeypatch,
+        [{"entities": _rows("a", "b")}, {"entities": _rows("c")}])
+    found = gating_module.query_all_entities("task", snapshot_filters={})
+    assert [row["entity_id"] for row in found] == ["a", "b", "c"]
+    assert offsets == [0, 2]
+
+
+@pytest.mark.parametrize("pages", [
+    [{"entities": _rows("a", "b"), "total": 3}, {"entities": _rows("b"), "total": 3}],
+    [{"entities": _rows("a", "a"), "total": 3}, {"entities": _rows("b"), "total": 3}],
+    [{"entities": [{"entity_type": "task"}], "total": 1}],
+    [{"entities": _rows(""), "total": 1}],
+    [{"entities": [{"entity_id": 7}], "total": 1}],
+    [{"entities": [{"entity_id": "a", "entity_type": "plan"}],
+      "total": 1}],
+    [{"entities": _rows("ent_a", " ent_a "), "total": 2},
+     {"entities": [], "total": 2}],
+    [{"entities": _rows("   "), "total": 1}],
+], ids=[
+    "duplicate_id_across_pages", "duplicate_id_within_page", "missing_id",
+    "empty_id", "non_string_id", "wrong_entity_type",
+    "same_id_with_padding", "whitespace_only_id",
+])
+def test_strict_listing_with_an_unidentifiable_row_is_incomplete(monkeypatch, pages):
+    _serve_pages(monkeypatch, pages)
+    assert gating_module.query_all_entities(
+        "task", snapshot_filters={}, strict=True) is None
+
+
+def test_strict_listing_with_distinct_typed_ids_matching_total_is_complete(
+        monkeypatch):
+    _serve_pages(monkeypatch, [
+        {"entities": [{"entity_id": "a", "entity_type": "task"},
+                      {"entity_id": "b"}], "total": 3, "has_more": True},
+        {"entities": _rows("c"), "total": 3, "has_more": False},
+    ])
+    found = gating_module.query_all_entities("task", snapshot_filters={}, strict=True)
+    assert [row["entity_id"] for row in found] == ["a", "b", "c"]
+
+
+def test_non_strict_listing_keeps_repeated_and_unidentified_rows(monkeypatch):
+    _serve_pages(monkeypatch, [
+        {"entities": _rows("a", "a")},
+        {"entities": [{"entity_type": "other"}]},
+    ])
+    found = gating_module.query_all_entities("task", snapshot_filters={})
+    assert found == [{"entity_id": "a"}, {"entity_id": "a"},
+                     {"entity_type": "other"}]
+
+
+def test_checkpoints_for_task_is_non_strict_by_default_and_strict_on_request(
+        monkeypatch):
+    pages = [{"entities": [{"entity_type": "other"}]}]
+    _serve_pages(monkeypatch, pages)
+    assert gating_module.checkpoints_for_task("ent_t") == [
+        {"entity_type": "other"}]
+    _serve_pages(monkeypatch, pages)
+    assert gating_module.checkpoints_for_task("ent_t", strict=True) is None
+
+
+# ── never-tier hold reasons: reserved vs unclassified (ateles#1599) ──────────
+OPERATOR_ONLY_REASON_TEXT = (
+    "operator-only action — never auto-executable at any confidence or "
+    "recurrence count"
+)
+
+
+def test_reserved_action_type_keeps_the_operator_only_reason():
+    d = evaluate_gate(confidence=0.95, action_type="operator_only", policy=_default())
+    assert d.blast_radius == BlastRadius.NEVER
+    assert d.action == GateAction.CHECKPOINT
+    assert d.reason == OPERATOR_ONLY_REASON_TEXT
+
+
+def test_unclassified_action_type_gets_its_own_reason_naming_it():
+    d = evaluate_gate(confidence=0.95, action_type="code_review", policy=_default())
+    assert d.blast_radius == BlastRadius.NEVER
+    assert d.action == GateAction.CHECKPOINT
+    assert not d.may_auto_execute
+    assert d.reason.startswith("unclassified action type 'code_review'")
+    assert "execution policy does not classify it" in d.reason
+    assert "held until the policy classifies it" in d.reason
+    assert "operator-only" not in d.reason
+    assert "\n" not in d.reason
+
+
+def test_missing_action_type_under_never_default_gets_the_unclassified_reason():
+    pol = ExecutionPolicy(
+        entity_id="p", blast_radius_default=BlastRadius.NEVER, loaded=True
+    )
+    for missing in (None, "", "   "):
+        d = evaluate_gate(confidence=0.95, action_type=missing, policy=pol)
+        assert d.blast_radius == BlastRadius.NEVER
+        assert d.action == GateAction.CHECKPOINT
+        assert not d.may_auto_execute
+        assert d.reason.startswith("unclassified action type (none declared)")
+        assert "execution policy does not classify it" in d.reason
+        assert "operator-only" not in d.reason
+
+
+# ── Original checkpoint effect scope ──────────────────────────────────────────
+
+
+def _record_with_body(body):
+    return {"entity_id": "ent_cp", "snapshot": {"status": "approved", "body": body}}
+
+
+def _ordinary_authority():
+    return {k: "x" for k in gating_module.CHECKPOINT_ORDINARY_ENVELOPE_FIELDS}
+
+
+@pytest.mark.parametrize(
+    ("record", "authority", "history", "expected"),
+    [
+        (None, None, [], "unknown"),
+        ({"entity_id": "ent_cp", "snapshot": {"status": "approved"}}, None, [], "legacy"),
+        (_record_with_body("not json"), None, [], "legacy"),
+        (_record_with_body('{"version": 2}'), None, [], "legacy"),
+        (_record_with_body("{}"), _ordinary_authority(), None, "ordinary"),
+        (
+            _record_with_body("{}"),
+            {**_ordinary_authority(), "effect_scope": "review_request_only"},
+            None,
+            "restricted",
+        ),
+        # An extension claimed by an envelope that never authenticated.
+        (_record_with_body('{"version": 2, "effect_scope": "x"}'), None, [], "unknown"),
+        # An uncertain history read is never "no restriction".
+        (_record_with_body('{"version": 2}'), None, None, "unknown"),
+        # A later edit stripped the extension from the current body, but the
+        # creation observation carried it: never legacy.
+        (
+            _record_with_body('{"version": 2}'),
+            None,
+            [
+                {"id": "o1", "fields": {"body": '{"version": 2, "effect_scope": "x"}'}},
+                {"id": "o2", "fields": {"body": '{"version": 2}'}},
+            ],
+            "unknown",
+        ),
+        (
+            {"entity_id": "ent_cp", "snapshot": {"status": "approved"}},
+            None,
+            [{"id": "o1", "fields": {"body": '{"effect_scope": "x"}'}}],
+            "unknown",
+        ),
+    ],
+)
+def test_checkpoint_effect_scope_is_read_from_the_original_envelope(
+    record, authority, history, expected
+):
+    assert (
+        gating_module.classify_checkpoint_effect_scope(record, authority, history)
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    "transition",
+    [
+        close_checkpoint_without_release,
+        require_fresh_checkpoint_approval,
+        gating_module.supersede_checkpoint,
+    ],
+)
+def test_status_transitions_never_write_on_a_restricted_original_scope(
+    monkeypatch, transition
+):
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    record = _record_with_body("{}")
+    record["entity_type"] = "checkpoint_" + "brief"
+    monkeypatch.setattr(gating_module, "_fetch_entity", lambda entity_id: record)
+    monkeypatch.setattr(
+        gating_module,
+        "read_authenticated_checkpoint_authorization",
+        lambda *args, **kwargs: {
+            **_ordinary_authority(),
+            "effect_scope": "review_request_only",
+        },
+    )
+
+    posted: list[tuple] = []
+
+    class _Ok:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(
+        gating_module.httpx,
+        "post",
+        lambda *args, **kwargs: posted.append((args, kwargs)) or _Ok(),
+    )
+
+    assert transition("ent_cp", handler="apis", reason="x") is False
+    assert posted == [], "a restricted checkpoint must take no consuming write"

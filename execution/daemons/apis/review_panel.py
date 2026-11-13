@@ -22,7 +22,10 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+
+import review_scope
 
 log = logging.getLogger("apis.review_panel")
 
@@ -167,12 +170,17 @@ LENSES: tuple[Lens, ...] = (
             "sink; (3) find every branch where an error, an unset env var, a "
             "parse failure, or an unknown value yields ALLOW rather than DENY — "
             "name each fail-open default explicitly; (4) check that the change "
-            "does not narrow an existing protection anywhere else. Report a "
-            "break you demonstrated as CONFIRMED and block on it; report a "
-            "break you can argue but not demonstrate as PLAUSIBLE and do not "
-            "block. A review that finds nothing must state which sinks and "
-            "which encodings you actually checked — 'looks fine' is not a "
-            "security review."
+            "does not narrow an existing protection anywhere else. Every concern "
+            "must end in one of three states before your verdict. A break you "
+            "demonstrated, or traced through a fully closed code path with "
+            "named inputs, is CONFIRMED: block on it. A concern you checked "
+            "and refuted is dropped from the findings and listed with what "
+            "you checked. Only a concern you tried and truly cannot settle "
+            "with what you have is PLAUSIBLE: mark it non-blocking, give a "
+            "COMMENT verdict, and say what you tried and what would settle it. "
+            "A review that finds nothing must state which sinks and which "
+            "encodings you actually checked — 'looks fine' is not a security "
+            "review."
         ),
         diff_patterns=(
             # Path-level security surfaces, kept in lock-step with the CONCERNS
@@ -272,6 +280,7 @@ def select_panel(
     changed_files: list[str],
     max_panel: int = 6,
     pending_gates: set[str] | None = None,
+    required_lenses: set[str] | frozenset[str] | None = None,
 ) -> list[Lens]:
     """
     Pick the review panel for a PR.
@@ -288,8 +297,18 @@ def select_panel(
     only agent that can re-evaluate it (its owning lens) would be dropped by
     the cap and never re-invoked (ateles#230 panel-assembly gap: PR #1944's
     arch gate stuck `pending` while pm/ux/legal/qa re-ran without arch).
+
+    `required_lenses` are the lens labels the panel-gated approval tool will
+    require for this PR at this head, chosen by changed path from the repo's
+    `.github/review_scope.json` (`review_scope.path_panel_for_pr`, the same
+    reader and decision the tool uses). The panel is the UNION of those and
+    the lenses picked here, and a required lens is never dropped by the cap:
+    it ranks with the pending-gate owners, and the cap only trims the rest. A
+    panel without one of them could only ever produce an approval the tool
+    refuses.
     """
     pending = pending_gates or set()
+    required = {name.strip().lower() for name in (required_lenses or ())}
     selected: list[Lens] = []
     for lens in LENSES:
         relevant = (
@@ -297,6 +316,7 @@ def select_panel(
             or lens.agent in gate_contributors
             or _matches_diff(lens, changed_files)
             or (lens.gate != "" and lens.gate in pending)
+            or lens.lens in required
         )
         if lens.forward_looking:
             # Size threshold is an additional opt-in path, not an override
@@ -315,7 +335,8 @@ def select_panel(
     gate_owners = [
         item
         for item in selected
-        if not item.forward_looking and item.gate != "" and item.gate in pending
+        if (not item.forward_looking and item.gate != "" and item.gate in pending)
+        or item.lens in required
     ]
     # The security lens owns no gate, so registry order alone would let the cap
     # drop it exactly when it matters most: a BROAD security-touching PR pulls
@@ -348,11 +369,130 @@ def select_panel(
         and item not in always_on
     ]
     forward = [item for item in selected if item.forward_looking]
-    panel = (gate_owners + security + always_on + other_blocking + forward)[:max_panel]
+    ranked = gate_owners + security + always_on + other_blocking + forward
+    panel = ranked[:max_panel]
+    # A lens the approval tool requires is never capped away: a panel without
+    # it cannot produce an approvable review.
+    panel += [item for item in ranked[max_panel:] if item.lens in required]
     dropped = [item.lens for item in selected if item not in panel]
     if dropped:
         log.info(f"[apis] review panel capped at {max_panel}; dropped: {dropped}")
     return panel
+
+
+# Lenses the bootstrap approval gate never requires, even when `select_panel`
+# derives them into a PR's floor for its diff (ateles#1317, operator ruling
+# 2026-09-26: Corvus/content is excluded from bootstrap review). The approval
+# tool's `BOOTSTRAP_EXCLUDED_LENSES` is this constant.
+APPROVAL_EXCLUDED_LENSES: frozenset[str] = frozenset({"content"})
+
+# The `review_expectation` pre-registration marker an issue comment carries
+# (`swarm_dispatch.EXPECTATION_MARKER`, which posts it). Read here so the
+# approval tool and Apis recover the same gate contributors the same way.
+_EXPECTATION_MARKER_RE = re.compile(
+    r"\*\*review_expectation \((?P<lens>[\w-]+)\)\*\* — what "
+    r"(?P<agent>\w+) will verify",
+    re.I,
+)
+
+
+def approval_floor(
+    gate_contributors: set[str], changed_files: list[str], max_panel: int
+) -> list[Lens]:
+    """The approval tool's diff-derived required-lens FLOOR for a PR.
+
+    `select_panel` over the PR's changed files and the agents that
+    pre-registered on its parent issue, at `max_panel`, with every always-on
+    lens unioned back in by name (defense in depth if `select_panel` ever drops
+    one). Always-on lenses first, then the rest in `select_panel`'s order. The
+    one implementation `approve_pr_as_app.derive_required_lenses` and Apis
+    (`approval_required_lenses`) both use, so the two cannot disagree on it.
+    """
+    panel = select_panel(
+        gate_contributors=gate_contributors,
+        changed_files=changed_files,
+        max_panel=max_panel,
+    )
+    by_name: dict[str, Lens] = {lens.lens: lens for lens in LENSES if lens.always}
+    for lens in panel:
+        by_name.setdefault(lens.lens, lens)
+    return list(by_name.values())
+
+
+def approval_required_lenses(
+    decision: "review_scope.PanelDecision",
+    *,
+    gate_contributors: set[str],
+    changed_files: list[str],
+    max_panel: int,
+) -> frozenset[str]:
+    """Every lens `approve_pr_as_app.py --panel path` requires for a PR whose
+    path decision is *decision*, with no `--lenses` additions.
+
+    A full-panel decision requires the diff-derived floor (`approval_floor`,
+    less `APPROVAL_EXCLUDED_LENSES`) AND the five-lens bootstrap roster: a
+    `LICENSE` or `package.json` change adds `legal` through the floor's own
+    patterns, and a pre-registered contributor adds its lens. A one-lens
+    decision requires that lens alone (the floor is not added on the reduced
+    route). Apis seats exactly this set, so a panel it finishes is one the tool
+    can approve.
+    """
+    if not decision.full:
+        return frozenset({decision.lens})
+    floor = {
+        lens.lens
+        for lens in approval_floor(gate_contributors, changed_files, max_panel)
+        if lens.lens not in APPROVAL_EXCLUDED_LENSES
+    }
+    return frozenset(floor | review_scope.FULL_PANEL_LENSES)
+
+
+def every_requirable_lens() -> frozenset[str]:
+    """Every lens the approval tool could require for some PR: each blocking
+    lens in the registry, less `APPROVAL_EXCLUDED_LENSES`. The fail-closed
+    answer when a PR's own required set cannot be read."""
+    return frozenset(
+        lens.lens
+        for lens in LENSES
+        if not lens.forward_looking and lens.lens not in APPROVAL_EXCLUDED_LENSES
+    )
+
+
+def gate_contributors_from_comments(bodies: Iterable[str]) -> set[str]:
+    """Agents that pre-registered a `review_expectation` in *bodies*."""
+    out: set[str] = set()
+    for body in bodies:
+        match = _EXPECTATION_MARKER_RE.search(body or "")
+        if match:
+            out.add(match.group("agent").lower())
+    return out
+
+
+async def fetch_gate_contributors(
+    client: object,
+    *,
+    api_base: str,
+    repo: str,
+    issue_number: int,
+    headers: Mapping[str, str],
+) -> set[str]:
+    """Agents that pre-registered on *issue_number*, over every comment page.
+    Raises on an HTTP error: an unread contributor could be a required lens."""
+    out: set[str] = set()
+    page = 1
+    while True:
+        resp = await client.get(  # type: ignore[attr-defined]
+            f"{api_base}/repos/{repo}/issues/{issue_number}/comments",
+            headers=dict(headers),
+            params={"per_page": 100, "page": page},
+        )
+        resp.raise_for_status()
+        rows = resp.json() or []
+        out |= gate_contributors_from_comments(c.get("body") or "" for c in rows)
+        if len(rows) < 100:
+            break
+        page += 1
+    return out
 
 
 def select_expectation_agents(

@@ -47,7 +47,8 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from datetime import date
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
@@ -144,6 +145,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from lib.daemon_runtime.logging_setup import configure_daemon_logging
+from lib.daemon_runtime.neotoma_correct import correct_field  # noqa: E402
 
 # Rotating + repeat-suppressing (lib/daemon_runtime/logging_setup.py):
 # unbounded retry logging filled a 926 GB disk on 2026-08-18.
@@ -292,26 +294,101 @@ def _entity_fields(entity: dict) -> dict:
     return entity.get("snapshot") or entity.get("fields") or entity
 
 
-def set_release_status(version: str, status: str, extra: dict | None = None) -> None:
-    """
-    Append a release_result observation flipping status (prepared -> approved ->
-    publishing -> published / failed). Idempotency key carries status + date so
-    each transition is a distinct observation.
+# One value per publish invocation. /correct treats a repeated idempotency key
+# as a no-op, so a retry later the same day (failed -> publishing --force) would
+# otherwise replay the earlier observation and change nothing. Constant within a
+# run, so a retried correct_field call inside this run still dedups.
+_RUN_NONCE = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:8]}"
 
-    Uses the `release_result` entity type, whose canonical identity is `version`,
-    so every transition coalesces onto the same entity (latest status wins in the
-    snapshot). Declared fields: version, status, branch, release_url, reason, ...
+
+def _status_key(entity_id: str, version: str, status: str, field: str) -> str:
+    return f"release-{entity_id}-{version}-{status}-{field}-{_RUN_NONCE}"
+
+
+class StatusWriteError(Exception):
+    """A release status transition could not be written AND read back.
+
+    Deliberately NOT a StepError: main() turns a StepError into a "failed"
+    status write, which is the very write that just failed. Callers must stop
+    the release, not retry the status through the same broken path.
     """
-    rec: dict = {
-        "entity_type": "release_result",
-        "version": version,
-        "status": status,
+
+
+def _resolve_release_entity_id(version: str) -> str:
+    """Entity id of the release_result for `version`, or raise StatusWriteError.
+
+    Fails closed: zero matches or more than one distinct entity means there is
+    no unambiguous record to correct, so no write is attempted.
+    """
+    want = version.lstrip("v")
+    ids = {
+        str(c.get("entity_id") or "")
+        for c in neotoma_query("release_result", limit=100)
+        if str(_entity_fields(c).get("version") or "").lstrip("v") == want
     }
-    if extra:
-        rec.update(extra)
-    key = f"release-{version}-{status}-{date.today().isoformat()}"
-    neotoma_store([rec], key)
-    log.info(f"Release {version} status -> {status}")
+    ids.discard("")
+    if len(ids) != 1:
+        raise StatusWriteError(
+            f"cannot resolve a single release_result entity for {version} "
+            f"(found {len(ids)}); refusing to write status"
+        )
+    return ids.pop()
+
+
+def set_release_status(
+    version: str,
+    status: str,
+    extra: dict | None = None,
+    entity_id: str | None = None,
+) -> None:
+    """
+    Flip a release_result's status (prepared -> approved -> publishing ->
+    published / failed) and VERIFY it took effect.
+
+    Status goes through POST /correct (lib.daemon_runtime.neotoma_correct),
+    never /store: a correction outranks a store observation, and the manual
+    approval path corrects status to `approved`, so a stored status after that
+    is silently ignored (v0.28.0 logged "status -> published" while the snapshot
+    still read `approved`). correct_field reads the value back; on any failure
+    this raises StatusWriteError so a release never proceeds on a status nobody
+    can see.
+
+    `entity_id` is the exact entity find_release resolved (one version may have
+    several release_result entities: concurrent RCs, terminal history, and
+    --entity-id picks one). Status and every `extra` field are corrected on
+    that same entity. Only when no id is held does this fall back to a lookup
+    by version, which refuses unless it is unambiguous.
+    """
+    import httpx  # local: only the status write needs it
+
+    entity_id = entity_id or _resolve_release_entity_id(version)
+    headers = {**_neotoma_headers(), "User-Agent": NEOTOMA_USER_AGENT}
+    with httpx.Client(headers=headers) as client:
+        for field, value in (extra or {}).items():
+            if field in ("status", "entity_type"):
+                continue
+            # Extras are informational (url, reason, summary): a failed write is
+            # logged but does not stop the release; the status below still is.
+            if not correct_field(
+                client, _neotoma_base(), entity_id, "release_result",
+                field, value, _status_key(entity_id, version, status, field),
+            ):
+                log.error(f"Release {version}: writing {field} for {status} failed")
+        ok = correct_field(
+            client,
+            _neotoma_base(),
+            entity_id,
+            "release_result",
+            "status",
+            status,
+            _status_key(entity_id, version, status, "status"),
+        )
+    if not ok:
+        log.error(f"Release {version}: status -> {status} NOT confirmed by read-back")
+        raise StatusWriteError(
+            f"release {version} status -> {status} was not confirmed by read-back"
+        )
+    log.info(f"Release {version} status -> {status} (read back)")
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +418,22 @@ def find_release(version: str | None, entity_id: str | None) -> dict | None:
     """
     if entity_id:
         ent = neotoma_fetch_entity(entity_id)
+        if not ent:
+            return None
+        etype = str(ent.get("entity_type") or _entity_fields(ent).get("entity_type") or "")
+        if etype and etype != "release_result":
+            log.error(f"--entity-id {entity_id} is a {etype!r}, not a release_result")
+            return None
+        if version:
+            have = str(_entity_fields(ent).get("version") or "").lstrip("v")
+            if have != version.lstrip("v"):
+                log.error(
+                    f"--entity-id {entity_id} has version {have!r}, "
+                    f"not the requested {version!r}; refusing"
+                )
+                return None
+        # Status writes target exactly this entity.
+        ent.setdefault("entity_id", entity_id)
         return ent
     if not version:
         return None
@@ -855,6 +948,8 @@ def publish_release(
     email_approval: bool = False,
 ) -> None:
     f = _entity_fields(release)
+    # The exact entity find_release resolved; every status write targets it.
+    entity_id = str(release.get("entity_id") or "") or None
     status = str(f.get("status") or "")
     # Field-name reconciliation: prepare.py's agent stores the RC PR URL under
     # `release_url` and the branch under `branch`, but this reader historically
@@ -879,7 +974,7 @@ def publish_release(
             log.info(f"{version} already approved — proceeding to publish")
         elif status == "pending_approval":
             if not dry_run:
-                set_release_status(version, "approved")
+                set_release_status(version, "approved", entity_id=entity_id)
             status = "approved"
             log.info(f"{version} approved via email reply -> publishing")
         else:
@@ -899,7 +994,7 @@ def publish_release(
 
     log.info(f"Publishing {version} (status={status}, dry_run={dry_run}, force={force})")
     if not dry_run:
-        set_release_status(version, "publishing")
+        set_release_status(version, "publishing", entity_id=entity_id)
 
     resume_idx = STEP_ORDER.index(resume_from) if resume_from else 0
 
@@ -939,6 +1034,7 @@ def publish_release(
         version,
         "published",
         {"release_url": release_url, "published_summary": summary},
+        entity_id=entity_id,
     )
     telegram_send(
         f"✅ Released *{version}*\n"
@@ -999,6 +1095,17 @@ def main() -> int:
         log.error("could not determine version from release record")
         return 2
 
+    def _mark_failed(reason: str) -> None:
+        if args.dry_run:
+            return
+        try:
+            set_release_status(
+                version, "failed", {"reason": reason[:500]},
+                entity_id=str(release.get("entity_id") or "") or None,
+            )
+        except StatusWriteError as werr:
+            log.error(f"could not record failed status for {version}: {werr}")
+
     try:
         publish_release(
             release, version, args.dry_run, args.force,
@@ -1006,16 +1113,23 @@ def main() -> int:
             email_approval=args.from_email_approval,
         )
         return 0
+    except StatusWriteError as exc:
+        # The status write is what failed: do not try to record "failed"
+        # through the same path. Halt and tell the operator the state is unverified.
+        log.error(f"release status write failed: {exc}")
+        telegram_send(
+            f"🔴 Phoenicurus: {version} halted — status write unverified: {exc}. "
+            "Check the release_result snapshot before retrying."
+        )
+        return 1
     except StepError as exc:
         log.error(f"publish failed: {exc}")
-        if not args.dry_run:
-            set_release_status(version, "failed", {"reason": str(exc)[:500]})
+        _mark_failed(str(exc))
         telegram_send(f"🔴 Phoenicurus: {version} publish FAILED — {exc}")
         return 1
     except Exception as exc:  # noqa: BLE001 — last-resort guard for a release tool
         log.exception(f"unexpected fatal error: {exc}")
-        if not args.dry_run:
-            set_release_status(version, "failed", {"reason": str(exc)[:500]})
+        _mark_failed(str(exc))
         telegram_send(f"🔴 Phoenicurus: {version} publish crashed — {exc}")
         return 1
 

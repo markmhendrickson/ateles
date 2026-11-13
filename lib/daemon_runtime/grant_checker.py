@@ -32,6 +32,8 @@ from typing import Optional
 
 import httpx
 
+from lib.daemon_runtime.neotoma_correct import correct_field
+
 log = logging.getLogger(__name__)
 
 NEOTOMA_BASE_URL = os.environ.get(
@@ -328,6 +330,10 @@ def check_param_constraints(
     return True, ""
 
 
+def _correct_grant(client: httpx.Client, entity_id: str, field: str, value: str, key: str) -> bool:
+    return correct_field(client, NEOTOMA_BASE_URL, entity_id, "agent_grant", field, value, key)
+
+
 def _write_grant_state(
     entity_id: str,
     status: str,
@@ -335,28 +341,22 @@ def _write_grant_state(
     timestamp_field: str,
     reason_field: str,
 ) -> bool:
-    """PATCH a grant entity's status via Neotoma corrections API."""
+    """Set a grant's status, reason and timestamp via POST /correct (one field per call)."""
     if not NEOTOMA_BEARER_TOKEN:
         log.error("NEOTOMA_BEARER_TOKEN not set — cannot update grant")
         return False
 
     now = _iso_now()
-    base = f"{NEOTOMA_BASE_URL}/entities/{entity_id}/corrections"
-    headers = {"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}", "Content-Type": "application/json"}
-
     updates = [
-        {"field": "status", "value": status, "idempotency_key": f"grant-status-{entity_id}-{now}"},
-        {"field": reason_field, "value": reason, "idempotency_key": f"grant-reason-{entity_id}-{now}"},
-        {"field": timestamp_field, "value": now, "idempotency_key": f"grant-ts-{entity_id}-{now}"},
+        ("status", status, f"grant-status-{entity_id}-{now}"),
+        (reason_field, reason, f"grant-reason-{entity_id}-{now}"),
+        (timestamp_field, now, f"grant-ts-{entity_id}-{now}"),
     ]
-    try:
-        for update in updates:
-            resp = httpx.post(base, json=update, headers=headers, timeout=10)
-            resp.raise_for_status()
-        return True
-    except Exception as exc:
-        log.error(f"Failed to update grant {entity_id}: {exc}")
-        return False
+    with httpx.Client(headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}) as client:
+        results = [_correct_grant(client, entity_id, f, v, k) for f, v, k in updates]
+    if not all(results):
+        log.error(f"Failed to update grant {entity_id}: {results}")
+    return all(results)
 
 
 def suspend_grant(entity_id: str, reason: str = "") -> bool:
@@ -369,20 +369,8 @@ def restore_grant(entity_id: str) -> bool:
     if not NEOTOMA_BEARER_TOKEN:
         return False
     now = _iso_now()
-    base = f"{NEOTOMA_BASE_URL}/entities/{entity_id}/corrections"
-    headers = {"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}", "Content-Type": "application/json"}
-    try:
-        resp = httpx.post(
-            base,
-            json={"field": "status", "value": "active", "idempotency_key": f"grant-restore-{entity_id}-{now}"},
-            headers=headers,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        return True
-    except Exception as exc:
-        log.error(f"Failed to restore grant {entity_id}: {exc}")
-        return False
+    with httpx.Client(headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}) as client:
+        return _correct_grant(client, entity_id, "status", "active", f"grant-restore-{entity_id}-{now}")
 
 
 def revoke_grant(entity_id: str, reason: str = "") -> bool:

@@ -30,6 +30,7 @@ sys.path.insert(0, str(_SCRIPTS_DIR))
 os.environ.setdefault("DATA_DIR", str(_SCRIPTS_DIR / "_test_data_dir"))
 
 import transcribe_audio as ta  # noqa: E402
+from test_transcription_results import complete_result  # noqa: E402
 
 
 def test_neotoma_store_uses_explicit_cli_runtime(tmp_path, monkeypatch):
@@ -340,6 +341,54 @@ def test_whisper_chunked_returns_corrected_text(tmp_path, monkeypatch):
     assert "Vexcorb" not in combined
 
 
+@pytest.mark.parametrize("override", ["backend", "environment"])
+def test_paired_plain_local_override_is_rejected_before_inference(tmp_path, monkeypatch, override):
+    monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
+    monkeypatch.delenv("RECORD_MEETING_DIARIZE", raising=False)
+    backend = "local" if override == "backend" else None
+    if override == "environment":
+        monkeypatch.setenv("RECORD_MEETING_DIARIZE", "0")
+    with patch.object(ta, "transcribe_fluid") as run:
+        with pytest.raises(RuntimeError, match="Paired transcription supports"):
+            ta.transcribe_two_files(tmp_path / "mic.wav", tmp_path / "system.wav", backend=backend)
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize("override", ["backend", "flag", "environment"])
+def test_multichannel_plain_overrides_cannot_downmix(tmp_path, monkeypatch, override):
+    audio = tmp_path / "stereo.wav"
+    audio.write_bytes(b"synthetic")
+    monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
+    monkeypatch.delenv("RECORD_MEETING_DIARIZE", raising=False)
+    kwargs = {"backend": "local"} if override == "backend" else {"use_diarization": False}
+    if override == "environment":
+        monkeypatch.setenv("RECORD_MEETING_DIARIZE", "0")
+        kwargs = {}
+    with patch.object(ta, "get_audio_channel_count", return_value=2), patch.object(ta, "transcribe_local") as run:
+        with pytest.raises(RuntimeError, match="Original channels retained"):
+            ta.transcribe_audio_file(audio, **kwargs)
+    run.assert_not_called()
+
+
+def test_paired_default_preserves_system_and_mic_raw_events(tmp_path, monkeypatch):
+    monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
+    mic, system = tmp_path / "mic.wav", tmp_path / "system.wav"
+    mic.write_bytes(b"mic")
+    system.write_bytes(b"system")
+    def native(path, **kwargs):
+        return {"raw_response": {"original": path.name, "aligned_words": [
+            {"start": .1, "end": .5, "text": path.stem, "speaker": "S1"}
+        ]}}
+    with patch.object(ta, "transcribe_fluid", side_effect=native) as run, patch.object(ta, "get_audio_duration", return_value=2):
+        result = ta.transcribe_two_files(mic, system)
+    assert [call.args[0] for call in run.call_args_list] == [system, mic]
+    assert result["backend"] == "fluid"
+    assert "[System/S1]" in result["transcription_text"]
+    assert "[Mic/S1]" in result["transcription_text"]
+    assert [track["result"]["original"] for track in result["raw_response"]["tracks"]] == ["system.wav", "mic.wav"]
+    assert [word["speaker"] for word in result["raw_response"]["aligned_words"]] == ["System/S1", "Mic/S1"]
+
+
 def test_transcribe_two_files_delegates_and_preserves_text(tmp_path):
     mic_path = tmp_path / "mic.wav"
     remote_path = tmp_path / "remote.wav"
@@ -362,7 +411,7 @@ def test_transcribe_two_files_delegates_and_preserves_text(tmp_path):
         "transcribe_with_elevenlabs_speech_to_text",
         return_value=dict(fake_el_result),
     ) as mock_el, patch.object(ta, "get_audio_duration", return_value=30.0):
-        result = ta.transcribe_two_files(mic_path, remote_path, language="en")
+        result = ta.transcribe_two_files(mic_path, remote_path, language="en", backend="elevenlabs")
 
     assert result["transcription_text"] == "Zolium"
     mock_el.assert_called_once()
@@ -394,7 +443,7 @@ def test_transcribe_two_files_fallback_concatenation_corrected(tmp_path, monkeyp
     ), patch.dict(
         os.environ, {"ELEVENLABS_API_KEY": "fake-key"}
     ):
-        result = ta.transcribe_two_files(mic_path, remote_path, language="en")
+        result = ta.transcribe_two_files(mic_path, remote_path, language="en", backend="elevenlabs")
 
     assert "Vexcorp" in result["transcription_text"]
     assert "Vexcorb" not in result["transcription_text"]
@@ -764,7 +813,7 @@ def test_elevenlabs_without_a_key_raises_rather_than_billing_openai(
     monkeypatch.setattr(ta, "get_audio_duration", lambda _p: 5.0)
 
     with pytest.raises(RuntimeError, match="ELEVENLABS_API_KEY"):
-        ta.transcribe_audio_file(audio, use_diarization=True)
+        ta.transcribe_audio_file(audio, use_diarization=True, backend="elevenlabs")
 
 
 def test_default_routing_uses_the_local_backend(tmp_path, monkeypatch):
@@ -814,21 +863,22 @@ def test_m4a_ffprobe_channel_count_drives_public_backend_routing(tmp_path, monke
     monkeypatch.setattr(ta.shutil, "which", lambda name: "/usr/bin/ffprobe")
     monkeypatch.setattr(ta.subprocess, "run", lambda *args, **kwargs: completed)
 
-    def fake_elevenlabs(path, **kwargs):
+    def fake_fluid(path, **kwargs):
+        assert kwargs["channel_count"] == 2
         return {
             "transcription_text": "Two speakers.",
             "language": "en",
             "audio_duration_seconds": 5.0,
             "file_size_bytes": path.stat().st_size,
-            "transcription_engine": "elevenlabs_stt",
-            "transcription_model": "scribe_v2",
+            "transcription_engine": "local_fluid_audio",
+            "transcription_model": "FluidAudio + Parakeet v3",
         }
 
-    monkeypatch.setattr(ta, "transcribe_with_elevenlabs_speech_to_text", fake_elevenlabs)
+    monkeypatch.setattr(ta, "transcribe_fluid", fake_fluid)
 
     result = ta.transcribe_audio_file(audio)
 
-    assert result["transcription_engine"] == "elevenlabs_stt"
+    assert result["transcription_engine"] == "local_fluid_audio"
 
 
 def test_no_speech_marker_is_not_run_through_stutter_cleanup(tmp_path, monkeypatch):
@@ -856,3 +906,114 @@ def test_no_speech_marker_is_not_run_through_stutter_cleanup(tmp_path, monkeypat
 
     assert result["transcription_text"] == marker
     assert result["silence"] is True
+
+
+@pytest.mark.parametrize('store_only', [False, True])
+def test_denied_store_recovers_cached_pair_without_asr(tmp_path, monkeypatch, store_only):
+    audio = tmp_path / 'sample remote.wav'
+    mic = tmp_path / 'sample mic.wav'
+    audio.write_bytes(b'system audio')
+    mic.write_bytes(b'microphone audio')
+    result = complete_result(audio, mic, text='System/1: hello\nMic/1: yes')
+    argv = ['transcribe_audio.py', str(audio), '--mic-file', str(mic),
+            '--capture-method', 'platform_native']
+    monkeypatch.setattr(sys, 'argv', argv)
+    with patch.object(ta, 'transcribe_two_files', return_value=result) as asr, patch.object(
+        ta, '_merge_transcription_relate_targets', return_value=([], None)
+    ), patch.object(ta, 'save_transcription', side_effect=RuntimeError('capability_denied')):
+        with pytest.raises(SystemExit):
+            ta.main()
+        asr.assert_called_once()
+    pending = audio.with_suffix('.wav.pending-store.json')
+    assert pending.stat().st_mode & 0o777 == 0o600
+    assert json.loads(pending.read_text())['result'] == result
+    monkeypatch.setattr(sys, 'argv', argv + (['--store-only'] if store_only else []))
+    with patch.object(ta, 'transcribe_two_files', side_effect=AssertionError('ASR repeated')), patch.object(
+        ta, 'transcribe_audio_file', side_effect=AssertionError('ASR repeated')
+    ), patch.object(ta, '_merge_transcription_relate_targets', return_value=([], None)), patch.object(
+        ta, 'save_transcription', return_value={**result, 'entity_id': 'ent_synthetic'}
+    ) as store:
+        ta.main()
+    assert store.call_args.args[:2] == (audio, result)
+    assert store.call_args.kwargs['extra_entity_fields']['capture_method'] == 'platform_native'
+    assert audio.read_bytes() == b'system audio'
+    assert mic.read_bytes() == b'microphone audio'
+    assert audio.with_suffix('.wav.stt_raw.json').exists()
+
+
+@pytest.mark.parametrize('change', ['audio', 'mic', 'context', 'missing'])
+def test_store_only_refuses_unbound_pending_result(tmp_path, monkeypatch, change):
+    audio = tmp_path / 'sample.wav'
+    mic = tmp_path / 'mic.wav'
+    audio.write_bytes(b'audio')
+    mic.write_bytes(b'mic')
+    context = {'capture_method': 'platform_native'}
+    ta._write_pending_store(audio, mic, context, complete_result(audio, mic))
+    if change == 'audio':
+        audio.write_bytes(b'changed')
+    elif change == 'mic':
+        mic.write_bytes(b'changed')
+    elif change == 'context':
+        context['capture_method'] = 'unknown'
+    else:
+        audio.with_suffix('.wav.pending-store.json').unlink()
+    with pytest.raises(RuntimeError, match='pending store'):
+        ta._read_pending_store(audio, mic, context, required=True)
+
+
+@pytest.mark.parametrize('setting,value', [
+    ('TRANSCRIBE_CLEAN_STUTTERS', '0'), ('TRANSCRIBE_LABEL_MIC', 'Different'),
+    ('TRANSCRIBE_UTTERANCE_GAP_SECONDS', '2.8'), ('TRANSCRIBE_WHISPER_MODEL_NAME', 'different.bin'),
+    ('TRANSCRIBE_FLUID_COMPUTE_UNITS', 'ane'), ('TRANSCRIBE_DEFAULT_LANGUAGE', 'spa'),
+    ('TRANSCRIBE_PROPER_NOUNS', 'Different=variant'),
+])
+def test_cli_pending_cache_rejects_changed_processing_options(tmp_path, monkeypatch, setting, value):
+    audio = tmp_path / 'sample.wav'
+    audio.write_bytes(b'audio')
+    result = complete_result(audio)
+    argv = ['transcribe_audio.py', str(audio)]
+    monkeypatch.setattr(sys, 'argv', argv)
+    with patch.object(ta, '_merge_transcription_relate_targets', return_value=([], None)), patch.object(
+        ta, 'transcribe_audio_file', return_value=result
+    ), patch.object(ta, 'save_transcription', side_effect=RuntimeError('capability_denied')):
+        with pytest.raises(SystemExit):
+            ta.main()
+    monkeypatch.setenv(setting, value)
+    monkeypatch.setattr(sys, 'argv', argv + ['--store-only'])
+    with patch.object(ta, '_merge_transcription_relate_targets', return_value=([], None)), patch.object(
+        ta, 'transcribe_audio_file', side_effect=AssertionError('unexpected ASR')
+    ) as asr, patch.object(ta, 'save_transcription') as store:
+        with pytest.raises(SystemExit):
+            ta.main()
+        asr.assert_not_called()
+        store.assert_not_called()
+
+
+@pytest.mark.parametrize('source', ['file', 'neotoma'])
+def test_cli_pending_cache_binds_resolved_vocabulary(tmp_path, monkeypatch, source):
+    audio = tmp_path / 'sample.wav'
+    audio.write_bytes(b'audio')
+    vocabulary = tmp_path / 'vocabulary.json'
+    vocabulary.write_text(json.dumps([['Synthetic', 'old']]))
+    monkeypatch.setenv('TRANSCRIBE_PROPER_NOUNS_FILE', str(vocabulary))
+    resolved = [('Synthetic', 'old')]
+    monkeypatch.setattr(ta, '_proper_nouns_from_neotoma', lambda: list(resolved) if source == 'neotoma' else [])
+    argv = ['transcribe_audio.py', str(audio)]
+    monkeypatch.setattr(sys, 'argv', argv)
+    with patch.object(ta, '_merge_transcription_relate_targets', return_value=([], None)), patch.object(
+        ta, 'transcribe_audio_file', return_value=complete_result(audio)
+    ), patch.object(ta, 'save_transcription', side_effect=RuntimeError('capability_denied')):
+        with pytest.raises(SystemExit):
+            ta.main()
+    if source == 'file':
+        vocabulary.write_text(json.dumps([['Synthetic', 'new']]))
+    else:
+        resolved[:] = [('Synthetic', 'new')]
+    monkeypatch.setattr(sys, 'argv', argv + ['--store-only'])
+    with patch.object(ta, '_merge_transcription_relate_targets', return_value=([], None)), patch.object(
+        ta, 'transcribe_audio_file', side_effect=AssertionError('unexpected ASR')
+    ) as asr, patch.object(ta, 'save_transcription') as store:
+        with pytest.raises(SystemExit):
+            ta.main()
+        asr.assert_not_called()
+        store.assert_not_called()

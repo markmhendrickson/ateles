@@ -421,14 +421,14 @@ def test_genuinely_unroutable_tags_still_escalate():
     assert "unroutable" in n.sent[0]
 
 
-# ── human-owned tasks park, never spawn (ateles#702, defect a) ────────────────
+# ── human-owned tasks stay as filed, never spawn ────────────────────────────
 
 
 def test_operator_assigned_task_is_not_spawned(monkeypatch):
     """The blast-radius case, through the dispatcher.
 
     An `operator`-assigned task whose text keyword-matches an agent used to be
-    marked ROUTED and spawned. It must now park in AWAITING_INPUT — and must not
+    marked ROUTED and spawned. Its human-owned state must be preserved — and must not
     travel the unroutable BLOCKER path either, because it is not a defect.
     """
     statuses: list = []
@@ -449,8 +449,7 @@ def test_operator_assigned_task_is_not_spawned(monkeypatch):
         n,
     )
     assert spawned == [], f"an agent was spawned onto human-owned work: {spawned}"
-    assert statuses and statuses[0][0] == apis.TaskStatus.AWAITING_INPUT, statuses
-    assert "human-owned" in (statuses[0][1] or "")
+    assert statuses == []
     assert not any("unroutable" in m for m in n.sent), n.sent
 
 
@@ -472,3 +471,183 @@ def test_unknown_assignee_escalates_instead_of_being_reassigned(monkeypatch):
     )
     assert spawned == [], f"reassigned to another agent: {spawned}"
     assert len(n.sent) == 1 and "unroutable" in n.sent[0], n.sent
+
+
+# ── session-owned tasks are left as filed (no route/owner is for ownerless work) ─
+
+
+@pytest.fixture
+def _world(monkeypatch):
+    """Capture every edge a dispatch could touch: status writes, spawns, pages."""
+    seen = {"statuses": [], "started": [], "spawns": []}
+    monkeypatch.setattr(
+        apis, "set_task_status",
+        lambda eid, status, **k: seen["statuses"].append((status, k.get("reason"))) or True,
+    )
+    monkeypatch.setattr(
+        apis, "_activity",
+        type("A", (), {"started": lambda self, *a, **k: seen["started"].append(a)
+                       or (_ for _ in ()).throw(_Stop())})(),
+    )
+
+    async def _spawn(*a, **k):
+        seen["spawns"].append(a)
+        raise _Stop()
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", _spawn)
+    return seen
+
+
+def _dispatch_with(snapshot, notifier, *, trigger="created", override=False):
+    asyncio.run(
+        apis.dispatch_task(
+            "ent_s1", snapshot, trigger=trigger, notifier=notifier,
+            gate_override=override, snapshot_hydrated=True,
+        )
+    )
+
+
+def _left_as_filed(world, notifier):
+    assert world["statuses"] == [], f"status written: {world['statuses']}"
+    assert world["started"] == [] and world["spawns"] == [], world
+    assert notifier.sent == [], f"paged: {notifier.sent}"
+    assert apis._unroutable._seen == {} and apis._unroutable._pending == {}
+
+
+def test_session_assignee_is_left_as_filed(_world):
+    n = _Notifier()
+    _dispatch_with({"title": "Billing follow-up", "assigned_to": "Codex session billing",
+                    "tags": []}, n)
+    _left_as_filed(_world, n)
+
+
+def test_session_owner_is_left_as_filed_and_status_untouched(_world):
+    n = _Notifier()
+    snapshot = {"title": "Plan the review", "owner": "Codex street coordinator chat0a1b2c3d",
+                "due_date": "2026-11-10", "action_type": "analysis", "tags": [],
+                "status": "pending"}
+    _dispatch_with(snapshot, n)
+    _left_as_filed(_world, n)
+    assert snapshot["status"] == "pending" and "blocked_reason" not in snapshot
+
+
+@pytest.mark.parametrize(
+    "owner",
+    [
+        "constara (Claude local_77de7679)",
+        "Logik client lead \u2014 Claude Code (from 2026-11-12, under ateles inbox "
+        "local_117abff0-4498-445c-858d-2c9da04b86a1); previously Codex 01a186bf",
+    ],
+)
+def test_local_session_id_owner_with_no_assignee_is_left_as_filed(_world, owner):
+    # Reproduces prod: these owners were written BLOCKED
+    # "no route/owner (tags=[], assigned_to=None)" while a session ran them.
+    n = _Notifier()
+    snapshot = {"title": "Draft the launch post", "owner": owner, "tags": [],
+                "status": "pending"}
+    _dispatch_with(snapshot, n)
+    _left_as_filed(_world, n)
+    assert snapshot["status"] == "pending" and "blocked_reason" not in snapshot
+
+
+def test_session_owner_with_guessable_words_is_not_gated_or_routed(_world):
+    n = _Notifier()
+    _dispatch_with({"title": "Reconcile the payments ledger", "body": "payments wage",
+                    "owner": "ateles session", "action_type": "code", "tags": []}, n)
+    _left_as_filed(_world, n)
+
+
+def test_session_owner_beats_a_stored_routable_tag(_world):
+    n = _Notifier()
+    _dispatch_with({"title": "Fix the flaky CI pipeline", "tags": ["ops"],
+                    "owner": "Codex session"}, n)
+    _left_as_filed(_world, n)
+
+
+def test_agent_assignee_with_session_owner_still_routes_to_the_agent(_world):
+    with pytest.raises(_Stop):
+        _dispatch_with({"title": "Tidy notes", "assigned_to": "cicada",
+                        "owner": "Codex session", "tags": []}, _Notifier())
+    assert _world["started"] and "cicada" in _world["started"][0][0]
+
+
+def test_person_assignee_with_session_owner_is_still_human_owned(_world):
+    n = _Notifier()
+    _dispatch_with({"title": "Approve it", "assigned_to": "operator",
+                    "owner": "Codex session", "tags": []}, n)
+    assert _world["statuses"] == []
+    assert _world["spawns"] == []
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        {"assigned_to": "Jane Doe"},
+        {"assigned_to": "payments"},
+        {"assigned_to": "root"},
+        {"assigned_to": "operator confirms identity and assigns license; "
+                        "Codex provisions and verifies"},
+        {"owner": "meeting: acme"},
+        {},
+        # One marker word is not a session: a session verdict silences this page.
+        {"assigned_to": "Claude Martin"},
+        {"assigned_to": "Marcus Chat"},
+        {"assigned_to": "Session Bank"},
+        {"assigned_to": "Chat support vendor"},
+        {"assigned_to": "Marketing coordinator"},
+        {"assigned_to": "operator session notes"},
+        {"owner": "Claude Martin"},
+        {"owner": "Session Bank"},
+        # Positive controls for the `local` marker: a word, not a session id.
+        {"owner": "local clinic"},
+        {"owner": "Claude local office"},
+    ],
+)
+def test_other_owners_still_block_and_page(_world, snapshot):
+    n = _Notifier()
+    _dispatch_with({"title": "Something with no domain words", "tags": [], **snapshot}, n)
+    assert [s for s, _r in _world["statuses"]] == [apis.TaskStatus.BLOCKED]
+    assert "no route/owner" in _world["statuses"][0][1]
+    assert len(n.sent) == 1 and "unroutable" in n.sent[0]
+    assert _world["spawns"] == []
+
+
+def test_approved_session_task_is_not_spawned_and_sends_one_info_line(_world):
+    n = _Notifier()
+    _dispatch_with({"title": "Billing follow-up", "assigned_to": "Codex session billing",
+                    "tags": []}, n, trigger="approved", override=True)
+    assert _world["statuses"] == [] and _world["spawns"] == [] and _world["started"] == []
+    assert len(n.sent) == 1 and "session-owned" in n.sent[0] and "ent_s1" in n.sent[0]
+    assert "Codex" not in n.sent[0]
+
+
+def test_session_branch_forgets_an_earlier_ledger_entry(_world):
+    apis._unroutable.note("ent_s1", "Billing follow-up", [], "Codex session billing")
+    assert "ent_s1" in apis._unroutable._seen
+    _dispatch_with({"title": "Billing follow-up", "assigned_to": "Codex session billing"},
+                   _Notifier())
+    assert apis._unroutable._seen == {} and apis._unroutable.drain(force=True) is None
+
+
+@pytest.mark.parametrize(
+    "trigger,extra",
+    [("created", {"task_type": "existing_pr_correction"}), ("build_released", {})],
+)
+def test_pr_correction_and_build_released_do_not_read_owner(_world, trigger, extra):
+    """Those lifecycles own their handling: a session owner does not short-circuit."""
+    with pytest.raises(_Stop):
+        _dispatch_with({"title": "Fix the flaky CI pipeline", "tags": ["ops"],
+                        "owner": "Codex session", **extra}, _Notifier(), trigger=trigger)
+    assert _world["started"], "routing should have proceeded as before"
+
+
+@pytest.mark.parametrize(
+    "trigger,extra",
+    [("created", {"task_type": "existing_pr_correction"}), ("build_released", {})],
+)
+def test_pr_correction_and_build_released_still_honor_a_session_assignee(_world, trigger, extra):
+    """Only `owner` is withheld there: a named session assignee is still its session's."""
+    n = _Notifier()
+    _dispatch_with({"title": "Fix the flaky CI pipeline", "tags": ["ops"],
+                    "assigned_to": "Codex session billing", **extra}, n, trigger=trigger)
+    _left_as_filed(_world, n)

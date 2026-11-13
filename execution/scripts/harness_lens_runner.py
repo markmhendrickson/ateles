@@ -2460,7 +2460,8 @@ def current_pr_metadata(*, repo: str, pr: int) -> dict | None:
     try:
         result = subprocess.run(
             ["gh", "api", f"repos/{repo}/pulls/{pr}", "--jq",
-             "{state,head:{sha:.head.sha},base:{ref:.base.ref}}"],
+             "{state,head:{sha:.head.sha},base:{ref:.base.ref},"
+             "mergeable,mergeable_state}"],
             capture_output=True, text=True, check=False, timeout=30,
             env=repo_scoped_env(repo),
         )
@@ -2491,7 +2492,9 @@ async def head_checks_hold(target: "LensTarget") -> str | None:
     if problem:
         gate = panel_check_gate.unreadable_gate(target.head, problem)
     else:
-        gate = await panel_check_gate.read_check_gate(
+        gate = panel_check_gate.merge_conflict_gate(
+            pr, target.head
+        ) or await panel_check_gate.read_check_gate(
             target.repo, swarm_dispatch._normalise_full_sha(target.head), pr["base"]["ref"]
         )
     if gate.green:

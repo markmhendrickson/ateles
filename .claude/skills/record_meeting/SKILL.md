@@ -18,9 +18,11 @@ entity_id: ent_b0976fda824a000ee984a5da
 
 Use this skill when the user wants command-style control of meeting recording.
 
+Recording runs through **Audio Hijack**. Start and stop the configured recording session in Audio Hijack's UI; the previously documented `execution/scripts/audio_hijack_control.sh` is not present in the supported repository and must not be invoked or described as installed. Audio Hijack writes paired `*remote*`/`*mic*` files into its output folder, and the **Tyto daemon** watches that folder and performs transcription + `/analyze-meeting` automatically. Do not infer a working chat or Strix control integration from this skill.
+
 ## Default (no argument)
 
-When the user invokes `/record_meeting` with no argument (or "toggle"): run `npm run record_meeting`. That **starts** recording if not running, or **stops** (and transcribes + Neotoma store) if running. If the user asks to stop **without** transcribing, run `RECORD_MEETING_SKIP_TRANSCRIBE=1 npm run record_meeting` (or set `RECORD_MEETING_SKIP_TRANSCRIBE=1` in `.env`) so the WAV is saved but `transcribe_audio.py` is not run.
+When the user invokes `/record_meeting` with no argument (or "toggle"), inspect the configured Audio Hijack recording session and use its visible start/stop control only when supported app control is available. Otherwise report that the recording UI must be operated directly; do not invent a command or substitute another capture mechanism. Transcription and analysis happen downstream in Tyto when the recording file settles — this path does not transcribe inline.
 
 ## Guardrail
 
@@ -30,12 +32,12 @@ When the user invokes `/record_meeting` with no argument (or "toggle"): run `npm
 
 The operator is always a party to recordings made via this skill (operator-triggered, operator present). That satisfies US federal one-party consent and Spain's Penal Code Art. 197 (no interception of others' communications). The residual gaps are **US all-party-consent states** and EU transparency. Apply this disclosure ladder, best to worst:
 
-1. **Platform-native recording (preferred).** If the call is on Zoom/Meet/Teams, prefer the platform's own Record button: it auto-discloses to everyone — on-screen banner + consent splash + an audio announcement to phone/dial-in participants. This is the only method that reaches dial-ins, and it sidesteps the disclosure problem entirely. Route the resulting file through Tyto's `TYTO_NATIVE_RECORDINGS_DIR` (stamped `capture_method=platform_native`) so the transcribe+analyze pipeline is identical. When the operator is on a supported platform, **suggest native recording instead of starting BlackHole capture.**
+1. **Platform-native recording (preferred).** If the call is on Zoom/Meet/Teams, prefer the platform's own Record button: it auto-discloses to everyone — on-screen banner + consent splash + an audio announcement to phone/dial-in participants. This is the only method that reaches dial-ins, and it sidesteps the disclosure problem entirely. Route the resulting file through Tyto's `TYTO_NATIVE_RECORDINGS_DIR` (stamped `capture_method=platform_native`) so the transcribe+analyze pipeline is identical. When the operator is on a supported platform, **suggest native recording instead of the local Audio Hijack capture.**
 2. **Verbal announcement.** "I'm recording this for my notes." Reaches everyone; continuing to talk after it is valid implied consent in every state.
 3. **In-meeting chat message.** Valid + creates a written record, BUT misses (a) phone/dial-in participants (they never see chat) and (b) late joiners (most platforms don't show pre-arrival messages). If using chat, repeat for late joiners and announce verbally for any dial-in.
 4. **Booking-page disclaimer only** (e.g. markmhendrickson.com/meet): prior notice, not contemporaneous — leaves a residual gap in all-party states (esp. California) for anyone who didn't book through the page (forwarded invite, booked by someone else).
 
-On `record_meeting:start`, after the recorder starts (BlackHole/Audio Hijack local capture path = `capture_method=audio_hijack_system`/`blackhole_system`, which carries **no** built-in disclosure), ALWAYS print:
+On `record_meeting:start`, after the recorder starts (Audio Hijack local capture = `capture_method=audio_hijack_system`, which carries **no** built-in disclosure), ALWAYS print:
 
 ```
 ⚠️  Local capture has no built-in recording notice. If on Zoom/Meet/Teams,
@@ -52,95 +54,39 @@ This is a reminder, not a blocking prompt — do not gate the start on a confirm
 
 ## Commands
 
-Run from repo root:
+Audio Hijack capture uses the application's visible recording controls for its configured session. Verify its current state before toggling and read back the resulting recording state. A supported programmatic Audio Hijack entrypoint is not installed in this repository.
+
+An existing, separate local device-capture controller is available at:
 
 ```bash
-npm run record_meeting
-RECORD_MEETING_SKIP_TRANSCRIBE=1 npm run record_meeting   # toggle stop: WAV only, no transcribe
-RECORD_MEETING_SKIP_TRANSCRIBE=1 npm run record_meeting:stop
-npm run record_meeting:start
-npm run record_meeting:stop
-npm run record_meeting:status
+bash execution/scripts/meeting-recording-control.sh status
+bash execution/scripts/meeting-recording-control.sh start
+bash execution/scripts/meeting-recording-control.sh stop
 ```
 
-### Real-time transcription (chunked)
-
-Set `RECORD_MEETING_REALTIME_INTERVAL=30` (or any seconds > 0) in `.env` or pass `--realtime-interval 30` directly to print a live partial transcript every N seconds while recording. Uses Whisper only (no diarization, no Neotoma store). The full diarized transcription still runs at stop as usual.
-
-```bash
-RECORD_MEETING_REALTIME_INTERVAL=30 npm run record_meeting:start
-```
-
-### Video capture + frame extraction
-
-Screen recording starts automatically alongside audio when `ffmpeg` is available (disable with `RECORD_MEETING_VIDEO=0`). Defaults: 2fps, primary display (index 1). On stop, frames are extracted every 60s (override: `RECORD_MEETING_FRAME_INTERVAL`) to a `frames/` directory next to the video, and linked to the Neotoma `transcription` entity when a transcription entity ID is present.
-
-```bash
-# Manual frame extraction from an existing recording:
-execution/venv/bin/python execution/scripts/extract_meeting_frames.py path/to/meeting.mp4
-execution/venv/bin/python execution/scripts/extract_meeting_frames.py path/to/meeting.mp4 \
-  --interval 30 --transcription-id ent_abc123
-```
-
-Env overrides:
-- `RECORD_MEETING_VIDEO=0` — disable screen capture
-- `RECORD_MEETING_VIDEO_SCREEN=1` — avfoundation screen index (default 1 = primary)
-- `RECORD_MEETING_VIDEO_FPS=2` — recording framerate (default 2)
-- `RECORD_MEETING_FRAME_INTERVAL=60` — seconds between extracted stills (default 60)
+This controller launches `record_meeting_audio.py`; it does not control Audio Hijack. Use it only when that capture path is explicitly selected and the devices/configuration are verified. Do not switch the operator's Audio Hijack capture setup merely because this script exists. This repository has no root `package.json`, so `npm run record_meeting` is not a supported repo-root command.
 
 ## Behavior
 
-- `record_meeting` (no suffix)
-  - **Toggle:** start if not running; stop (and transcribe + store) if running. With **`RECORD_MEETING_SKIP_TRANSCRIBE=1`**, a stop saves the WAV only (no `transcribe_audio.py`, no Neotoma `transcription` row); transcribe later with the command the script prints.
-- `record_meeting:start`
-  - Starts `record_meeting_audio.py` in background.
-  - Uses existing defaults (BlackHole capture + default mic).
-  - Records with **stereo channel separation** by default (`--separate-sources`: ch1=system audio, ch2=mic) for speaker diarization. Set `RECORD_MEETING_SEPARATE_SOURCES=0` to disable.
-  - Starts **parallel screen recording** via `ffmpeg` (2fps, primary display) when ffmpeg is installed. Disable with `RECORD_MEETING_VIDEO=0`.
-  - Starts **live transcription** thread if `RECORD_MEETING_REALTIME_INTERVAL` > 0.
-- `record_meeting:stop`
-  - Sends stop signal to recorder.
-  - With **`RECORD_MEETING_SKIP_TRANSCRIBE=1`** (env or `.env`), stops after saving the WAV; skips everything below.
-  - Reads saved audio path from recorder log.
-  - Runs `transcribe_audio.py` on the saved audio. Pass `--capture-method blackhole_system` (local capture has no built-in consent disclosure) so the `transcription` entity records its consent posture.
-  - **Speaker diarization** is enabled automatically when `ELEVENLABS_API_KEY` is set (passes `--diarize`), because meetings need speaker separation and the local model cannot do it. On failure it falls back to the **free local `whisper-cli` backend** (single-speaker text, no labels) — not to the metered OpenAI API. Set `RECORD_MEETING_DIARIZE=0` to force plain local mode.
-  - Prints the transcription in a clear block (--- TRANSCRIPTION --- ... --- END TRANSCRIPTION ---), then prints the **Neotoma `transcription` entity ID** and **audio WAV** path.
-  - Stores the transcription as a `transcription` entity in Neotoma via `neotoma store` (combined entities + `--file-path` WAV). No Parquet write.
-  - **Direct-to-prod transport (since 2026-05-13):** `transcribe_audio.py` calls the CLI with `--api-only --base-url $NEOTOMA_PROD_BASE_URL` (default `http://localhost:3180`) and inherits `NEOTOMA_BEARER_TOKEN` from the shell env (sourced from the ateles `.env`). It now performs an auth preflight and **fails loudly** if the bearer token is missing instead of silently falling back to the unauthenticated dev server (3080). Override via `NEOTOMA_PROD_BASE_URL` if you need to target a different host. The `http://localhost:3180/inspector/entities/<entity_id>` link reported in chat is therefore guaranteed to resolve when the script returned successfully.
-  - **Neotoma-related call detection (auto-analyze):** After transcription completes, scan the transcript text for Neotoma-related signal using this heuristic: the transcript qualifies if it contains the literal word "Neotoma" (case-insensitive), OR contains at least 2 of the following domain terms: `entity`, `schema`, `MCP`, `memory`, `observation`, `store`, `transcription`, `knowledge graph`, `feedback_analysis`. Apply this heuristic to the full transcript text returned by `transcribe_audio.py`.
-    - If `RECORD_MEETING_AUTO_ANALYZE_NEOTOMA=1` is set in env and the heuristic fires: **automatically invoke `/analyze-neotoma-feedback`** with the transcript file path as the source, in the same turn. Do not wait for the user to ask.
-    - If the heuristic fires but the env var is not set: print a one-line suggestion after the stop summary: `> Neotoma-related call detected. Run /analyze-neotoma-feedback <transcript_path> to analyze feedback.` where `<transcript_path>` is the absolute path to the transcript (if `transcribe_audio.py` wrote one) or `last_meeting_transcription.txt` path.
-    - If the heuristic does not fire: skip silently — do not mention detection to the user.
-    - The heuristic runs only when transcription succeeded (not when `RECORD_MEETING_SKIP_TRANSCRIBE=1`).
-  - **When reporting stop in chat:** Always include (1) the **audio WAV path**, (2) the **Neotoma `transcription` entity ID**, (3) the **transcription text**, and (4) the **video path and frames directory** if video was captured. Always link to the prod Inspector (`http://localhost:3180/inspector/entities/<entity_id>`) — if the script succeeded, the row is on prod. If the script aborted on the auth preflight, surface the error and ask the user to source the env file rather than fabricating an Inspector link.
-  - **Legacy parquet:** One-off migration from ``$DATA_DIR/transcriptions/transcriptions.parquet``: run ``execution/venv/bin/python execution/scripts/migrate_transcriptions_parquet_to_neotoma.py`` (use ``--dry-run`` / ``--limit`` as needed).
-  - **Repair basename merges:** If imports collapsed rows that shared ``audio_file_name``, run ``execution/venv/bin/python execution/scripts/repair_transcription_merge_duplicates.py`` (default: only duplicate-basename rows; ``--all-rows`` to re-key everything).
-  - **Link transcription to people / feedback analysis (optional):** After Neotoma stores the ``transcription``, ``transcribe_audio.py`` can create ``REFERS_TO`` edges from that ``transcription`` to related entities (transcription → contact, transcription → ``feedback_analysis``). Three ways to pass targets (merged; CLI overrides sidecar overrides env for feedback_analysis id; contact lists are unioned in CLI → sidecar → env order):
-    1. **Sidecar JSON** next to the WAV: ``<stem>_neotoma_relations.json`` (same directory). Example: ``{"relate_contact_entity_ids": ["ent_…"], "relate_feedback_analysis_entity_id": "ent_…"}``.
-    2. **Environment** (sourced from repo ``.env`` when using ``meeting-recording-control.sh``): ``NEOTOMA_TRANSCRIPTION_CONTACT_ENTITY_IDS`` (comma-separated ``ent_`` ids) and ``NEOTOMA_TRANSCRIPTION_FEEDBACK_ANALYSIS_ENTITY_ID``.
-    3. **CLI** (advanced): ``transcribe_audio.py path.wav --relate-contact-entity-id ent_… --relate-feedback-analysis-entity-id ent_…`` (repeat ``--relate-contact-entity-id`` for multiple contacts). Add ``--relate-verbose`` to print each relationship attempt.
-    4. **Backfill on an existing ``transcription``:** ``execution/venv/bin/python execution/scripts/link_transcription_neotoma_relations.py --transcription-id ent_… --contact-entity-id ent_… --feedback-analysis-entity-id ent_…`` (with prod Neotoma env same as transcribe).
-- `record_meeting:status`
-  - Reports whether recorder is currently running.
+- `toggle` (default) — use the verified visible Audio Hijack recording control if supported app control is available.
+- `start` — start the Audio Hijack session (begin recording). Print the consent reminder above.
+- `stop` — stop the Audio Hijack session. Audio Hijack finalizes the `*remote*`/`*mic*` files; the **Tyto daemon** then transcribes (`transcribe_audio.py`, using local FluidAudio diarization under agent_policy `ent_1cf60379aaf1537787e571a5`) and auto-invokes `/analyze-meeting`. This skill does not transcribe inline.
+- `status` — inspect and report the Audio Hijack session's actual recording state.
 
-## Device setup (macOS)
+### Downstream (handled by Tyto, not this skill)
 
-1. **System audio:** Install [BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole) (e.g. `brew install blackhole-2ch`), **reboot**, then in **Audio MIDI Setup** create a **Multi-Output Device** that includes your speakers/headphones **and** BlackHole so meeting apps play into BlackHole.
-2. **Python:** Use `execution/venv` with `numpy` and `sounddevice` (see `execution/scripts/requirements.txt`). If `venv/bin/pip` fails with a bad interpreter, run `execution/venv/bin/python3 -m pip install -r execution/scripts/requirements.txt`.
-3. **Mic / device overrides (optional):** Set in repo `.env` (sourced by `meeting-recording-control.sh`): `RECORD_MEETING_DEVICE` (substring for system capture, default `BlackHole`), `RECORD_MEETING_MIC` (mic substring; empty string = no mic). If unset, the mic defaults to the **current PortAudio default input** (e.g. built-in mic).
-4. **Transcription:** the default backend is **local `whisper-cli`** (free, on-device, no key). `transcribe_audio.py` uses ElevenLabs only when diarization is requested — `--diarize`, or `RECORD_MEETING_DIARIZE=1` with `ELEVENLABS_API_KEY` set — giving **multichannel** for stereo (merges `[System]` / `[Mic]` **in time order** when word timestamps exist, otherwise channel order: system then mic) and **diarization** for mono. `RECORD_MEETING_DIARIZE=0` or `--no-diarize` forces the local backend.
-   - The **metered** OpenAI Whisper API is now an explicit opt-in only: `--backend openai` or `TRANSCRIBE_BACKEND=openai`. It is never selected automatically and is never a silent fallback — a misconfigured local backend fails loudly instead of starting to bill.
-   - Local model: `~/.cache/whisper-cpp/ggml-large-v3-turbo.bin`, overridable with `TRANSCRIBE_WHISPER_MODEL`. Needs `ffmpeg` (voice memos are `.m4a`; whisper-cli reads only flac/mp3/ogg/wav).
+- Tyto watches `TYTO_RECORDINGS_DIR` (Audio Hijack output, stamped `capture_method=audio_hijack_system`) and optionally `TYTO_NATIVE_RECORDINGS_DIR` (Zoom/Meet/Teams native recordings, stamped `capture_method=platform_native`).
+- On a settled recording, Tyto runs `transcribe_audio.py` (passing `--capture-method`) → stores a Neotoma `transcription` entity → auto-invokes `/analyze-meeting`.
+- The `transcription` entity ID and prod Inspector link (`http://localhost:3180/inspector/entities/<entity_id>`) come from Tyto's run, not from this skill.
+
+## Setup (macOS)
+
+1. **Audio Hijack:** Install Audio Hijack, create a session named `Tyto` that captures the meeting app's audio (system/far-end) on one recorder block and your mic on another, writing files whose names contain `remote`/`system` (far end) and `mic` (you). Use the application's supported visible controls; do not assume the absent `audio_hijack_control.sh` is available.
+2. **Tyto daemon:** Point `TYTO_RECORDINGS_DIR` at the Audio Hijack output folder (default `$RECORD_MEETING_DIR` or `~/Documents/data/recordings`). Optionally set `TYTO_NATIVE_RECORDINGS_DIR` for platform-native recordings.
+3. **Local transcription:** Install FluidAudio and its diarization/ASR models for supported Apple Silicon machines. Meeting diarization runs locally by default under agent_policy `ent_1cf60379aaf1537787e571a5` (operator ruling 2026-11-04). Preserve raw speaker/timestamp output, source transcript and deterministic channel identities. No provider API key is needed for the local route; do not automatically fall back to paid/cloud transcription or undiarized output when it fails. Diagnose the local error and report any remaining blocker.
 
 ## Implementation detail
 
-Controller script:
+Audio Hijack capture is controlled through the application; downstream processing is implemented by `execution/daemons/tyto/tyto.py` and `execution/scripts/transcribe_audio.py`.
 
-`execution/scripts/meeting-recording-control.sh`
-
-NPM scripts:
-
-- `record_meeting` — toggle (default)
-- `record_meeting:start`
-- `record_meeting:stop`
-- `record_meeting:status`
+The separate device-capture path is implemented by `execution/scripts/meeting-recording-control.sh` and `execution/scripts/record_meeting_audio.py`. Its availability does not establish that it is selected, that its audio devices are configured, or that it controls Strix/Audio Hijack.

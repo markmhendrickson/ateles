@@ -237,6 +237,7 @@ def run_launch(scenario: dict, tmp_root: Path, monkeypatch) -> LaunchTrace:
     # no fixture may consult GitHub credentials before the containment probe.
     monkeypatch.setattr(hlr, "current_pr_metadata", lambda **kw: {
         "state": "open", "head": {"sha": "a" * 40}, "base": {"ref": "main"},
+        "mergeable": True, "mergeable_state": "clean",
     })
 
     async def green_checks(repository, head_sha, base_ref):

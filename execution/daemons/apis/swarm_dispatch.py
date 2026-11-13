@@ -42,6 +42,7 @@ behind APIS_AUTONOMY_AUTO_MERGE regardless.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -90,6 +91,7 @@ from review_learning import (
     parse_findings,
     propose_skill_updates,
 )
+import review_panel
 from review_panel import (
     LENSES,
     Lens,
@@ -106,6 +108,7 @@ import model_tiering
 import panel_check_gate
 import review_carry
 import review_delta
+import review_scope
 import skill_runner
 from skill_runner import (
     ATELES_REPO,
@@ -121,6 +124,7 @@ from skill_runner import (
 
 from lib.daemon_runtime.checkpoint_posture import PostureOutcome, evaluate_with_posture
 from lib.daemon_runtime import label_gate as _label_gate
+from lib.daemon_runtime import neotoma_transient as _neotoma_transient
 from lib.daemon_runtime.gating import load_policy
 from lib.notify import Notifier, Priority
 from lib import github_app_token as _github_app_token
@@ -141,6 +145,17 @@ def _lens_return_only_on_fly(lens: Lens) -> bool:
 
 
 DAEMON_NAME = "apis"
+# The admission class a Fly fix-round correction task is filed with and read
+# back with: a task a worker may take carries it (the claimable predicate in
+# docs/foundation/work_model.md#parent-and-child-tasks).
+CORRECTION_ADMISSION_CLASS = "workflow_entering"
+
+# The exact-head ``pr_review`` store carries the full text of every panel
+# review, so one attempt can outlast the 30s every other store gets. Each
+# attempt may take this long; the whole store, retries and pauses included,
+# never takes longer than the total (a panel must not wait without bound).
+PR_REVIEW_STORE_ATTEMPT_TIMEOUT_SECONDS = 90.0
+PR_REVIEW_STORE_TOTAL_SECONDS = 240.0
 
 # Parent-issue resolution (ateles#434, ateles#613, ateles#300).
 #
@@ -194,7 +209,17 @@ _GATE_VERDICT = re.compile(r"GATE_INHERITANCE:\s*(clear|blocked)", re.I)
 # "pr_reopened", distinct from "pr_synchronize") re-enters the pipeline the
 # same way a re-push does, so it must be eligible for the same auto-re-review
 # treatment as a synchronize push against a gate-blocked PR.
-_AUTO_REREVIEW_TRIGGER_KINDS = ("pr_synchronize", "pr_reopened")
+#
+# `pr_labeled` joins them: an admitted label add is meant to re-run the review
+# (CLAUDE.md, "A plain comment does NOT re-dispatch a swarm review"). Without
+# it a labelled PR with no parent issue and already-green checks was skipped as
+# "pre-impl gates open", while the same PR labelled while checks were pending
+# got its panel because the hold is released as a `pr_synchronize`. Only an
+# admitted label add can arrive with this kind: `github_gateway.
+# _labeled_event_admitted` drops every `labeled` delivery unless the gate is
+# set and the label just added is exactly the configured one, before any
+# trigger is built, and nothing in this module constructs a `pr_labeled`.
+_AUTO_REREVIEW_TRIGGER_KINDS = ("pr_synchronize", "pr_reopened", "pr_labeled")
 
 # Product-code path classifier (ateles: harden pipeline-bypass detection).
 # A PR that touches these paths is a product change that SHOULD originate from a
@@ -579,6 +604,16 @@ def parse_pending_gates(stdout: str) -> set[str]:
     if not m:
         return set()
     return {g.strip().lower() for g in m.group(1).split(",") if g.strip()}
+
+
+_MISSING_PARENT_ISSUE_REASON = re.compile(
+    r"^GATE_BLOCK_REASON: missing_parent_issue\s*$", re.I | re.M
+)
+
+
+def missing_parent_issue_block(stdout: str) -> bool:
+    """Recognize only Lanius's explicit missing-parent-issue block reason."""
+    return bool(_MISSING_PARENT_ISSUE_REASON.search(stdout or ""))
 
 
 # Vanellus / panelist verdict token (SWARM_GITHUB_CONTRACT, skill_runner.py):
@@ -2024,13 +2059,55 @@ def body_has_blocking_findings(body: str | None) -> bool:
     a false-clean verdict — this is the SAME guard `body_has_blocking_findings`
     already is, this call is what feeds `sign_off`'s clean-verdict check in the
     panel loop (`swarm_dispatch`'s per-lens `sign_off` call site).
+
+    A whole line that only says there are none (`- [x] No [BLOCKING]
+    findings.`, the review steward's approval checklist) is not a finding and
+    is dropped from each normalized form first (`is_clean_no_blocking_line`).
+    Without that, every approval contradicted itself: REQUEST_CHANGES, a
+    content-block stamp, an unparseable-verdict page and a fix round for a
+    defect nobody reported.
     """
     if not body:
         return False
-    forms = _veto_scan_forms(body)
+    forms = tuple(_without_clean_no_blocking_lines(text) for text in _veto_scan_forms(body))
     if any(_BLOCKING_MARKER_RE.search(text) for text in forms):
         return True
     return any(_wildcard_token_hit(text, "[BLOCKING]", marker=True) for text in forms)
+
+
+# A whole line stating there are no blocking findings, as the review steward
+# writes it in its approval checklist: `- [x] No [BLOCKING] findings.` It
+# carries the marker without being a finding, so `body_has_blocking_findings`
+# drops it before scanning. Deliberately narrow, because this check guards
+# merges: an optional list bullet or number, an optional TICKED checkbox, then
+# exactly "No [BLOCKING] finding(s)" and an optional full stop, filling the
+# whole line. Anything else on the line ("... except the deadline gap", a
+# second marker after the full stop) keeps the line, and so the block. It is
+# matched against the already-normalized scan forms, so a disguised marker
+# that normalizes to ASCII is judged like the ASCII one, and one that does not
+# stays on the line for the wildcard backstop to catch.
+_CLEAN_NO_BLOCKING_LINE_RE = re.compile(
+    r"(?:(?:[-*+]|\d{1,3}[.)])[ \t]+)?(?:\[[xX]\][ \t]+)?"
+    r"No[ \t]+\[BLOCKING\][ \t]+findings?\.?",
+    re.IGNORECASE,
+)
+
+
+def is_clean_no_blocking_line(line: str) -> bool:
+    """True when *line*, a normalized scan-form line, only states that there are
+    no blocking findings (`_CLEAN_NO_BLOCKING_LINE_RE`). Surrounding spaces,
+    tabs and a carriage return are stripped here rather than matched, so the
+    pattern has no leading run to backtrack over."""
+    return _CLEAN_NO_BLOCKING_LINE_RE.fullmatch(line.strip(" \t\r")) is not None
+
+
+def _without_clean_no_blocking_lines(text: str) -> str:
+    """*text* with every clean "No [BLOCKING] findings" line removed.
+
+    Splits on `\n` only, so a line joined to a real finding by any other
+    separator stays one line, fails the full-line match and still blocks.
+    """
+    return "\n".join(line for line in text.split("\n") if not is_clean_no_blocking_line(line))
 
 
 # `[BLOCKING] category: summary`, optionally wrapped in markdown emphasis as
@@ -2159,6 +2236,40 @@ def signed_off_is_head_pinned(body: str | None, current_head_sha: str | None) ->
         return False
     current = current_head_sha.lower()
     return reviewed == current or current.startswith(reviewed) or reviewed.startswith(current)
+
+
+def verified_parent_task_note(task_id: str) -> str:
+    """The fact a lens is told about a PR delivered from a tracked task.
+
+    Only ever built from ``build_delivery.verified_parent_task`` (Apis's own
+    delivery ledger), never from PR body text."""
+    return (
+        f"VERIFIED PARENT TASK: Apis's own delivery record shows this exact "
+        f"head was delivered from tracked task {task_id}. It has no parent issue."
+    )
+
+
+def checks_green_note(head: str) -> str:
+    """The prompt line stating that the check gate read *head*'s checks green.
+
+    Empty when *head* is empty: with no green reading for the reviewed head
+    (the gate did not run, held, or read a different head) the prompt states
+    nothing and the lenses read check status themselves as before. Evidence
+    only — it relaxes no lens rule.
+    """
+    if not head:
+        return ""
+    return (
+        "CURRENT-HEAD CI EVIDENCE: before seating this panel, Apis's check "
+        f"gate read every gating check on head `{head}` as green (the same "
+        "reading the panel-gated approval tool applies). This fact binds to "
+        "that exact SHA: if the PR head you see is not that SHA, ignore it. "
+        "It is evidence, not a waiver: it relaxes no lens rule — QA still "
+        "judges test coverage — and a check you see failed or pending on "
+        "this head is still reported. Do not withhold a verdict or record a "
+        "process block only because you could not confirm current-head CI "
+        "yourself.\n\n"
+    )
 
 
 def merge_authorization_clause(
@@ -2736,15 +2847,225 @@ def gate_verdict_instruction(agent: str, role: str) -> str:
 def compose_fallback_comment(
     lens: str, agent: str, text: str, commit_sha: str = ""
 ) -> str:
-    """Body for a dispatcher-posted review comment (panelist could not post)."""
+    """Body for a dispatcher-posted review comment (panelist could not post).
+
+    The approval tool reads a lens's posted comment with `lens_own_verdict`
+    alone: at most one head marker, then the lens's header, then its verdict.
+    So when the lens's own reply already reads that way (it opens with its
+    header, optionally after its own marker for this head), the comment is the
+    head marker followed by that reply, with nothing between them, and it must
+    read the same as the reply did. The earlier shape put a plain
+    `review:<lens>` line and a second, dispatcher-written header ahead of the
+    lens's own, so the tool found no verdict at the fixed position and every
+    fallback verdict, arch's included, read as missing. A reply with no
+    readable verdict of its own keeps the dispatcher header, which reads as
+    before (no verdict, never a pass).
+    """
     marker = compose_lens_review_marker(lens, commit_sha)
-    return (
-        f"{marker}\nreview:{lens}\n"
-        f"{attribution_header(agent, f'{lens} lens panelist')}\n\n"
-        f"{text}\n\n"
+    footer = (
         f"_Posted by the Apis dispatcher on behalf of {agent} — the "
         "panelist could not post its comment directly._"
     )
+    reply = (text or "").lstrip("\r\n")
+    own_marker = f"{marker}\n"
+    if _normalise_full_sha(commit_sha) and reply.startswith(own_marker):
+        reply = reply[len(own_marker):]
+    if _normalise_full_sha(commit_sha) and lens_own_verdict(reply, lens_agent=agent):
+        body = f"{marker}\n{reply.rstrip()}\n\n{footer}"
+        if _reader_view(body, agent) == _reader_view(text, agent):
+            return body
+    return (
+        f"{marker}\n"
+        f"{attribution_header(agent, f'{lens} lens panelist')}\n\n"
+        f"{text}\n\n"
+        f"{footer}"
+    )
+
+
+# A lens run on Fly returns its review in delimited sections: it holds a
+# read-only GitHub token and no Neotoma tools, so the dispatcher publishes.
+DISPATCHER_REVIEW_BEGIN = "<<<DISPATCHER_REVIEW>>>"
+DISPATCHER_REVIEW_END = "<<<END_DISPATCHER_REVIEW>>>"
+DISPATCHER_EXPECTATION_BEGIN = "<<<DISPATCHER_EXPECTATION_UPDATE>>>"
+DISPATCHER_EXPECTATION_END = "<<<END_DISPATCHER_EXPECTATION_UPDATE>>>"
+_RETURNED_DELIM_RE = re.compile(
+    r"^[ \t\r]*(?P<d><<<(?:END_)?DISPATCHER_(?:REVIEW|EXPECTATION_UPDATE)>>>)[ \t\r]*$",
+    re.M,
+)
+_RETURNED_KINDS = {
+    DISPATCHER_REVIEW_BEGIN: ("review", True),
+    DISPATCHER_REVIEW_END: ("review", False),
+    DISPATCHER_EXPECTATION_BEGIN: ("expectation", True),
+    DISPATCHER_EXPECTATION_END: ("expectation", False),
+}
+# What the readers accept as swarm state is `lens_authors._VERDICT_SHAPED_RE`
+# (any `review:<name>` form, aggregation, deferral and notice markers, found
+# anywhere in a body). A returned response containing any of it is refused,
+# never cleaned: the dispatcher adds the one marker itself.
+_FOREIGN_MARKER_RE = lens_authors._VERDICT_SHAPED_RE
+_MAX_RETURNED_TEXT = 60_000
+_NO_NEOTOMA_NOTE = (
+    "You have no Neotoma tools on this run: do not try to retrieve or store "
+    "anything. Everything you need (your pre-registered expectations, the "
+    "gate and verdict rules) is in this prompt, and the dispatcher records "
+    "your review and any gate result."
+)
+
+
+def _no_neotoma_note_if_on_fly(lens: str) -> str:
+    """The no-Neotoma-tools note, only for a run that will go to Fly."""
+    if fly_runner.wants_fly(None, model_tiering.lens_review_class(lens)):
+        return "\n\n" + _NO_NEOTOMA_NOTE
+    return ""
+
+
+def _returned_sections(text: str) -> tuple[dict[str, list[str]], str] | None:
+    """Locate the delimited sections by offset, so no line is re-split or
+    re-joined: each section is the exact substring between its delimiter lines.
+    Returns (bodies by kind, the text outside every section), or None when a
+    delimiter is unmatched, nested, or ends the wrong section."""
+    found: dict[str, list[str]] = {"review": [], "expectation": []}
+    outside: list[str] = []
+    open_kind, body_start, cursor = "", 0, 0
+    for m in _RETURNED_DELIM_RE.finditer(text):
+        kind, is_begin = _RETURNED_KINDS[m.group("d")]
+        if is_begin and not open_kind:
+            outside.append(text[cursor:m.start()])
+            open_kind, body_start = kind, m.end() + 1
+        elif not is_begin and open_kind == kind:
+            found[kind].append(text[body_start:m.start()])
+            open_kind, cursor = "", m.end() + 1
+        else:
+            return None
+    if open_kind:
+        return None
+    outside.append(text[cursor:])
+    return found, "\n".join(outside)
+
+
+def _has_veto(text: str) -> bool:
+    return output_has_blocking_verdict(text) or body_has_blocking_findings(text)
+
+
+def _reader_view(text: str, lens_agent: str) -> tuple:
+    """Everything the gate reader decides about *text*, from its own readers."""
+    return (
+        lens_own_verdict(text, lens_agent=lens_agent),
+        output_has_blocking_verdict(text),
+        body_has_blocking_findings(text),
+        sign_off_is_warranted(text, lens_agent=lens_agent),
+    )
+
+
+def _outside_is_ambiguous(outside: str) -> bool:
+    """True when text outside the verdict section holds a header or any line
+    that reads as a verdict statement (it would be a second verdict)."""
+    if _HEADER_EMOJI in _normalize_for_blocking_scan(outside):
+        return True
+    return any(
+        _VERDICT_LIKE_RE.match(_LINE_DECORATION_RE.sub("", form))
+        for line in outside.splitlines()
+        for form in _veto_scan_forms_uncached(line)
+    )
+
+
+def parse_returned_lens_review(
+    stdout: str, lens_agent: str = ""
+) -> tuple[str, str | None] | None:
+    """The review and optional expectation update a return-only lens returned.
+
+    Invariant: a response the gate reader would refuse never becomes one it
+    accepts because a later step changed it. So the response is judged as it
+    arrived, with the existing readers: it must carry no swarm marker at all,
+    exactly one well-formed review section and at most one expectation section
+    (never nested), nothing outside them that reads as a second verdict or
+    header, and any veto in the whole response must be in the review itself.
+    The review is the exact substring between its delimiter lines (outer
+    newlines only are dropped), the reader must decide the same about it after
+    that as before, and it must carry a readable own verdict. Anything else is
+    None and the lens run is failed."""
+    if _FOREIGN_MARKER_RE.search(stdout or ""):
+        return None
+    parsed = _returned_sections(stdout)
+    if parsed is None:
+        return None
+    found, outside = parsed
+    if len(found["review"]) != 1 or len(found["expectation"]) > 1:
+        return None
+    raw_review = found["review"][0]
+    raw_update = found["expectation"][0] if found["expectation"] else ""
+    if _outside_is_ambiguous(outside + "\n" + raw_update):
+        return None
+    if _has_veto(stdout) and not _has_veto(raw_review):
+        return None
+    review = raw_review.strip("\r\n")
+    update = raw_update.strip("\r\n")
+    if not review.strip() or len(review) > _MAX_RETURNED_TEXT or len(update) > _MAX_RETURNED_TEXT:
+        return None
+    if _reader_view(raw_review, lens_agent) != _reader_view(review, lens_agent):
+        return None
+    if lens_own_verdict(review, lens_agent=lens_agent) is None:
+        return None  # agreeing on "unreadable" is not acceptance
+    return review, (update if update.strip() else None)
+
+
+def verified_remote_comment(lens: str, agent: str, review: str, head_sha: str) -> str | None:
+    """The final comment body for a returned review, or None when the readers
+    decide anything different about the body than about the judged review.
+    Run when the review is accepted and again immediately before it is posted,
+    on every publishing path."""
+    body = compose_remote_lens_comment(lens, review, head_sha)
+    return body if _reader_view(body, agent) == _reader_view(review, agent) else None
+
+
+def unwrap_returned_review(
+    result: SkillResult, lens_agent: str = "", lens: str = "", head_sha: str = ""
+) -> tuple[SkillResult, str | None]:
+    """A return-only lens's result with its stdout reduced to the extracted
+    review text, plus its expectation update. A truncated output (the tail
+    only, so an earlier objection may be lost) or one that does not parse is a
+    failed run with no stdout: nothing is persisted, posted or signed."""
+    if not result.ok:
+        return result, None
+    parsed = (
+        None if getattr(result, "output_truncated", False)
+        else parse_returned_lens_review(result.stdout, lens_agent)
+    )
+    if parsed is not None and lens and (
+        verified_remote_comment(lens, lens_agent, parsed[0], head_sha) is None
+    ):
+        parsed = None  # the final comment would be read differently
+    if parsed is None:
+        return dataclasses.replace(
+            result, ok=False, stdout="",
+            error="the lens did not return exactly one well-formed review block",
+        ), None
+    return dataclasses.replace(result, stdout=parsed[0]), parsed[1]
+
+
+class CombinedPassResults(dict):
+    """The combined pass's accepted results (lens -> SkillResult, read as a
+    plain dict), plus the lenses among them that ran return-only and the
+    expectation updates those returned, so the panel loop publishes them the
+    same as a single return-only lens's."""
+
+    def __init__(
+        self,
+        results=(),
+        *,
+        remote_lenses=frozenset(),
+        expectation_updates: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(results)
+        self.remote_lenses: frozenset[str] = frozenset(remote_lenses)
+        self.expectation_updates: dict[str, str] = dict(expectation_updates or {})
+
+
+def compose_remote_lens_comment(lens: str, text: str, commit_sha: str) -> str:
+    """The comment posted for a return-only lens: this lens's head marker, a
+    newline, then the reviewed bytes unchanged (no normalising, no footer: any
+    marker was refused before this point)."""
+    return f"{compose_lens_review_marker(lens, commit_sha)}\n{text}"
 
 
 # Stable marker embedded in every Vanellus aggregation comment so the
@@ -2934,6 +3255,137 @@ def latest_aggregation_comment(
     )
 
 
+_WRAPPER_MARKER_RE = re.compile(
+    r"^(?:<!--\s*review:[a-z0-9_-]+\s+commit=[0-9a-f]{7,40}\s*-->"
+    r"|<!--\s*vanellus-aggregation(?:\s[^>]*)?-->"
+    r"|review:[a-z0-9_-]+)$",
+    re.IGNORECASE,
+)
+
+
+def posted_comment_own_verdict(body: str | None, *, lens_agent: str) -> str | None:
+    """The fixed-position verdict of a POSTED swarm comment, or None.
+
+    A posted comment can carry a wrapper `lens_own_verdict` alone refuses: a
+    dispatcher fallback post (`compose_fallback_comment`,
+    `compose_vanellus_fallback_comment`) prefixes a marker, for a lens a plain
+    `review:<lens>` line, and its own attribution header to the agent's reply,
+    which may itself begin with the same marker and header. So this peels the
+    leading run of marker lines (lens, aggregation, or plain `review:<lens>`)
+    and attribution headers naming *lens_agent*, keeps the LAST header of that
+    run, and hands the rest to `lens_own_verdict` unchanged; every one of its
+    rules (verdict line right after the header, one header emoji, no second
+    verdict-like line) still applies to what follows. A wrapper line that is
+    code-indented, ends in a non-newline break, or is a header naming another
+    agent stops the peel, which then reads as not finished. A comment with no
+    header at all (an aggregation posted from a provisioned account with the
+    header omitted) also reads as None, deliberately: a false "not finished"
+    re-runs a panel, the safe direction.
+    """
+    lines = _split_lines_keeping_breaks(body or "")
+    count = len(lines)
+    want = (lens_agent or "").strip().lower()
+    i = 0
+    last_header: int | None = None
+    while i < count:
+        raw, brk = lines[i]
+        stripped = raw.strip()
+        if not stripped:
+            i += 1
+            continue
+        if brk and brk not in _PLAIN_LINE_BREAKS:
+            break
+        if not _starts_a_markdown_line(raw):
+            break
+        if _WRAPPER_MARKER_RE.match(stripped):
+            i += 1
+            continue
+        header = _OWN_HEADER_RE.match(_normalize_for_blocking_scan(raw).strip())
+        if header and header.group("name").strip().lower() == want:
+            last_header = i
+            i += 1
+            continue
+        break
+    if last_header is None:
+        return None
+    rest = "".join(line + brk for line, brk in lines[last_header:])
+    return lens_own_verdict(rest, lens_agent=lens_agent)
+
+
+def panel_finished_at_head(
+    comments: list[dict], head_sha: str, required_lenses: set[str] | frozenset[str]
+) -> bool:
+    """True when the review panel has already finished on exactly ``head_sha``.
+
+    Finished means a non-superseded Vanellus aggregation pinned to the head
+    whose verdict reads at the fixed position, or, for every lens in
+    ``required_lenses``, a non-superseded ``review:<lens> commit=<head>``
+    comment whose verdict reads at the fixed position. Both go through
+    `posted_comment_own_verdict`, which is `lens_own_verdict` (the reader the
+    panel-gated approval tool uses) after peeling the dispatcher's wrapper. A
+    bold verdict token quoted anywhere else in the body does not count: an
+    unanchored search let a marker followed by prose quoting `**APPROVE**`
+    skip recovery (PR #1616 review).
+    A marker alone is not a finished panel: a marker-only or malformed comment
+    is exactly what a review that died mid-post leaves, and it must be
+    recovered, not skipped. Any readable verdict is terminal, a blocking one
+    included: a panel that finished with REQUEST_CHANGES is finished.
+    ``comments`` must already be scoped to swarm identities
+    (`_lens_scoped_comments`). An empty required set never counts as finished
+    through the lens path: "no lens known to be required" is not "every
+    required lens reported".
+    """
+    head = _normalise_full_sha(head_sha)
+    if not head:
+        return False
+    # The NEWEST aggregation at the head decides: a newer marker-only one is a
+    # later run that died, and an older verdict must not stand in for it.
+    aggregation = latest_aggregation_comment(comments, head_sha=head)
+    if aggregation is not None and posted_comment_own_verdict(
+        aggregation.get("body") or "", lens_agent="vanellus"
+    ):
+        return True
+    if not required_lenses:
+        return False
+    reported: set[str] = set()
+    for comment in comments:
+        body = comment.get("body") or ""
+        match = _LENS_MARKER_RE.search(body)
+        if not match or not comment_verdict_matches_current_head(body, head):
+            continue
+        known = lens_by_name(match.group("lens"))
+        if known is None or posted_comment_own_verdict(body, lens_agent=known.agent) is None:
+            continue
+        reported.add(match.group("lens").lower())
+    return {lens.lower() for lens in required_lenses} <= reported
+
+
+def unseated_required_lenses(
+    comments: list[dict], head_sha: str, required_lenses: set[str] | frozenset[str]
+) -> list[str]:
+    """Required lenses the panel on this PR never seated, sorted.
+
+    A lens counts as seated when a swarm comment carries its `review:<lens>`
+    head marker at ANY head (a lens carried from an earlier head was seated
+    there), or when the newest aggregation at *head_sha* names it as not
+    received (the missing-lens sweep re-runs that one). Anything else was left
+    out of the panel altogether, which is what an Apis panel chosen without the
+    repository's scope file did: the approval tool requires the lens and no
+    verdict for it will ever arrive on its own. ``comments`` must already be
+    scoped to swarm identities (`_lens_scoped_comments`).
+    """
+    seen = {
+        match.group("lens").lower()
+        for comment in comments
+        for match in [_LENS_MARKER_RE.search(comment.get("body") or "")]
+        if match
+    }
+    aggregation = latest_aggregation_comment(comments, head_sha=_normalise_full_sha(head_sha))
+    if aggregation is not None:
+        seen |= set(parse_not_received_lenses(aggregation.get("body") or ""))
+    return sorted({lens.lower() for lens in required_lenses} - seen)
+
+
 def vanellus_comment_missing(comment_bodies: list[str], head_sha: str = "") -> bool:
     """Return True when no Vanellus aggregation comment has landed on the PR.
 
@@ -3072,8 +3524,71 @@ def detect_auth_failure(*texts: str) -> bool:
     return any(sig in blob for sig in _AUTH_FAILURE_SIGNATURES)
 
 
+def review_detector_stderr(result: SkillResult, *, posted_verdict_this_run: bool) -> str:
+    """The stderr the review-path limit and auth detectors may read.
+
+    Empty for a successful run that posted its verdict for this head during
+    this run (the review the detectors would protect already exists), and for
+    a successful Codex run, whose stderr holds its prompt and session text
+    rather than diagnostics. Every other run, including any failed run and a
+    run whose provider is not named, is read as before.
+    """
+    if result.ok and posted_verdict_this_run:
+        return ""
+    if result.ok and (getattr(result, "provider", "") or "").strip().lower() == "codex":
+        return ""
+    return result.stderr
+
+
+def _matched_streams(detector, stdout: str, stderr: str) -> str:
+    """Name the streams *detector* matched ("stdout", "stderr"), never contents."""
+    names = [name for name, text in (("stdout", stdout), ("stderr", stderr)) if detector(text)]
+    return "+".join(names) or "combined"
+
+
+# A lens or Vanellus refused at launch because its agent_definition or
+# agent_policy could not be READ (Neotoma slow, unreachable or answering 5xx).
+# The refusal itself is right — no agent runs without its policy — but the
+# cause clears on its own, so the panel auto-resumes like a usage limit rather
+# than stopping for operator attention. A policy that was read and refuses, or
+# answered malformed, is not this class: it stays an execution failure.
+NEOTOMA_TEMPORARILY_UNAVAILABLE = "Neotoma temporarily unavailable"
+# The load-failure codes (`agent_loader.load_failure_code`) that mean "the read
+# did not complete": a timeout, a connection error, a server 5xx.
+_TRANSIENT_NEOTOMA_READ_CODES = frozenset({"timeout", "transport_error", "server_error"})
+# The fixed refusal texts of `AgentPolicyUnavailable` and
+# `AgentDefinitionUnavailable`; they carry only fixed stage/code tokens.
+_POLICY_READ_FAILURE_RE = re.compile(
+    r"agent_policy for .{1,80}? is unavailable \((?P<stage>[a-z_]+), (?P<code>[a-z_]+)\)"
+)
+_DEFINITION_READ_FAILURE_RE = re.compile(
+    r"agent_definition for .{1,80}? is unavailable \((?P<code>[a-z_]+), \d+ attempt"
+)
+
+
+def neotoma_read_failure_is_transient(result: SkillResult) -> bool:
+    """True when ``result`` is a launch refusal caused by an incomplete read.
+
+    Only a dispatch refused for an unreadable agent_definition or agent_policy
+    qualifies, and only for a timeout, transport error or server 5xx. Every
+    other code (not_found, refused_status, bad_response, rejected, ...) is a
+    real answer from Neotoma and stays fail-closed.
+    """
+    error = result.error or ""
+    if not (
+        getattr(result, "policy_unavailable", False)
+        or getattr(result, "definition_unavailable", False)
+        or error.startswith(("agent_policy unavailable", "agent_definition unavailable"))
+    ):
+        return False
+    match = _POLICY_READ_FAILURE_RE.search(error) or _DEFINITION_READ_FAILURE_RE.search(error)
+    return bool(match) and match.group("code") in _TRANSIENT_NEOTOMA_READ_CODES
+
+
 def review_failure_class(result: SkillResult) -> str:
     """Return a public-safe reason for one incomplete review invocation."""
+    if neotoma_read_failure_is_transient(result):
+        return NEOTOMA_TEMPORARILY_UNAVAILABLE
     if getattr(result, "cooled_until", "") or detect_session_limit(
         result.stdout, result.stderr, result.error
     ):
@@ -3099,6 +3614,111 @@ def review_failure_class(result: SkillResult) -> str:
     if detect_auth_failure(result.stdout, result.stderr, result.error):
         return "credential failure"
     return "execution failure"
+
+
+# Failure classes that clear without anyone acting: provider capacity returns,
+# and a Neotoma read that timed out answers on a later attempt.
+_CAPACITY_FAILURE_CLASSES = frozenset({"usage limit", "provider exhaustion"})
+_SELF_CLEARING_FAILURE_CLASSES = _CAPACITY_FAILURE_CLASSES | {
+    NEOTOMA_TEMPORARILY_UNAVAILABLE
+}
+
+
+# GitHub answered a PR read with a rate-limit 403/429 (one carrying
+# `Retry-After`, or a body naming a secondary rate limit) and the short in-place
+# retries below did not clear it. Self-clearing like a Neotoma read failure, so
+# the panel is deferred with a resume marker instead of stopping for attention,
+# bounded by the same consecutive-deferral limit (`_neotoma_retry_limit`).
+GITHUB_TEMPORARILY_RATE_LIMITED = "GitHub temporarily rate limited"
+# In-place retry bounds for a rate-limited PR read: how many reads in total,
+# and the longest single wait, whatever `Retry-After` asks for.
+_GITHUB_RATE_LIMIT_ATTEMPTS = 3
+_GITHUB_RATE_LIMIT_MAX_WAIT_SECONDS = 120
+# Resume delay for a panel deferred on a GitHub rate limit; the 600s deferred
+# sweep picks it up.
+_GITHUB_RATE_LIMIT_DEFER_SECONDS = 300
+# The tests' seam for the in-place wait.
+_rate_limit_sleep = asyncio.sleep
+
+
+def github_rate_limit_wait(resp) -> int | None:
+    """Seconds to wait when *resp* is a temporary GitHub rate-limit answer.
+
+    A 403 or 429 counts as temporary only when it carries a `Retry-After`
+    header or its body names a secondary rate limit; the wait is the header's
+    value (60s when the body is the only sign), capped at
+    `_GITHUB_RATE_LIMIT_MAX_WAIT_SECONDS`. None for every other response,
+    including a plain 403, which stays a permanent failure.
+    """
+    if getattr(resp, "status_code", None) not in (403, 429):
+        return None
+    headers = getattr(resp, "headers", None) or {}
+    raw = headers.get("Retry-After") or headers.get("retry-after")
+    if raw is not None:
+        try:
+            wait = int(str(raw).strip())
+        except ValueError:
+            wait = 60
+        return max(0, min(wait, _GITHUB_RATE_LIMIT_MAX_WAIT_SECONDS))
+    try:
+        body = (getattr(resp, "text", "") or "").lower()
+    except Exception:  # noqa: BLE001 — an unreadable body is no signal
+        body = ""
+    if "secondary rate limit" in body:
+        return 60
+    return None
+
+
+def _neotoma_retry_limit() -> int:
+    """Consecutive Neotoma deferrals allowed at one head before an operator is asked.
+
+    Unset means the default of 3. A malformed value fails closed to 0, so an
+    unreadable safety limit allows no automatic retry and the panel stops for
+    attention instead.
+    """
+    try:
+        return max(0, int(os.environ.get("APIS_NEOTOMA_RETRY_LIMIT", "3")))
+    except ValueError:
+        log.warning(
+            f"[{DAEMON_NAME}] APIS_NEOTOMA_RETRY_LIMIT is not an integer; "
+            "allowing no automatic Neotoma retry"
+        )
+        return 0
+
+
+# Ceiling for the Neotoma retry backoff below: however many consecutive
+# deferrals one head has had, the next one is never scheduled further out.
+_NEOTOMA_RETRY_MAX_DELAY_SECONDS = 3600
+
+
+def _neotoma_retry_delay_seconds(attempt: int = 1) -> int:
+    """How far out Neotoma deferral ``attempt`` (1-based) is scheduled.
+
+    Backoff (failure_posture.md rule 5): the base delay doubles with each
+    consecutive deferral recorded in the marker, capped at
+    ``_NEOTOMA_RETRY_MAX_DELAY_SECONDS``. The 600s sweep picks it up.
+    """
+    try:
+        base = max(60, int(os.environ.get("APIS_NEOTOMA_RETRY_DELAY_SECONDS", "120")))
+    except ValueError:
+        base = 120
+    exponent = min(max(attempt, 1) - 1, 16)
+    return min(base * (2 ** exponent), _NEOTOMA_RETRY_MAX_DELAY_SECONDS)
+
+
+def incomplete_panel_reason(failures: list[str]) -> str:
+    """The `_handle_panel_session_limit` reason for a panel's failed runs.
+
+    Auto-resumes only when EVERY failure clears on its own; any other failure
+    keeps the panel stopped for operator attention. A capacity failure wins over
+    a Neotoma one: its reset time is the later of the two, so resuming sooner
+    would only spend quota again and count against the Neotoma retry bound.
+    """
+    if not failures or not all(f in _SELF_CLEARING_FAILURE_CLASSES for f in failures):
+        return "incomplete review panel"
+    if any(f in _CAPACITY_FAILURE_CLASSES for f in failures):
+        return "provider capacity exhausted"
+    return NEOTOMA_TEMPORARILY_UNAVAILABLE
 
 
 def sign_off_failure_class(error: str) -> str:
@@ -4189,6 +4809,7 @@ class DispatchConfig:
     #   - handle_trigger: issue_opened and PR (opened/reopened/synchronize/
     #     labeled) webhook deliveries;
     #   - resume_interrupted_pipelines (boot) -> _handle_issue_opened;
+    #   - resume_labelled_panels (boot) -> _handle_pr;
     #   - resume_deferred_reviews, resume_stalled_reviews (600s sweep loop)
     #     -> _handle_pr;
     #   - resume_missing_lens_reviews (600s loop) -> one lens re-dispatch;
@@ -4273,9 +4894,26 @@ class SwarmDispatcher:
         # `_hold_panel_until_checks_green`; read by `_handle_ci_status_for_current_head`
         # to re-dispatch a held panel when the head's checks complete.
         self._panel_ci_holds: dict[tuple[str, int], _PanelCIHold] = {}
+        # The head SHA whose checks `_hold_panel_until_checks_green` last read
+        # green, keyed like `_panel_ci_holds`. Cleared at the start of each
+        # `_handle_pr` and on any hold, so it only ever names a reading taken
+        # in the current panel run; see `_checks_green_head`.
+        self._panel_checks_green: dict[tuple[str, int], str] = {}
         # (source, "owner/repo#N") pairs whose label-gate skip has already been
         # logged at WARNING by a periodic sweep — see `_label_gate_log`.
         self._label_gate_warned: set[tuple[str, str]] = set()
+        # PRs `_handle_pr` is running a panel for right now, keyed like
+        # `_panel_ci_holds`, valued by how many entries are in flight. The
+        # repeating panel sweep never re-enters a PR listed here.
+        self._panels_running: dict[tuple[str, int], int] = {}
+        # (casefolded repository, PR number, head SHA) the labelled-panel
+        # sweeps have already re-entered in this process. Each head is
+        # re-entered at most once, so a panel that strands again waits for a
+        # person or a new commit instead of looping. In memory only: a restart
+        # forgets it, and the startup sweep is then the one re-entry.
+        self._panel_sweep_entered: set[tuple[str, int, str]] = set()
+        # Held by one labelled-panel sweep at a time, startup or repeating.
+        self._panel_sweep_lock = asyncio.Lock()
 
     async def handle_trigger(self, trigger: SwarmTrigger) -> None:
         """Entry point handed to the webhook gateway. Never raises."""
@@ -4974,6 +5612,15 @@ class SwarmDispatcher:
                     ):
                         summary["label_gated"] = summary.get("label_gated", 0) + 1
                         continue
+                    if self._panel_running(trigger):
+                        summary["already_running"] = (
+                            summary.get("already_running", 0) + 1
+                        )
+                        log.info(
+                            f"[{DAEMON_NAME}] deferred-review sweep: {ref} "
+                            "panel already running for this head — skipped"
+                        )
+                        continue
                     log.info(
                         f"[{DAEMON_NAME}] deferred-review sweep: {ref} deferral "
                         "has matured — re-running the panel"
@@ -4990,6 +5637,380 @@ class SwarmDispatcher:
         if summary["scanned"]:
             log.info(f"[{DAEMON_NAME}] deferred-review sweep: {summary}")
         return summary
+
+    # At most this many labelled PRs are examined by one startup panel sweep.
+    _STARTUP_PANEL_SWEEP_MAX = 20
+
+    async def resume_labelled_panels(self, repositories: list[str]) -> dict:
+        """Restore review panels a restart dropped, once, at startup.
+
+        Apis restarts after every merge to main. Three kinds of pending review
+        work die with it: a panel held until checks go green (the hold lives in
+        the in-memory `_panel_ci_holds`, so the check completion finds nothing
+        to release), a panel running at the moment of the restart, and a
+        webhook delivered while the process was down. Each leaves a labelled PR
+        whose current head has no finished panel and nothing to start one.
+
+        This sweep rebuilds that state from GitHub, the system of record,
+        rather than persisting holds. It runs only when the label gate is set
+        and looks only at open, non-draft PRs that already carry the configured
+        label on the PR itself. For each one whose current head has no finished
+        panel (`panel_finished_at_head`), it drives the ordinary review
+        entrance, `_handle_pr`, with a `pr_synchronize` trigger from
+        `_pr_trigger_from_api`. The existing readiness logic decides the rest:
+        a head with pending checks becomes held (rebuilding the hold), a head
+        with green checks runs its panel.
+
+        The PR list is read once, so each PR's current head is re-read just
+        before it is judged: a PR reached minutes later must not be judged on
+        the head it had when the list was read. A failed re-read leaves that
+        PR alone.
+
+        PRs are handled one at a time, at most `_STARTUP_PANEL_SWEEP_MAX` per
+        sweep. It never adds a label and never admits a PR the gate would not:
+        each candidate still passes `_label_gate_allows`. A GitHub read that
+        fails leaves that repository or PR alone. Never raises: a failed sweep
+        must not stop Apis from starting. `repeat_labelled_panel_sweep` runs
+        the same sweep while Apis is running.
+        """
+        async with self._panel_sweep_lock:
+            return await self._sweep_labelled_panels(repositories, repeating=False)
+
+    async def repeat_labelled_panel_sweep(self, repositories: list[str]) -> dict | None:
+        """One pass of the labelled-panel sweep while Apis is running.
+
+        GitHub gives a webhook 10 seconds and does not resend one that timed
+        out, so a lost `check_suite/completed` leaves a held panel with nothing
+        to release it until the next restart. This repeats
+        `resume_labelled_panels`' approach (GitHub is the system of record and
+        `_handle_pr` decides the rest) with limits on its cost. A PR head is
+        left alone when a panel is running on the PR now, when its hold is
+        still in `_panel_ci_holds` with checks pending, when it was already
+        re-entered once in this process and has no hold whose checks are now
+        green, or when the PR carries a usage-limit
+        deferral that has not expired.
+
+        Returns None without sweeping while another sweep holds the lock, so
+        two sweeps never run at once. Never raises on a per-PR failure.
+        """
+        if self._panel_sweep_lock.locked():
+            log.info(
+                f"[{DAEMON_NAME}] repeating panel sweep: a sweep is already "
+                "running — skipping this pass"
+            )
+            return None
+        async with self._panel_sweep_lock:
+            return await self._sweep_labelled_panels(repositories, repeating=True)
+
+    async def _sweep_labelled_panels(
+        self, repositories: list[str], *, repeating: bool
+    ) -> dict:
+        name = "repeating panel sweep" if repeating else "startup panel sweep"
+        summary = {
+            "scanned": 0, "resumed": 0, "finished": 0, "unreadable": 0,
+            "failed": 0, "capped": False,
+        }
+        if repeating:
+            summary.update(running=0, held=0, already_entered=0, deferred=0)
+        label = self.config.require_label
+        if not label:
+            return summary
+        try:
+            await self._await_github_app_ready(repositories)
+        except Exception as exc:  # noqa: BLE001 — never block startup
+            log.warning(
+                f"[{DAEMON_NAME}] {name}: GitHub App readiness "
+                f"failed ({exc}) — continuing with whatever token is available"
+            )
+        for repository in repositories:
+            if summary["scanned"] >= self._STARTUP_PANEL_SWEEP_MAX:
+                summary["capped"] = True
+                break
+            try:
+                prs = await self._open_labelled_prs(repository, label)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    f"[{DAEMON_NAME}] {name}: could not list open "
+                    f"PRs in {repository} ({exc}) — leaving them alone"
+                )
+                continue
+            for pr in prs:
+                if summary["scanned"] >= self._STARTUP_PANEL_SWEEP_MAX:
+                    summary["capped"] = True
+                    log.warning(
+                        f"[{DAEMON_NAME}] {name}: cap of "
+                        f"{self._STARTUP_PANEL_SWEEP_MAX} PRs reached — the "
+                        "rest wait for their next event or the review sweeps"
+                    )
+                    break
+                summary["scanned"] += 1
+                ref = f"{repository}#{pr.get('number')}"
+                try:
+                    await self._sweep_one_labelled_pr(
+                        repository, pr, summary, repeating=repeating, name=name
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    summary["failed"] += 1
+                    log.error(
+                        f"[{DAEMON_NAME}] {name}: {ref} failed ({exc})",
+                        exc_info=True,
+                    )
+        log.info(f"[{DAEMON_NAME}] {name}: {summary}")
+        return summary
+
+    async def _sweep_one_labelled_pr(
+        self, repository: str, listed: dict, summary: dict, *, repeating: bool,
+        name: str,
+    ) -> None:
+        """Judge one listed PR at its CURRENT head; re-enter review if stranded."""
+        number = listed.get("number")
+        ref = f"{repository}#{number}"
+        # Re-read the head now: the list may be minutes old by the time this
+        # PR is reached, and an old head reads as "check state unreadable".
+        fresh = await self._fetch_pr(repository, number)
+        if not isinstance(fresh, dict) or not fresh:
+            summary["unreadable"] += 1
+            log.warning(
+                f"[{DAEMON_NAME}] {name}: could not re-read {ref} — leaving it "
+                "alone until the next sweep"
+            )
+            return
+        if fresh.get("state", "open") != "open" or fresh.get("draft"):
+            return
+        trigger = dataclasses.replace(
+            self._pr_trigger_from_api(repository, {**fresh, "number": number}),
+            delivery_id=(
+                f"{'repeat' if repeating else 'startup'}-panel-resume-{number}"
+            ),
+        )
+        head = _normalise_full_sha(trigger.head_sha or "")
+        key = (repository.casefold(), int(number))
+        if repeating:
+            if self._panels_running.get(key):
+                summary["running"] += 1
+                return
+            # The hold is looked at before the already-entered mark: an
+            # earlier entry of this head may have ended in a hold (checks
+            # pending), and if the checks-finished webhook was lost, the
+            # hold's now-green checks are what this sweep exists to catch.
+            # Only a head with no green hold stays suppressed once entered.
+            held = self._panel_ci_holds.get(key)
+            held_green = False
+            if held is not None and held.head == head:
+                gate = await self._read_head_check_gate(
+                    repository, trigger.head_sha, trigger.base_ref
+                )
+                if gate.pending:
+                    summary["held"] += 1
+                    return
+                held_green = bool(gate.green)
+            if not held_green and head and (*key, head) in self._panel_sweep_entered:
+                summary["already_entered"] += 1
+                return
+        if not await self._label_gate_allows(
+            trigger, source="resume_labelled_panels"
+        ):
+            return
+        if repeating and await self._unexpired_deferral(repository, int(number)):
+            summary["deferred"] += 1
+            return
+        if await self._resume_stranded_lenses(trigger, fresh, summary, name=name):
+            if head:
+                self._panel_sweep_entered.add((*key, head))
+            return
+        finished = await self._panel_finished_for_pr(trigger)
+        if finished is None:
+            summary["unreadable"] += 1
+            return
+        if finished:
+            summary["finished"] += 1
+            return
+        log.info(
+            f"[{DAEMON_NAME}] {name}: {ref} head "
+            f"{trigger.head_sha[:9]} has no finished panel — re-entering review"
+        )
+        # Recorded before entry, so a panel that fails again is not re-entered
+        # on this head by a later sweep in this process.
+        if head:
+            self._panel_sweep_entered.add((*key, head))
+        await self._handle_pr(trigger)
+        summary["resumed"] += 1
+
+    async def _resume_stranded_lenses(
+        self, trigger: SwarmTrigger, pr: dict, summary: dict, *, name: str
+    ) -> bool:
+        """Re-run ONLY the lenses stranded by a refused carry; True when it did.
+
+        Stranded (`review_carry.stranded_lenses`): a required lens seated at an
+        earlier head, with no verdict at this head and an earlier verdict the
+        approval gate will not carry. Taken here only when the rest of the
+        required panel is settled at this head (a verdict here, or a carry the
+        gate accepts), so a head nobody has reviewed yet still re-enters the
+        full panel through `_handle_pr`. Under the missing-lens sweep's retry
+        limit. Any unreadable input returns False and the normal path decides.
+        """
+        head = _normalise_full_sha(trigger.head_sha or "")
+        if not head:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments = await self._lens_scoped_comments(
+                    trigger.repository, trigger.number, client
+                )
+        except Exception:  # noqa: BLE001 — the normal path reports it
+            return False
+        required = await self._path_required_lenses(trigger)
+        if unseated_required_lenses(comments, head, required):
+            return False
+        stranded = await self._stranded_carry_lenses(trigger, comments, head, required)
+        if not stranded or set(stranded) >= {r.lower() for r in required}:
+            return False
+        log.info(
+            f"[{DAEMON_NAME}] {name}: {trigger.repository}#{trigger.number} head "
+            f"{head[:9]}: {stranded} cannot carry to this head — re-running "
+            "only those lenses"
+        )
+        await self._redispatch_lenses_bounded(
+            trigger.repository, pr, stranded, summary,
+            int(os.environ.get("APIS_MISSING_LENS_MAX_RETRIES", "3")),
+            sweep=name,
+        )
+        return True
+
+    async def _unexpired_deferral(self, repository: str, number: int) -> bool:
+        """True if the PR's latest live `review-deferred-until:` marker is in the future.
+
+        The same last-write-wins walk as `_has_live_deferral_marker`, plus the
+        maturity check `_prs_with_matured_deferral` applies: an unmatured
+        marker means a usage limit is still in force, and a matured one belongs
+        to the deferred sweep. An unreadable thread or marker counts as
+        unexpired, so a read failure leaves the PR alone. The whole thread is
+        read through `_issue_comments_scan`, as those two do: the newest marker
+        may lie past the first 100 comments, and a scan that could not reach
+        the last page also counts as unexpired.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments, complete = await self._issue_comments_scan(
+                    repository, number, client
+                )
+        except Exception:  # noqa: BLE001
+            return True
+        if not complete:
+            return True
+        latest_iso = None
+        for c in await self._swarm_authored(repository, number, comments):
+            body = c.get("body", "") if isinstance(c, dict) else ""
+            m = self._REVIEW_DEFERRED_RE.search(body)
+            if m:
+                latest_iso = m.group(1)
+            elif _VANELLUS_COMMENT_MARKER in body:
+                latest_iso = None
+        if latest_iso is None:
+            return False
+        try:
+            due_at = datetime.strptime(latest_iso, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            return True
+        return due_at > datetime.now(timezone.utc)
+
+    async def _open_labelled_prs(self, repository: str, label: str) -> list[dict]:
+        """Open, non-draft PRs in `repository` carrying `label` on the PR itself.
+
+        Bound: this reads only the FIRST page of open pull requests (100, no
+        pagination), and `resume_labelled_panels` examines at most
+        `_STARTUP_PANEL_SWEEP_MAX` (20) labelled PRs in one sweep. A labelled
+        PR beyond either limit is not recovered by this sweep; it waits for its
+        next event (a push, a reopen, an admitted label add) or the review
+        sweeps. Raises on an HTTP error so the caller leaves the repository
+        alone.
+        """
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"https://api.github.com/repos/{repository}/pulls",
+                params={"state": "open", "per_page": 100},
+                headers=self._github_headers(repository),
+            )
+            resp.raise_for_status()
+            prs = resp.json() or []
+        return [
+            pr
+            for pr in prs
+            if isinstance(pr, dict)
+            and not pr.get("draft")
+            and _label_gate.carries_label(label, _label_names(pr))
+        ]
+
+    async def _panel_finished_for_pr(self, trigger: SwarmTrigger) -> bool | None:
+        """Whether `trigger`'s head already has a finished panel; None if unreadable.
+
+        The required lenses are the ones `select_panel` seats for the PR's
+        changed files, which include every lens the approval tool requires
+        (`_path_required_lenses`); a panel missing one of those is not
+        finished. `_changed_files` reports a failed read as an empty list; the
+        required set is then the approval tool's alone (the full panel when the
+        read failed there too).
+        """
+        head = _normalise_full_sha(trigger.head_sha or "")
+        if not head:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments = await self._lens_scoped_comments(
+                    trigger.repository, trigger.number, client
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                f"[{DAEMON_NAME}] startup panel sweep: could not read comments "
+                f"on {trigger.repository}#{trigger.number} ({exc}) — leaving it "
+                "alone"
+            )
+            return None
+        # The lenses the approval tool requires at this head. An aggregation at
+        # the head settles the panel only when every one of them was seated on
+        # this PR at some point (it has a lens comment, or the aggregation names
+        # it as not received, which the missing-lens sweep recovers). An
+        # aggregation over a panel that never seated a required lens is not a
+        # finished panel: the approval tool can never pass it.
+        path_required = await self._path_required_lenses(trigger)
+        if unseated_required_lenses(comments, head, path_required):
+            return False
+        # Nor is it finished while a required lens has no verdict at this head
+        # and an earlier verdict the approval gate will not carry here.
+        stranded = await self._stranded_carry_lenses(
+            trigger, comments, head, path_required
+        )
+        if stranded is None:
+            return None
+        if stranded:
+            return False
+        if panel_finished_at_head(comments, head, set()):
+            return True
+        try:
+            changed_files = await self._changed_files(trigger)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                f"[{DAEMON_NAME}] startup panel sweep: could not read changed "
+                f"files on {trigger.repository}#{trigger.number} ({exc}) — "
+                "leaving it alone"
+            )
+            return None
+        required = (
+            {
+                lens.lens
+                for lens in select_panel(
+                    gate_contributors=set(),
+                    changed_files=changed_files,
+                    max_panel=self.config.panel_max,
+                    required_lenses=path_required,
+                )
+            }
+            if changed_files
+            else set()
+        ) | set(path_required)
+        return panel_finished_at_head(comments, head, required)
 
     async def resume_stalled_reviews(self, repositories: list[str]) -> dict:
         """Re-dispatch open PRs whose review died without leaving any marker.
@@ -5256,6 +6277,40 @@ class SwarmDispatcher:
                     # recorded fix round — is.
                     prior_fix_rounds = await self._fix_round_count(trigger)
                     blocking_review = pr.get("_blocking_review_body") or ""
+                    route, route_facts = self._fix_round_route(trigger)
+                    if route == "hold":
+                        self._hold_fix_round(
+                            trigger, "resumed fix", attempts + 1, route_facts
+                        )
+                        raise RuntimeError(f"fix round held: {route_facts}")
+                    if route == "fly":
+                        # A Fly correction is a fix round like the review and
+                        # CI routes': bounded by the same limit, and recorded
+                        # only once its filing is confirmed.
+                        if prior_fix_rounds >= self.config.max_fix_rounds:
+                            head = _normalise_full_sha(head_sha) or head_sha
+                            self.notifier.send(
+                                f"PR {ref}: {self.config.max_fix_rounds} "
+                                "auto-fix rounds did not clear review. "
+                                "Escalating — needs your attention. "
+                                f"{trigger.html_url} Merge held.",
+                                priority=Priority.OPERATOR_DECISION,
+                                handler=DAEMON_NAME,
+                                dedupe_key=f"fix-exhausted:{ref}:{head}",
+                            )
+                            summary["fix_rounds_exhausted"] = (
+                                summary.get("fix_rounds_exhausted", 0) + 1
+                            )
+                            continue
+                        this_round = prior_fix_rounds + 1
+                        if not await self._file_fly_correction(
+                            trigger, kind="resumed fix", round_n=this_round,
+                            body=blocking_review, facts=route_facts,
+                        ):
+                            raise RuntimeError("Fly correction was not filed")
+                        await self._record_fix_round(trigger, this_round)
+                        summary["resumed"] += 1
+                        continue
                     result = await run_skill(
                         "cicada",
                         self._cicada_fix_prompt(
@@ -5281,6 +6336,8 @@ class SwarmDispatcher:
                             trigger,
                             prior_attempt_failed=attempts > 0 or prior_fix_rounds > 0,
                         ),
+                        # A resumed fix round: commits as the agent, unsigned.
+                        agent_git_identity=True,
                     )
                     if not result.ok:
                         raise RuntimeError(
@@ -5495,17 +6552,16 @@ class SwarmDispatcher:
         owns re-dispatching once it matures. This just needs to say "hands off,
         someone else's sweep is watching this one."
         """
-        c_url = f"https://api.github.com/repos/{repository}/issues/{number}/comments"
         try:
-            cresp = await client.get(
-                c_url,
-                params={"per_page": 100},
-                headers=self._github_headers(repository),
+            # Every page: the newest marker may lie past the first 100.
+            raw, complete = await self._issue_comments_scan(
+                repository, number, client
             )
-            cresp.raise_for_status()
         except Exception:
             # Cannot tell → assume a marker might be live so we don't double-
             # dispatch. Same "false negative costs a delay" bias as the caller.
+            return True
+        if not complete:
             return True
         latest_iso = None
         # ateles#430 audit: this scan is CORRECT and must stay last-write-wins.
@@ -5513,7 +6569,7 @@ class SwarmDispatcher:
         # the newest marker. Do NOT "optimise" this into an early return on the
         # first match — that is exactly the bug #430 fixed at the two sites that
         # did so. The ordering assumption is the same; the traversal is not.
-        for c in await self._swarm_authored(repository, number, cresp.json()):
+        for c in await self._swarm_authored(repository, number, raw):
             body = c.get("body", "")
             m = self._REVIEW_DEFERRED_RE.search(body)
             if m:
@@ -5589,6 +6645,7 @@ class SwarmDispatcher:
         review_signals = await self._review_signals(
             trigger, changed_files=changed_files
         )
+        return_only = _lens_return_only_on_fly(lens)
         try:
             result = await run_skill(
                 lens.agent,
@@ -5599,6 +6656,7 @@ class SwarmDispatcher:
                     None,
                     has_worktree=bool(worktree),
                     changed_files=changed_files,
+                    read_only=return_only,
                 ),
                 # Read-only on Fly: a lens reviews and never delivers.
                 github_read_only=True,
@@ -5615,10 +6673,17 @@ class SwarmDispatcher:
                 # Every seated lens is denied `correct`, not only a gate
                 # owner (dispatcher security run at e874537f, BLOCKING).
                 seated_reviewer=True,
+                # The PR's repository: a Fly job's read-only GitHub token is
+                # scoped to it, and is refused without one.
+                repository=repository,
             )
         finally:
             await cleanup_pr_worktree(worktree)
 
+        if return_only:
+            result, _ = unwrap_returned_review(
+                result, lens.agent, lens.lens, reviewed_head
+            )
         if not result.ok:
             raise RuntimeError(
                 f"lens '{lens_name}' run failed: "
@@ -5644,7 +6709,68 @@ class SwarmDispatcher:
             captured,
             agents_by_lens,
             reviewed_head=reviewed_head,
+            remote_lenses=frozenset({lens.lens}) if return_only else frozenset(),
         )
+
+    async def _redispatch_lenses_bounded(
+        self,
+        repository: str,
+        pr: dict,
+        lenses: list[str],
+        summary: dict,
+        max_retries: int,
+        *,
+        sweep: str,
+    ) -> None:
+        """Re-dispatch each of *lenses* alone, under the per-PR, per-lens retry
+        limit the missing-lens sweep keeps (`APIS_MISSING_LENS_MAX_RETRIES`):
+        past the limit the lens is escalated once and never retried. Shared by
+        every sweep that re-runs single lenses, so one count bounds them all."""
+        ref = f"{repository}#{int(pr.get('number'))}"
+        escalated = self._missing_lens_escalated.setdefault(ref, set())
+        per_lens = self._missing_lens_retries.setdefault(ref, {})
+        for key in ("resumed", "escalated", "failed"):
+            summary.setdefault(key, 0)
+
+        for lens in lenses:
+            if lens in escalated:
+                continue
+            attempts = per_lens.get(lens, 0)
+
+            if attempts >= max_retries:
+                log.error(
+                    f"[{DAEMON_NAME}] {sweep}: {ref} lens "
+                    f"'{lens}' still produced no verdict after "
+                    f"{attempts} re-dispatches — not retrying."
+                )
+                self.notifier.send(
+                    f"🔴 {ref}: the '{lens}' lens has produced no verdict "
+                    f"after {attempts} automatic re-dispatches. The panel "
+                    "is otherwise clear (Blocking: 0), so merge is held "
+                    "only on this. A green CI gate is NOT a substitute — "
+                    "the lens verdict is still required.",
+                    priority=Priority.BLOCKER,
+                )
+                escalated.add(lens)
+                summary["escalated"] += 1
+                continue
+
+            log.warning(
+                f"[{DAEMON_NAME}] {sweep}: {ref} lens '{lens}' has no verdict "
+                "at the current head the approval gate will accept — "
+                f"re-dispatching it (attempt {attempts + 1}/{max_retries})"
+            )
+            per_lens[lens] = attempts + 1
+            try:
+                await self._redispatch_missing_lens(repository, pr, lens)
+                summary["resumed"] += 1
+            except Exception as exc:
+                summary["failed"] += 1
+                log.error(
+                    f"[{DAEMON_NAME}] {sweep}: {ref} lens "
+                    f"'{lens}' re-dispatch failed ({exc})",
+                    exc_info=True,
+                )
 
     async def resume_missing_lens_reviews(self, repositories: list[str]) -> dict:
         """Re-dispatch a lens that never answered on an otherwise-clear panel.
@@ -5713,54 +6839,18 @@ class SwarmDispatcher:
                     summary["held_for_checks"] = summary.get("held_for_checks", 0) + 1
                     continue
                 summary["scanned"] += len(lenses)
-                escalated = self._missing_lens_escalated.setdefault(ref, set())
-                per_lens = self._missing_lens_retries.setdefault(ref, {})
-
-                for lens in lenses:
-                    if lens in escalated:
-                        continue
-                    attempts = per_lens.get(lens, 0)
-
-                    if attempts >= max_retries:
-                        log.error(
-                            f"[{DAEMON_NAME}] missing-lens sweep: {ref} lens "
-                            f"'{lens}' still produced no verdict after "
-                            f"{attempts} re-dispatches — not retrying."
-                        )
-                        self.notifier.send(
-                            f"🔴 {ref}: the '{lens}' lens has produced no verdict "
-                            f"after {attempts} automatic re-dispatches. The panel "
-                            "is otherwise clear (Blocking: 0), so merge is held "
-                            "only on this. A green CI gate is NOT a substitute — "
-                            "the lens verdict is still required.",
-                            priority=Priority.BLOCKER,
-                        )
-                        escalated.add(lens)
-                        summary["escalated"] += 1
-                        continue
-
-                    log.warning(
-                        f"[{DAEMON_NAME}] missing-lens sweep: {ref} is clear "
-                        f"(Blocking: 0) but lens '{lens}' never reported — "
-                        f"re-dispatching it (attempt {attempts + 1}/{max_retries})"
-                    )
-                    per_lens[lens] = attempts + 1
-                    try:
-                        await self._redispatch_missing_lens(repository, pr, lens)
-                        summary["resumed"] += 1
-                    except Exception as exc:
-                        summary["failed"] += 1
-                        log.error(
-                            f"[{DAEMON_NAME}] missing-lens sweep: {ref} lens "
-                            f"'{lens}' re-dispatch failed ({exc})",
-                            exc_info=True,
-                        )
+                await self._redispatch_lenses_bounded(
+                    repository, pr, lenses, summary, max_retries,
+                    sweep="missing-lens sweep",
+                )
         return summary
 
     async def _prs_with_missing_lens(
         self, repository: str
     ) -> list[tuple[dict, list[str]]]:
-        """Open PRs whose LATEST aggregation is clear but names an absent lens.
+        """Open PRs whose LATEST aggregation is clear but names an absent lens,
+        or is clear at the current head while a lens the approval tool requires
+        (`_path_required_lenses`) was never seated on the PR.
 
         Reads the newest aggregation via ``latest_aggregation_comment`` over the
         fully-paged comment list (#430) — reading the oldest would resurrect a
@@ -5793,9 +6883,37 @@ class SwarmDispatcher:
                 if not latest:
                     continue
                 body = latest.get("body") or ""
-                if not is_missing_lens_candidate(body):
-                    continue
-                lenses = parse_not_received_lenses(body)
+                lenses = (
+                    parse_not_received_lenses(body)
+                    if is_missing_lens_candidate(body)
+                    else []
+                )
+                # A clear aggregation at the current head over a panel that
+                # never seated a lens the approval tool requires (one chosen
+                # without the scope file) is the same hold with no NOT RECEIVED
+                # line to say so: re-run each such lens too.
+                head = _normalise_full_sha(str((pr.get("head") or {}).get("sha") or ""))
+                if (
+                    head
+                    and parse_blocking_count(body) == 0
+                    and parse_aggregation_marker(body).get("commit") == head
+                ):
+                    required = await self._path_required_lenses(
+                        self._pr_trigger_from_api(repository, pr)
+                    )
+                    for lens in unseated_required_lenses(comments, head, required):
+                        if lens not in lenses:
+                            lenses.append(lens)
+                    # A lens seated at an earlier head whose verdict the
+                    # approval gate will not carry to this one is the same hold:
+                    # no verdict for it will arrive at this head on its own.
+                    stranded = await self._stranded_carry_lenses(
+                        self._pr_trigger_from_api(repository, pr),
+                        comments, head, required,
+                    )
+                    for lens in stranded or []:
+                        if lens not in lenses:
+                            lenses.append(lens)
                 if lenses:
                     out.append((pr, lenses))
         return out
@@ -5871,17 +6989,16 @@ class SwarmDispatcher:
             resp.raise_for_status()
             for pr in resp.json():
                 num = pr.get("number")
-                c_url = (
-                    f"https://api.github.com/repos/{repository}/issues/{num}/comments"
-                )
                 try:
-                    cresp = await client.get(
-                        c_url,
-                        params={"per_page": 100},
-                        headers=self._github_headers(repository),
+                    # Every page: on a thread past 100 comments the newest
+                    # marker is on a later page. A thread that could not be
+                    # read to its end is skipped like an unreadable one.
+                    raw, complete = await self._issue_comments_scan(
+                        repository, num, client
                     )
-                    cresp.raise_for_status()
                 except Exception:
+                    continue
+                if not complete:
                     continue
                 # Walk comments in order. A deferral is LIVE only if it is the
                 # latest terminal marker — i.e. no aggregation verdict was posted
@@ -5889,7 +7006,7 @@ class SwarmDispatcher:
                 # old deferral is superseded and the PR stops being "due", so a
                 # resolved PR is not re-dispatched forever (Loxia #264 review).
                 latest_iso = None  # ISO of the most-recent still-live deferral
-                for c in await self._swarm_authored(repository, num, cresp.json()):
+                for c in await self._swarm_authored(repository, num, raw):
                     body = c.get("body", "")
                     m = self._REVIEW_DEFERRED_RE.search(body)
                     if m:
@@ -6303,7 +7420,8 @@ class SwarmDispatcher:
                     section,
                     spec_so_far,
                     design_basis=(state.sections or {}).get(DESIGN_BASIS.field),
-                ),
+                )
+                + _no_neotoma_note_if_on_fly(section.lens),
                 github_token=_token_for_agent_on_repo(
                     section.agent, trigger.repository
                 ),
@@ -7138,9 +8256,12 @@ class SwarmDispatcher:
             issue_number=trigger.number,
         )
         if plan is not None:
-            with build_delivery.claim_build(
-                trigger.repository, trigger.number, "swarm-build-handoff"
-            ) as claim:
+            with contextlib.ExitStack() as claims:
+                try:
+                    claim = claims.enter_context(build_delivery.claim_build(
+                        trigger.repository, trigger.number, "swarm-build-handoff"))
+                except build_delivery.BuildWorktreeError as exc:
+                    raise build_delivery.BuildNotStarted(trigger.repository, trigger.number, exc) from exc
                 async def launch():
                     return await run_skill(
                         "cicada",
@@ -7183,9 +8304,12 @@ class SwarmDispatcher:
             ) from exc
         # Registered for the whole run so a task the build files to track its own
         # work is recognised as this build, not dispatched as a second one.
-        with build_delivery.claim_build(
-            trigger.repository, trigger.number, "swarm-build-handoff"
-        ) as claim:
+        with contextlib.ExitStack() as claims:
+            try:
+                claim = claims.enter_context(build_delivery.claim_build(
+                    trigger.repository, trigger.number, "swarm-build-handoff"))
+            except build_delivery.BuildWorktreeError as exc:
+                raise build_delivery.BuildNotStarted(trigger.repository, trigger.number, exc) from exc
             result = await run_skill(
                 "cicada",
                 self._cicada_build_prompt(
@@ -7437,6 +8561,7 @@ class SwarmDispatcher:
         pr = await self._fetch_pr(trigger.repository, trigger.number)
         if isinstance(pr, dict) and pr.get("state") == "closed":
             self._panel_ci_holds.pop(key, None)
+            self._panel_checks_green.pop(key, None)
             return True
         head = _normalise_full_sha(trigger.head_sha) if isinstance(trigger.head_sha, str) else ""
         problem = panel_check_gate.live_pr_problem(
@@ -7445,16 +8570,22 @@ class SwarmDispatcher:
         if problem:
             gate = panel_check_gate.unreadable_gate(head, problem)
         else:
-            gate = await self._read_head_check_gate(
+            gate = panel_check_gate.merge_conflict_gate(
+                pr, head
+            ) or await self._read_head_check_gate(
                 trigger.repository, head, pr["base"]["ref"]
             )
         if gate.green:
+            # Remember which head read green, so the panel prompts can state
+            # it (only `gate.green` from this reading ever sets it).
+            self._panel_checks_green[key] = head
             if self._panel_ci_holds.pop(key, None) is not None:
                 log.info(
                     f"[{DAEMON_NAME}] {ref}: head {head[:9]} checks are green — "
                     f"releasing the held review panel ({source})"
                 )
             return False
+        self._panel_checks_green.pop(key, None)
         previous = self._panel_ci_holds.get(key)
         self._panel_ci_holds[key] = _PanelCIHold(head=head, reason=gate.reason)
         changed = previous is None or previous.head != head or previous.reason != gate.reason
@@ -7466,8 +8597,77 @@ class SwarmDispatcher:
         )
         return True
 
+    def _checks_green_head(self, trigger: SwarmTrigger, review_head: str) -> str:
+        """*review_head* when the check gate read it green in this panel run.
+
+        Empty when there was no green reading (the gate held, or this path
+        never went through it) or the reading was for another head: the fact
+        binds to the SHA, so a moved head states nothing.
+        """
+        head = _normalise_full_sha(review_head or "")
+        key = (trigger.repository.casefold(), trigger.number)
+        green = self._panel_checks_green.get(key, "")
+        return head if head and green == head else ""
+
+    def _panel_run_key(self, trigger: SwarmTrigger) -> tuple[str, int, str]:
+        return (
+            trigger.repository.casefold(),
+            trigger.number,
+            _normalise_full_sha(trigger.head_sha or ""),
+        )
+
+    def _panel_running(self, trigger: SwarmTrigger) -> bool:
+        """True while a panel for this PR head is running in this process."""
+        running = self.__dict__.setdefault("_panel_heads_running", set())
+        return self._panel_run_key(trigger) in running
+
     async def _handle_pr(self, trigger: SwarmTrigger) -> None:
+        """The PR review entrance; records the PR as running while it works.
+
+        `_panels_running` is what lets the repeating panel sweep leave a PR
+        with a panel in progress alone. The count is released in a `finally`,
+        so a raise or cancellation never pins a PR as running.
+        """
+        key = (trigger.repository.casefold(), trigger.number)
+        self._panels_running[key] = self._panels_running.get(key, 0) + 1
+        try:
+            await self._handle_pr_entrance(trigger)
+        finally:
+            remaining = self._panels_running.get(key, 1) - 1
+            if remaining > 0:
+                self._panels_running[key] = remaining
+            else:
+                self._panels_running.pop(key, None)
+
+    async def _handle_pr_entrance(self, trigger: SwarmTrigger) -> None:
+        """Run the review panel for one PR head, at most once at a time.
+
+        A sweep or webhook that arrives while a panel for the same head is
+        running is skipped: the running panel produces that head's verdict.
+        The guard is cleared when the panel ends, including when it raises.
+        """
+        running = self.__dict__.setdefault("_panel_heads_running", set())
+        key = self._panel_run_key(trigger)
+        if key in running:
+            log.info(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: a panel "
+                f"for head {key[2][:7] or '(unknown)'} is already running — "
+                f"{trigger.kind or 'trigger'} skipped"
+            )
+            return
+        running.add(key)
+        try:
+            await self._handle_pr_panel(trigger)
+        finally:
+            running.discard(key)
+
+    async def _handle_pr_panel(self, trigger: SwarmTrigger) -> None:
         ref = f"{trigger.repository}#{trigger.number}"
+        # A green reading belongs to one panel run: never carry an earlier
+        # run's reading into this one.
+        self._panel_checks_green.pop(
+            (trigger.repository.casefold(), trigger.number), None
+        )
         # A push/reopen changes which artifact may stand. Retire stale bot
         # verdicts before any gate reads or new panel work begins. Missing SHA
         # skips safely: supersession must never guess which head is current.
@@ -7484,6 +8684,17 @@ class SwarmDispatcher:
         ):
             return
         parent = self._parent_issue_number(trigger.body, trigger.repository)
+        # A PR the Apis task path delivered has a tracked task as its parent,
+        # not an issue. Taken only from Apis's own delivery ledger (never the
+        # PR body); None keeps the no-parent path unchanged.
+        parent_task = (
+            self._verified_parent_task(trigger) if parent is None else None
+        )
+        if parent_task:
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: no parent issue, but Apis's delivery "
+                f"ledger verifies parent task {parent_task} — no bypass notice"
+            )
 
         # 0. Pipeline-bypass guard (ateles): a product-code PR with NO parent
         #    issue skipped the gated issue → pm/arch → Cicada path. Lanius still
@@ -7491,7 +8702,7 @@ class SwarmDispatcher:
         #    bypass must be surfaced LOUDLY — a visible PR comment + an operator
         #    notification — instead of being silently retro-initialized as a
         #    "legacy independent fix". Best-effort; never blocks the pipeline.
-        if parent is None:
+        if parent is None and parent_task is None:
             bypass_files = await self._changed_files(trigger)
             if touches_product_code(bypass_files):
                 log.info(
@@ -7524,7 +8735,7 @@ class SwarmDispatcher:
         )
         lanius = await run_skill(
             "lanius",
-            self._lanius_pr_prompt(trigger, parent),
+            self._lanius_pr_prompt(trigger, parent, parent_task),
             github_token=_lanius_token,
             include_github_contract=True,
             # Read-only on Fly: the check reads gates and never delivers.
@@ -7554,7 +8765,7 @@ class SwarmDispatcher:
             )
             lanius = await run_skill(
                 "lanius",
-                self._lanius_pr_prompt(trigger, parent)
+                self._lanius_pr_prompt(trigger, parent, parent_task)
                 + (
                     "\n\nREMINDER: your previous attempt omitted the mandatory "
                     "final line. End with exactly `GATE_INHERITANCE: clear` or "
@@ -7603,16 +8814,31 @@ class SwarmDispatcher:
             )
             log.error(
                 f"[{DAEMON_NAME}] {ref}: gate inheritance unresolved ({reason}) — "
-                "failing OPEN to `clear` so the review panel still runs. Merge "
-                "remains gated on a formal approval."
+                + ("proceeding to review with an unknown verdict; task receipt "
+                   "does not clear it. " if parent_task else "failing OPEN to "
+                   "`clear` so the review panel still runs. ")
+                + "Merge remains gated on a formal approval."
             )
-            verdict = "clear"
+            if not parent_task:
+                verdict = "clear"
 
         # Gates Lanius reports as still-pending (from its GATE_PENDING: line on a
         # blocked verdict). Fed to select_panel so the owning lens is guaranteed
         # a seat under the cap — otherwise a carried-over gate can never clear
         # because its owning lens is never re-invoked (ateles#230 panel gap).
         pending_gates = parse_pending_gates(lanius.stdout)
+        if (parent is None and parent_task and verdict == "blocked"
+                and not pending_gates
+                and missing_parent_issue_block(lanius.stdout)):
+            # Only a block explicitly about the absent issue is resolved by
+            # the task receipt. All other blocks retain their pending gates.
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: Lanius blocked on a PR with verified "
+                f"parent task {parent_task} and missing-parent-issue reason — "
+                "proceeding to review"
+            )
+            verdict = "clear"
+            pending_gates = set()
         if verdict == "blocked":
             await self._post_gate_block(
                 trigger, parent, parse_pending_gates(lanius.stdout)
@@ -7698,7 +8924,11 @@ class SwarmDispatcher:
                 "panel",
                 "",
                 "",
-                reason="PR head could not be verified before review",
+                reason=(
+                    GITHUB_TEMPORARILY_RATE_LIMITED
+                    if self._pr_read_rate_limited(trigger.repository, trigger.number)
+                    else "PR head could not be verified before review"
+                ),
             )
             return
 
@@ -7710,11 +8940,16 @@ class SwarmDispatcher:
             if parent
             else {}
         )
+        # Every lens the approval tool will require at this head is seated
+        # (union with the picks above, never capped away), so the panel can
+        # produce an approvable review without anyone running a lens by hand.
+        path_required = await self._path_required_lenses(trigger)
         panel = select_panel(
             gate_contributors=set(expectations),
             changed_files=changed_files,
             max_panel=self.config.panel_max,
             pending_gates=pending_gates,
+            required_lenses=path_required,
         )
         # Narrow a re-round (ruling `rereview_only_blockers_and_touched_areas`).
         # Extends the carry-forward above: a pending gate's owner is forced to
@@ -7746,6 +8981,10 @@ class SwarmDispatcher:
 
         reviews: list[tuple[str, str]] = []
         failed_lenses: list[tuple[str, str]] = []
+        # Forward-looking (advisory) lenses that failed without a verdict.
+        # Kept out of `failed_lenses`: they block nothing, so they never stop
+        # the panel; they are only left out of the lens list Vanellus reads.
+        failed_advisory_lenses: set[str] = set()
         # (lens, agent) for each gate owner that reported its writeback refused.
         denied_gate_writebacks: list[tuple[str, str]] = []
         # (lens, agent, error_class, observed_state) for each dispatcher-side
@@ -7779,7 +9018,12 @@ class SwarmDispatcher:
         # pm, qa and ux in one mid-tier pass (ruling `combined_pm_qa_ux_pass`).
         # A lens whose block is missing or unreadable is simply absent here and
         # runs alone below, so the combined pass can only save work.
-        combined_results: dict[str, SkillResult] = {}
+        combined_results: CombinedPassResults = CombinedPassResults()
+        # Lenses whose prompt was return-only (decided before the run, so a
+        # Mac fallback of a Fly launch is still published by the dispatcher),
+        # and the expectation updates they returned.
+        remote_lenses: set[str] = set()
+        expectation_updates: dict[str, str] = {}
         if self.config.combined_review_pass:
             if await self._hold_panel_until_checks_green(
                 trigger, source="combined_review_pass"
@@ -7795,6 +9039,7 @@ class SwarmDispatcher:
                 pending_gates=pending_gates,
                 live_gates=live_gates,
                 signals=panel_signals,
+                checks_green_head=self._checks_green_head(trigger, review_head),
             )
         for lens in panel:
             if lens.lens not in combined_results and await self._hold_panel_until_checks_green(
@@ -7817,6 +9062,7 @@ class SwarmDispatcher:
                 qa_worktree = await prepare_pr_worktree(
                     trigger.repository, trigger.number, lens.agent
                 )
+            return_only = _lens_return_only_on_fly(lens)
             try:
                 result = combined_results.get(lens.lens) or await run_skill(
                     lens.agent,
@@ -7829,7 +9075,7 @@ class SwarmDispatcher:
                         owns_pending_gate=lens.lens in pending_gates,
                         changed_files=changed_files,
                         reviewed_head=review_head,
-                        read_only=_lens_return_only_on_fly(lens),
+                        read_only=return_only,
                     ),
                     github_token=_token_for_agent_on_repo(
                         lens.agent, trigger.repository
@@ -7857,11 +9103,28 @@ class SwarmDispatcher:
                     seated_reviewer=True,
                     # Read-only on Fly: a lens reviews and never delivers.
                     github_read_only=True,
+                    # The PR's repository: a Fly job's read-only GitHub token
+                    # is scoped to it, and is refused without one.
+                    repository=trigger.repository,
                     action_class=model_tiering.lens_review_class(lens.lens),
                     escalation_signals=panel_signals,
                 )
             finally:
                 await cleanup_pr_worktree(qa_worktree)
+            if return_only and lens.lens not in combined_results:
+                result, returned_update = unwrap_returned_review(
+                    result, lens.agent, lens.lens, review_head
+                )
+                if result.ok:
+                    remote_lenses.add(lens.lens)
+                    if returned_update:
+                        expectation_updates[lens.lens] = returned_update
+            elif lens.lens in combined_results.remote_lenses:
+                # Already unwrapped and posted by the combined pass.
+                remote_lenses.add(lens.lens)
+                combined_update = combined_results.expectation_updates.get(lens.lens)
+                if combined_update:
+                    expectation_updates[lens.lens] = combined_update
             if result.ok:
                 reviews.append((lens.lens, result.stdout))
                 # ateles#795 amended ADR: the dispatcher — not the lens's own
@@ -7952,6 +9215,21 @@ class SwarmDispatcher:
                     gate_launch_refusals.append(
                         (lens.lens, lens.agent, failure_class)
                     )
+                elif lens.forward_looking and not (
+                    lens.lens in pending_gates or signs_gate
+                ):
+                    # An advisory (forward-looking) lens blocks nothing and
+                    # routes its output to its own queue, so its failure must
+                    # not stop a review whose blocking lenses all completed
+                    # (6 November 2026: three PRs stopped on the `content`
+                    # lens). Logged, left out of the roll-up, never a pass for
+                    # any blocking lens.
+                    failed_advisory_lenses.add(lens.lens)
+                    log.warning(
+                        f"[{DAEMON_NAME}] {ref}: advisory lens {lens.lens} "
+                        f"({lens.agent}) failed ({failure_class}) — not "
+                        "blocking; the panel continues without it"
+                    )
                 else:
                     failed_lenses.append((lens.lens, failure_class))
             # ateles#795: a lens that owns a gate and reports its own writeback
@@ -8007,23 +9285,21 @@ class SwarmDispatcher:
                 reviews,
                 agents_by_lens,
                 reviewed_head=review_head,
+                remote_lenses=frozenset(remote_lenses),
+            )
+            await self._publish_expectation_updates(
+                trigger, parent, expectation_updates, agents_by_lens
             )
 
         if failed_lenses:
-            auto_resume = all(
-                failure in {"usage limit", "provider exhaustion"}
-                for _, failure in failed_lenses
-            )
             await self._handle_panel_session_limit(
                 trigger,
                 parent,
                 ", ".join(lens for lens, _ in failed_lenses),
                 "",
                 "",
-                reason=(
-                    "provider capacity exhausted"
-                    if auto_resume
-                    else "incomplete review panel"
+                reason=incomplete_panel_reason(
+                    [failure for _, failure in failed_lenses]
                 ),
                 completed_lenses=tuple(lens for lens, _ in reviews),
                 failed_lenses=tuple(failed_lenses),
@@ -8126,9 +9402,18 @@ class SwarmDispatcher:
             (await self._pr_head_sha(trigger)) or ""
         )
         if not review_head or aggregation_head != review_head:
+            # Only an unread head may be a rate limit; a head that was read and
+            # differs really changed, and still stops the panel.
+            rate_limited = not aggregation_head and self._pr_read_rate_limited(
+                trigger.repository, trigger.number
+            )
             await self._handle_panel_session_limit(
                 trigger, parent, "panel", "", "",
-                reason="PR head changed during review or could not be verified",
+                reason=(
+                    GITHUB_TEMPORARILY_RATE_LIMITED
+                    if rate_limited
+                    else "PR head changed during review or could not be verified"
+                ),
             )
             return
         vanellus_result = await run_skill(
@@ -8136,11 +9421,17 @@ class SwarmDispatcher:
             self._vanellus_prompt(
                 trigger,
                 parent,
-                [p.lens for p in panel],
+                [p.lens for p in panel if p.lens not in failed_advisory_lenses],
                 reviews,
                 pending_gates=pending_gates,
                 reviewed_head=review_head,
                 **({"carried": carried_lenses} if carried_lenses else {}),
+                **({"parent_task": parent_task} if parent_task else {}),
+                **(
+                    {"checks_green_head": green_head}
+                    if (green_head := self._checks_green_head(trigger, aggregation_head))
+                    else {}
+                ),
             ),
             github_token=_token_for_agent_on_repo("vanellus", trigger.repository),
             include_github_contract=True,
@@ -8156,7 +9447,80 @@ class SwarmDispatcher:
         #     limit notice. Post a truthful REVIEW-INCOMPLETE marker (never a stub
         #     that reads like a verdict) and schedule a resume after the reset,
         #     rather than paging the operator to fix nothing.
-        if detect_session_limit(vanellus_result.stdout, vanellus_result.stderr):
+        #
+        #     A successful run whose STDOUT carries Vanellus's verdict at the
+        #     fixed position (`lens_own_verdict`: the steward's header, the
+        #     verdict line directly under it) is a review, so neither detector
+        #     reads its stdout: a roll-up that discusses rate limits or a 401
+        #     would otherwise match the broad signatures, defer, and match
+        #     again on every resume. A verdict token anywhere else does not
+        #     count, so a provider diagnostic carrying an incidental token is
+        #     still detected. Both detectors read STDERR on the review path
+        #     (subject to the stderr rule below), since a zero-exit run can
+        #     carry a real limit or auth diagnostic there; a verdict token found only in stderr is not a
+        #     verdict. Output with no fixed-position verdict, and any failed
+        #     run, is checked on both streams as before.
+        #
+        #     A successful run whose stdout lacks that form but which POSTED
+        #     its aggregation comment for this head during this run, with the
+        #     verdict at the fixed position of that comment
+        #     (`posted_comment_own_verdict`), is a review too: a run that
+        #     posts its own comment often ends with a summary of it in stdout
+        #     (seen on #1635 and #1645, both deferred ~3h because their
+        #     findings were about retry limits). The comment is read only
+        #     when stdout or stderr would otherwise match a detector.
+        #
+        #     When the run is accepted on that posted comment, the comment's
+        #     verdict is the conclusion: step 5 reads it back from the comment
+        #     and never parses stdout, whose summary may mention another token.
+        #
+        #     Stderr (ateles task ent_79097958658a23663f0ad586): `codex exec`
+        #     prints only its final message to stdout; its stderr carries the
+        #     prompt and session text, which on a clean exit-0 run can quote
+        #     "rate limit resets" twice. So two rules decide whether the
+        #     detectors read stderr (`review_detector_stderr`): a successful
+        #     run that posted its verdict for this head during this run is a
+        #     finished review from any provider, and its stderr is not read;
+        #     a successful Codex run's stderr is never read (a real Codex
+        #     limit fails the run, so it is still caught). Failed runs, and
+        #     successful runs from other providers with no posted verdict,
+        #     read stderr as before. The posted-verdict check therefore runs
+        #     whenever EITHER stream would match a detector.
+        stdout_has_own_verdict = (
+            lens_own_verdict(vanellus_result.stdout, lens_agent="vanellus")
+            is not None
+        )
+        stdout_matches = detect_session_limit(
+            vanellus_result.stdout
+        ) or detect_auth_failure(vanellus_result.stdout)
+        stderr_matches = detect_session_limit(
+            vanellus_result.stderr
+        ) or detect_auth_failure(vanellus_result.stderr)
+        posted_verdict_this_run = (
+            vanellus_result.ok
+            and (stdout_matches or stderr_matches)
+            and await self._vanellus_posted_verdict_this_run(
+                trigger,
+                head_sha=review_head,
+                started_at=aggregation_started_at,
+            )
+        )
+        accepted_on_posted_comment = (
+            posted_verdict_this_run and not stdout_has_own_verdict and stdout_matches
+        )
+        aggregation_is_review = vanellus_result.ok and (
+            stdout_has_own_verdict or accepted_on_posted_comment
+        )
+        detector_stdout = "" if aggregation_is_review else vanellus_result.stdout
+        detector_stderr = review_detector_stderr(
+            vanellus_result, posted_verdict_this_run=posted_verdict_this_run
+        )
+        if detect_session_limit(detector_stdout, detector_stderr):
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                "vanellus usage-limit detector matched on "
+                f"{_matched_streams(detect_session_limit, detector_stdout, detector_stderr)}"
+            )
             await self._handle_panel_session_limit(
                 trigger, parent, "vanellus",
                 vanellus_result.stdout, vanellus_result.stderr,
@@ -8166,16 +9530,21 @@ class SwarmDispatcher:
         #     auth (expired OAuth / missing ANTHROPIC_API_KEY), its "verdict" is
         #     just the 401. Reframe it as an infra failure and page the operator
         #     to re-auth, rather than posting the raw error as a review.
-        if detect_auth_failure(vanellus_result.stdout, vanellus_result.stderr):
+        if detect_auth_failure(detector_stdout, detector_stderr):
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                "vanellus auth-failure detector matched on "
+                f"{_matched_streams(detect_auth_failure, detector_stdout, detector_stderr)}"
+            )
             await self._handle_panel_auth_failure(trigger, "vanellus")
             return
         if not vanellus_result.ok:
             # No current invocation verdict exists. Historical issue comments
             # cannot turn provider exhaustion or process failure into a review.
+            failure = review_failure_class(vanellus_result)
             reason = (
-                "provider capacity exhausted"
-                if review_failure_class(vanellus_result)
-                in {"usage limit", "provider exhaustion"}
+                incomplete_panel_reason([failure])
+                if failure in _SELF_CLEARING_FAILURE_CLASSES
                 else "review execution failure"
             )
             await self._handle_panel_session_limit(
@@ -8204,10 +9573,24 @@ class SwarmDispatcher:
         #    posts the verdict reliably but repeats it in stdout only ~25% of
         #    the time, and a missed token silently downgrades a REQUEST_CHANGES
         #    to an inert COMMENT on GitHub.
-        verdict, used_comment_fallback = await self._resolve_review_verdict(
-            trigger, vanellus_result.stdout,
-            expected_head=aggregation_head, started_at=aggregation_started_at,
-        )
+        #    When the run was accepted on its posted comment (step 4a-0), that
+        #    comment is the conclusion: its verdict, and its body, drive the
+        #    formal review and the routing below, and stdout is not parsed.
+        review_body = vanellus_result.stdout
+        if accepted_on_posted_comment:
+            verdict, posted_body = await self._resolve_posted_review_verdict(
+                trigger, vanellus_result.stdout,
+                expected_head=aggregation_head,
+                started_at=aggregation_started_at,
+            )
+            used_comment_fallback = False
+            if posted_body is not None:
+                review_body = posted_body
+        else:
+            verdict, used_comment_fallback = await self._resolve_review_verdict(
+                trigger, vanellus_result.stdout,
+                expected_head=aggregation_head, started_at=aggregation_started_at,
+            )
         if verdict is None:
             await self._handle_panel_session_limit(
                 trigger, parent, "vanellus", "", "",
@@ -8227,7 +9610,7 @@ class SwarmDispatcher:
         #     here must not change the routing decision below, which remains
         #     driven by the parsed verdict.
         binding_receipt = await self._emit_formal_review(
-            trigger, verdict, vanellus_result.stdout, reviewed_head=aggregation_head
+            trigger, verdict, review_body, reviewed_head=aggregation_head
         )
 
         # 5b. ateles#565: a merge the steward was AUTHORIZED to perform and
@@ -8251,7 +9634,7 @@ class SwarmDispatcher:
         #     same blocker: branching on the token alone let a `**COMMENT**` above
         #     a `[BLOCKING]` finding block the PR on GitHub while the dispatcher
         #     told the operator it was merge-ready.
-        if review_blocks_merge(verdict, vanellus_result.stdout):
+        if review_blocks_merge(verdict, review_body):
             await self._route_blocking_findings(
                 trigger,
                 parent,
@@ -8905,6 +10288,320 @@ class SwarmDispatcher:
                 f"could not record fix round {n}: {exc}"
             )
 
+    # ── fix rounds for Fly-delivered PRs ─────────────────────────────────────
+    #
+    # A PR that Fly delivered is corrected on Fly, never by a commit on this
+    # host: its fix round is filed as an `existing_pr_correction` task on the
+    # PR's own branch and goes through the task path's gate, checkpoint and
+    # signed release like any other correction. A cleared or superseded
+    # receipt still counts: the ledger's audit file records it, matched on the
+    # repository and the PR's head branch. Only a PR that neither the ledger
+    # nor its audit file names keeps the local fix round, unchanged.
+
+    def _fix_round_route(self, trigger: SwarmTrigger):
+        """Where this PR's fix round runs: ("local", None), ("fly", facts) or
+        ("hold", reason).
+
+        "hold" means the round must not run here and cannot be filed on Fly:
+        the ledger or its audit file is missing or unreadable, so whether the
+        PR came from Fly is unknown (whether or not deliveries are opted onto
+        Fly), or the PR came from Fly but deliveries are no longer opted onto
+        it. A missing PR number, repository or head branch also holds the
+        round, since whether a Fly delivery opened the PR cannot be decided.
+        Only a readable ledger that names the PR in no receipt, with no audit
+        record of a cleared or superseded receipt on its branch, keeps the
+        local round."""
+        opted_in = fly_runner.delivery_opted_in()
+        facts = build_delivery.fly_delivered_pr(
+            trigger.repository, trigger.number, trigger.head_ref
+        )
+        if facts.delivered is None:
+            if facts.unknown_reason:
+                return "hold", facts.unknown_reason
+            return "hold", (
+                "the Fly delivery ledger or its audit file is missing or could "
+                "not be read, so "
+                "whether this PR came from Fly is unknown"
+            )
+        if not facts.delivered:
+            return "local", None
+        if not opted_in:
+            return "hold", (
+                "this PR came from Fly, but deliveries are no longer opted onto "
+                "Fly, so no correction can be started"
+            )
+        return "fly", facts
+
+    def _hold_fix_round(
+        self, trigger: SwarmTrigger, kind: str, n: int, reason: str
+    ) -> None:
+        """Stop the PR for attention: its fix round was not started."""
+        ref = f"{trigger.repository}#{trigger.number}"
+        log.warning(
+            f"[{DAEMON_NAME}] {ref}: {kind} round {n} not started: {reason}"
+        )
+        head = _normalise_full_sha(trigger.head_sha or "") or trigger.head_sha
+        self.notifier.send(
+            f"PR {ref}: {kind} round {n} was not started: {reason}. It was not "
+            "run on this host either, because a Fly-delivered PR is corrected "
+            "on Fly and this PR's origin decides which. Needs your attention. "
+            f"{trigger.html_url} Merge held.",
+            priority=Priority.OPERATOR_DECISION,
+            handler=DAEMON_NAME,
+            dedupe_key=f"fly-fix-hold:{ref}:{kind}:{n}:{head}",
+        )
+
+    @staticmethod
+    def _fly_correction_description(
+        trigger: SwarmTrigger, kind: str, round_n: int, max_rounds: int, body: str
+    ) -> str:
+        t = trigger
+        what = (
+            "required CI is failing; the failing checks are listed below. Read "
+            "their logs where you can, fix the cause and run the affected tests."
+            if kind == "CI-fix"
+            else "the review panel returned blocking findings. Apply the "
+            "consolidated review guidance below. Where a reviewer flagged a "
+            "false positive, say so in your change summary instead of forcing "
+            "a change. Run the affected tests and self-review before committing."
+        )
+        return (
+            f"{kind} round {round_n} of {max_rounds} for pull request "
+            f"{t.repository}#{t.number} ({t.title}): {what}\n\n"
+            "Correct this pull request on its existing branch only. Do not open "
+            "a new pull request and do not merge; the runner's update of this "
+            "PR re-runs the review panel and CI.\n\n"
+            "----- ROUND INPUT -----\n"
+            f"{body}\n"
+            "----- END ROUND INPUT -----"
+        )
+
+    async def _file_fly_correction(
+        self,
+        trigger: SwarmTrigger,
+        *,
+        kind: str,
+        round_n: int,
+        body: str,
+        facts,
+    ) -> bool:
+        """File this fix round as an existing-PR correction task for Fly.
+
+        Returns True once the task is stored and read back by id with the
+        repository, PR number, head, branch, action type, `PART_OF` edge to
+        the plan and `REFERS_TO` edge to the source task it was filed with; a
+        returned id alone is not proof. The correction is a peer of the task
+        that delivered the PR, filed under that task's plan, never a child of
+        it: a task is not an aggregate parent
+        (docs/foundation/work_model.md#parent-and-child-tasks). On any
+        failure the PR stops for attention with the reason, and nothing runs
+        locally. The task carries `open_or_merge_pr`, so the task path holds it
+        at a PLAN checkpoint until a signed release; that gate is unchanged."""
+        ref = f"{trigger.repository}#{trigger.number}"
+        if not facts.source_task:
+            # A correction is filed under its source task's plan and refers to
+            # that task; with none known, hold rather than file it nowhere.
+            self._hold_fix_round(
+                trigger, kind, round_n,
+                "no source task is recorded for this Fly delivery, so the "
+                "correction has no parent task to be filed under",
+            )
+            return False
+        plan = await self._fly_correction_plan(facts.source_task)
+        if not plan:
+            self._hold_fix_round(
+                trigger, kind, round_n,
+                "the task that delivered this PR has no single plan to file "
+                "the correction under",
+            )
+            return False
+        head = _normalise_full_sha((await self._pr_head_sha(trigger)) or "")
+        if not head:
+            self._hold_fix_round(
+                trigger, kind, round_n, "the PR's current head could not be read"
+            )
+            return False
+        branch = trigger.head_ref or facts.branch
+        if facts.branch and trigger.head_ref and facts.branch != trigger.head_ref:
+            self._hold_fix_round(
+                trigger, kind, round_n,
+                "the PR's branch is not the branch Fly delivered",
+            )
+            return False
+        base = trigger.base_ref or facts.base_branch
+        task = {
+            "entity_type": "task",
+            "title": f"{kind} round {round_n}: correct {ref} on Fly",
+            "description": self._fly_correction_description(
+                trigger, kind, round_n, self.config.max_fix_rounds, body
+            ),
+            "status": "pending",
+            "repository": trigger.repository,
+            "assigned_to": "cicada",
+            "action_type": build_delivery.DELIVERY_ACTION_TYPE,
+            "task_type": "existing_pr_correction",
+            # A task a worker may take carries this class
+            # (docs/foundation/work_model.md#parent-and-child-tasks).
+            "admission_class": CORRECTION_ADMISSION_CLASS,
+            "pr_number": trigger.number,
+            # The PR is its own issue key, so the correction's entrance reads
+            # the PR's own receipt and never the first delivery's issue receipt.
+            "issue_number": trigger.number,
+            "head_sha": head,
+            "context": json.dumps(
+                {"branch": branch, "base_branch": base,
+                 "fix_round": round_n, "fix_kind": kind},
+                sort_keys=True,
+            ),
+        }
+        try:
+            build_delivery.existing_pr_target(task, trigger.repository)
+        except build_delivery.BuildWorktreeError as exc:
+            self._hold_fix_round(
+                trigger, kind, round_n, f"the correction is not admissible ({exc})"
+            )
+            return False
+        relationships = [
+            {"relationship_type": "PART_OF", "source_index": 0,
+             "target_entity_id": plan},
+            {"relationship_type": "REFERS_TO", "source_index": 0,
+             "target_entity_id": facts.source_task},
+        ]
+        stored = await self._store_entities(
+            [task],
+            idempotency_key=(
+                f"fly-fix-correction-{trigger.repository}-{trigger.number}-"
+                f"{kind}-{round_n}-{head}"
+            ),
+            relationships=relationships,
+        )
+        entities = (stored or {}).get("entities") if isinstance(stored, dict) else None
+        task_id = (
+            entities[0].get("entity_id")
+            if isinstance(entities, list) and entities
+            and isinstance(entities[0], dict) else None
+        )
+        if not task_id:
+            self._hold_fix_round(
+                trigger, kind, round_n,
+                "the correction task could not be stored in Neotoma",
+            )
+            return False
+        problem = await self._fly_correction_read_back(
+            task_id, task, branch=branch, plan=plan, refers_to=facts.source_task
+        )
+        if problem:
+            self._hold_fix_round(
+                trigger, kind, round_n,
+                f"the stored correction task {task_id} did not read back as "
+                f"filed ({problem})",
+            )
+            return False
+        log.info(
+            f"[{DAEMON_NAME}] {ref}: {kind} round {round_n} filed as Fly "
+            f"correction task {task_id} on {branch} at {head[:7]}; it waits at "
+            "its PLAN checkpoint for a signed release"
+        )
+        return True
+
+    async def _fly_correction_plan(self, source_task: str) -> str:
+        """The plan the task that delivered the PR is filed under, or "".
+
+        The source task's `PART_OF` targets are read back; there must be
+        exactly one, and it must read back as a `plan`. Anything else,
+        including a failed read, is "": the correction then has nowhere it may
+        be filed."""
+        rels = await self._neotoma_get(f"entities/{source_task}/relationships")
+        if not isinstance(rels, dict):
+            return ""
+        listed = rels.get("relationships")
+        if not isinstance(listed, list):
+            return ""
+        targets = {
+            r.get("target_entity_id")
+            for r in listed
+            if isinstance(r, dict)
+            and r.get("relationship_type") == "PART_OF"
+            and r.get("source_entity_id") == source_task
+        }
+        if len(targets) != 1:
+            return ""
+        [target] = targets
+        if not isinstance(target, str) or not target:
+            return ""
+        entity = await self._neotoma_get(f"entities/{target}")
+        if not isinstance(entity, dict) or entity.get("entity_type") != "plan":
+            return ""
+        return target
+
+    async def _fly_correction_read_back(
+        self, task_id: str, task: dict, *, branch: str, plan: str, refers_to: str
+    ) -> str:
+        """Why the stored correction does not match what was filed, or "".
+
+        Reads the task and its relationships back by id: its `PART_OF` edge to
+        *plan* and its `REFERS_TO` edge to *refers_to* must both be present,
+        and its `admission_class` must be `workflow_entering`. A failed read, a
+        missing edge, or a missing or different class is a mismatch: the
+        filing is unconfirmed."""
+        entity = await self._neotoma_get(f"entities/{task_id}")
+        if not isinstance(entity, dict):
+            return "the task could not be read back"
+        snapshot = entity.get("snapshot")
+        if isinstance(snapshot, dict) and isinstance(snapshot.get("snapshot"), dict):
+            snapshot = snapshot["snapshot"]
+        if not isinstance(snapshot, dict):
+            return "the task read back with no fields"
+        context = snapshot.get("context")
+        if isinstance(context, str):
+            try:
+                context = json.loads(context)
+            except ValueError:
+                context = None
+        stored_branch = context.get("branch") if isinstance(context, dict) else None
+        wrong = [
+            name for name, ok in (
+                ("repository", snapshot.get("repository") == task["repository"]),
+                ("PR number", str(snapshot.get("pr_number")) == str(task["pr_number"])),
+                ("head", snapshot.get("head_sha") == task["head_sha"]),
+                ("branch", stored_branch == branch),
+                ("action type", snapshot.get("action_type") == task["action_type"]),
+                ("admission class",
+                 snapshot.get("admission_class") == CORRECTION_ADMISSION_CLASS),
+            ) if not ok
+        ]
+        if wrong:
+            return "wrong " + ", ".join(wrong)
+        if not plan:
+            return "it has no plan"
+        if not refers_to:
+            return "it has no source task"
+        rels = await self._neotoma_get(f"entities/{task_id}/relationships")
+        if not isinstance(rels, dict):
+            return "its relationships could not be read back"
+        listed = rels.get("relationships")
+        if not isinstance(listed, list):
+            return "its relationships could not be read back"
+
+        def has(kind: str, target: str) -> bool:
+            return any(
+                isinstance(r, dict)
+                and r.get("relationship_type") == kind
+                and r.get("source_entity_id") == task_id
+                and r.get("target_entity_id") == target
+                for r in listed
+            )
+
+        missing = [
+            name for name, ok in (
+                ("PART_OF edge to its plan", has("PART_OF", plan)),
+                ("REFERS_TO edge to its source task", has("REFERS_TO", refers_to)),
+            ) if not ok
+        ]
+        if missing:
+            return "missing its " + " and ".join(missing)
+        return ""
+
     _ESCALATION_MARKER = "<!-- apis-escalated:{kind} -->"
 
     async def _claim_escalation(
@@ -9103,7 +10800,15 @@ class SwarmDispatcher:
             return
 
         this_round = prior_rounds + 1
-        await self._record_fix_round(trigger, this_round)
+        # A Fly-delivered PR is corrected on Fly; decided before the round is
+        # recorded, so a round that cannot start does not use up the budget.
+        # A Fly round is recorded only once its filing is confirmed.
+        route, route_facts = self._fix_round_route(trigger)
+        if route == "hold":
+            self._hold_fix_round(trigger, "auto-fix", this_round, route_facts)
+            return
+        if route != "fly":
+            await self._record_fix_round(trigger, this_round)
 
         # Each lens agent proposes fix guidance for its own findings.
         guidance_blocks: list[str] = []
@@ -9134,7 +10839,8 @@ class SwarmDispatcher:
             )
             result = await run_skill(
                 agent,
-                self._fix_guidance_prompt(trigger, lens, agent, findings_text),
+                self._fix_guidance_prompt(trigger, lens, agent, findings_text)
+                + _no_neotoma_note_if_on_fly(lens),
                 github_token=_token_for_agent_on_repo(agent, trigger.repository),
                 include_github_contract=True,
                 notifier=self.notifier,
@@ -9148,6 +10854,9 @@ class SwarmDispatcher:
                 # at the lens's tier: security and arch stay top.
                 action_class=model_tiering.lens_review_class(lens),
                 escalation_signals=fix_signals,
+                # The PR's repository: a Fly job's read-only GitHub token is
+                # scoped to it, and is refused without one.
+                repository=trigger.repository,
             )
             if result.ok and result.stdout.strip():
                 guidance_blocks.append(
@@ -9161,6 +10870,16 @@ class SwarmDispatcher:
                 )
 
         consolidated = "\n\n".join(guidance_blocks)
+
+        if route == "fly":
+            # The same guidance, as a correction on the PR's own branch. The
+            # runner's push re-runs the panel; no commit is made on this host.
+            if await self._file_fly_correction(
+                trigger, kind="auto-fix", round_n=this_round,
+                body=consolidated, facts=route_facts,
+            ):
+                await self._record_fix_round(trigger, this_round)
+            return
 
         # Snapshot the head so we can tell whether Cicada actually pushed
         # (a clean exit with no commit strands the PR — see
@@ -9178,6 +10897,8 @@ class SwarmDispatcher:
             # security finding makes it a security fix, which stays on top.
             action_class=model_tiering.repair_action_class(set(by_lens)),
             escalation_signals=fix_signals,
+            # Commits as the agent, unsigned; refused with no identity.
+            agent_git_identity=True,
         )
         # An auth-expired claude call can exit 0 with the 401 in stdout, so a
         # bare `ok` is not enough — reframe an auth failure as an infra page.
@@ -9725,6 +11446,24 @@ class SwarmDispatcher:
             )
             return
         this_round = prior_rounds + 1
+        route, route_facts = self._fix_round_route(trigger)
+        if route == "hold":
+            self._hold_fix_round(trigger, "CI-fix", this_round, route_facts)
+            return
+        if route == "fly":
+            failing = await self._failing_check_runs(trigger)
+            checks = "\n".join(
+                f"- {c['name']}: {c.get('html_url') or 'no link'}"
+                for c in failing if c.get("name")
+            ) or "- (the failing checks could not be listed; read the PR's checks)"
+            # Recorded only once the filing is confirmed: a failed filing
+            # does not use up a round.
+            if await self._file_fly_correction(
+                trigger, kind="CI-fix", round_n=this_round,
+                body=f"Failing required checks:\n{checks}", facts=route_facts,
+            ):
+                await self._record_fix_round(trigger, this_round)
+            return
         await self._record_fix_round(trigger, this_round)
         head_before = await self._pr_head_sha(trigger)
         ci_signals = await self._tier_signals(
@@ -9742,6 +11481,8 @@ class SwarmDispatcher:
             work_class="ci_log_triage",
             action_class=model_tiering.ACTION_CI_LOG_TRIAGE,
             escalation_signals=ci_signals,
+            # Commits as the agent, unsigned; refused with no identity.
+            agent_git_identity=True,
         )
         if detect_auth_failure(cicada_result.stdout, cicada_result.stderr):
             await self._handle_panel_auth_failure(trigger, "cicada")
@@ -10487,6 +12228,101 @@ class SwarmDispatcher:
             principal=principal,
         )
 
+    async def _vanellus_posted_verdict_this_run(
+        self, t: SwarmTrigger, *, head_sha: str, started_at: datetime
+    ) -> bool:
+        """True when Vanellus's aggregation comment for *head_sha*, posted or
+        updated at or after *started_at*, carries its verdict at the fixed
+        position (`posted_comment_own_verdict`, the reader `panel_finished_at_head`
+        uses).
+
+        A roll-up that posts its own comment can end with stdout that is a
+        summary of what it posted, not the verdict at the fixed position, so
+        stdout alone cannot say the run was a review. Never raises: a read
+        failure, an unpinned head or an older comment returns False, which
+        leaves the limit and auth detectors reading stdout as before.
+        """
+        return (
+            await self._vanellus_posted_aggregation_this_run(
+                t, head_sha=head_sha, started_at=started_at
+            )
+        ) is not None
+
+    async def _vanellus_posted_aggregation_this_run(
+        self, t: SwarmTrigger, *, head_sha: str, started_at: datetime
+    ) -> tuple[str, str] | None:
+        """``(verdict, body)`` of Vanellus's aggregation comment for *head_sha*
+        posted or updated at or after *started_at*, with the verdict read at
+        the comment's fixed position (`posted_comment_own_verdict`); else None.
+
+        Never raises: a read failure, an unpinned head, an older comment or a
+        comment without a fixed-position verdict all return None.
+        """
+        head = _normalise_full_sha(head_sha)
+        if not head:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments = await self._lens_scoped_comments(
+                    t.repository, t.number, client
+                )
+            comment = latest_aggregation_comment(comments, head_sha=head)
+            if comment is None:
+                return None
+            stamp = comment.get("updated_at") or comment.get("created_at")
+            posted = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+            if posted.tzinfo is None or posted < started_at:
+                return None
+            body = comment.get("body") or ""
+            verdict = posted_comment_own_verdict(body, lens_agent="vanellus")
+            if verdict is None:
+                return None
+            return verdict, body
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: posted-aggregation "
+                f"read failed ({exc}) — no posted verdict read"
+            )
+            return None
+
+    async def _resolve_posted_review_verdict(
+        self, t: SwarmTrigger, stdout: str, *,
+        expected_head: str, started_at: datetime,
+    ) -> tuple[str | None, str | None]:
+        """The verdict of a run accepted on its current-run posted comment.
+
+        That comment is the conclusion, so it is read back here and its
+        fixed-position verdict returned with its body; stdout is NOT parsed
+        for a verdict, because a summary can mention another token anywhere.
+        A different token in stdout is logged and ignored. When the comment
+        cannot be read back (head moved, comment gone, older than this run,
+        no fixed-position verdict, read failure) this returns ``(None, None)``
+        and the caller treats the review as incomplete; it never falls back
+        to stdout. Never raises.
+        """
+        current_head = await self._pr_head_sha(t)
+        if not current_head or current_head != expected_head:
+            return None, None
+        posted = await self._vanellus_posted_aggregation_this_run(
+            t, head_sha=current_head, started_at=started_at
+        )
+        if posted is None:
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: run was accepted on "
+                "its posted aggregation comment, which could not be read back — "
+                "review incomplete (stdout is not used)"
+            )
+            return None, None
+        verdict, body = posted
+        stdout_verdict = parse_review_verdict(stdout)
+        if stdout_verdict is not None and stdout_verdict != verdict:
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: stdout mentions "
+                f"verdict {stdout_verdict!r} but the posted aggregation comment "
+                f"says {verdict!r} — using the posted comment"
+            )
+        return verdict, body
+
     async def _resolve_review_verdict(
         self, t: SwarmTrigger, stdout: str, *,
         expected_head: str | None = None, started_at: datetime | None = None,
@@ -10653,6 +12489,57 @@ class SwarmDispatcher:
             )
             return False
 
+    async def _github_pr_get(self, client, url: str, repository: str, pr_number: int):
+        """GET a PR, waiting out a short GitHub rate-limit burst in place.
+
+        A 403/429 that `github_rate_limit_wait` calls temporary is retried after
+        the wait it names, at most `_GITHUB_RATE_LIMIT_ATTEMPTS` reads in all.
+        Each such answer logs its `Retry-After` and `X-RateLimit-Remaining`
+        values (never a credential), so a burst shows which limit it was. When
+        the last read is still rate-limited the PR is remembered as such, so
+        the panel defers instead of stopping (`_pr_read_rate_limited`); any
+        other outcome clears that. Returns the last response either way.
+        """
+        key = (repository.casefold(), pr_number)
+        limited = self.__dict__.setdefault("_rate_limited_pr_reads", set())
+        limited.discard(key)
+        seen = self.__dict__.setdefault("_github_rate_limit_headers", {})
+        for attempt in range(1, _GITHUB_RATE_LIMIT_ATTEMPTS + 1):
+            resp = await client.get(url, headers=self._github_headers(repository))
+            wait = github_rate_limit_wait(resp)
+            if wait is None:
+                return resp
+            headers = getattr(resp, "headers", None) or {}
+            # Only these two header values are kept (never a credential), so
+            # an exhausted deferral can name the limit it last saw.
+            seen[key] = (
+                str(headers.get("Retry-After", "absent")),
+                str(headers.get("X-RateLimit-Remaining", "absent")),
+            )
+            log.warning(
+                f"[{DAEMON_NAME}] {repository}#{pr_number}: GitHub PR read "
+                f"answered {resp.status_code} rate-limited (attempt {attempt} of "
+                f"{_GITHUB_RATE_LIMIT_ATTEMPTS}; Retry-After="
+                f"{headers.get('Retry-After', 'absent')}, X-RateLimit-Remaining="
+                f"{headers.get('X-RateLimit-Remaining', 'absent')})"
+            )
+            if attempt < _GITHUB_RATE_LIMIT_ATTEMPTS:
+                await _rate_limit_sleep(wait)
+        limited.add(key)
+        return resp
+
+    def _pr_read_rate_limited(self, repository: str, pr_number: int) -> bool:
+        """True when this PR's last read ended on a temporary GitHub rate limit."""
+        limited = self.__dict__.get("_rate_limited_pr_reads") or set()
+        return (repository.casefold(), pr_number) in limited
+
+    def _last_github_rate_limit_headers(
+        self, repository: str, pr_number: int
+    ) -> tuple[str, str]:
+        """The last `Retry-After` and `X-RateLimit-Remaining` seen for this PR."""
+        seen = self.__dict__.get("_github_rate_limit_headers") or {}
+        return seen.get((repository.casefold(), pr_number), ("absent", "absent"))
+
     async def _pr_head_sha_for(self, repository: str, pr_number: int) -> str | None:
         """Current head SHA for an arbitrary (repository, pr_number) pair.
 
@@ -10664,7 +12551,7 @@ class SwarmDispatcher:
         url = f"https://api.github.com/repos/{repository}/pulls/{pr_number}"
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(url, headers=self._github_headers(repository))
+                resp = await self._github_pr_get(client, url, repository, pr_number)
                 resp.raise_for_status()
                 return (resp.json().get("head") or {}).get("sha")
         except Exception as exc:  # noqa: BLE001 — advisory only
@@ -11213,9 +13100,7 @@ class SwarmDispatcher:
         url = f"https://api.github.com/repos/{repository}/pulls/{pr_number}"
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(
-                    url, headers=self._github_headers(repository)
-                )
+                resp = await self._github_pr_get(client, url, repository, pr_number)
                 resp.raise_for_status()
                 return resp.json()
         except Exception as exc:
@@ -12729,13 +14614,73 @@ class SwarmDispatcher:
         )
 
     @staticmethod
-    def _lanius_pr_prompt(t: SwarmTrigger, parent: int | None) -> str:
-        parent_line = (
-            f"The PR body references parent issue #{parent}."
-            if parent
-            else "No parent issue reference found in the PR body — find it "
-            "yourself or treat gate inheritance as blocked."
-        )
+    def _lanius_pr_prompt(
+        t: SwarmTrigger, parent: int | None, parent_task: str | None = None
+    ) -> str:
+        # The verified-task wording applies only when no parent issue is
+        # identified; every other path keeps the issue-gate prompt unchanged.
+        task_only = bool(parent_task) and not parent
+        if parent:
+            parent_line = f"The PR body references parent issue #{parent}."
+        elif parent_task:
+            parent_line = verified_parent_task_note(parent_task) + (
+                " No issue is identified for this PR, so do not retrieve or "
+                "initialize issue gates. Emit `GATE_INHERITANCE: clear` if "
+                "that is the only gate concern. If you block solely because "
+                "the parent issue is missing, emit `GATE_BLOCK_REASON: "
+                "missing_parent_issue` on a separate line. For every other "
+                "block, report its pending gates and omit that reason."
+            )
+        else:
+            parent_line = (
+                "No parent issue reference found in the PR body — find it "
+                "yourself or treat gate inheritance as blocked."
+            )
+        if task_only:
+            report_lines = (
+                "Report through the final GATE_INHERITANCE, GATE_PENDING and, "
+                "only for a missing parent issue, GATE_BLOCK_REASON lines"
+            )
+            retrieve_clause = (
+                "GATE-STATUS SOURCE OF TRUTH: when a parent issue is "
+                "identified, the parent issue's `gate_status` "
+                "lives on its NEOTOMA issue entity, NOT in the GitHub issue body "
+                "(the GitHub body never carries gate metadata). For an "
+                "identified parent issue, retrieve it "
+            )
+            blocked_clause = "For an identified issue, only emit `blocked` when "
+            override_clause = (
+                "publication steps in your role prompt. When a verified parent "
+                "task is supplied and no parent issue is identified, it also "
+                "overrides any role-prompt instruction to retrieve issue gates: "
+                "there is no issue entity to retrieve. Do NOT post a blocking "
+            )
+            routed_lines = "GATE_INHERITANCE, GATE_PENDING and GATE_BLOCK_REASON "
+            final_line = (
+                "End your reply with one verdict line: `GATE_INHERITANCE: clear` "
+            )
+            omit_clause = (
+                "Omit the line when clear or when no gate is pending. "
+                "Only a block solely for an absent parent issue may add "
+                "`GATE_BLOCK_REASON: missing_parent_issue`; omit it for all "
+                "other blocks."
+            )
+        else:
+            report_lines = "Report only through the final GATE_INHERITANCE and GATE_PENDING lines"
+            retrieve_clause = (
+                "GATE-STATUS SOURCE OF TRUTH: the parent issue's `gate_status` "
+                "lives on its NEOTOMA issue entity, NOT in the GitHub issue body "
+                "(the GitHub body never carries gate metadata). ALWAYS retrieve it "
+            )
+            blocked_clause = "Only emit `blocked` when "
+            override_clause = (
+                "publication steps in your role prompt. Do NOT post a blocking "
+            )
+            routed_lines = "GATE_INHERITANCE and GATE_PENDING "
+            final_line = (
+                "End your reply with exactly one line: `GATE_INHERITANCE: clear` "
+            )
+            omit_clause = "Omit the line when clear."
         return (
             "Invoke the lanius agent per your appended system prompt.\n\n"
             f"A pull request event ({t.action}) fired for "
@@ -12744,12 +14689,9 @@ class SwarmDispatcher:
             f"{parent_line}\n\n"
             "Run your PR-opened protocol: enforce PR gate inheritance from "
             "the parent issue. Do NOT post GitHub comments or assign reviewers "
-            "or make any other GitHub write. Report only through the final "
-            "GATE_INHERITANCE and GATE_PENDING lines; the dispatcher posts the "
+            f"or make any other GitHub write. {report_lines}; the dispatcher posts the "
             "blocking comment and routes Vanellus into review when clear.\n\n"
-            "GATE-STATUS SOURCE OF TRUTH: the parent issue's `gate_status` "
-            "lives on its NEOTOMA issue entity, NOT in the GitHub issue body "
-            "(the GitHub body never carries gate metadata). ALWAYS retrieve it "
+            f"{retrieve_clause}"
             "first: `retrieve_entity_by_identifier(entity_type='issue', "
             "identifier=<number>, identifier_field='github_number')` (scoped to "
             "this repo), and read `gate_status` from that entity's snapshot. "
@@ -12765,7 +14707,7 @@ class SwarmDispatcher:
             "emit `GATE_INHERITANCE: clear`. Legacy init MUST MERGE, never "
             "overwrite: if the entity already has a `gate_status` with any gate "
             "at `signed_off`/`waived`, PRESERVE those exactly — never downgrade "
-            "a `signed_off` gate to `pending`. Only emit `blocked` when "
+            f"a `signed_off` gate to `pending`. {blocked_clause}"
             "`gate_status` exists AND a pre-impl gate is genuinely `pending` "
             "(unsigned). Merge stays operator-gated regardless, per the "
             "fail-open-for-review guardrail. To run the full issue pipeline on "
@@ -12773,19 +14715,19 @@ class SwarmDispatcher:
             "backfill via `trigger_swarm_pr.py issue <n>`.\n\n"
             f"{_agent_prompt_instruction('lanius', 'PR gate inheritance')}\n\n"
             "AUTHORITATIVE FOR THIS RUN: this instruction overrides the "
-            "publication steps in your role prompt. Do NOT post a blocking "
+            f"{override_clause}"
             "comment, do NOT assign or request a reviewer, and make no other "
             "GitHub write. The dispatcher posts the gate-block comment and "
-            "routes Vanellus from your GATE_INHERITANCE and GATE_PENDING "
+            f"routes Vanellus from your {routed_lines}"
             "lines.\n\n"
-            "End your reply with exactly one line: `GATE_INHERITANCE: clear` "
+            f"{final_line}"
             "or `GATE_INHERITANCE: blocked` so the dispatcher can route. When "
             "you emit `blocked`, add a SECOND line naming the unsigned pre-impl "
             "gates as a comma-separated list, e.g. `GATE_PENDING: arch,ux` — "
             "the dispatcher uses this to guarantee the lens agent that owns "
             "each pending gate a seat on the (capped) review panel, so a gate "
             "can never stay blocked because its owning lens was never "
-            "re-invoked. Omit the line when clear."
+            f"re-invoked. {omit_clause}"
         )
 
     @staticmethod
@@ -13029,21 +14971,26 @@ class SwarmDispatcher:
             "you if your gh call fails)."
         )
         if read_only:
-            _position = _position.replace(
-                "in the comment and in your reply", "in the returned review"
+            _ro_start = "\n".join(
+                line for line in (_header_line, "**<VERDICT>**") if line
             )
             comment_identity_block = (
                 "Return your complete review in your final message between "
                 "`<<<DISPATCHER_REVIEW>>>` and `<<<END_DISPATCHER_REVIEW>>>`. "
-                "The dispatcher publishes it. Start the review with these "
-                "lines, and nothing before them inside the section:\n\n"
-                f"```\n{_start_lines}\n```\n\n"
+                "The dispatcher publishes it and adds the head marker itself. "
+                "Start the review with these lines, and nothing before them "
+                "inside the section:\n\n"
+                f"```\n{_ro_start}\n```\n\n"
                 "Replace `**<VERDICT>**` with your bold verdict token. "
-                + _position
-                + " If the SHA is not supplied above, fetch the PR's current "
-                "`headRefOid` and substitute the full 40-hex SHA in the marker. "
-                "Write the rest of your review after the verdict line. "
-                "Make no GitHub write; return all publication content here."
+                + (
+                    f"{GATE_VERDICT_POSITION_RULE}. " if _header_line else ""
+                )
+                + "Write no `<!-- review:... -->` marker and never write the "
+                "text `review:` followed by a name anywhere in your reply: a "
+                "reply containing one is refused. Write the rest of your "
+                "review after the verdict line. "
+                "Make no GitHub write; return all publication content here. "
+                + _NO_NEOTOMA_NOTE
             )
         return (
             f"Invoke the {lens.agent} agent per your appended system prompt.\n\n"
@@ -13081,6 +15028,8 @@ class SwarmDispatcher:
         pending_gates: set[str] | None = None,
         reviewed_head: str | None = None,
         carried: "dict[str, review_carry.Carried] | None" = None,
+        checks_green_head: str = "",
+        parent_task: str | None = None,
     ) -> str:
         # The captured lens reviews are embedded INLINE below so the aggregator
         # never has to re-fetch them via `gh`. Vanellus runs diff-only
@@ -13116,8 +15065,16 @@ class SwarmDispatcher:
             "Invoke the vanellus agent per your appended system prompt.\n\n"
             f"Aggregate the review panel for PR {t.repository}#{t.number}: "
             f"{t.title}\n{t.html_url}\n"
-            f"Parent issue: #{parent if parent else 'unknown'}. "
-            f"Panel lenses that reviewed: {', '.join(lenses) or '(none — GHA baseline only)'}.\n\n"
+            + (
+                f"Parent issue: #{parent}. "
+                if parent or not parent_task
+                else f"Parent issue: none. {verified_parent_task_note(parent_task)} "
+                "The missing issue is NOT a blocker: do not record "
+                "`block_kind=process` or BLOCKED for it, and do not sign gates "
+                "on any issue entity or create one. Every content finding "
+                "still blocks exactly as it would otherwise. "
+            )
+            + f"Panel lenses that reviewed: {', '.join(lenses) or '(none — GHA baseline only)'}.\n\n"
             "The panel lens reviews are provided INLINE below — aggregate them "
             "directly. Do NOT fetch them via gh; you run without a repo checkout "
             "and that read fails. (Optionally read the Claude GHA baseline with "
@@ -13129,7 +15086,10 @@ class SwarmDispatcher:
             "----- PANEL LENS REVIEWS (inline) -----\n"
             f"{panel_block}\n"
             "----- END PANEL LENS REVIEWS -----\n\n"
-            f"{_agent_prompt_instruction('vanellus', 'PR steward')}\n\n"
+            + checks_green_note(
+                checks_green_head if checks_green_head == marker_head else ""
+            )
+            + f"{_agent_prompt_instruction('vanellus', 'PR steward')}\n\n"
             "POST YOUR AGGREGATED VERDICT AS A PR COMMENT using the gh CLI "
             f"(`gh pr comment {t.number} --repo {t.repository} --body ...`). "
             f"The comment MUST begin with the line `{marker}`. If the SHA is "
@@ -13153,6 +15113,22 @@ class SwarmDispatcher:
         )
 
     # ── GitHub helpers ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _verified_parent_task(t: SwarmTrigger) -> str | None:
+        """The tracked task this PR was delivered from, read from Apis's own
+        delivery ledger (``build_delivery.verified_parent_task``), or None.
+        The PR body is never consulted, so editing it cannot make the claim."""
+        try:
+            return build_delivery.verified_parent_task(
+                t.repository, t.number, t.head_ref, t.head_sha
+            )
+        except Exception as exc:  # noqa: BLE001 — fail closed to no-parent
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: parent-task lookup "
+                f"failed ({type(exc).__name__}) — treating as no parent"
+            )
+            return None
 
     @staticmethod
     def _parent_issue_number(pr_body: str, repository: str = "") -> int | None:
@@ -13404,6 +15380,89 @@ class SwarmDispatcher:
         )
         return await send(url, headers=headers, **kwargs)
 
+    async def _path_required_lenses(self, t: SwarmTrigger) -> frozenset[str]:
+        """Every lens the panel-gated approval tool will require for this PR at
+        this head (`approve_pr_as_app.py --panel path`): the path decision's
+        lenses AND, on a full-panel decision, the tool's diff-derived floor
+        (`legal` for a `LICENSE` or `package.json` change, a pre-registered
+        contributor's lens).
+
+        Read and decided by the tool's own code: `review_scope.fetch_scope` and
+        `review_scope.path_panel_for_pr` for the path decision (the scope file
+        from the PR's BASE branch, every changed path with renames counting both
+        sides), `review_scope.fetch_pr_files` and
+        `review_panel.fetch_gate_contributors` for the floor's inputs, and
+        `review_panel.approval_required_lenses` for the set, at this daemon's
+        `panel_max` (the tool's `APIS_PANEL_MAX`). A missing, unreadable or
+        malformed scope file is the full panel; an unreadable PR, file list or
+        parent issue, or any error here, is every lens the tool could require
+        (`review_panel.every_requirable_lens`), never a smaller set; one log
+        line names the reason. Seated by `select_panel` alongside its own
+        picks, never capped away, and read by finished detection and the
+        missing-lens sweep, so Apis never finishes a panel whose approval the
+        tool must refuse for a lens that was never seated.
+        """
+        ref = f"{t.repository}#{t.number}"
+        try:
+            pr_data = await self._fetch_pr(t.repository, t.number)
+            if not isinstance(pr_data, dict):
+                raise RuntimeError("the PR could not be read")
+            headers = self._github_headers(t.repository)
+            api_base = "https://api.github.com"
+            base_ref = str((pr_data.get("base") or {}).get("ref") or "")
+            async with httpx.AsyncClient(timeout=30) as client:
+                load = await review_scope.fetch_scope(
+                    client, api_base=api_base,
+                    repo=t.repository, base_ref=base_ref, headers=headers,
+                )
+                decision = await review_scope.path_panel_for_pr(
+                    client, api_base=api_base,
+                    repo=t.repository, pr=t.number, pr_data=pr_data,
+                    headers=headers, load=load,
+                )
+                changed_files: list[str] = []
+                contributors: set[str] = set()
+                if decision.full:
+                    # The tool's floor inputs, read the way the tool reads
+                    # them; a failed read raises into the fail-closed branch.
+                    changed_files, _rows = await review_scope.fetch_pr_files(
+                        client, api_base=api_base, repo=t.repository,
+                        pr=t.number, headers=headers,
+                    )
+                    parent = self._parent_issue_number(
+                        str(pr_data.get("body") or ""), t.repository
+                    )
+                    if parent is not None:
+                        contributors = await review_panel.fetch_gate_contributors(
+                            client, api_base=api_base, repo=t.repository,
+                            issue_number=parent, headers=headers,
+                        )
+            lenses = review_panel.approval_required_lenses(
+                decision,
+                gate_contributors=contributors,
+                changed_files=changed_files,
+                max_panel=self.config.panel_max,
+            )
+        except Exception as exc:  # noqa: BLE001 — unknown: every requirable lens
+            lenses = review_panel.every_requirable_lens()
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: required panel unreadable "
+                f"({type(exc).__name__}: {exc}) — seating every lens the "
+                f"approval tool could require {sorted(lenses)}"
+            )
+            return lenses
+        if load.scope is None:
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: scope file unusable ({load.error}) — "
+                f"seating the full panel {sorted(lenses)}"
+            )
+        else:
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: approval tool requires {sorted(lenses)}. "
+                f"{decision.reason}"
+            )
+        return lenses
+
     async def _changed_files(self, t: SwarmTrigger) -> list[str]:
         url = (
             f"https://api.github.com/repos/{t.repository}/pulls/"
@@ -13524,6 +15583,52 @@ class SwarmDispatcher:
             )
             return None
 
+    async def _carry_inputs(
+        self,
+        client: httpx.AsyncClient,
+        trigger: SwarmTrigger,
+        comments: list[dict],
+        names: list[str],
+        review_head: str,
+    ) -> tuple[
+        dict[str, list[review_carry.LensRecord]],
+        dict[str, review_delta.Delta | None],
+        review_scope.ScopeLoad,
+    ]:
+        """What the approval gate's carry decision reads, read the way it reads
+        it: lens records, the interdiff from each candidate head, and the repo's
+        review scope from the PR's BASE branch (`review_scope.fetch_scope`)."""
+        records = lens_records(comments)
+        heads = review_carry.candidate_heads(names, records, review_head)
+        base_ref = trigger.base_ref
+        if not base_ref:
+            resp = await client.get(
+                f"https://api.github.com/repos/{trigger.repository}/pulls/"
+                f"{trigger.number}",
+                headers=self._github_headers(trigger.repository),
+            )
+            resp.raise_for_status()
+            base_ref = str((resp.json().get("base") or {}).get("ref") or "")
+        deltas = {
+            head: await review_carry.fetch_interdiff(
+                client,
+                repo=trigger.repository,
+                base_ref=base_ref,
+                old_head=head,
+                new_head=review_head,
+                headers=self._github_headers(trigger.repository),
+            )
+            for head in heads
+        }
+        load = await review_scope.fetch_scope(
+            client,
+            api_base="https://api.github.com",
+            repo=trigger.repository,
+            base_ref=base_ref,
+            headers=self._github_headers(trigger.repository),
+        )
+        return records, deltas, load
+
     async def _rereview_selection(
         self,
         trigger: SwarmTrigger,
@@ -13535,40 +15640,26 @@ class SwarmDispatcher:
         """Which panel lenses this round must re-run, or None for the full panel.
 
         None on round 1 (no earlier verdict exists) and on ANY failure: the
-        narrowing only ever removes work when it can prove the removal.
+        narrowing only ever removes work when it can prove the removal. The
+        decision is the approval gate's own carry rule with the same scope
+        (`review_carry.select_rerun_for_load`), so a lens is never carried here
+        that the gate would refuse to carry; an unreadable scope re-runs it.
         """
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 comments = await self._lens_scoped_comments(
                     trigger.repository, trigger.number, client
                 )
-                records = lens_records(comments)
                 names = [item.lens for item in panel]
-                heads = review_carry.candidate_heads(names, records, review_head)
-                if not heads:
+                if not review_carry.candidate_heads(
+                    names, lens_records(comments), review_head
+                ):
                     return None
-                base_ref = trigger.base_ref
-                if not base_ref:
-                    resp = await client.get(
-                        f"https://api.github.com/repos/{trigger.repository}/pulls/"
-                        f"{trigger.number}",
-                        headers=self._github_headers(trigger.repository),
-                    )
-                    resp.raise_for_status()
-                    base_ref = str((resp.json().get("base") or {}).get("ref") or "")
-                deltas = {
-                    head: await review_carry.fetch_interdiff(
-                        client,
-                        repo=trigger.repository,
-                        base_ref=base_ref,
-                        old_head=head,
-                        new_head=review_head,
-                        headers=self._github_headers(trigger.repository),
-                    )
-                    for head in heads
-                }
-            return review_carry.select_rerun(
-                names, records, review_head, deltas, forced=forced
+                records, deltas, load = await self._carry_inputs(
+                    client, trigger, comments, names, review_head
+                )
+            return review_carry.select_rerun_for_load(
+                names, records, review_head, deltas, load=load, forced=forced
             )
         except Exception as exc:
             log.warning(
@@ -13576,6 +15667,33 @@ class SwarmDispatcher:
                 f"re-review selection failed ({exc}) — running the full panel"
             )
             return None
+
+    async def _stranded_carry_lenses(
+        self,
+        trigger: SwarmTrigger,
+        comments: list[dict],
+        head: str,
+        required: set[str] | frozenset[str],
+    ) -> list[str] | None:
+        """Required lenses with no verdict at *head* whose earlier verdict the
+        approval gate will not carry (`review_carry.stranded_lenses`), or None
+        when the inputs could not be read (the caller leaves the PR alone)."""
+        if not review_carry.awaiting_carry(required, lens_records(comments), head):
+            return []
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                records, deltas, load = await self._carry_inputs(
+                    client, trigger, comments, sorted(required), head
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: carry "
+                f"check unreadable ({exc}) — leaving it alone"
+            )
+            return None
+        return review_carry.stranded_lenses(
+            required, records, head, deltas, load=load
+        )
 
     async def _post_carry_note(
         self,
@@ -13634,6 +15752,7 @@ class SwarmDispatcher:
         parent: int | None = None,
         changed_files: list[str] | None = None,
         read_only: bool = False,
+        checks_green_head: str = "",
     ) -> str:
         """One prompt that has the pm, qa and ux lenses review together.
 
@@ -13685,6 +15804,24 @@ class SwarmDispatcher:
                     f"Apply the `{lens.lens}` lens criteria below. Return all "
                     "publication content in this lens's final block.\n\n"
                 )
+            # Return-only: the lens's review is one delimited section inside
+            # its block, so `unwrap_returned_review` judges each block exactly
+            # as it judges a single return-only lens's reply.
+            shape = (
+                f"{review_carry.combined_delimiter(lens.lens)}\n"
+                f"{DISPATCHER_REVIEW_BEGIN}\n{header}\n**<VERDICT>**\n"
+                f"<findings for the {lens.lens} lens only>\n"
+                f"{DISPATCHER_REVIEW_END}\n"
+                + (
+                    "<this lens's expectation update section, if asked for above>\n"
+                    if checkoff_block
+                    else ""
+                )
+                if read_only
+                else f"{review_carry.combined_delimiter(lens.lens)}\n{header}\n"
+                "**<VERDICT>**\n"
+                f"<findings for the {lens.lens} lens only>\n"
+            )
             sections.append(
                 f"######## LENS `{lens.lens}` (agent `{lens.agent}`) ########\n"
                 f"{own_prompt}"
@@ -13692,9 +15829,7 @@ class SwarmDispatcher:
                 f"{expectation_block}\n\n{blocking_rules}"
                 f"{checkoff_block}{gate_block}{foundation_block}\n\n"
                 "Your block, exactly in this shape:\n"
-                f"{review_carry.combined_delimiter(lens.lens)}\n{header}\n"
-                "**<VERDICT>**\n"
-                f"<findings for the {lens.lens} lens only>\n"
+                f"{shape}"
                 + (
                     "State in your findings that this lens ran diff-only in the "
                     "combined pass (no checkout, nothing executed).\n"
@@ -13710,25 +15845,43 @@ class SwarmDispatcher:
             + (
                 "Make no GitHub write. Return any expectation checklist "
                 "updates in the delimited sections requested below; the "
-                "dispatcher publishes them.\n\n"
+                "dispatcher publishes them. " + _NO_NEOTOMA_NOTE + "\n\n"
                 if read_only
                 else "Editing your pre-registered expectation checklist on the "
                 "parent issue, where a lens below asks for it, is the only "
                 "write you make.\n\n"
             )
-            + "Return ONE reply made of one block per lens, in this order. Each "
-            "block starts with its own delimiter line, then that lens's header "
-            "line EXACTLY as shown, then its verdict line (replace `**<VERDICT>**` "
-            "with your bold verdict token), then its findings. Never write one "
-            "lens's header or verdict inside another lens's block, do not quote "
-            "a verdict line anywhere, and add no artifact or attribution line of "
-            "your own after the last block. The dispatcher posts each block "
-            "under its head marker ("
-            + ", ".join(
-                f"`{compose_lens_review_marker(lens.lens, head)}`" for lens in lenses
+            + checks_green_note(checks_green_head if checks_green_head == head else "")
+            + (
+                "Return ONE reply made of one block per lens, in this order. Each "
+                "block starts with its own delimiter line, then "
+                f"`{DISPATCHER_REVIEW_BEGIN}`, then that lens's header line "
+                "EXACTLY as shown, then its verdict line (replace `**<VERDICT>**` "
+                "with your bold verdict token), then its findings, then "
+                f"`{DISPATCHER_REVIEW_END}`. Never write one lens's header or "
+                "verdict inside another lens's block, do not quote a verdict line "
+                "anywhere, and add no artifact or attribution line of your own "
+                "after the last block. The dispatcher publishes each lens's review "
+                "and adds its head marker itself. Write no `<!-- review:... -->` "
+                "marker and, outside the block delimiter lines, never write the "
+                "text `review:` followed by a name: a block containing one is "
+                "refused. A review whose second line is not its own verdict is "
+                f"read as not passing. {GATE_VERDICT_POSITION_RULE}.\n\n"
+                if read_only
+                else "Return ONE reply made of one block per lens, in this order. Each "
+                "block starts with its own delimiter line, then that lens's header "
+                "line EXACTLY as shown, then its verdict line (replace `**<VERDICT>**` "
+                "with your bold verdict token), then its findings. Never write one "
+                "lens's header or verdict inside another lens's block, do not quote "
+                "a verdict line anywhere, and add no artifact or attribution line of "
+                "your own after the last block. The dispatcher posts each block "
+                "under its head marker ("
+                + ", ".join(
+                    f"`{compose_lens_review_marker(lens.lens, head)}`" for lens in lenses
+                )
+                + "); do not write a marker yourself. A block whose second line is "
+                f"not its own verdict is read as not passing. {GATE_VERDICT_POSITION_RULE}.\n\n"
             )
-            + "); do not write a marker yourself. A block whose second line is "
-            f"not its own verdict is read as not passing. {GATE_VERDICT_POSITION_RULE}.\n\n"
             + "\n".join(sections)
         )
 
@@ -13744,29 +15897,42 @@ class SwarmDispatcher:
         pending_gates: set[str],
         live_gates,
         signals,
-    ) -> dict[str, SkillResult]:
+        checks_green_head: str = "",
+    ) -> CombinedPassResults:
         """Review the panel's pm/qa/ux lenses in one mid-tier dispatch.
 
         Returns a synthesized result per lens whose block the gate's own reader
         accepts (its header names that lens's agent, its verdict is readable),
         already posted as that lens's own head-marked comment. Anything less —
         fewer than two combinable lenses, a failed run, an unreadable or
-        missing block — leaves that lens out, and it runs alone as before."""
+        missing block — leaves that lens out, and it runs alone as before.
+
+        When the first lens's class is opted in to Fly the pass runs
+        return-only, as a single lens does: the class picks the runner, each
+        block must be exactly one well-formed review section
+        (`unwrap_returned_review`), and the result names those lenses and their
+        expectation updates for the panel loop to publish."""
         combinable = [item for item in panel if item.lens in review_carry.COMBINED_LENSES]
         if len(combinable) < 2:
-            return {}
+            return CombinedPassResults()
         try:
             first = combinable[0]
             if not all(self._lens_agent_prompt(item.agent) for item in combinable):
                 # A lens whose own prompt cannot be loaded cannot be reviewed
                 # in a pass that promises its full duties: run them one by one.
-                return {}
+                return CombinedPassResults()
+            # The run is launched as `first` under its class, so this is the
+            # same decision the runner makes for it.
+            return_only = _lens_return_only_on_fly(first)
+            # Return-only: the class decides the runner. Otherwise the local
+            # prompt has the lens post its own comments, so it stays on the Mac.
+            runner_kwargs = {} if return_only else {"runner": "local"}
             result = await run_skill(
                 first.agent,
                 self._combined_prompt(
                     trigger, combinable, expectations, review_head, parent,
-                    changed_files,
-                    read_only=_lens_return_only_on_fly(first),
+                    changed_files, read_only=return_only,
+                    checks_green_head=checks_green_head,
                 ),
                 github_token=_token_for_agent_on_repo(first.agent, trigger.repository),
                 include_github_contract=True,
@@ -13783,36 +15949,92 @@ class SwarmDispatcher:
                 seated_reviewer=True,
                 # Read-only on Fly: a lens reviews and never delivers.
                 github_read_only=True,
+                **runner_kwargs,
+                repository=trigger.repository,
                 action_class=model_tiering.lens_review_class(first.lens),
                 escalation_signals=signals,
             )
             if not result.ok:
-                return {}
-            blocks = review_carry.split_combined_reply(
-                result.stdout, [item.lens for item in combinable]
-            )
+                return CombinedPassResults()
+            lens_names = [item.lens for item in combinable]
+            if return_only:
+                # Return-only combined replies are validated exactly as
+                # received; nothing is removed before validation. Text outside
+                # every block must be whitespace, or no lens of the pass is
+                # accepted and each runs alone.
+                blocks, leading = review_carry.split_combined_reply_raw(
+                    result.stdout, lens_names
+                )
+                if leading.strip():
+                    log.warning(
+                        f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                        "combined return-only reply has text outside its lens "
+                        "blocks — lenses run one by one"
+                    )
+                    return CombinedPassResults()
+            else:
+                blocks = review_carry.split_combined_reply(result.stdout, lens_names)
             accepted: dict[str, SkillResult] = {}
+            updates: dict[str, str] = {}
             for item in combinable:
                 block = blocks.get(item.lens)
-                if block is None or lens_own_verdict(block, lens_agent=item.agent) is None:
+                if block is None:
+                    continue
+                if return_only:
+                    unwrapped, update = unwrap_returned_review(
+                        dataclasses.replace(result, stdout=block),
+                        item.agent, item.lens, review_head,
+                    )
+                    if not unwrapped.ok or lens_own_verdict(
+                        unwrapped.stdout, lens_agent=item.agent
+                    ) is None:
+                        continue  # never posted, signed or persisted: runs alone
+                    accepted[item.lens] = unwrapped
+                    if update:
+                        updates[item.lens] = update
+                    continue
+                if lens_own_verdict(block, lens_agent=item.agent) is None:
                     continue
                 accepted[item.lens] = dataclasses.replace(result, stdout=block)
-            posted = await self._post_combined_comments(trigger, accepted, review_head)
-            return {lens: res for lens, res in accepted.items() if lens in posted}
+            remote_agents = (
+                {item.lens: item.agent for item in combinable if item.lens in accepted}
+                if return_only
+                else {}
+            )
+            posted = await self._post_combined_comments(
+                trigger, accepted, review_head, remote_agents=remote_agents
+            )
+            kept = {lens: res for lens, res in accepted.items() if lens in posted}
+            return CombinedPassResults(
+                kept,
+                remote_lenses=set(kept) if return_only else (),
+                expectation_updates={
+                    lens: text for lens, text in updates.items() if lens in kept
+                },
+            )
         except Exception as exc:
             log.warning(
                 f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: combined "
                 f"pm/qa/ux pass failed ({exc}) — lenses run one by one"
             )
-            return {}
+            return CombinedPassResults()
 
     async def _post_combined_comments(
         self,
         trigger: SwarmTrigger,
         accepted: dict[str, SkillResult],
         review_head: str,
+        *,
+        remote_agents: dict[str, str] | None = None,
     ) -> set[str]:
-        """Post each accepted lens's own verdict comment; the lenses posted."""
+        """Post each accepted lens's own verdict comment; the lenses posted.
+
+        ``remote_agents`` (lens -> agent) names the lenses that ran
+        return-only. Each is posted exactly as a single return-only lens is:
+        `verified_remote_comment`'s shape, as the lens's own App when it has
+        one (`_post_remote_lens_verdict`), and not at all when the final
+        comment would be read differently."""
+        remote = remote_agents or {}
         posted: set[str] = set()
         combined_by = next(iter(accepted.values())).skill if accepted else ""
         if not accepted or not review_head:
@@ -13829,6 +16051,31 @@ class SwarmDispatcher:
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 for lens, res in accepted.items():
+                    if lens in remote:
+                        if _github_app_token.lens_has_own_app(lens):
+                            if await self._post_remote_lens_verdict(
+                                client, url, trigger, lens, remote[lens],
+                                res.stdout, review_head,
+                            ):
+                                posted.add(lens)
+                            continue
+                        remote_body = verified_remote_comment(
+                            lens, remote[lens], res.stdout, review_head
+                        )
+                        if remote_body is None:
+                            log.error(
+                                f"[{DAEMON_NAME}] review:{lens} final comment would "
+                                f"be read differently on {trigger.repository}"
+                                f"#{trigger.number}: not posted"
+                            )
+                            continue
+                        resp = await client.post(
+                            url, json={"body": remote_body},
+                            headers=self._github_headers(trigger.repository),
+                        )
+                        resp.raise_for_status()
+                        posted.add(lens)
+                        continue
                     body = review_carry.compose_combined_comment(
                         res.stdout,
                         compose_lens_review_marker(lens, review_head),
@@ -14002,25 +16249,72 @@ class SwarmDispatcher:
     # ── Neotoma helpers ──────────────────────────────────────────────────────
 
     async def _store_entities(
-        self, entities: list[dict], idempotency_key: str
+        self,
+        entities: list[dict],
+        idempotency_key: str,
+        relationships: list[dict] | None = None,
+        *,
+        retry_transient: bool = False,
     ) -> dict | None:
+        """POST ``entities`` to Neotoma ``/store``; None on any failure.
+
+        Default: one attempt with a 30s time limit, as every caller has always
+        had. ``retry_transient=True`` (the large ``pr_review`` store) uses the
+        shared bounded Neotoma retry instead: timeouts, connection errors, 429
+        and 5xx are retried with the same body and idempotency key, each
+        attempt may take up to ``PR_REVIEW_STORE_ATTEMPT_TIMEOUT_SECONDS``,
+        and the whole store is capped at ``PR_REVIEW_STORE_TOTAL_SECONDS``.
+        Any other 4xx fails at once. A 2xx reporting undeclared fields is
+        returned as before, for the caller to refuse.
+        """
         if not self.config.neotoma_token:
             log.warning(f"[{DAEMON_NAME}] NEOTOMA_BEARER_TOKEN unset — store skipped")
             return None
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    f"{self.config.neotoma_base_url}/store",
-                    json={"entities": entities, "idempotency_key": idempotency_key},
-                    headers={
-                        "Authorization": f"Bearer {self.config.neotoma_token}"
-                    },
+            if not retry_transient:
+                return await self._store_entities_once(
+                    entities, idempotency_key, 30, relationships
                 )
-                resp.raise_for_status()
-                return resp.json() if resp.content else {}
+            return await _neotoma_transient.acall_with_transient_retry(
+                lambda time_limit: self._store_entities_once(
+                    entities, idempotency_key, time_limit, relationships
+                ),
+                label=f"store {idempotency_key}",
+                attempt_timeout=PR_REVIEW_STORE_ATTEMPT_TIMEOUT_SECONDS,
+                total_seconds=PR_REVIEW_STORE_TOTAL_SECONDS,
+                retry_status=True,
+            )
         except Exception as exc:
-            log.error(f"[{DAEMON_NAME}] Neotoma store failed ({idempotency_key}): {exc}")
+            log.error(
+                f"[{DAEMON_NAME}] Neotoma store failed ({idempotency_key}): "
+                f"{_neotoma_transient.describe(exc)}"
+            )
             return None
+
+    async def _store_entities_once(
+        self,
+        entities: list[dict],
+        idempotency_key: str,
+        time_limit: float,
+        relationships: list[dict] | None = None,
+    ) -> dict:
+        """One Neotoma ``/store`` POST; raises on any failure.
+
+        A named method rather than a nested function so the dispatcher's
+        GitHub-write guard test can allow exactly this Neotoma write by name.
+        ``relationships`` is added to the payload only when given.
+        """
+        payload: dict = {"entities": entities, "idempotency_key": idempotency_key}
+        if relationships:
+            payload["relationships"] = relationships
+        async with httpx.AsyncClient(timeout=time_limit) as client:
+            resp = await client.post(
+                f"{self.config.neotoma_base_url}/store",
+                json=payload,
+                headers={"Authorization": f"Bearer {self.config.neotoma_token}"},
+            )
+            resp.raise_for_status()
+            return resp.json() if resp.content else {}
 
     async def _log_harness_event(self, t: SwarmTrigger) -> None:
         entities = [
@@ -14147,6 +16441,7 @@ class SwarmDispatcher:
                     f"pr-review-{t.repository}-{t.number}-{sha[:12]}-"
                     f"{content_digest(digest_basis)}"
                 ),
+                retry_transient=True,
             )
             expected_lenses = {entity["review_lens"] for entity in entities}
             review_store_confirmed = bool(store_result) and not (
@@ -14399,6 +16694,25 @@ class SwarmDispatcher:
             ) == sha
             for row in (data or {}).get("entities", [])
         )
+
+    async def _neotoma_get(self, path: str) -> dict | None:
+        """GET from Neotoma; the decoded response, or None on any failure."""
+        if not self.config.neotoma_token:
+            log.warning(
+                f"[{DAEMON_NAME}] NEOTOMA_BEARER_TOKEN unset — {path} skipped"
+            )
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(
+                    f"{self.config.neotoma_base_url}/{path}",
+                    headers={"Authorization": f"Bearer {self.config.neotoma_token}"},
+                )
+                response.raise_for_status()
+                return response.json() if response.content else {}
+        except Exception as exc:
+            log.warning(f"[{DAEMON_NAME}] Neotoma GET {path} failed: {exc}")
+            return None
 
     async def _neotoma_post(self, path: str, payload: dict) -> dict | None:
         """POST to Neotoma and return the decoded response when available."""
@@ -14730,8 +17044,15 @@ class SwarmDispatcher:
         agents_by_lens: dict[str, str] | None = None,
         *,
         reviewed_head: str = "",
+        remote_lenses: frozenset[str] = frozenset(),
     ) -> None:
         """Backfill `review:<lens>` PR comments the panelists failed to post.
+
+        ``remote_lenses``: lenses whose prompt was return-only (they hold no
+        GitHub write access, on Fly or after a Mac fallback). Their review is
+        posted from here as the lens's own App when it has one (never the
+        shared identity then); a lens with no App takes the ordinary fallback
+        post below, under the shared identity.
 
         Headless `claude --print` panelists cannot answer permission prompts,
         so their `gh` comment step often fails silently; Vanellus aggregates
@@ -14778,6 +17099,18 @@ class SwarmDispatcher:
                 for lens in lenses_missing_comments(
                     bodies, list(captured), head_sha=head_sha
                 ):
+                    if lens in remote_lenses and _github_app_token.lens_has_own_app(lens):
+                        try:
+                            await self._post_remote_lens_verdict(
+                                client, url, t, lens, agents.get(lens, ""),
+                                captured[lens], head_sha,
+                            )
+                        except Exception as exc:  # noqa: BLE001 — lens stays pending
+                            log.error(
+                                f"[{DAEMON_NAME}] review:{lens} post failed on "
+                                f"{t.repository}#{t.number}: {type(exc).__name__}"
+                            )
+                        continue
                     if _github_app_token.lens_has_own_app(lens):
                         # A comment posted with the dispatcher's shared token is
                         # never read as this lens's verdict (the lens is read only
@@ -14790,10 +17123,21 @@ class SwarmDispatcher:
                             f"#{t.number}; the lens stays pending until its App posts"
                         )
                         continue
-                    body = compose_fallback_comment(
-                        lens, agents.get(lens, "unknown panelist"), captured[lens],
-                        head_sha,
-                    )
+                    if lens in remote_lenses:
+                        body = verified_remote_comment(
+                            lens, agents.get(lens, ""), captured[lens], head_sha
+                        )
+                        if body is None:
+                            log.error(
+                                f"[{DAEMON_NAME}] review:{lens} final comment would be "
+                                f"read differently on {t.repository}#{t.number}: not posted"
+                            )
+                            continue
+                    else:
+                        body = compose_fallback_comment(
+                            lens, agents.get(lens, "unknown panelist"),
+                            captured[lens], head_sha,
+                        )
                     post = await client.post(
                         url, json={"body": body}, headers=self._github_headers(t.repository)
                     )
@@ -14807,6 +17151,119 @@ class SwarmDispatcher:
                 f"[{DAEMON_NAME}] fallback review comments failed for "
                 f"{t.repository}#{t.number}: {exc}"
             )
+
+    @staticmethod
+    async def _lens_app_token(lens: str, agent: str, repository: str) -> str:
+        """The lens's own App token for *repository*, or "" (never another
+        identity). The agent must act as exactly this lens's declared App."""
+        identity = _app_identity_for_agent(agent)
+        if (
+            not identity
+            or identity != _github_app_token.reviewer_identity(lens)
+            or not _github_app_token.identity_declared(identity)
+        ):
+            log.error(
+                f"[{DAEMON_NAME}] the {lens} lens has no declared App identity; "
+                "its returned output is not published"
+            )
+            return ""
+        return await asyncio.to_thread(_token_for_agent_on_repo, agent, repository)
+
+    async def _post_remote_lens_verdict(
+        self, client, url: str, t: SwarmTrigger, lens: str, agent: str,
+        text: str, head_sha: str,
+    ) -> bool:
+        """Post a return-only lens's review as that lens's own App. Fails
+        closed: no declared App, no token, or a failed post leaves the lens
+        pending. Never uses the shared identity and never logs the token."""
+        token = await self._lens_app_token(lens, agent, t.repository)
+        if not token:
+            log.error(
+                f"[{DAEMON_NAME}] no App token for the {lens} lens on "
+                f"{t.repository}#{t.number}: the lens stays pending"
+            )
+            return False
+        body = verified_remote_comment(lens, agent, text, head_sha)
+        if body is None:
+            log.error(
+                f"[{DAEMON_NAME}] review:{lens} final comment would be read "
+                f"differently on {t.repository}#{t.number}: not posted"
+            )
+            return False
+        resp = await client.post(
+            url,
+            json={"body": body},
+            headers={"Accept": "application/vnd.github+json",
+                     "Authorization": f"Bearer {token}"},
+        )
+        resp.raise_for_status()
+        log.info(
+            f"[{DAEMON_NAME}] posted review:{lens} for {t.repository}#{t.number} "
+            "as the lens's own App"
+        )
+        return True
+
+    async def _publish_expectation_updates(
+        self, t: SwarmTrigger, parent: int | None, updates: dict[str, str],
+        agents_by_lens: dict[str, str],
+    ) -> None:
+        """Edit each return-only lens's own expectation checklist on the parent
+        issue, as that lens's App, the way a local lens edits it with `gh`.
+        A lens with no App of its own edits under the shared identity. Best
+        effort and never raises: a missed update leaves boxes unchecked."""
+        if not parent or not updates:
+            return
+        url = f"https://api.github.com/repos/{t.repository}/issues/{parent}/comments"
+        for lens, text in updates.items():
+            header = f"**{EXPECTATION_MARKER} ({lens})**"
+            try:
+                if not text.lstrip().startswith(header):
+                    log.warning(
+                        f"[{DAEMON_NAME}] {lens} expectation update does not keep "
+                        "its header: not published"
+                    )
+                    continue
+                if _github_app_token.lens_has_own_app(lens):
+                    token = await self._lens_app_token(
+                        lens, agents_by_lens.get(lens, ""), t.repository
+                    )
+                    if not token:
+                        continue  # an App with no token never falls back
+                    write_headers = {"Accept": "application/vnd.github+json",
+                                     "Authorization": f"Bearer {token}"}
+                else:
+                    if not await self._require_github_write_credential(
+                        t.repository, "expectation update",
+                        detail=f"{t.repository}#{parent}",
+                    ):
+                        continue
+                    write_headers = self._github_headers(t.repository)
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.get(
+                        url, params={"per_page": 100},
+                        headers=self._github_headers(t.repository),
+                    )
+                    resp.raise_for_status()
+                    own = [
+                        c for c in lens_authors.scope_lens_comments(
+                            resp.json(), await asyncio.to_thread(lens_comment_authors)
+                        )
+                        if str(c.get("body", "")).lstrip().startswith(header)
+                    ]
+                    if not own:
+                        continue
+                    patch = await client.patch(
+                        f"https://api.github.com/repos/{t.repository}/issues/comments/"
+                        f"{own[-1]['id']}",
+                        json={"body": text.strip()},
+                        headers=write_headers,
+                    )
+                    patch.raise_for_status()
+            except Exception as exc:  # noqa: BLE001 — best effort
+                log.warning(
+                    f"[{DAEMON_NAME}] {lens} expectation update on "
+                    f"{t.repository}#{parent} failed: {type(exc).__name__}"
+                )
 
     async def _post_gate_block(
         self, t: SwarmTrigger, parent: int | None, pending: set[str]
@@ -15481,6 +17938,94 @@ class SwarmDispatcher:
     _REVIEW_DEFERRED_MARKER = "<!-- review-deferred-until:{iso} -->"
     _REVIEW_DEFERRED_RE = re.compile(r"<!-- review-deferred-until:([^ ]+) -->")
 
+    # Rides in the same comment as a deferral marker when the deferral was a
+    # Neotoma read failure: the consecutive count at one head, so the retry
+    # bound survives restarts without a new store.
+    _NEOTOMA_DEFERRAL_MARKER = (
+        "<!-- review-deferred-neotoma attempt={attempt} head={head} -->"
+    )
+    _NEOTOMA_DEFERRAL_RE = re.compile(
+        r"<!-- review-deferred-neotoma attempt=(\d+) head=([0-9a-f]*) -->"
+    )
+    # Any Neotoma deferral marker, readable or not: one that carries this
+    # prefix but fails _NEOTOMA_DEFERRAL_RE has an unknown count.
+    _NEOTOMA_DEFERRAL_PREFIX = "<!-- review-deferred-neotoma"
+
+    # The same shape for a GitHub rate-limit deferral: its consecutive count at
+    # one head, so that deferral is bounded too (failure_posture.md rule 5).
+    _GITHUB_DEFERRAL_MARKER = (
+        "<!-- review-deferred-github attempt={attempt} head={head} -->"
+    )
+    _GITHUB_DEFERRAL_RE = re.compile(
+        r"<!-- review-deferred-github attempt=(\d+) head=([0-9a-f]*) -->"
+    )
+    _GITHUB_DEFERRAL_PREFIX = "<!-- review-deferred-github"
+
+    async def _prior_neotoma_deferral_attempts(self, t: SwarmTrigger) -> int | None:
+        """Consecutive Neotoma deferrals already recorded for this PR head."""
+        return await self._prior_deferral_attempts(
+            t, self._NEOTOMA_DEFERRAL_RE, self._NEOTOMA_DEFERRAL_PREFIX, "Neotoma"
+        )
+
+    async def _prior_github_deferral_attempts(self, t: SwarmTrigger) -> int | None:
+        """Consecutive GitHub rate-limit deferrals already recorded for this PR head."""
+        return await self._prior_deferral_attempts(
+            t, self._GITHUB_DEFERRAL_RE, self._GITHUB_DEFERRAL_PREFIX, "GitHub"
+        )
+
+    async def _prior_deferral_attempts(
+        self, t: SwarmTrigger, marker_re: re.Pattern, prefix: str, kind: str
+    ) -> int | None:
+        """Consecutive deferrals of one *kind* already recorded for this PR head.
+
+        Read from the newest live deferral marker (the same last-write-wins walk
+        the deferred sweep uses): 0 when there is none, when a verdict or a
+        deferral of another kind followed it, or when it was for another head.
+        None when any page of the comments cannot be read, or when the newest
+        live marker of this kind has a count that cannot be parsed, so the
+        caller fails closed.
+        """
+        head = _normalise_full_sha(t.head_sha)
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                # Every page: the newest marker sits on a later page once a
+                # thread passes 100 comments, and a first-page count restarts
+                # at zero there, so the bound would never be reached.
+                raw, complete = await self._issue_comments_scan(
+                    t.repository, t.number, client
+                )
+                if not complete:
+                    raise RuntimeError("comment scan did not reach the last page")
+                comments = await self._swarm_authored(t.repository, t.number, raw)
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: {kind} retry "
+                f"count unreadable ({type(exc).__name__})"
+            )
+            return None
+        attempts: int | None = 0
+        for c in comments:
+            body = c.get("body", "")
+            if self._REVIEW_DEFERRED_RE.search(body):
+                m = marker_re.search(body)
+                if m:
+                    attempts = int(m.group(1)) if m.group(2) == head else 0
+                elif prefix in body:
+                    # A marker of this kind whose count cannot be read: unknown,
+                    # not zero, or a malformed latest marker would reopen
+                    # retries an earlier marker had already exhausted.
+                    attempts = None
+                else:
+                    attempts = 0  # a deferral of another kind
+            elif _VANELLUS_COMMENT_MARKER in body:
+                attempts = 0
+        if attempts is None:
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: latest {kind} "
+                "deferral marker has an unreadable retry count"
+            )
+        return attempts
+
     async def _handle_panel_session_limit(
         self,
         t: SwarmTrigger,
@@ -15495,16 +18040,75 @@ class SwarmDispatcher:
     ) -> None:
         """Surface an incomplete review without fabricating a verdict.
 
-        Usage limits and provider exhaustion get a durable retry marker because
-        capacity can recover. Stale-head, execution, and unverified-verdict
-        failures require attention and must not borrow that self-clearing copy.
+        Usage limits, provider exhaustion, a Neotoma read that did not
+        complete and a GitHub rate limit that outlasted the in-place retries
+        get a durable retry marker because each can recover. The Neotoma and
+        GitHub kinds are each bounded by ``APIS_NEOTOMA_RETRY_LIMIT``
+        consecutive deferrals of that kind at one head, counted from a marker
+        of the same shape; at the limit, or when the count cannot be read, the
+        panel stops for attention naming Neotoma or GitHub rate limits (with
+        the last ``Retry-After`` and ``X-RateLimit-Remaining`` values seen).
+        Stale-head, execution, and unverified-verdict failures require
+        attention and must not borrow that self-clearing copy.
         Successful and failed lens names remain visible on partial panels.
         Best-effort; never raises.
         """
-        auto_resume = reason in {"usage limit", "provider capacity exhausted"}
+        neotoma_attempt = 0
+        if reason == NEOTOMA_TEMPORARILY_UNAVAILABLE:
+            # Bounded: count consecutive Neotoma deferrals at this head from the
+            # live deferral marker. Past the limit, or when the count cannot be
+            # read, stop for operator attention and name Neotoma availability.
+            limit = _neotoma_retry_limit()
+            prior = await self._prior_neotoma_deferral_attempts(t)
+            if prior is None or prior >= limit:
+                reason = (
+                    "Neotoma availability: the agent definition or policy "
+                    "could not be read"
+                    + (
+                        f" after {limit} automatic retries"
+                        if prior is not None
+                        else " and the retry count could not be confirmed"
+                    )
+                )
+            else:
+                neotoma_attempt = prior + 1
+        github_attempt = 0
+        if reason == GITHUB_TEMPORARILY_RATE_LIMITED:
+            # Bounded the same way, with the same limit: a rate limit that
+            # never lifts must not defer and resume this panel forever.
+            limit = _neotoma_retry_limit()
+            prior = await self._prior_github_deferral_attempts(t)
+            if prior is None or prior >= limit:
+                retry_after, remaining = self._last_github_rate_limit_headers(
+                    t.repository, t.number
+                )
+                reason = (
+                    "GitHub rate limits: the pull request could not be read"
+                    + (
+                        f" after {limit} automatic retries"
+                        if prior is not None
+                        else " and the retry count could not be confirmed"
+                    )
+                    + f" (last Retry-After={retry_after}, "
+                    f"X-RateLimit-Remaining={remaining})"
+                )
+            else:
+                github_attempt = prior + 1
+        attempt = neotoma_attempt or github_attempt
+        auto_resume = reason in {
+            "usage limit",
+            "provider capacity exhausted",
+            NEOTOMA_TEMPORARILY_UNAVAILABLE,
+            GITHUB_TEMPORARILY_RATE_LIMITED,
+        }
         iso = ""
         if auto_resume:
-            delay = parse_limit_reset_delay(stdout, stderr)
+            if neotoma_attempt:
+                delay = _neotoma_retry_delay_seconds(neotoma_attempt)
+            elif reason == GITHUB_TEMPORARILY_RATE_LIMITED:
+                delay = _GITHUB_RATE_LIMIT_DEFER_SECONDS
+            else:
+                delay = parse_limit_reset_delay(stdout, stderr)
             resume_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
             iso = resume_at.strftime("%Y-%m-%dT%H:%M:%SZ")
             log.warning(
@@ -15533,7 +18137,13 @@ class SwarmDispatcher:
             if auto_resume:
                 message = (
                     f"⏳ Swarm review on {t.repository}#{t.number} paused: "
-                    f"{reason}; auto-resumes at {iso}. No action needed."
+                    f"{reason}; auto-resumes at {iso}"
+                    + (
+                        f" (retry {attempt} of {_neotoma_retry_limit()})"
+                        if attempt
+                        else ""
+                    )
+                    + ". No action needed."
                 )
                 priority = Priority.INFO
             else:
@@ -15553,7 +18163,36 @@ class SwarmDispatcher:
         if not await self._require_github_write_credential(t.repository, "handle panel session limit"):
             return
         detail = completed_note + failed_note
-        if auto_resume:
+        if neotoma_attempt:
+            status_copy = (
+                "The agent was not run without its definition and policy. The "
+                "review will resume automatically once Neotoma answers again "
+                f"(scheduled ~`{iso}`, retry {neotoma_attempt} of "
+                f"{_neotoma_retry_limit()}); no operator action is required."
+            )
+            marker = (
+                self._REVIEW_DEFERRED_MARKER.format(iso=iso)
+                + "\n"
+                + self._NEOTOMA_DEFERRAL_MARKER.format(
+                    attempt=neotoma_attempt, head=_normalise_full_sha(t.head_sha)
+                )
+                + "\n"
+            )
+        elif github_attempt:
+            status_copy = (
+                "The review will resume automatically once GitHub's rate limit "
+                f"lifts (scheduled ~`{iso}`, retry {github_attempt} of "
+                f"{_neotoma_retry_limit()}); no operator action is required."
+            )
+            marker = (
+                self._REVIEW_DEFERRED_MARKER.format(iso=iso)
+                + "\n"
+                + self._GITHUB_DEFERRAL_MARKER.format(
+                    attempt=github_attempt, head=_normalise_full_sha(t.head_sha)
+                )
+                + "\n"
+            )
+        elif auto_resume:
             status_copy = (
                 "The review will resume automatically when capacity is expected "
                 f"to return (scheduled ~`{iso}`); no operator action is required."
@@ -15586,12 +18225,20 @@ class SwarmDispatcher:
                 # post the fresh one carrying the NEW reset ISO. Deleting first
                 # also keeps the "latest live marker" invariant the sweep relies
                 # on unambiguous.
-                resp = await client.get(
-                    url, params={"per_page": 100},
-                    headers=self._github_headers(t.repository),
+                # Every page, so a marker past the first 100 comments is
+                # removed too and never outlives the fresh one.
+                # A failed page raises and skips the post below. Hitting the
+                # page cap still posts: the fresh marker is the newest, which
+                # is the one the last-write-wins sweep reads.
+                existing, complete = await self._issue_comments_scan(
+                    t.repository, t.number, client
                 )
-                resp.raise_for_status()
-                for c in resp.json():
+                if not complete:
+                    log.warning(
+                        f"[{DAEMON_NAME}] {t.repository}#{t.number}: deferral "
+                        "markers past the comment page cap were not removed"
+                    )
+                for c in existing:
                     if self._REVIEW_DEFERRED_RE.search(c.get("body", "")):
                         del_url = (
                             f"https://api.github.com/repos/{t.repository}/issues/"

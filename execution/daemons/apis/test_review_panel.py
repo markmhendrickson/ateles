@@ -1,6 +1,10 @@
 """Tests for review panel selection (neotoma#1640) and the shift-left
 expectation pass (ateles#81)."""
 
+from pathlib import Path
+
+import pytest
+
 from review_panel import LENSES, select_expectation_agents, select_panel
 
 
@@ -560,3 +564,628 @@ def test_gate_owning_lenses_have_agent_grant_admission_for_issue():
                 f"{lens.agent} agent_grant must NOT admit store_structured on "
                 f"issue (gate writeback is correct-only); got {sorted(store_types)}"
             )
+
+
+# ── Apis seats every lens the approval tool requires ───────────────────────
+#
+# `approve_pr_as_app.py --panel path` requires lenses by changed path from the
+# repo's `.github/review_scope.json`, read from the PR's base branch. Apis used
+# to seat only `select_panel`'s filename-keyword picks, so a change confined to
+# `execution/daemons/apis/fly_runner.py` got pm and qa and rolled up to APPROVE
+# while the tool required all five. These drive the real
+# `SwarmDispatcher._path_required_lenses` (restored from the conftest default)
+# against a scripted GitHub, the real scope file, and the tool's real reader.
+
+import asyncio  # noqa: E402
+import base64  # noqa: E402
+import json  # noqa: E402
+import logging  # noqa: E402
+import sys  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import pytest  # noqa: E402
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_SCRIPTS = _REPO_ROOT / "execution" / "scripts"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+
+import review_scope  # noqa: E402
+import swarm_dispatch as sd  # noqa: E402
+from github_gateway import SwarmTrigger  # noqa: E402
+
+REPO = "owner/repo"
+PR_NUMBER = 41
+HEAD = "c" * 40
+FULL = {"pm", "arch", "ux", "qa", "security"}
+REAL_SCOPE = (_REPO_ROOT / ".github" / "review_scope.json").read_text(encoding="utf-8")
+FLY_RUNNER = "execution/daemons/apis/fly_runner.py"
+
+
+class _Resp:
+    def __init__(self, status, payload):
+        self.status_code = status
+        self._payload = payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self):
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
+
+
+def _github(monkeypatch, files, *, scope=REAL_SCOPE, scope_status=200, scope_raises=False):
+    """Script GitHub for `_path_required_lenses`: the PR, its base branch's scope
+    file, its file list and the repository's default branch."""
+    calls = []
+
+    class _Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, params=None):
+            calls.append((url, params))
+            if url.endswith("/contents/.github/review_scope.json"):
+                assert (params or {}).get("ref") == "main", "read from the BASE branch"
+                if scope_raises:
+                    raise ConnectionError("down")
+                content = base64.b64encode((scope or "").encode()).decode()
+                return _Resp(scope_status, {"type": "file", "encoding": "base64", "content": content})
+            if url.endswith(f"/pulls/{PR_NUMBER}/files"):
+                return _Resp(200, [{"filename": f} for f in files])
+            if url.endswith(f"/repos/{REPO}"):
+                return _Resp(200, {"default_branch": "main"})
+            return _Resp(404, {})
+
+    async def fetch_pr(self, repo, number):
+        return {"number": number, "base": {"ref": "main"}, "head": {"sha": HEAD},
+                "changed_files": len(files)}
+
+    monkeypatch.setattr(sd.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_fetch_pr", fetch_pr)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_github_headers", lambda self, repo=None: {})
+    monkeypatch.setattr(
+        sd.SwarmDispatcher, "_path_required_lenses", sd._REAL_PATH_REQUIRED_LENSES
+    )
+    return calls
+
+
+class _Notifier:
+    def send(self, *a, **k):
+        pass
+
+    def clear_dedupe(self, key):
+        pass
+
+
+def _dispatcher(**over):
+    cfg = dict(neotoma_token="", github_token="", auto_merge=False)
+    cfg.update(over)
+    return sd.SwarmDispatcher(_Notifier(), sd.DispatchConfig(**cfg))
+
+
+def _trigger():
+    return SwarmTrigger(
+        kind="pr_opened", repository=REPO, number=PR_NUMBER, title="t", body="",
+        author="someone", html_url="u", delivery_id="d", action="opened",
+        head_sha=HEAD, base_ref="main",
+    )
+
+
+def _seated(d, files):
+    required = asyncio.run(d._path_required_lenses(_trigger()))
+    panel = select_panel(set(), files, d.config.panel_max, required_lenses=required)
+    return {lens.lens for lens in panel}, required
+
+
+def test_a_daemon_only_change_seats_the_full_panel_the_tool_requires(monkeypatch):
+    # Red without the change: Apis seated {pm, qa} (`select_panel` alone, below).
+    _github(monkeypatch, [FLY_RUNNER])
+    d = _dispatcher()
+    seated, required = _seated(d, [FLY_RUNNER])
+    assert set(required) == FULL
+    assert seated == FULL
+    assert {lens.lens for lens in select_panel(set(), [FLY_RUNNER])} == {"pm", "qa"}
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["missing", "server_error", "read_raises", "not_json", "wrong_version"],
+)
+def test_no_usable_scope_file_seats_the_full_panel_and_says_why(monkeypatch, caplog, case):
+    # A docs-only change, so only the fail-closed rule can make the panel full.
+    files = ["docs/notes.md"]
+    kwargs = {
+        "missing": {"scope_status": 404},
+        "server_error": {"scope_status": 500},
+        "read_raises": {"scope_raises": True},
+        "not_json": {"scope": "{not json"},
+        "wrong_version": {"scope": json.dumps({"version": 2, "full_panel_paths": ["a/**"],
+                                               "reduced_paths": ["b/**"]})},
+    }[case]
+    _github(monkeypatch, files, **kwargs)
+    d = _dispatcher()
+    with caplog.at_level(logging.WARNING, logger="apis"):
+        seated, required = _seated(d, files)
+    assert set(required) == FULL and FULL <= seated
+    lines = [r.getMessage() for r in caplog.records if "scope file unusable" in r.getMessage()]
+    assert len(lines) == 1, lines
+
+
+def test_a_docs_only_change_keeps_todays_seats_plus_the_one_scope_lens(monkeypatch):
+    # docs/notes.md is on reduced_paths, not ux_paths: the tool requires arch.
+    files = ["docs/notes.md"]
+    _github(monkeypatch, files)
+    d = _dispatcher()
+    today = {lens.lens for lens in select_panel(set(), files, d.config.panel_max)}
+    seated, required = _seated(d, files)
+    assert set(required) == {"arch"}
+    assert "arch" not in today, "red without the change: arch was never seated"
+    assert seated == today | {"arch"}
+    assert "security" not in seated, "the reduced route does not grow to the full panel"
+
+
+def test_a_panel_cap_below_the_required_count_keeps_every_required_lens():
+    # Red without the change: `select_panel` had no `required_lenses` and capped
+    # at two seats, dropping arch, ux and security.
+    panel = select_panel(
+        set(), [FLY_RUNNER], max_panel=2, pending_gates={"pm"}, required_lenses=FULL
+    )
+    assert FULL <= {lens.lens for lens in panel}
+    capped = select_panel(set(), ["src/x.py", "docs/a.md"], max_panel=1, required_lenses={"arch"})
+    assert "arch" in {lens.lens for lens in capped}
+
+
+def _lens_comment(lens, verdict="**SIGNED_OFF**"):
+    agent = sd.lens_by_name(lens).agent
+    reply = (
+        f"{sd.compose_lens_review_marker(lens, HEAD)}\n"
+        f"{sd.attribution_header(agent, f'{lens} lens panelist')}\n{verdict}\n\nlooks fine"
+    )
+    return {"id": hash(lens) & 0xFFFF, "created_at": "2026-11-06T00:00:01Z",
+            "user": {"login": "ateles-agent"}, "body": reply}
+
+
+def _aggregation():
+    return {"id": 999, "created_at": "2026-11-06T00:00:09Z", "user": {"login": "ateles-agent"},
+            "body": (f"<!-- vanellus-aggregation commit={HEAD} -->\n"
+                     "**🤖 Vanellus — Ateles swarm, PR steward**\n**APPROVE**\n\nBlocking: 0")}
+
+
+def test_a_panel_missing_only_the_security_verdict_is_not_finished(monkeypatch):
+    # Red without the change: the aggregation at the head, or the pm/qa verdicts
+    # `select_panel` alone required, read as a finished panel.
+    _github(monkeypatch, [FLY_RUNNER])
+    d = _dispatcher()
+    comments = [_lens_comment(lens) for lens in sorted(FULL - {"security"})]
+
+    async def scoped(self, repository, number, client):
+        return state["comments"]
+
+    async def files(self, trigger):
+        return [FLY_RUNNER]
+
+    state = {"comments": comments}
+    monkeypatch.setattr(sd.SwarmDispatcher, "_lens_scoped_comments", scoped)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_changed_files", files)
+    assert asyncio.run(d._panel_finished_for_pr(_trigger())) is False
+    state["comments"] = comments + [_aggregation()]
+    assert asyncio.run(d._panel_finished_for_pr(_trigger())) is False, (
+        "an aggregation over a panel that never seated security is not finished"
+    )
+    state["comments"] = comments + [_lens_comment("security"), _aggregation()]
+    assert asyncio.run(d._panel_finished_for_pr(_trigger())) is True
+
+
+def test_the_missing_lens_sweep_reseats_a_required_lens_the_panel_never_had(monkeypatch):
+    # Red without the change: no NOT RECEIVED line, so no candidate at all.
+    _github(monkeypatch, [FLY_RUNNER])
+    d = _dispatcher()
+    comments = [_lens_comment("pm"), _lens_comment("qa"), _aggregation()]
+    pr = {"number": PR_NUMBER, "draft": False, "head": {"sha": HEAD, "ref": "f"},
+          "base": {"ref": "main"}, "title": "t", "user": {"login": "x"}}
+
+    class _ListClient:
+        def __init__(self, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, **k):
+            return _Resp(200, [pr])
+
+    async def scoped(self, repository, number, client):
+        return comments
+
+    async def required(self, trigger):
+        return frozenset(FULL)
+
+    monkeypatch.setattr(sd.httpx, "AsyncClient", _ListClient)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_lens_scoped_comments", scoped)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_path_required_lenses", required)
+    out = asyncio.run(d._prs_with_missing_lens(REPO))
+    assert [(p["number"], sorted(lenses)) for p, lenses in out] == [
+        (PR_NUMBER, ["arch", "security", "ux"])
+    ]
+
+
+@pytest.mark.parametrize("lens", ["arch", "security", "ux"])
+@pytest.mark.parametrize("path", ["fallback", "returned"])
+def test_apis_posted_verdicts_read_as_clear_in_the_approval_tool(lens, path):
+    # Red without the change (fallback): the comment carried a plain
+    # `review:<lens>` line and a second, dispatcher-written header ahead of the
+    # lens's own, and `evaluate_lens` said "no readable verdict at the fixed
+    # header/verdict position".
+    import approve_pr_as_app as tool
+
+    agent = sd.lens_by_name(lens).agent
+    header = sd.attribution_header(agent, f"{lens} lens panelist")
+    review = f"{header}\n**SIGNED_OFF**\n\nNo blocking findings."
+    if path == "fallback":
+        reply = f"{sd.compose_lens_review_marker(lens, HEAD)}\n{review}"
+        body = sd.compose_fallback_comment(lens, agent, reply, HEAD)
+        assert f"\nreview:{lens}\n" not in body
+    else:
+        body = sd.verified_remote_comment(lens, agent, review, HEAD)
+        assert body is not None
+    comment = {"id": 1, "created_at": "2026-11-06T00:00:01Z",
+               "user": {"login": "ateles-agent"}, "body": body, "html_url": "u"}
+    outcome = asyncio.run(tool.evaluate_lens(
+        None, repo=REPO, pr=PR_NUMBER, head_sha=HEAD, comments=[comment],
+        lens=lens, authors=frozenset({"ateles-agent"}),
+    ))
+    assert outcome.passed is True, outcome.reason
+    assert outcome.verdict == "signed_off"
+    # The Apis-side reader agrees, so the finished-panel check counts it too.
+    assert sd.posted_comment_own_verdict(body, lens_agent=agent) == "signed_off"
+
+
+def test_a_fallback_for_an_unreadable_reply_still_reads_as_no_verdict():
+    # The new shape is used only when it reads exactly as the reply did: a reply
+    # with no verdict at the fixed position never becomes a pass.
+    import approve_pr_as_app as tool
+
+    body = sd.compose_fallback_comment("arch", "waxwing", "Looks fine to me. **SIGNED_OFF**", HEAD)
+    comment = {"id": 1, "created_at": "x", "user": {"login": "ateles-agent"}, "body": body}
+    outcome = asyncio.run(tool.evaluate_lens(
+        None, repo=REPO, pr=PR_NUMBER, head_sha=HEAD, comments=[comment],
+        lens="arch", authors=frozenset({"ateles-agent"}),
+    ))
+    assert outcome.passed is False
+
+
+def test_the_approval_tool_and_apis_share_the_one_scope_reader():
+    import approve_pr_as_app as tool
+    import inspect
+
+    assert tool.BOOTSTRAP_PANEL_LENSES == review_scope.FULL_PANEL_LENSES
+    assert "review_scope.fetch_scope" in inspect.getsource(tool.fetch_review_scope)
+    assert "review_scope.path_panel_for_pr" in inspect.getsource(tool.run)
+    src = inspect.getsource(sd._REAL_PATH_REQUIRED_LENSES)
+    assert "review_scope.fetch_scope" in src and "review_scope.path_panel_for_pr" in src
+
+
+# ── Apis requires the approval tool's floor as well as the path decision ───
+#
+# The tool's `--panel path` requires, on a full-panel decision, the five core
+# lenses AND its diff-derived floor (`review_panel.approval_floor`): `legal`
+# for a `LICENSE` or `package.json` change, a pre-registered contributor's
+# lens. Apis used to require only the core five, so at `APIS_PANEL_MAX=3` a
+# `LICENSE` change seated pm/arch/ux/qa/security and capped legal away, and
+# finished detection and the missing-lens sweep read that same short set.
+
+CORE_AND_LEGAL = FULL | {"legal"}
+PARENT = 7
+
+
+def _scripted_client(files, *, scope=REAL_SCOPE, issue_comments=(), open_prs=()):
+    """A GitHub stand-in for both Apis and the approval tool: the base-branch
+    scope file, the PR's file list, the default branch, the parent issue's
+    comments, and the open-PR list."""
+
+    class _Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, params=None):
+            if url.endswith("/contents/.github/review_scope.json"):
+                content = base64.b64encode(scope.encode()).decode()
+                return _Resp(200, {"type": "file", "encoding": "base64", "content": content})
+            if url.endswith(f"/pulls/{PR_NUMBER}/files"):
+                return _Resp(200, [{"filename": f} for f in files])
+            if url.endswith(f"/issues/{PARENT}/comments"):
+                return _Resp(200, [{"body": b} for b in issue_comments])
+            if url.endswith(f"/repos/{REPO}/pulls"):
+                return _Resp(200, list(open_prs))
+            if url.endswith(f"/repos/{REPO}"):
+                return _Resp(200, {"default_branch": "main"})
+            return _Resp(404, {})
+
+    return _Client
+
+
+def _pr_data(files, body=""):
+    return {"number": PR_NUMBER, "base": {"ref": "main"}, "head": {"sha": HEAD},
+            "changed_files": len(files), "body": body}
+
+
+def _script_apis(monkeypatch, files, *, body="", issue_comments=(), open_prs=()):
+    client = _scripted_client(files, issue_comments=issue_comments, open_prs=open_prs)
+
+    async def fetch_pr(self, repo, number):
+        return _pr_data(files, body)
+
+    monkeypatch.setattr(sd.httpx, "AsyncClient", client)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_fetch_pr", fetch_pr)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_github_headers", lambda self, repo=None: {})
+    monkeypatch.setattr(
+        sd.SwarmDispatcher, "_path_required_lenses", sd._REAL_PATH_REQUIRED_LENSES
+    )
+    return client
+
+
+def _tool_required(monkeypatch, files, *, body="", issue_comments=(), panel_max=6):
+    """The lens set `approve_pr_as_app.py --panel path` requires, from the
+    tool's own code against the same scripted GitHub."""
+    import approve_pr_as_app as tool
+
+    monkeypatch.setenv("APIS_PANEL_MAX", str(panel_max))
+    monkeypatch.setattr(tool, "_github_headers", lambda repo=None: {})
+    client = _scripted_client(files, issue_comments=issue_comments)()
+
+    async def go():
+        load = await tool.fetch_review_scope(client, REPO, "main")
+        decision = await review_scope.path_panel_for_pr(
+            client, api_base=tool.GITHUB_API, repo=REPO, pr=PR_NUMBER,
+            pr_data=_pr_data(files, body), headers={}, load=load,
+        )
+        lenses, _required, _excluded = await tool.resolve_path_lenses(
+            client, repo=REPO, pr=PR_NUMBER, pr_body=body, extra_lenses=[],
+            decision=decision,
+        )
+        return set(lenses)
+
+    return asyncio.run(go())
+
+
+def test_a_license_change_at_panel_max_3_seats_the_core_five_and_legal(monkeypatch):
+    # Red without the correction: required was the core five, and `select_panel`
+    # at max 3 ranked legal after them and capped it away:
+    # seated == {pm, arch, ux, qa, security}.
+    _script_apis(monkeypatch, ["LICENSE"])
+    d = _dispatcher(panel_max=3)
+    seated, required = _seated(d, ["LICENSE"])
+    assert set(required) == CORE_AND_LEGAL
+    assert seated == CORE_AND_LEGAL
+
+
+def test_a_package_json_change_seats_legal_with_the_core_five(monkeypatch):
+    # Red without the correction: required == the core five, without legal.
+    _script_apis(monkeypatch, ["package.json"])
+    d = _dispatcher(panel_max=3)
+    seated, required = _seated(d, ["package.json"])
+    assert set(required) == CORE_AND_LEGAL
+    assert CORE_AND_LEGAL <= seated
+
+
+@pytest.mark.parametrize("panel_max", [6, 3])
+@pytest.mark.parametrize(
+    "files,body,issue_comments",
+    [
+        pytest.param([FLY_RUNNER], "", (), id="code"),
+        pytest.param(["docs/notes.md"], "", (), id="docs-only"),
+        pytest.param(["LICENSE"], "", (), id="license"),
+        pytest.param(["package.json"], "", (), id="package-json"),
+        pytest.param(
+            ["docs/notes.md", "package.json", FLY_RUNNER, "LICENSE"], "", (), id="mixed"
+        ),
+        pytest.param(
+            [f"execution/daemons/apis/m{i}.py" for i in range(6)], "", (), id="six-files"
+        ),
+        pytest.param(
+            [FLY_RUNNER],
+            f"Closes #{PARENT}",
+            ("**review_expectation (legal)** — what buteo will verify",),
+            id="preregistered-contributor",
+        ),
+    ],
+)
+def test_apis_required_set_equals_the_approval_tools(
+    monkeypatch, files, body, issue_comments, panel_max
+):
+    # Red without the correction: license, package-json, mixed and
+    # preregistered-contributor differed by `legal` (Apis: the core five only).
+    _script_apis(monkeypatch, files, body=body, issue_comments=issue_comments)
+    d = _dispatcher(panel_max=panel_max)
+    trigger = _trigger()
+    apis = set(asyncio.run(d._path_required_lenses(trigger)))
+    tool = _tool_required(
+        monkeypatch, files, body=body, issue_comments=issue_comments, panel_max=panel_max
+    )
+    assert apis == tool
+    seated = {
+        lens.lens
+        for lens in select_panel(set(), files, panel_max, required_lenses=apis)
+    }
+    assert tool <= seated, "no required lens is capped away"
+
+
+def test_core_verdicts_without_legal_are_not_finished_and_recovery_seats_legal(
+    monkeypatch,
+):
+    # Red without the correction: legal was not required, so the five core
+    # verdicts read as a finished panel and the sweep found nothing to re-run.
+    comments = [_lens_comment(lens) for lens in sorted(FULL)]
+    pr = {"number": PR_NUMBER, "draft": False, "head": {"sha": HEAD, "ref": "f"},
+          "base": {"ref": "main"}, "title": "t", "user": {"login": "x"}, "body": ""}
+    _script_apis(monkeypatch, ["LICENSE"], open_prs=[pr])
+    d = _dispatcher(panel_max=3)
+    state = {"comments": comments}
+
+    async def scoped(self, repository, number, client):
+        return state["comments"]
+
+    async def files(self, trigger):
+        return ["LICENSE"]
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_lens_scoped_comments", scoped)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_changed_files", files)
+    assert asyncio.run(d._panel_finished_for_pr(_trigger())) is False
+    state["comments"] = comments + [_aggregation()]
+    assert asyncio.run(d._panel_finished_for_pr(_trigger())) is False
+    out = asyncio.run(d._prs_with_missing_lens(REPO))
+    assert [(p["number"], lenses) for p, lenses in out] == [(PR_NUMBER, ["legal"])]
+    state["comments"] = comments + [_lens_comment("legal"), _aggregation()]
+    assert asyncio.run(d._panel_finished_for_pr(_trigger())) is True
+
+
+def test_an_unreadable_required_set_seats_every_requirable_lens(monkeypatch):
+    # Red without the correction: the fallback was the core five, without legal.
+    async def fetch_pr(self, repo, number):
+        return None
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_fetch_pr", fetch_pr)
+    monkeypatch.setattr(
+        sd.SwarmDispatcher, "_path_required_lenses", sd._REAL_PATH_REQUIRED_LENSES
+    )
+    required = asyncio.run(_dispatcher()._path_required_lenses(_trigger()))
+    assert set(required) == CORE_AND_LEGAL
+    assert "content" not in required
+
+
+def test_the_approval_tool_and_apis_share_the_floor_and_contributor_reader():
+    import approve_pr_as_app as tool
+    import inspect
+
+    import review_panel
+
+    assert "review_panel.approval_floor" in inspect.getsource(tool.derive_required_lenses)
+    assert "review_panel.fetch_gate_contributors" in inspect.getsource(
+        tool._preregistered_gate_contributors
+    )
+    assert tool.BOOTSTRAP_EXCLUDED_LENSES is review_panel.APPROVAL_EXCLUDED_LENSES
+    assert tool._EXPECTATION_MARKER_RE is review_panel._EXPECTATION_MARKER_RE
+    # The shared marker reader matches what Apis posts.
+    assert f"**{sd.EXPECTATION_MARKER} (" in "**review_expectation (legal)**"
+    assert review_panel.gate_contributors_from_comments(
+        [f"**{sd.EXPECTATION_MARKER} (legal)** — what Buteo will verify"]
+    ) == {"buteo"}
+    src = inspect.getsource(sd._REAL_PATH_REQUIRED_LENSES)
+    assert "review_panel.approval_required_lenses" in src
+
+
+# ── Security concerns end proven, disproven, or unsettled ───────────────
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _normalized(text):
+    return " ".join(text.split())
+
+
+def test_apis_security_brief_requires_the_three_concern_outcomes():
+    security = next(lens for lens in LENSES if lens.lens == "security")
+    brief = _normalized(security.checks)
+    assert "Every concern must end in one of three states before your verdict" in brief
+    # Proven: a closed code path counts as proof, and it blocks.
+    assert "traced through a fully closed code path" in brief
+    assert "is CONFIRMED: block on it" in brief
+    # Disproven: dropped from the findings, with the checking shown.
+    assert (
+        "A concern you checked and refuted is dropped from the findings and "
+        "listed with what you checked" in brief
+    )
+    # Unsettled: only after trying, as a COMMENT saying what would settle it.
+    assert "tried and truly cannot settle" in brief
+    assert "give a COMMENT verdict" in brief
+    assert "what would settle it" in brief
+    # The earlier rule let an argued break pass with no verdict consequence.
+    assert "PLAUSIBLE and do not block" not in brief
+
+
+@pytest.mark.parametrize(
+    "document", ["docs/agents/falco.md", ".claude/skills/falco/SKILL.md"]
+)
+def test_falco_prompt_mirrors_map_each_outcome_to_its_verdict(document):
+    text = _normalized((_REPO_ROOT / document).read_text(encoding="utf-8"))
+    assert "must end in one of three states" in text
+    assert "A CONFIRMED break is `[BLOCKING]`, and your verdict is `REQUEST_CHANGES`" in text
+    assert "list it under **Checked and disproven**" in text
+    assert "It doesn't stand in the way of `APPROVE`" in text
+    assert "A PLAUSIBLE finding is marked `[NON-BLOCKING]`, and your verdict is `COMMENT`" in text
+    assert "A `COMMENT` still holds the merge" in text
+    assert (
+        "`REQUEST_CHANGES` on any CONFIRMED break; otherwise `COMMENT` only if "
+        "a concern truly can't be settled" in text
+    )
+
+
+def _fly_grant_fixture_caps():
+    import json
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+    import check_gate_lens_grants as chk
+
+    fixture = json.loads(chk.FIXTURE_PATH.read_text())
+    caps = {
+        e["agent"]: {c["op"]: sorted(c.get("entity_types") or []) for c in e["capabilities"]}
+        for e in fixture["lenses"]
+    }
+    return chk, caps
+
+
+def test_fly_preflight_covers_every_fly_lens_role():
+    """The preflight's role set is fly_lens_review.LENS_ROLES, so a role added
+    to Fly cannot drift out of the check, and a role with no grant at all
+    (including one that owns no gate) is reported."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+    import fly_lens_review
+
+    chk, _ = _fly_grant_fixture_caps()
+    assert set(chk.FLY_ROLES) == set(fly_lens_review.LENS_ROLES.values())
+    problems = chk.fly_result_problems({})
+    assert len(problems) == len(fly_lens_review.LENS_ROLES)
+    for role in fly_lens_review.LENS_ROLES.values():
+        assert any(p.startswith(role) and "no agent_grant" in p for p in problems)
+
+
+def test_fly_preflight_reports_a_fly_role_whose_grant_lacks_the_result_write():
+    """A Fly role without store_structured on fly_runner_result is flagged
+    (HTTP 403 at run time). The fixture is a snapshot: whichever roles it shows
+    without the grant must be exactly the ones reported."""
+    chk, caps = _fly_grant_fixture_caps()
+    lacking = {
+        a for a in chk.FLY_ROLES
+        if a not in caps
+        or chk.FLY_RESULT_ENTITY_TYPE not in caps[a].get("store_structured", [])
+    }
+    problems = chk.fly_result_problems(caps)
+    assert {a for a in chk.FLY_ROLES if any(p.startswith(a) for p in problems)} == lacking
+
+    granted = {
+        a: {**c, "store_structured": sorted({*c.get("store_structured", []), chk.FLY_RESULT_ENTITY_TYPE})}
+        for a, c in caps.items()
+    }
+    for a in chk.FLY_ROLES:
+        granted.setdefault(a, {"store_structured": [chk.FLY_RESULT_ENTITY_TYPE]})
+    assert chk.fly_result_problems(granted) == []
+    assert all("fly_runner_result" in p and "403" in p for p in problems if "no agent_grant" not in p)

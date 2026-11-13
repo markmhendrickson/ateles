@@ -69,6 +69,7 @@ from lib.daemon_runtime import (  # noqa: E402
     hydrate_snapshot,
 )
 from lib.daemon_runtime import label_gate  # noqa: E402
+from lib.daemon_runtime.neotoma_correct import correct_field  # noqa: E402
 from lib.notify import Notifier, Priority  # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -313,26 +314,28 @@ async def apply_due_date_hygiene(entity_id: str, snapshot: dict) -> None:
         "Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}",
         "Content-Type": "application/json",
     }
-    async with httpx.AsyncClient(headers=headers, timeout=15) as client:
+    # POST /correct, one field per call (there is no /corrections route).
+    with httpx.Client(headers=headers, timeout=15) as client:
         for correction in corrections:
-            try:
-                resp = await client.post(
-                    f"{NEOTOMA_BASE_URL}/corrections",
-                    json=correction,
-                )
-                resp.raise_for_status()
+            field = correction["field_name"]
+            ok = await asyncio.to_thread(
+                correct_field,
+                client,
+                NEOTOMA_BASE_URL,
+                entity_id,
+                "task",
+                field,
+                correction["corrected_value"],
+                f"neotoma-agent-hygiene-{field}-{entity_id}",
+            )
+            if ok:
                 log.info(
-                    f"[{DAEMON_NAME}] Correction applied: {correction['field_name']}={correction['corrected_value']!r} "
+                    f"[{DAEMON_NAME}] Correction applied: {field}={correction['corrected_value']!r} "
                     f"→ {entity_id}"
                 )
-            except httpx.HTTPStatusError as exc:
+            else:
                 log.error(
-                    f"[{DAEMON_NAME}] Correction failed (HTTP {exc.response.status_code}) "
-                    f"for {entity_id} field={correction['field_name']}: {exc.response.text[:200]}"
-                )
-            except Exception as exc:
-                log.error(
-                    f"[{DAEMON_NAME}] Correction error for {entity_id} field={correction['field_name']}: {exc}"
+                    f"[{DAEMON_NAME}] Correction NOT applied for {entity_id} field={field}"
                 )
 
 
@@ -496,7 +499,16 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChe
         title = snapshot.get("title", "(untitled)")
         log.info(f"[{DAEMON_NAME}] Task created: {title[:80]} ({entity_id})")
         if DUE_DATE_HYGIENE_ENABLED:
-            await apply_due_date_hygiene(entity_id, snapshot)
+            # An unread snapshot is {} — NOT "a task with no due date". Hygiene
+            # on it would write a default due date over the real one.
+            if not event.hydrated:
+                log.warning(
+                    f"[{DAEMON_NAME}] task {entity_id} snapshot could not be read "
+                    "— skipping due-date hygiene rather than defaulting over "
+                    "unknown fields"
+                )
+            else:
+                await apply_due_date_hygiene(entity_id, snapshot)
 
     elif entity_type == "issue" and action == "created":
         title = snapshot.get("title", "(untitled)")

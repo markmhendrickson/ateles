@@ -35,6 +35,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from typing import Callable
 
 import httpx
 
@@ -73,20 +74,40 @@ def stall_seconds(env=None) -> int:
     """How long an in-flight task may sit before the watchdog re-dispatches
     it. It must outlast one whole dispatch. With the Fly executor enabled
     that includes a login-machine queue wait (APIS_FLY_QUEUE_MAX_WAIT_SECONDS,
-    not counted against the dispatch timeout) and the Apis deadline grace,
-    or the watchdog would re-dispatch a run that is still in flight."""
+    not counted against the dispatch timeout), the Fly-only timeout
+    (APIS_FLY_DISPATCH_TIMEOUT) when it is longer than the local one, the
+    delivery reserve and the Apis deadline grace, or the watchdog would
+    re-dispatch a run that is still in flight."""
     env = os.environ if env is None else env
-    base = int(env.get("APIS_DISPATCH_TIMEOUT", "1800")) + 600
+    local = int(env.get("APIS_DISPATCH_TIMEOUT", "1800"))
+    base = local + 600
     if (env.get("APIS_FLY_RUNNER_CLASSES") or "").strip():
-        # The same strict parser the executor uses. An invalid setting
-        # disables Fly (every launch refused), so nothing queues: no wait.
-        from fly_runner import APIS_DEADLINE_GRACE_SECONDS, LIMITS, FlyConfigInvalid, parse_setting
+        # The same strict parsers the executor uses. An invalid setting
+        # disables Fly (every launch refused), so nothing queues or runs
+        # there: no Fly term is added, and the local paths are unchanged.
+        from fly_runner import (
+            APIS_DEADLINE_GRACE_SECONDS,
+            DELIVERY_RESERVE_SECONDS,
+            FLY_DISPATCH_TIMEOUT,
+            LIMITS,
+            FlyConfigInvalid,
+            parse_optional_setting,
+            parse_setting,
+        )
 
         queue = next(lim for lim in LIMITS if lim.attr == "queue_max_wait_seconds")
         try:
-            base += int(parse_setting(queue, env)) + APIS_DEADLINE_GRACE_SECONDS
+            wait = int(parse_setting(queue, env))
+            fly_timeout = parse_optional_setting(FLY_DISPATCH_TIMEOUT, env)
         except FlyConfigInvalid:
             pass
+        else:
+            # A Fly run's whole span: the queue wait, its own timeout (the
+            # Fly-only one when set, which may be longer than the local one),
+            # a delivery's push and pull-request steps, and the Apis grace.
+            run = local if fly_timeout is None else max(local, int(fly_timeout))
+            base = (wait + run + DELIVERY_RESERVE_SECONDS + APIS_DEADLINE_GRACE_SECONDS
+                    + 600)  # fmt: skip
     return max(base, int(env.get("APIS_STALL_SECONDS", "3600")))
 
 
@@ -121,6 +142,10 @@ class TaskWatchdog:
     """Periodic sweeper. Holds per-task attempt state in memory."""
 
     stall_seconds: int = STALL_SECONDS
+    # Optional ``guard(entity_id, snapshot) -> bool``: True means a Fly run may
+    # be in flight for the task, so the sweep must not touch it. Set by apis.py
+    # (this module cannot import apis, which imports it).
+    fly_in_flight_guard: Callable[[str, dict], bool] | None = None
     _state: dict[str, _AttemptState] = field(default_factory=dict)
 
     # ── pure decision logic (unit-tested) ──────────────────────────────────
@@ -166,6 +191,17 @@ class TaskWatchdog:
     def forget(self, task_id: str) -> None:
         self._state.pop(task_id, None)
 
+    def _fly_run_may_be_in_flight(self, entity_id: str, snapshot: dict) -> bool:
+        """The guard's answer; an exception counts as True, since an unknown
+        must not lead to a status write on a task whose run may be live."""
+        if self.fly_in_flight_guard is None:
+            return False
+        try:
+            return bool(self.fly_in_flight_guard(entity_id, snapshot))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[watchdog] Fly in-flight guard failed for %s, skipping it: %s", entity_id, exc)
+            return True
+
     # ── I/O (fail-open) ────────────────────────────────────────────────────
 
     async def sweep(self, notifier, dispatch_fn) -> dict:
@@ -181,6 +217,7 @@ class TaskWatchdog:
             "reconciled": 0,
             "escalated": 0,
             "skipped_backoff": 0,
+            "skipped_fly_in_flight": 0,
         }
         try:
             tasks = _query_tasks(QUERY_LIMIT)
@@ -195,6 +232,15 @@ class TaskWatchdog:
             action = self.classify(entity_id, status, age)
 
             if action == WatchdogAction.NONE:
+                continue
+
+            # A task whose Fly run may be in flight gets nothing from the
+            # watchdog: RECONCILE would write DONE, ESCALATE would write BLOCKED
+            # and RETRY would write ROUTED before dispatch_task's own check
+            # could refuse. No status write, notification, attempt count or
+            # dispatch.
+            if self._fly_run_may_be_in_flight(entity_id, snapshot):
+                counts["skipped_fly_in_flight"] += 1
                 continue
 
             if action == WatchdogAction.RECONCILE:

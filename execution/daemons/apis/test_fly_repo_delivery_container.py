@@ -103,6 +103,37 @@ def test_the_agent_and_root_sides_stay_separate(tmp_path, monkeypatch):
                                 env=ENV, capture_output=True, text=True).stdout.strip()
         assert landed == imported.head
 
+        # Exercise the same custody boundary for an admitted existing branch.
+        # The second checkout starts at the exact first result and preserves it.
+        correction_root = Path("/work-container-correction-check")
+        correction = rd.prepare_work(correction_root, run_id="fly-container-correction")
+        try:
+            correction_base = rd.clone_origin(
+                correction, url=f"file://{remote}", base_branch=BRANCH,
+                expected_head=landed, token=TOKEN, allow="file")
+            rd.make_checkout(correction, branch=BRANCH, base_branch=BRANCH,
+                             repository="owner/repo", ident=ident,
+                             author=("cicada", "cicada@agents.example.invalid"), existing=True)
+            assert _as_agent(ident, "ls", str(correction.origin)).returncode != 0
+            assert _as_agent(ident, "sh", "-c",
+                             "echo correction > correction.txt && git add . && git commit -qm correction",
+                             cwd=correction.checkout).returncode == 0
+            assert rd.export_agent_work(correction, branch=BRANCH, base=correction_base,
+                                        ident=ident, existing=True)
+            corrected = rd.import_agent_work(correction, branch=BRANCH, base=correction_base,
+                                             existing=True)
+            rd.push_branch(correction, repository="owner/repo", branch=BRANCH,
+                           default_branch="main", head=corrected.head, token=TOKEN,
+                           expected_head=landed)
+            remote_head = subprocess.run(
+                ["git", "-C", str(remote), "rev-parse", f"refs/heads/{BRANCH}"],
+                env=ENV, capture_output=True, text=True).stdout.strip()
+            assert remote_head == corrected.head and remote_head != landed
+            assert _as_agent(ident, "cat", "change.txt", cwd=correction.checkout).stdout == b"work\n"
+        finally:
+            rd.remove_work(correction_root)
+        assert_cleanup(correction_root, present=True)
+
         header = rd.auth_config(TOKEN)[0][1].encode()
         for dirpath, _, files in os.walk(root):
             for name in files:

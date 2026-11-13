@@ -31,7 +31,7 @@ standalone, bypassing `__init__.py` entirely, needs nothing extra installed.
 
 Environment variables (set by loxia-pr-review.yml `gate` job):
   CANARY_LABEL      the label name that admits the canary lane
-  EVENT_NAME        github.event_name (expected: "pull_request")
+  EVENT_NAME        github.event_name (expected: "pull_request_target")
   PR_LABELS_JSON    JSON array of the PR's current labels (GitHub shape)
   PR_BODY           the PR body text, for parent-issue resolution
   REPO              "owner/repo"
@@ -127,7 +127,7 @@ def main() -> int:
         return 0
 
     event_name = os.environ.get("EVENT_NAME", "")
-    if event_name != "pull_request":
+    if event_name not in ("pull_request", "pull_request_target"):
         print(f"Unexpected EVENT_NAME={event_name!r} — denying.", file=sys.stderr)
         _write_output(False)
         return 0

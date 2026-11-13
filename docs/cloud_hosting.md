@@ -16,6 +16,7 @@ materialization entrypoint.
 | Surface | Implemented boundary |
 |---|---|
 | [Fly executor](../execution/daemons/apis/fly_runner.py) and [job entrypoint](../deploy/fly-runner/run_job.py) | Merged in [#1460](https://github.com/markmhendrickson/ateles/pull/1460). Supports explicitly forced Fly dispatch and vetted classes listed in `APIS_FLY_RUNNER_CLASSES`; an unset list opts in no classes. |
+| Lens reviews (`lens_review:<lens>`) | Vetted for Fly and opted in per lens through `APIS_FLY_RUNNER_CLASSES`; nothing moves until a class is listed. Limits: the lens holds a read-only GitHub token and has no Neotoma tools on the run (a seated run ships no MCP server); it returns its review between `<<<DISPATCHER_REVIEW>>>` markers and the Mac posts it as the lens's own App when it has one (otherwise under the existing shared identity, like any fallback post), failing closed unless exactly one well-formed block came back; a lost or unknown run is a failed lens and is re-run by the bounded missing-lens sweep. The qa lens needs a writable worktree, so it stays on the Mac and is not listed. |
 | [Repository delivery inside a job](../deploy/fly-runner/repo_delivery.py) | Merged in [#1473](https://github.com/markmhendrickson/ateles/pull/1473). A job with a delivery specification can clone, commit, push and open or update a PR. This alone does not route normal builder work to Fly. |
 | Dispatcher routing for builder delivery | Merged in [#1475](https://github.com/markmhendrickson/ateles/pull/1475) (2026-10-20, `8656c9a2`). It adds the explicit `open_or_merge_pr` opt-in; merging it does not enable it, and this guide does not enable it. A delivery counts as verified only after the pull request is read back from GitHub and matches the runner's reported repository, base, branch and commit. |
 
@@ -132,8 +133,15 @@ before starting the CLI, constructs its child environment from the shared
 allowlist, and keeps signing/result-publishing authority out of the child.
 A role needs its own Neotoma identity; the shared daemon bearer is not a Fly
 fallback. Probe reports contain names and presence checks, never values.
-A key-only Fly job signs its result record with AAuth, but its child has no
-agent-side Neotoma MCP tools because it has no role bearer for the MCP config.
+A Fly job reaches Neotoma through the runner's root-owned signing proxy, which
+signs each request with the role's AAuth key; the child never holds the key or
+a bearer. The role needs an active `agent_grant` that pins that key. Before a
+role granted Neotoma tools is sent to Fly, the dispatcher asks Neotoma, with a
+signed `GET /session`, whether the key is admitted; a refused key, or a
+provider the proxy does not serve yet (only Claude today), keeps the job off
+Fly rather than running it without its tools. The only other way such a role
+runs on Fly is the legacy path of its own Neotoma token on Claude; no new
+tokens are minted for it. A seated run still gets no Neotoma tools on Fly.
 
 Repository delivery additionally needs a distinct PR-opener App configuration.
 The [existing App helper](../lib/github_app_token.py) resolves that identity;
@@ -153,6 +161,22 @@ incoming job's maximum-duration cost against `APIS_FLY_MONTHLY_BUDGET_USD`
 unreadable ledger state refuses admission. The ledger is an estimate for this
 dispatcher, not a provider invoice or proof that a billing alert exists.
 A provider billing alert is a separate backstop, not the admission mechanism.
+
+Fly jobs may have their own execution timeout, `APIS_FLY_DISPATCH_TIMEOUT`
+(seconds), without widening `APIS_DISPATCH_TIMEOUT`, which every local run
+keeps. Unset, a Fly job uses the shared timeout exactly as before. Set, a Fly
+job with no timeout of its own runs with it, a caller's shorter timeout (a lens
+review, for example) is kept, and a caller's longer one is lowered to it, so no
+Fly job runs past it. It is resolved only once a job is bound for Fly: a job
+that falls back to the Mac keeps the shared timeout. An invalid value (zero,
+negative, not a plain decimal, or out of range) disables Fly like any other
+invalid limit: every launch is refused before a token is minted or a machine
+requested, with no local fallback, and the error names the setting, never the
+value. A delivering job must still end within its one-hour GitHub token, so a
+45-minute timeout fits and a 60-minute one is refused before the token is
+minted. The task watchdog waits out the queue wait, the longer of the two
+timeouts, the delivery reserve and the Apis grace before it treats a Fly run as
+stalled.
 
 The accepted Fly usage ruling exempts remote jobs from the dispatcher's local
 subscription pace and weekly-usage ceilings because the Fly logins are separate.

@@ -22,7 +22,7 @@ markmhendrickson/ateles#1448).
 This module is the one place that decides and provisions the three things a
 delivery-bearing Cicada dispatch needs, so no path can forget one:
 
-  1. a dedicated linked worktree on a fresh branch off ``origin/main``;
+  1. an isolated checkout of main, or an admitted existing PR exact head;
   2. (derived by ``skill_runner`` from that worktree as ``cwd``) the two git
      roots the sandbox must be able to write;
   3. (derived by ``skill_runner`` from ``include_github_contract=True``) network
@@ -43,12 +43,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import json
 import os
 import re
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterator, Mapping
 from urllib.parse import urlsplit
@@ -133,6 +134,55 @@ def issue_key(
     return (repo, next(iter(refs))) if len(refs) == 1 else None
 
 
+
+@dataclass(frozen=True)
+class ExistingPRTarget:
+    number: int
+    branch: str
+    base_branch: str
+    head_sha: str
+
+
+def existing_pr_target(snapshot: Mapping[str, object], repository: str | None):
+    """Decode an existing-target task using already declared task fields.
+
+    This is placement metadata under the caller's current task admission, never
+    authority to release a held task or renew the PR's automatic fix budget.
+    The task declares task_type=existing_pr_correction, pr_number, head_sha,
+    and context as JSON containing branch and base_branch. Other context keys
+    remain untouched and supply no placement authority. The separate
+    dispatch_context remains owned by normal task deferral/recovery.
+    The current checkpoint must cover these fields and the worker-consumed
+    description. Partial metadata refuses instead of becoming a new-PR build.
+    """
+    marker = snapshot.get("task_type") == "existing_pr_correction"
+    if not marker and not any(snapshot.get(k) is not None for k in ("pr_number", "head_sha")):
+        return None
+    if not marker:
+        raise BuildWorktreeError("PR correction metadata needs existing_pr_correction task_type")
+    validate_repository(repository)
+    number, head = snapshot.get("pr_number"), snapshot.get("head_sha")
+    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+        raise BuildWorktreeError("an existing PR correction needs its exact PR number")
+    if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise BuildWorktreeError("an existing PR correction needs its full exact head")
+    try:
+        context = json.loads(snapshot.get("context"))
+    except (ValueError, TypeError):
+        context = None
+    if not isinstance(context, dict) or not {"branch", "base_branch"}.issubset(context):
+        raise BuildWorktreeError("an existing PR correction needs branch and base_branch context")
+    branch, base = context["branch"], context["base_branch"]
+    # The runner independently validates refs and the live same-repository PR.
+    if (not isinstance(branch, str) or not re.fullmatch(r"(?:cicada|codex)/[A-Za-z0-9][A-Za-z0-9._/-]*", branch)
+            or any(x in branch for x in ("..", "//")) or branch.endswith(("/", ".", ".lock"))
+            or any(part.startswith(".") or part.endswith(".lock") for part in branch.split("/"))
+            or not isinstance(base, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", base)
+            or ".." in base or branch == base
+            or re.fullmatch(r"(?i)(?:main|master|trunk|develop|release[/_-].*|releases/.*|hotfix/.*|v?[0-9]+(?:\.[0-9]+)*)", branch.split("/", 1)[1])):
+        raise BuildWorktreeError("the existing PR correction branch or base is not permitted")
+    return ExistingPRTarget(number, branch, base, head)
+
 # ── In-flight builds ─────────────────────────────────────────────────────────
 #
 # A build registers the issue it is building for as long as it runs. Two things
@@ -156,6 +206,8 @@ class BuildClaim:
     number: int
     holder: str
     run_id: str
+    exclusive: bool = False
+    aliases: tuple[tuple[str, int], ...] = ()
 
 
 # Called, with the key, when the OWNER of a claim releases it (success or
@@ -176,39 +228,54 @@ def set_release_hook(hook: ReleaseHook | None) -> None:
 
 
 @contextlib.contextmanager
-def claim_build(repository: str, number: int, holder: str) -> Iterator[BuildClaim]:
-    """Record that a build of repository#number is running, for its duration.
+def claim_build(repository: str, number: int, holder: str, *, exclusive: bool = False,
+                aliases: tuple[tuple[str, int], ...] = ()) -> Iterator[BuildClaim]:
+    """Hold all associations atomically in the existing build registry.
 
-    Released on EVERY exit path, success or failure; releasing runs the release
-    hook, which is what re-dispatches tasks deferred behind it. A second claim on
-    a key already held keeps the FIRST holder as the owner, and only the owner's
-    exit releases the key.
+    Legacy nested observations remain supported for legacy nonexclusive builds.
+    A correction's exclusive claim cannot be bypassed by that legacy option.
+    All owned associations release together, then wake their existing recovery.
     """
     key = (repository.strip().lower(), int(number))
-    claim = BuildClaim(key[0], key[1], holder, secrets.token_hex(8))
+    keys = tuple(dict.fromkeys((key, *((repo.strip().lower(), int(n)) for repo, n in aliases))))
+    claim = BuildClaim(key[0], key[1], holder, secrets.token_hex(8), exclusive, keys[1:])
     with _inflight_lock:
-        owned = key not in _inflight
-        if owned:
-            _inflight[key] = claim
+        if any(k in _inflight and (exclusive or _inflight[k].exclusive) for k in keys):
+            raise BuildWorktreeError("the correction source or PR already has an active builder")
+        owned = tuple(k for k in keys if k not in _inflight)
+        for k in owned:
+            _inflight[k] = claim
         _runs[claim.run_id] = key
     try:
         yield claim
     finally:
+        released = []
         with _inflight_lock:
             _runs.pop(claim.run_id, None)
-            if owned:
-                _inflight.pop(key, None)
-        if owned and _release_hook is not None:
-            try:
-                _release_hook(key)
-            except Exception:  # noqa: BLE001 — a hook failure must not mask the build's outcome
-                log.exception("[apis] build release hook failed for %s#%s", *key)
+            for k in owned:
+                if _inflight.get(k) is claim:
+                    _inflight.pop(k)
+                    released.append(k)
+        if _release_hook is not None:
+            for k in released:
+                try:
+                    _release_hook(k)
+                except Exception:  # noqa: BLE001 — recovery failure must not mask this outcome
+                    log.exception("[apis] build release hook failed for %s#%s", *k)
 
 
 def active_build(repository: str, number: int) -> BuildClaim | None:
     """The in-flight build of repository#number, else None."""
+    key = (repository.strip().lower(), int(number))
     with _inflight_lock:
-        return _inflight.get((repository.strip().lower(), int(number)))
+        claim = _inflight.get(key)
+        if claim is not None and (claim.repository, claim.number) != key:
+            associations = ((claim.repository, claim.number), *claim.aliases)
+            # Existing deferral/recovery consumes this looked-up association,
+            # while owner/run identity still denotes the one original build.
+            return replace(claim, repository=key[0], number=key[1],
+                           aliases=tuple(k for k in associations if k != key))
+        return claim
 
 
 # ── The durable deferral record ──────────────────────────────────────────────
@@ -741,13 +808,21 @@ def worktree_instructions(wt: BuildWorktree) -> str:
 # (not eligible, a refused token mint, a launch request that provably did not
 # take effect); those never reach the receipt as a status, and the receipt
 # reserved for them is removed. Automatic retry of a launched failure is not
-# provided: it would be a separate, deliberate change.
+# provided: it would be a separate, deliberate change. The one exception is a
+# FURTHER correction of the same existing PR: a settled ``updated`` or
+# ``pr_failed`` correction receipt whose pushed commit is exactly the next
+# correction's admitted (live) head is replaced by that correction's reservation
+# (``supersedable_correction``). That is a new round on the run's own result,
+# not a retry of it; the round limit stays with the PR's coordinator. So is a
+# settled ``not_delivered`` or ``no_changes`` correction that recorded no commit
+# and was admitted against the very head the next correction declares: nothing
+# landed, and its run holds no reservation still in flight.
 
 FLY_DELIVERY_BASE_BRANCH = "main"
 FLY_DELIVERY_AUTHOR = ("cicada (ateles swarm)", "cicada@ateles-swarm.invalid")
 # Same ledger and lock as executor admission, accounting, and reaping.
 FLY_DELIVERY_REGISTRY_ENV = "APIS_FLY_LEDGER_FILE"
-# No receipt status is retryable: see the note above.
+# No receipt status is retryable: see the note above (and its one exception).
 
 
 @dataclass(frozen=True)
@@ -757,11 +832,20 @@ class FlyDeliveryPlan:
     base_branch: str
     key: str  # "owner/name#123", or "owner/name#task:<id>" for a task with no issue
     issue_number: int | None
+    target: ExistingPRTarget | None = None
+    source_key: str = ""
+    # The task this delivery is for, recorded on its receipt so a run stays
+    # findable by task when its key no longer derives from the task (the
+    # task's repository changed mid-run). Empty for a non-task delivery.
+    task_id: str = ""
 
     def spec(self) -> dict:
         """The job.json delivery spec the Fly job runner accepts."""
-        return {"branch": self.branch, "base_branch": self.base_branch,
+        spec = {"branch": self.branch, "base_branch": self.base_branch,
                 "author_name": FLY_DELIVERY_AUTHOR[0], "author_email": FLY_DELIVERY_AUTHOR[1]}
+        if self.target:
+            spec.update(pr_number=str(self.target.number), head_sha=self.target.head_sha)
+        return spec
 
 
 class FlyDeliveryEnded(RuntimeError):
@@ -774,25 +858,69 @@ class FlyDeliveryEnded(RuntimeError):
 
 
 def plan_fly_delivery(repository: str, label: str, *, key: str,
-                      issue_number: int | None) -> FlyDeliveryPlan | None:  # fmt: skip
+                      issue_number: int | None, target: ExistingPRTarget | None = None,
+                      source_key: str = "", task_id: str = "") -> FlyDeliveryPlan | None:  # fmt: skip
     """A Fly delivery plan when the operator opted deliveries onto Fly, else
     None (the builder runs locally, exactly as before)."""
     import fly_runner
 
     if not fly_runner.delivery_opted_in():
+        if target:
+            raise BuildWorktreeError("existing PR correction requires the selected Fly delivery adapter")
         return None
     validate_repository(repository)
-    branch, _, _ = _new_branch(label)
+    branch, _, _ = _new_branch(label) if target is None else (target.branch, "", "")
     return FlyDeliveryPlan(repository=repository, branch=branch,
-                           base_branch=FLY_DELIVERY_BASE_BRANCH, key=key,
-                           issue_number=issue_number)  # fmt: skip
+                           base_branch=target.base_branch if target else FLY_DELIVERY_BASE_BRANCH, key=key,
+                           issue_number=issue_number, target=target, source_key=source_key,
+                           task_id=str(task_id or "").strip())  # fmt: skip
 
+
+
+async def verify_existing_pr_target(repository: str, target: ExistingPRTarget, token_provider, *, policy_reader=None, policy_current=None):
+    """Qualify source/policy before delivery reservation, job or model.
+
+    The designated read-token provider retains its existing cache/mint contract;
+    this is not a promise that obtaining that credential has no effect.
+    """
+    from lib.daemon_runtime.artifact_resolver import read_back_delivered_pr
+
+    reason = await asyncio.to_thread(
+        read_back_delivered_pr, repo=repository, number=target.number,
+        base=target.base_branch, branch=target.branch, commit=target.head_sha,
+        attempts=1, require_open=True, token_provider=token_provider)
+    if reason:
+        return reason
+    if policy_reader is None:
+        from lib.daemon_runtime.artifact_resolver import read_back_default_protection
+        return await asyncio.to_thread(read_back_default_protection, repository, token_provider)
+    reason = await policy_reader()
+    if reason:
+        return reason
+    # The separate owner read cannot stand in for current App source/target
+    # validation. A target change while it was awaited holds this invocation.
+    reason = await asyncio.to_thread(
+        read_back_delivered_pr, repo=repository, number=target.number,
+        base=target.base_branch, branch=target.branch, commit=target.head_sha,
+        attempts=1, require_open=True, token_provider=token_provider)
+    return reason or (await policy_current() if policy_current is not None else None)
 
 def fly_delivery_instructions(plan: FlyDeliveryPlan) -> str:
     """The Fly variant of the builder's workspace and delivery instructions.
     The local variant (``worktree_instructions``) is unchanged."""
     import fly_runner
 
+    if plan.target:
+        return (
+            f"YOUR WORKSPACE: the runner checks out the admitted existing pull request #{plan.target.number} "
+            f"in {plan.repository}, branch `{plan.branch}` at exact head {plan.target.head_sha}. "
+            "Correct only this scoped task. Preserve prior WIP, findings and review/attempt history. "
+            "Do not change branch/remote, push, open another PR or merge. Commit before finishing; "
+            "the runner conditionally updates only this existing PR. No changes is a held outcome, not completion. "
+            f"Write the change summary to {fly_runner.PR_FILE_PLACEHOLDER}. The runner posts it on the "
+            "pull request as a comment for reviewers, so it must say what this round changed for each "
+            "finding. A correction never changes the pull request description."
+        )
     closes = (f" Reference the issue in the body with `Closes #{plan.issue_number}`."
               if plan.issue_number else "")  # fmt: skip
     return (
@@ -868,19 +996,497 @@ def _delivery_ledger():
 
 
 # The supported operator action that clears one delivery receipt (dry run by
-# default; see fly_delivery_receipt.py). Nothing clears a receipt automatically.
+# default; see fly_delivery_receipt.py). The only automatic replacement is
+# ``_supersede_settled_correction``: a settled existing-PR correction whose
+# pushed commit is the exact head the next correction was declared against.
 FLY_RECEIPT_COMMAND = "python3 execution/daemons/apis/fly_delivery_receipt.py"
+
+# Existing-PR correction outcomes whose recorded commit is a push the runner
+# confirmed (``delivery_push_state``). Every other status (``launching``,
+# ``unknown``, ``unreported``, ``push_failed``, ``no_time``, and any
+# unrecognised one such as an ``exhausted`` or ``noop`` record) keeps the
+# receipt until the operator clears it: an unknown outcome is never renewed
+# here.
+SUPERSEDABLE_CORRECTION_STATUSES = frozenset({"updated", "pr_failed"})
+# The one further exception: a ``not_delivered`` or ``no_changes`` correction
+# that recorded no commit, admitted against the very head the next correction
+# declares, whose run has settled (``_undelivered_correction_settled``). Nothing
+# landed, so the next correction starts from the same head; no other status
+# shares this. The runner leaves ``commit`` empty on a ``no_changes`` run (it
+# returns before any import), so the same recorded-no-commit check applies.
+UNDELIVERED_CORRECTION_STATUSES = frozenset({"not_delivered", "no_changes"})
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def _stored_receipt(key: str, receipts: dict) -> tuple[str, dict] | None:
+    """The (stored key, receipt) for the canonical *key*. A receipt written
+    under another spelling of the same repository (an older key form), or one
+    naming *key* among its associations, is found too."""
+    if key in receipts:
+        return key, receipts[key]
+    for stored, entry in receipts.items():
+        if canonical_key(stored) == key or key in {canonical_key(k) for k in entry.get("associated_keys", [])}:
+            return stored, entry
+    return None
 
 
 def _receipt_for(key: str, receipts: dict) -> dict | None:
-    """The receipt for the canonical *key*. A receipt written under another
-    spelling of the same repository (an older key form) is found too."""
-    if key in receipts:
-        return receipts[key]
+    """The receipt for the canonical *key* (see ``_stored_receipt``)."""
+    found = _stored_receipt(key, receipts)
+    return found[1] if found else None
+
+
+def supersedable_correction(plan: "FlyDeliveryPlan", stored: str, entry: dict) -> bool:
+    """True only when *entry* is a settled correction of the same existing PR
+    whose recorded commit is exactly the head *plan* was declared against.
+
+    The new task's admission (``verify_existing_pr_target``) has already read
+    the live PR and required its head to equal ``plan.target.head_sha``, so a
+    match proves the earlier run's commit landed and is the PR's current head:
+    the new correction was written against that run's result.
+
+    One narrower case also qualifies: a settled ``not_delivered`` or
+    ``no_changes`` correction that recorded no commit and was admitted against the same head the new
+    correction declares (``_undelivered_correction_settled``)."""
+    target = plan.target
+    if target is None or canonical_key(stored) != canonical_key(plan.key):
+        return False  # only the PR's own receipt, never one found via an association
+    if entry.get("kind") == "lens":
+        return False
+    admitted = entry.get("existing_pr")
+    if not isinstance(admitted, dict):
+        return False  # a first delivery's receipt
+    if entry.get("status") in UNDELIVERED_CORRECTION_STATUSES:
+        return _undelivered_correction_settled(target, entry, admitted)
+    if entry.get("status") not in SUPERSEDABLE_CORRECTION_STATUSES:
+        return False
+    commit = entry.get("commit")
+    if not isinstance(commit, str) or not _FULL_SHA_RE.fullmatch(commit):
+        return False
+    return (commit == target.head_sha and commit != admitted.get("head_sha")
+            and str(admitted.get("pr_number")) == str(target.number)
+            and admitted.get("branch") == target.branch
+            and admitted.get("base_branch") == target.base_branch)
+
+
+def _undelivered_correction_settled(target: "ExistingPRTarget", entry: dict, admitted: dict) -> bool:
+    """True only when a ``not_delivered`` or ``no_changes`` correction of the same PR recorded
+    no commit, was admitted against exactly the head the new correction
+    declares, and its run holds no reservation still in flight.
+
+    Admission has already required ``target.head_sha`` to be the PR's live
+    head, so an equal admitted head proves nothing landed from that run: the
+    new correction starts from the same state the earlier one did. Any ledger
+    read failure, or a run that cannot be named, refuses."""
+    import fly_runner
+
+    if "commit" not in entry or entry["commit"] not in (None, ""):
+        return False  # a missing field is unknown evidence, not a recorded "no commit"
+    if not (isinstance(target.head_sha, str) and _FULL_SHA_RE.fullmatch(target.head_sha)
+            and admitted.get("head_sha") == target.head_sha
+            and str(admitted.get("pr_number")) == str(target.number)
+            and admitted.get("branch") == target.branch
+            and admitted.get("base_branch") == target.base_branch):
+        return False
+    run_id = entry.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return False  # the run cannot be shown to have settled
+    try:
+        return _delivery_ledger().entry(run_id) is None
+    except (OSError, fly_runner.FlyLedgerError, AttributeError, TypeError, ValueError):
+        return False
+
+
+# Receipt outcomes that name a pull request the runner opened or updated and
+# that Apis read back from GitHub (``verify_fly_delivery``) before recording.
+_PARENT_TASK_STATUSES = frozenset({"opened", "updated"})
+# Every status a delivery receipt can carry (see the note above
+# ``FLY_DELIVERY_BASE_BRANCH``): the reservation's ``launching``, the
+# dispatcher's ``unknown``/``unreported``, and every status the runner reports.
+# A receipt naming a PR with any other status, or a non-string one, makes that
+# PR's origin unknown in ``fly_delivered_pr``: it is never read as "not Fly".
+_RECOGNIZED_RECEIPT_STATUSES = frozenset({
+    "launching", "unknown", "unreported", "opened", "updated", "no_changes",
+    "clone_failed", "not_delivered", "push_failed", "pr_failed", "no_time"})
+# Statuses of a receipt whose outcome has not settled yet: a delivery's effect
+# (a pushed branch, an opened PR) can come before its receipt records it.
+_UNSETTLED_RECEIPT_STATUSES = frozenset({"launching", "unknown", "unreported"})
+# Statuses whose outcome has settled. A first-delivery receipt on this PR's
+# repository that names the PR or sits on its head branch with any status
+# outside this set (unsettled, unrecognized, empty, missing or non-string)
+# makes the PR's origin unknown in ``fly_delivered_pr``, whether or not the
+# receipt records a PR number: the route holds, it never runs locally.
+_SETTLED_RECEIPT_STATUSES = _RECOGNIZED_RECEIPT_STATUSES - _UNSETTLED_RECEIPT_STATUSES
+_TASK_KEY_MARK = "#task:"
+
+
+def verified_parent_task(
+    repository: object, pr_number: object, head_ref: str, head_sha: str
+) -> str | None:
+    """The task id a pull request was delivered from, or None.
+
+    Read only from Apis's own delivery ledger, never from the PR body: a task
+    delivery's receipt is keyed ``owner/name#task:<id>`` when the task has no
+    issue, and settles with the PR number and branch the runner reported only
+    after ``verify_fly_delivery`` read the PR back. A pull request counts as
+    delivered from a task only when exactly one such receipt names it: same
+    repository, status ``opened``/``updated``, read-back ``passed``, the same PR
+    number, branch, and full commit SHA as the head under review.
+
+    Fail closed: an unreadable or malformed ledger, no match, or more than one
+    match returns None, and the caller keeps its no-parent behaviour."""
+    import fly_runner
+
+    number = _as_issue_number(pr_number)
+    repo = canonical_repository(repository)
+    if not number or not repo or not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha):
+        return None
+    try:
+        receipts = _delivery_ledger().delivery_receipts()
+    except (OSError, fly_runner.FlyLedgerError, ValueError):
+        return None
+    if not isinstance(receipts, dict):
+        return None
+    found: set[str] = set()
     for stored, entry in receipts.items():
-        if canonical_key(stored) == key:
-            return entry
-    return None
+        if not isinstance(stored, str) or not isinstance(entry, dict):
+            continue
+        key_repo, mark, task_id = canonical_key(stored).partition(_TASK_KEY_MARK)
+        task_id = task_id.strip()
+        if not mark or key_repo != repo or not task_id:
+            continue
+        if entry.get("kind") == "lens" or isinstance(entry.get("existing_pr"), dict):
+            continue
+        if (entry.get("status") not in _PARENT_TASK_STATUSES
+                or entry.get("readback") != "passed"
+                or _as_issue_number(entry.get("pr_number")) != number):
+            continue
+        if entry.get("branch") != head_ref or entry.get("commit") != head_sha:
+            continue
+        found.add(task_id)
+    return found.pop() if len(found) == 1 else None
+
+
+@dataclass(frozen=True)
+class FlyDeliveredPR:
+    """Whether Apis's own ledger shows a pull request came from Fly.
+
+    ``delivered`` is True when a receipt names the PR or the audit file records
+    a cleared or superseded receipt on its branch, False when a readable ledger
+    names it in none and the audit file adds nothing, and None when the ledger
+    or its audit file is missing or could not be read (unknown, never "not
+    Fly"). A missing audit file adds nothing: no receipt was ever cleared.
+    ``branch``/``base_branch`` are what the receipts recorded, when they did;
+    ``source_task`` is the task a first delivery was keyed by, when exactly one
+    such receipt names the PR, or the task an audit line recorded for the
+    cleared or superseded receipt. ``unknown_reason`` says why ``delivered`` is
+    None when the cause is not an unreadable ledger or audit file."""
+
+    delivered: bool | None
+    branch: str = ""
+    base_branch: str = ""
+    source_task: str = ""
+    unknown_reason: str = ""
+
+
+def receipt_source_task(stored: object, entry: object) -> str:
+    """The task a delivery receipt was keyed by, or "".
+
+    The same value ``fly_delivered_pr`` reads from an active receipt: the id
+    after ``#task:`` in its key, or in one of its ``associated_keys``. Empty
+    when none names a task, or more than one task. Written on the audit line
+    when a receipt is cleared or superseded (``source_task``), so a correction
+    filed from that line keeps its parent."""
+    keys = [stored]
+    if isinstance(entry, dict) and isinstance(entry.get("associated_keys"), list):
+        keys += entry["associated_keys"]
+    found: set[str] = set()
+    for key in keys:
+        if not isinstance(key, str):
+            continue
+        _, mark, task_id = canonical_key(key).partition(_TASK_KEY_MARK)
+        if mark and task_id.strip():
+            found.add(task_id.strip())
+    return found.pop() if len(found) == 1 else ""
+
+
+_RECEIPT_REMOVAL_ACTIONS = frozenset({"clear_delivery_receipt", "supersede_delivery_receipt"})
+
+
+def _removal_audit_lines(ledger) -> list[dict] | None:
+    """Every cleared or superseded non-lens receipt line in the ledger's audit
+    file, validated in full before any caller decides a route.
+
+    An empty list when the file does not exist (no receipt was ever cleared or
+    superseded). None when the file exists but cannot be read or decoded, when
+    any line is not a JSON object, when any line's ``action`` is missing or is
+    not one of ``_RECEIPT_REMOVAL_ACTIONS`` (the only actions this file's
+    writers emit, so any other line is one this reader cannot interpret), or
+    when a removal line carries a field this reader uses in a shape it cannot
+    read (a non-string key, branch or ``source_task``, a non-object
+    ``existing_pr`` or a non-string branch inside it): one bad line makes the
+    whole file unknown, whatever the other lines say."""
+    import fly_delivery_receipt
+
+    path = fly_delivery_receipt.audit_path(ledger)
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    removals: list[dict] = []
+    for raw in text.splitlines():
+        if not raw.strip():
+            continue
+        try:
+            line = json.loads(raw)
+        except ValueError:
+            return None
+        if not isinstance(line, dict):
+            return None
+        action = line.get("action")
+        if not isinstance(action, str) or action not in _RECEIPT_REMOVAL_ACTIONS:
+            return None
+        if not isinstance(line.get("key"), str):
+            return None
+        if not isinstance(line.get("branch"), (str, type(None))):
+            return None
+        if not isinstance(line.get("source_task"), (str, type(None))):
+            return None
+        if not isinstance(line.get("correction"), (bool, type(None))):
+            return None
+        prior = line.get("existing_pr")
+        if prior is not None:
+            if not isinstance(prior, dict) or not isinstance(prior.get("branch"), (str, type(None))):
+                return None
+        if line.get("kind") == "lens":
+            continue
+        removals.append(line)
+    return removals
+
+
+def _removed_receipt_names_branch(ledger, repo: str, head_branch: str) -> list[dict] | None:
+    """The ledger's audit lines for cleared or superseded non-lens receipts
+    for *repo* on *head_branch* (empty when none).
+
+    The audit line carries no PR number, so it is matched on the repository in
+    its key and on its branch; Fly branches are unique to a task. The whole
+    file is read and validated before a match counts (``_removal_audit_lines``).
+    Empty when the file does not exist (no receipt was ever cleared or
+    superseded). None when the file exists but cannot be read, any line cannot
+    be parsed, or no head branch is known while the file names a removed
+    receipt for *repo*: unknown, never "not Fly"."""
+    removals = _removal_audit_lines(ledger)
+    if removals is None:
+        return None
+    unmatched_for_repo = False
+    matched: list[dict] = []
+    for line in removals:
+        if canonical_key(line["key"]).partition("#")[0] != repo:
+            continue
+        branches = {line.get("branch") or ""}
+        prior = line.get("existing_pr")
+        if isinstance(prior, dict):
+            branches.add(prior.get("branch") or "")
+        branches.discard("")
+        if not head_branch:
+            unmatched_for_repo = True
+            continue
+        if head_branch in branches:
+            matched.append(line)
+    if matched:
+        return matched
+    return None if unmatched_for_repo else []
+
+
+def _parent_sources(removed: list[dict]) -> set[str]:
+    """The source tasks of the removal lines that were not correction receipts.
+
+    A removed correction receipt (marked ``correction``) is keyed by its own
+    correction task, or by none, so it never names the parent: the parent comes
+    only from unmarked lines. Lines written before the mark existed are all
+    unmarked, so a mix they cannot resolve still yields several sources (or an
+    empty one) and the caller holds."""
+    return {line.get("source_task") or "" for line in removed if line.get("correction") is not True}
+
+
+def fly_delivered_pr(
+    repository: object, pr_number: object, head_branch: object = ""
+) -> FlyDeliveredPR:
+    """Whether *pr_number* in *repository* is a pull request Fly delivered.
+
+    Read only from the delivery ledger and its audit file, never from the PR's
+    author or body. A PR counts when a non-lens receipt for the same repository
+    either settled a first delivery as ``opened``/``updated`` with that PR
+    number, or records an existing-PR correction of it; or, when no active
+    receipt names it, when the audit file records a cleared or superseded
+    non-lens receipt for the same repository on the PR's *head_branch*. A
+    cleared receipt still means the PR came from Fly; that route returns the
+    ``source_task`` its audit line recorded, and is unknown (None, with
+    ``unknown_reason``) when the matching lines record no single source task,
+    so no correction is filed with no parent. An existing audit file
+    that cannot be read or has any line that cannot be parsed makes the
+    origin unknown (None) even when an active receipt matches. A first-delivery
+    receipt that names this PR or sits on exactly this *head_branch*, with any
+    status that is not a recognized settled one (``launching``, ``unknown``,
+    ``unreported``, an unrecognized, empty, missing or non-string status),
+    makes it unknown whether or not it records a PR number, and whatever any
+    other receipt says: its PR may predate its receipt. With no receipt
+    establishing delivery, a missing audit file also makes it unknown, as it
+    may hold a cleared receipt's only record, and so does an empty
+    *head_branch*, since a receipt that records no PR number is matched only by
+    branch. A PR number or repository that cannot be read makes it unknown
+    too, never "not Fly": a missing PR number, repository or head branch holds
+    the fix round rather than running it on this host. A receipt that names
+    this PR still establishes delivery with an empty *head_branch*. A
+    removal line marked ``correction`` never supplies the parent task. Used to route a fix
+    round: a Fly PR's fix round runs as a Fly correction, never as a commit on
+    this host."""
+    import fly_runner
+
+    number = _as_issue_number(pr_number)
+    repo = canonical_repository(repository)
+    if not number or not repo:
+        missing = "PR number" if not number else "repository"
+        return FlyDeliveredPR(None, unknown_reason=(
+            f"this PR's {missing} could not be read, so whether a Fly delivery "
+            "opened it cannot be decided"))
+    try:
+        ledger = _delivery_ledger()
+        # A missing file is no evidence either way: `delivery_receipts` reads
+        # it as an empty map, which must not pass for "no Fly receipt".
+        if not ledger.path.exists():
+            return FlyDeliveredPR(None)
+        receipts = ledger.delivery_receipts()
+    except (OSError, fly_runner.FlyLedgerError, ValueError):
+        return FlyDeliveredPR(None)
+    if not isinstance(receipts, dict):
+        return FlyDeliveredPR(None)
+    branches: set[str] = set()
+    bases: set[str] = set()
+    tasks: set[str] = set()
+    delivered = False
+    unrecognized = False
+    unsettled_on_branch = False
+    head = str(head_branch or "").strip()
+    for stored, entry in receipts.items():
+        if not isinstance(stored, str) or not isinstance(entry, dict) or entry.get("kind") == "lens":
+            continue
+        key_repo, _, rest = canonical_key(stored).partition("#")
+        if key_repo != repo:
+            continue
+        admitted = entry.get("existing_pr")
+        status = entry.get("status")
+        if not isinstance(admitted, dict):
+            names_pr = _as_issue_number(entry.get("pr_number")) == number or rest == str(number)
+            on_branch = bool(head) and entry.get("branch") == head
+            if (names_pr or on_branch) and (
+                    not isinstance(status, str) or status not in _SETTLED_RECEIPT_STATUSES):
+                # A first delivery for this PR, or on its head branch, whose
+                # outcome has not settled or that this reader cannot interpret:
+                # it may have opened this PR before its receipt recorded it, so
+                # it is never "not Fly", and no other receipt can outweigh it.
+                if isinstance(status, str) and status in _UNSETTLED_RECEIPT_STATUSES:
+                    unsettled_on_branch = True
+                else:
+                    unrecognized = True
+                continue
+        if isinstance(admitted, dict):
+            if _as_issue_number(admitted.get("pr_number")) != number:
+                continue
+            delivered = True
+            branches.add(str(admitted.get("branch") or ""))
+            bases.add(str(admitted.get("base_branch") or ""))
+            continue
+        if (entry.get("status") not in _PARENT_TASK_STATUSES
+                or _as_issue_number(entry.get("pr_number")) != number):
+            continue
+        delivered = True
+        branches.add(str(entry.get("branch") or ""))
+        task_mark = _TASK_KEY_MARK.lstrip("#")
+        if rest.startswith(task_mark) and rest[len(task_mark):].strip():
+            tasks.add(rest[len(task_mark):].strip())
+    branches.discard("")
+    bases.discard("")
+    # The audit file is read and validated whether or not an active receipt
+    # matched: a corrupt one holds the route either way, never a definite
+    # Fly route and never local.
+    try:
+        audit_ok = _removal_audit_lines(ledger) is not None
+    except OSError:
+        audit_ok = False
+    if not audit_ok:
+        return FlyDeliveredPR(None)
+    if unrecognized:
+        return FlyDeliveredPR(None, unknown_reason=(
+            "a Fly delivery receipt for this PR or its head branch carries a status "
+            "this reader does not recognize, so whether this PR came from Fly is unknown"))
+    if unsettled_on_branch:
+        return FlyDeliveredPR(None, unknown_reason=(
+            "a Fly delivery for this PR or on its head branch has not settled, so "
+            "whether this PR came from Fly is unknown"))
+    if not delivered:
+        if not head:
+            # A first-delivery receipt that records no PR number is matched
+            # only by branch: with no head branch it could never be seen.
+            return FlyDeliveredPR(None, unknown_reason=(
+                "this PR's head branch is unknown, so whether a Fly delivery on "
+                "that branch opened it cannot be decided"))
+        import fly_delivery_receipt
+
+        try:
+            audit_exists = fly_delivery_receipt.audit_path(ledger).exists()
+        except OSError:
+            audit_exists = False
+        if not audit_exists:
+            # A cleared receipt may have its only record in the audit file, so
+            # a missing file is no evidence the PR did not come from Fly.
+            return FlyDeliveredPR(None, unknown_reason=(
+                "no active Fly delivery receipt names this PR and the delivery "
+                "ledger's audit file does not exist, so whether this PR came from "
+                "Fly through a cleared receipt is unknown"))
+        try:
+            removed = _removed_receipt_names_branch(ledger, repo, head)
+        except OSError:
+            removed = None
+        if removed is None:
+            return FlyDeliveredPR(None)
+        if removed:
+            # The correction is filed PART_OF the receipt's source task. A
+            # line that recorded none (every line written before the field
+            # existed) holds the route rather than file a task with no parent.
+            sources = _parent_sources(removed)
+            if len(sources) != 1 or "" in sources:
+                return FlyDeliveredPR(None, unknown_reason=(
+                    "this PR came from Fly, but the audit record of its cleared or "
+                    "superseded delivery receipt names no single source task, so "
+                    "no correction can be filed under its parent task"))
+            return FlyDeliveredPR(True, branch=head, source_task=sources.pop())
+    elif not tasks:
+        # Only a correction receipt (``existing_pr``) names this PR: its first
+        # delivery receipt was cleared or superseded. The parent task comes
+        # from that removal's audit line; a correction is never filed with no
+        # parent, so none, several or an unreadable file holds the route.
+        head = head or (next(iter(branches)) if len(branches) == 1 else "")
+        try:
+            removed = _removed_receipt_names_branch(ledger, repo, head)
+        except OSError:
+            removed = None
+        sources = _parent_sources(removed or [])
+        if removed is None or len(sources) != 1 or "" in sources:
+            return FlyDeliveredPR(None, unknown_reason=(
+                "this PR came from Fly and a correction receipt names it, but no "
+                "active receipt or audit record of its cleared or superseded first "
+                "delivery names a single source task, so no correction can be "
+                "filed under its parent task"))
+        tasks.add(sources.pop())
+    return FlyDeliveredPR(
+        delivered,
+        branch=branches.pop() if len(branches) == 1 else "",
+        base_branch=bases.pop() if len(bases) == 1 else "",
+        source_task=tasks.pop() if len(tasks) == 1 else "",
+    )
 
 
 def fly_delivery_facts(key: str, status, branch, run_id, commit=None) -> str:
@@ -890,7 +1496,7 @@ def fly_delivery_facts(key: str, status, branch, run_id, commit=None) -> str:
             f"Key: {key}.")  # fmt: skip
 
 
-def fly_delivery_recovery(key: str) -> str:
+def fly_delivery_recovery(key: str, *, existing_pr: bool = False) -> str:
     """What the operator does next, in order, once a delivery is recorded."""
     return (
         "To recover:\n"
@@ -898,9 +1504,14 @@ def fly_delivery_recovery(key: str) -> str:
         "2. Reconcile what actually happened.\n"
         f"3. Clear the delivery receipt for this issue: {FLY_RECEIPT_COMMAND} clear {key} "
         f"(a dry run; to remove it, repeat with --confirm {key}).\n"
-        "4. Only then re-dispatch.\n"
-        "Until the receipt is cleared, any re-dispatch is refused and nothing falls back "
-        "to the local path."
+        + ("4. Only after fresh current task/target/checkpoint and target-policy qualification may a permitted existing-PR dispatch proceed. Clearing does not renew exhausted/noop attempts.\n"
+         if existing_pr else "4. Only then re-dispatch.\n")
+        + ("Until the receipt is cleared, any re-dispatch is refused (except a further "
+           "correction declared against the exact commit a settled updated or pr_failed "
+           "run recorded, once that commit is the PR's live head) and nothing falls back "
+           "to the local path." if existing_pr else
+           "Until the receipt is cleared, any re-dispatch is refused and nothing falls back "
+           "to the local path.")
     )
 
 
@@ -924,7 +1535,41 @@ def fly_delivery_blocker(key: str) -> str:
     return ("Fly delivery refused: a delivery for this issue or task is already recorded.\n"
             + fly_delivery_facts(key, entry["status"], entry.get("branch"), entry.get("run_id"),
                                  entry.get("commit")) + "\n"
-            + fly_delivery_recovery(key))
+            + fly_delivery_recovery(key, existing_pr=isinstance(entry.get("existing_pr"), dict)))
+
+
+def fly_delivery_entrance_blocker(key: str, *, receipt_key: str = "", target=None) -> str:
+    """``fly_delivery_blocker`` for a dispatch entrance, with the one exception
+    ``run_fly_delivery`` admits: a further correction of an existing PR whose
+    settled receipt passes ``supersedable_correction`` proceeds (an empty
+    string), so the same eligibility decides at the entrance and at launch.
+
+    *key* is the entrance's receipt key, *receipt_key* the correction's own
+    (``OWNER/REPO#PR``). Every receipt naming either key, by its stored key or
+    an association, must be that one qualifying receipt; any other receipt, an
+    unknown outcome, or a ledger that cannot be read keeps the refusal."""
+    reason = fly_delivery_blocker(key)
+    if not reason or target is None or not receipt_key:
+        return reason
+    import fly_runner
+
+    wanted = {canonical_key(key), canonical_key(receipt_key)}
+    try:
+        receipts = _delivery_ledger().delivery_receipts()
+        matches = []
+        for stored, entry in receipts.items():
+            aliases = entry.get("associated_keys", [])
+            if not isinstance(aliases, list) or not all(isinstance(a, str) for a in aliases):
+                return reason
+            if wanted & {canonical_key(stored), *(canonical_key(a) for a in aliases)}:
+                matches.append((stored, entry))
+    except (OSError, fly_runner.FlyLedgerError, AttributeError, TypeError):
+        return reason
+    probe = FlyDeliveryPlan(repository="", branch=target.branch, base_branch=target.base_branch,
+                            key=receipt_key, issue_number=None, target=target)
+    if len(matches) == 1 and supersedable_correction(probe, *matches[0]):
+        return ""
+    return reason
 
 
 def _new_token() -> str:
@@ -941,13 +1586,70 @@ def _reserve_delivery(plan: FlyDeliveryPlan) -> str:
     token = _new_token()
     try:
         reserved = _delivery_ledger().reserve_delivery(
-            canonical_key(plan.key),
-            {"status": "launching", "branch": plan.branch, "run_id": "", "token": token,
-             "recorded_at": time.time()},
-        )
+            canonical_key(plan.key), _reservation_entry(plan, token))
     except fly_runner.FlyLedgerError as exc:
         raise ValueError(str(exc)) from None
     return token if reserved else ""
+
+
+def _task_fields(plan: FlyDeliveryPlan) -> dict:
+    return {"task_id": plan.task_id} if plan.task_id else {}
+
+
+def _reservation_entry(plan: FlyDeliveryPlan, token: str) -> dict:
+    return {"status": "launching", "branch": plan.branch, "run_id": "", "token": token,
+            "recorded_at": time.time(), **_task_fields(plan),
+            **({"existing_pr": plan.spec(),
+                **({"associated_keys": [canonical_key(plan.source_key)]} if plan.source_key else {})} if plan.target else {})}
+
+
+def _supersede_settled_correction(plan: FlyDeliveryPlan) -> str | None:
+    """Replace a settled existing-PR correction receipt with this dispatch's
+    reservation when ``supersedable_correction`` holds, and return the new
+    token. None: the receipt does not qualify (the caller refuses as before).
+    An empty string: it qualified but changed, or another dispatch took it,
+    before the compare-and-write. Raises OSError/ValueError when the outcome
+    is uncertain (the caller must not launch).
+
+    Under the ledger lock, after the receipt is compared and before anything is
+    written, the old receipt's identity is appended to the same audit file the
+    operator's ``fly_delivery_receipt.py clear`` writes; if that fails, nothing
+    is replaced."""
+    import fly_delivery_receipt
+    import fly_runner
+
+    if plan.target is None:
+        return None
+    key = canonical_key(plan.key)
+    ledger = _delivery_ledger()
+    try:
+        found = _stored_receipt(key, ledger.delivery_receipts())
+    except fly_runner.FlyLedgerError as exc:
+        raise ValueError(str(exc)) from None
+    if found is None or not supersedable_correction(plan, *found):
+        return None
+    stored, expected = found
+    token = _new_token()
+    entry = _reservation_entry(plan, token)
+
+    def audit() -> None:
+        fly_delivery_receipt._append_audit(ledger, {
+            "by": "apis", "action": "supersede_delivery_receipt", "stage": "superseding",
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "key": stored, "source_task": receipt_source_task(stored, expected),
+            "status": expected.get("status"), "run_id": expected.get("run_id"),
+            "branch": expected.get("branch"), "commit": expected.get("commit"),
+            "recorded_at": expected.get("recorded_at"), "existing_pr": expected.get("existing_pr"),
+            # The removed receipt was a correction: its key names the correction
+            # task, never the parent, so readers skip this line's source_task.
+            **({"correction": True} if isinstance(expected.get("existing_pr"), dict) else {}),
+            "superseded_by": {"key": key, "head_sha": plan.target.head_sha}})
+
+    try:
+        won = ledger.supersede_delivery(stored, expected, key, entry, before=audit)
+    except fly_runner.FlyLedgerError as exc:
+        raise ValueError(str(exc)) from None
+    return token if won else ""
 
 
 def _settle_delivery(plan: FlyDeliveryPlan, token: str, entry: dict) -> bool:
@@ -957,7 +1659,10 @@ def _settle_delivery(plan: FlyDeliveryPlan, token: str, entry: dict) -> bool:
 
     try:
         return _delivery_ledger().settle_delivery(
-            canonical_key(plan.key), token, {**entry, "token": token, "recorded_at": time.time()})
+            canonical_key(plan.key), token, {**entry, "token": token, "recorded_at": time.time(),
+                                           **_task_fields(plan),
+                                           **({"existing_pr": plan.spec(),
+                 **({"associated_keys": [canonical_key(plan.source_key)]} if plan.source_key else {})} if plan.target else {})})
     except fly_runner.FlyLedgerError as exc:
         raise ValueError(str(exc)) from None
 
@@ -981,17 +1686,33 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
     Every write to the receipt after the reservation is a compare against the
     reservation's token: a dispatch that no longer owns the receipt (it was
     cleared and another dispatch reserved the key) changes nothing, and never
-    falls back to the local path."""
+    falls back to the local path.
+
+    One recorded receipt does not refuse: a settled correction of the same
+    existing PR whose pushed commit is exactly this correction's admitted head
+    (``supersedable_correction``) is replaced by this dispatch's reservation,
+    with the old receipt's identity audited first."""
     reason = fly_delivery_blocker(plan.key)
     if reason:
-        log.warning("[apis] %s", reason)
-        return blocked(reason)
-    try:
-        token = _reserve_delivery(plan)
-    except (OSError, ValueError):
-        return blocked("the Fly delivery record could not be written; not launching")
-    if not token:
-        return blocked("another dispatcher already reserved this Fly delivery; not launching")
+        try:
+            token = _supersede_settled_correction(plan)
+        except (OSError, ValueError):
+            return blocked("the settled correction receipt could not be replaced with certainty; "
+                           "not launching. " + reason)
+        if token is None:
+            log.warning("[apis] %s", reason)
+            return blocked(reason)
+        if not token:
+            return blocked("another dispatcher already reserved this Fly delivery; not launching")
+        log.info("[apis] superseded the settled correction receipt for %s; its pushed commit "
+                 "is this correction's admitted head", plan.key)
+    else:
+        try:
+            token = _reserve_delivery(plan)
+        except (OSError, ValueError):
+            return blocked("the Fly delivery record could not be written; not launching")
+        if not token:
+            return blocked("another dispatcher already reserved this Fly delivery; not launching")
     try:
         result = await launch()
     except BaseException:
@@ -1000,6 +1721,8 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
             _settle_delivery(plan, token, {"status": "unknown", "branch": plan.branch,
                                            "run_id": ""})  # fmt: skip
         raise
+    if plan.target:
+        result.fly_existing_pr_number = plan.target.number
     launched = bool(result.fly_delivery_status or result.remote_run_id
                     or result.remote_outcome_unknown)
     if not launched:
@@ -1013,6 +1736,12 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
             kind = type(exc).__name__
             log.warning("[apis] the delivery receipt for %s could not be confirmed after a "
                         "failed cleanup (%s); not starting the local path", plan.key, kind)
+            if plan.target:
+                result.fly_delivery_not_launched = True
+                result.fly_delivery_cleanup = "unconfirmed"
+                result.fly_delivery_status = "unknown"
+                result.fly_delivery_reason = f"prelaunch receipt cleanup is unconfirmed ({kind}); hold and reconcile"
+                return result
             if result.fly_ineligible_before_launch:
                 return blocked(
                     f"the delivery receipt for {canonical_key(plan.key)} could not be confirmed "
@@ -1022,10 +1751,21 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
         if not owned:
             log.warning("[apis] the delivery receipt for %s is no longer this dispatch's; "
                         "left untouched", plan.key)
+            if plan.target:
+                result.fly_delivery_not_launched = True
+                result.fly_delivery_cleanup = "not_owned"
+                result.fly_delivery_status = "unknown"
+                result.fly_delivery_reason = "prelaunch receipt is not owned; hold and reconcile"
+                return result
             if result.fly_ineligible_before_launch:
                 # Another dispatch holds the key now: no local path beside it.
                 return blocked("the delivery record for this issue or task now belongs to "
                                "another dispatch; not starting the local path")
+            return result
+        if plan.target:
+            result.ok = False
+            result.fly_delivery_not_launched = True
+            result.fly_delivery_cleanup = "released"
             return result
         return None if result.fly_ineligible_before_launch else result
     if result.fly_delivery_status in {"opened", "updated"} and result.fly_pr_url:
@@ -1045,7 +1785,9 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
             "run_id": result.remote_run_id, "commit": result.fly_delivery_commit,
             "reason": result.fly_delivery_reason, "pr_number": result.fly_pr_number,
             "pr_url": result.fly_pr_url, "readback": result.fly_delivery_readback,
-            "readback_reason": result.fly_delivery_readback_reason})  # fmt: skip
+            "readback_reason": result.fly_delivery_readback_reason,
+            **({"pr_description": result.fly_pr_description}
+               if isinstance(result.fly_pr_description, str) and result.fly_pr_description else {})})  # fmt: skip
     except (OSError, ValueError):
         settled = True  # unreadable: the reservation stays as it was written
     if not settled:
@@ -1068,10 +1810,15 @@ async def verify_fly_delivery(result, plan) -> str | None:
     from lib import github_app_token
     from lib.daemon_runtime.artifact_resolver import read_back_delivered_pr
 
+    if plan.target and (result.fly_delivery_status != "updated"
+                        or result.fly_pr_number != plan.target.number
+                        or result.fly_delivery_branch != plan.branch
+                        or result.fly_delivery_commit == plan.target.head_sha):
+        return "the existing PR correction did not report its admitted target and a new head"
     return await asyncio.to_thread(
         read_back_delivered_pr, repo=plan.repository, number=result.fly_pr_number,
         base=plan.base_branch, branch=result.fly_delivery_branch,
-        commit=result.fly_delivery_commit,
+        commit=result.fly_delivery_commit, require_open=bool(plan.target),
         token_provider=lambda repo: github_app_token.identity_token("pr_opener", repo))  # fmt: skip
 
 
@@ -1082,7 +1829,7 @@ _FLY_STATUS_TEXT = {
     "clone_failed": ("ended as clone_failed: the runner reported that it could not prepare its "
                      "clone of the repository"),
     "not_delivered": "ended as not_delivered: the runner's record reports no delivery",
-    "push_failed": "did not get its push of {branch} accepted; no pull request was opened",
+    "push_failed": "could not confirm its push of {branch}; no pull request was opened",
     "pr_failed": ("pushed {branch} ({commit}), but the pull request step did not complete; "
                   "the branch is on the remote"),
     "no_time": "ran out of time",
@@ -1091,6 +1838,40 @@ _FLY_STATUS_TEXT = {
                    "it may have pushed {branch}"),
 }
 
+
+
+def fly_prelaunch_failure_summary(result) -> str:
+    """Technical repair evidence without inventing an unknown remote effect."""
+    cleanup = ("its own prelaunch receipt was removed" if result.fly_delivery_cleanup == "released"
+               else "no delivery receipt was reserved")
+    parts = [f"Existing PR correction not launched; {cleanup}."]
+    for label, value in (("Cause", result.error), ("Configuration repair", result.configuration_repair),
+                         ("Provider", result.provider), ("Provider attempts", ", ".join(result.attempted_providers)),
+                         ("stderr", result.stderr), ("output", result.stdout)):
+        if value:
+            parts.append(f"{label}: {value}")
+    parts.append("Technical repair and fresh current task/target qualification are required; this result authorizes no automatic retry, local run, new PR or provider fallback.")
+    return "\n".join(parts)
+
+
+def delivery_push_state(result) -> str:
+    """Effect evidence from the runner's existing reason/status fields.
+
+    Old imported commit fields alone prove nothing about a push. The legacy
+    fixed postpush-timeout reason remains a supported positive witness.
+    """
+    reason = result.fly_delivery_reason or ""
+    for state in ("confirmed", "not_started", "unknown"):
+        if reason.startswith(f"[push={state}] "):
+            return state
+    if result.fly_delivery_status in {"opened", "updated", "pr_failed"}:
+        return "confirmed"
+    if reason.startswith("the branch was pushed; no time was left"):
+        return "confirmed"
+    if (result.fly_delivery_status in {"no_changes", "clone_failed", "not_delivered"}
+            or reason in {"no_time: the delivery deadline has passed; the step was not started", "no time was left to deliver"}):
+        return "not_started"
+    return "unknown"
 
 def fly_delivery_summary(result, key: str = "") -> str:
     """Operator-facing text for a Fly delivery's outcome: what the record
@@ -1106,9 +1887,24 @@ def fly_delivery_summary(result, key: str = "") -> str:
         branch=result.fly_delivery_branch or "its branch",
         commit=(result.fly_delivery_commit or "")[:12] or "commit not reported",
         run=result.remote_run_id or "not known", status=status or "none")
-    if status == "no_time" and result.fly_delivery_commit:
-        text += (f"; {result.fly_delivery_branch} ({result.fly_delivery_commit[:12]}) was "
-                 "pushed and no pull request was opened")  # fmt: skip
+    existing = getattr(result, "fly_existing_pr_number", None)
+    state = delivery_push_state(result)
+    if existing and status in {"push_failed", "pr_failed", "no_time"}:
+        text = f"Fly correction of existing PR #{existing} ended with {status}"
+    if status in {"no_time", "push_failed"}:
+        if state == "confirmed":
+            text += (f"; {result.fly_delivery_branch} ({result.fly_delivery_commit[:12]}) was pushed; "
+                     + (f"existing PR #{existing} confirmation did not complete" if existing
+                        else "no pull request was opened"))
+        elif state == "not_started":
+            text += "; no push was started"
+            if result.fly_delivery_commit:
+                text += f"; commit {result.fly_delivery_commit[:12]} was imported locally only"
+        else:
+            text += "; push outcome is unknown; the imported commit is not confirmed on the remote"
+    elif existing and status == "pr_failed":
+        text += (f"; {result.fly_delivery_branch} ({result.fly_delivery_commit[:12]}) was pushed, "
+                 f"but existing PR #{existing} could not be confirmed")
     if result.fly_delivery_reason and status not in ("opened", "updated"):
         text += f" ({result.fly_delivery_reason})"
     if status in ("opened", "updated"):
@@ -1118,7 +1914,8 @@ def fly_delivery_summary(result, key: str = "") -> str:
             f"commit {result.fly_delivery_commit or 'not reported'}."
         )
     head = ("Fly delivery needs operator reconciliation.\n"
+            + (f"Admitted existing PR #{existing}.\n" if existing else "")
             + fly_delivery_facts(key or "not reported", status, result.fly_delivery_branch,
                                  result.remote_run_id, result.fly_delivery_commit))
     out = f"{head}\n{text}."
-    return out + "\n" + fly_delivery_recovery(key) if key else out
+    return out + "\n" + fly_delivery_recovery(key, existing_pr=bool(existing)) if key else out

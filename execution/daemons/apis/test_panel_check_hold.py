@@ -72,6 +72,8 @@ def _pr(head=HEAD, state="open"):
         "number": PR, "state": state, "draft": False, "title": "t",
         "body": "Closes #80", "html_url": "u", "user": {"login": "someone"},
         "head": {"sha": head, "ref": "feat/x"}, "base": {"ref": "main"},
+        # GitHub has computed mergeability: unknown now holds the panel.
+        "mergeable": True, "mergeable_state": "clean",
     }
 
 
@@ -250,6 +252,166 @@ def test_direct_missing_lens_entry_holds_before_preparing_or_seating(world, monk
     _run(d._redispatch_missing_lens(REPO, _pr(), "security"))
     assert state["seated"] == []
     assert KEY in d._panel_ci_holds
+
+
+# ── a PR that conflicts with its base is held (most CI never runs on it) ─────
+
+# One green secrets scan: all a conflicting head reports, since GitHub runs
+# most CI only on a mergeable head. The check reading alone calls it green.
+ONE_GREEN_CHECK = pcg.describe_gate(
+    HEAD, [_outcome("secrets scan", "success", True)], True
+)
+
+
+@pytest.mark.parametrize("conflict", [
+    {"mergeable": False, "mergeable_state": "dirty"},
+    {"mergeable": False},
+    {"mergeable_state": "dirty"},
+], ids=["both", "mergeable-false", "state-dirty"])
+def test_a_conflicting_pr_with_one_green_check_is_held_and_names_the_conflict(
+    world, caplog, conflict
+):
+    d, state = world
+    state["pr"] = {**_pr(), **conflict}
+    state["gate"] = ONE_GREEN_CHECK
+    with caplog.at_level(logging.INFO):
+        _run(d._handle_pr(_trigger()))
+    assert state["seated"] == [], "no lens may be seated on a conflicting head"
+    assert KEY in d._panel_ci_holds
+    assert "merge conflict" in d._panel_ci_holds[KEY].reason
+    assert "base branch main" in d._panel_ci_holds[KEY].reason
+    assert "review panel HELD" in caplog.text and "merge conflict" in caplog.text
+
+
+@pytest.mark.parametrize("unknown", [
+    {"mergeable": None, "mergeable_state": "unknown"},
+    {"mergeable": True, "mergeable_state": "unknown"},
+    {"mergeable": "true", "mergeable_state": "clean"},
+    {"mergeable": True, "mergeable_state": None},
+], ids=["null-unknown", "true-unknown", "not-a-bool", "state-missing"])
+def test_mergeable_not_yet_computed_with_green_checks_is_held(world, unknown):
+    # The old assertion here (`mergeable: null` seated Lanius) pinned the
+    # defect: unknown mergeability was read as "no conflict". Red before this
+    # fix, observed for null-unknown (the panel was seated, raising _Seated);
+    # the other ids are inferred from the same `return None` fall-through.
+    d, state = world
+    state["pr"] = {**_pr(), **unknown}
+    state["gate"] = GREEN
+    _run(d._handle_pr(_trigger()))
+    assert state["seated"] == [], "no lens may be seated while mergeability is unknown"
+    assert KEY in d._panel_ci_holds
+    reason = d._panel_ci_holds[KEY].reason
+    assert "is not yet computed or not recognised" in reason
+    assert "is held until it is a known non-conflicting state" in reason
+
+
+def test_missing_mergeable_field_holds(world):
+    # Red before this fix (inferred): `pr.get("mergeable")` was None and not
+    # False, so the gate fell through to the green check reading and seated.
+    d, state = world
+    pr = _pr()
+    pr.pop("mergeable")
+    pr.pop("mergeable_state")
+    state["pr"] = pr
+    state["gate"] = GREEN
+    _run(d._handle_pr(_trigger()))
+    assert state["seated"] == []
+    assert "not yet computed or not recognised" in d._panel_ci_holds[KEY].reason
+    assert state["gate_reads"] == 0, "checks are not read while mergeability is unknown"
+
+
+@pytest.mark.parametrize("allowed", ["clean", "unstable", "has_hooks", "blocked", "behind"])
+def test_each_known_non_conflicting_state_with_mergeable_true_proceeds(allowed):
+    # A guard on the allow set: each GitHub state that says "no conflict"
+    # proceeds to the check reading. Red if the allow set drops one (checked by
+    # removing "behind" from _MERGEABLE_STATES: the behind case failed).
+    pr = {**_pr(), "mergeable": True, "mergeable_state": allowed}
+    assert pcg.merge_conflict_gate(pr, HEAD) is None
+
+
+@pytest.mark.parametrize("pr_fields", [
+    {"mergeable": True, "mergeable_state": " Dirty "},
+    {"mergeable": True, "mergeable_state": "UNKNOWN"},
+    {"mergeable": True, "mergeable_state": "draft"},
+    {"mergeable": True, "mergeable_state": "something-new"},
+    {"mergeable": None, "mergeable_state": "clean"},
+], ids=["dirty-variant", "unknown-upper", "draft", "unrecognised", "null-clean"])
+def test_an_unrecognised_mergeability_holds_and_names_the_value(pr_fields):
+    # Red before this round, observed: the gate held only for exact
+    # "dirty"/"unknown"/empty, so " Dirty ", "UNKNOWN", "draft" and
+    # "something-new" returned None (released). null-clean already held.
+    gate = pcg.merge_conflict_gate({**_pr(), **pr_fields}, HEAD)
+    assert gate is not None and gate.green is False
+    assert "not yet computed or not recognised" in gate.reason
+    assert repr(pr_fields["mergeable_state"]) in gate.reason
+
+
+def test_mergeable_true_clean_releases_as_today(world):
+    # A guard, not a red-before test: it passed before this fix too, and pins
+    # that the stricter rule still releases a known-mergeable green head.
+    d, state = world
+    state["pr"] = {**_pr(), "mergeable": True, "mergeable_state": "clean"}
+    state["gate"] = GREEN
+    with pytest.raises(_Seated):
+        _run(d._handle_pr(_trigger()))
+    assert state["seated"] == ["lanius"]
+    assert KEY not in d._panel_ci_holds
+
+
+def test_a_mergeable_pr_with_green_checks_is_released_as_today(world):
+    d, state = world
+    state["pr"] = {**_pr(), "mergeable": True, "mergeable_state": "clean"}
+    state["gate"] = GREEN
+    with pytest.raises(_Seated):
+        _run(d._handle_pr(_trigger()))
+    assert state["seated"] == ["lanius"]
+    assert state["gate_reads"] == 1, "a mergeable head's checks are read as today"
+    assert KEY not in d._panel_ci_holds
+
+
+def test_a_conflict_cleared_by_a_push_reaches_the_completion_event(
+    world, monkeypatch
+):
+    d, state = world
+
+    async def pending_ci(self, trigger):
+        return "pending"
+
+    async def not_clear(self, repo, num, head_sha=""):
+        return False
+
+    async def no_supersede(self, *a, **k):
+        return None
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_required_ci_state", pending_ci)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_pr_review_is_clear", not_clear)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_supersede_stale_verdicts", no_supersede)
+
+    state["pr"] = {**_pr(), "mergeable": False, "mergeable_state": "dirty"}
+    state["gate"] = ONE_GREEN_CHECK
+    _run(d._handle_pr(_trigger()))
+    assert state["seated"] == [] and "merge conflict" in d._panel_ci_holds[KEY].reason
+
+    # The push that resolves the conflict is a new head; its CI is now running.
+    state["pr"] = {**_pr(head=OTHER_HEAD), "mergeable": True, "mergeable_state": "blocked"}
+    state["gate"] = pcg.describe_gate(
+        OTHER_HEAD, [_outcome("pytest", "pending (in_progress)", False)], False
+    )
+    _run(d._handle_pr(_trigger(
+        kind="pr_synchronize", action="synchronize", head_sha=OTHER_HEAD
+    )))
+    assert state["seated"] == []
+    assert d._panel_ci_holds[KEY].head == OTHER_HEAD
+    assert "merge conflict" not in d._panel_ci_holds[KEY].reason
+
+    # The new head's checks complete green: the completion event seats the panel.
+    state["gate"] = pcg.describe_gate(
+        OTHER_HEAD, [_outcome("pytest", "success", True)], True
+    )
+    with pytest.raises(_Seated):
+        _run(d._handle_ci_status(_ci_trigger(head=OTHER_HEAD)))
+    assert state["seated"] == ["lanius"]
+    assert KEY not in d._panel_ci_holds
 
 
 # ── the head going green re-dispatches the held panel, exactly once ──────────
@@ -451,3 +613,407 @@ def test_the_real_reader_holds_red_pending_and_unreadable_and_releases_green(
 
     green = _real_gate(monkeypatch, [_run_row(1, "pytest"), _run_row(2, "lint")])
     assert green.green is True and green.reason == ""
+
+
+# ── a restart drops holds and in-flight panels; the startup sweep restores ──
+
+CANARY = "swarm-canary"
+
+
+def _labelled_pr(head=HEAD, labels=(CANARY,), number=PR, draft=False):
+    return {**_pr(head=head), "number": number, "draft": draft,
+            "labels": [{"name": name} for name in labels]}
+
+
+def _lens_comment(lens, head=HEAD, cid=1, verdict="**SIGNED_OFF**"):
+    """A lens comment at `head` in the contract shape: marker, header, verdict.
+
+    `verdict=None` gives a marker-only comment (what a review that died
+    mid-post leaves); any other string is placed on the fixed verdict line.
+    """
+    agent = sd.lens_by_name(lens).agent
+    if verdict is None:
+        text = "looks fine"
+    else:
+        text = f"**🤖 {agent.capitalize()} — Ateles swarm, {lens} lens**\n{verdict}\n\nlooks fine"
+    return {"id": cid, "created_at": f"2026-11-06T00:00:{cid:02d}Z",
+            "body": f"<!-- review:{lens} commit={head} -->\n{text}"}
+
+
+_VANELLUS_HEADER = "**🤖 Vanellus — Ateles swarm, PR steward**"
+
+
+def _aggregation_comment(head=HEAD, cid=9, verdict="**APPROVE**"):
+    """An aggregation at `head` in the contract shape: marker, header, verdict."""
+    text = "" if verdict is None else f"\n{_VANELLUS_HEADER}\n{verdict}\n\nBlocking: 0"
+    return {"id": cid, "created_at": f"2026-11-06T00:00:{cid:02d}Z",
+            "body": f"<!-- vanellus-aggregation commit={head} -->{text}"}
+
+
+@pytest.fixture
+def sweep_world(world, monkeypatch):
+    """`world` after a restart: a fresh dispatcher with the label gate set,
+    GitHub's open-PR list and comment thread scripted."""
+    _, state = world
+    state.update(pr=_labelled_pr(), listed=[_labelled_pr()], comments=[],
+                 files=["docs/x.md"],
+                 list_error=None, comment_error=None)
+    d = sd.SwarmDispatcher(
+        _Notifier(),
+        sd.DispatchConfig(
+            neotoma_token="", github_token="", auto_merge=False,
+            auto_rereview_on_push=False, require_label=CANARY,
+        ),
+    )
+
+    async def ready(self, repos):
+        return None
+
+    async def comments(self, repository, number, client):
+        if state["comment_error"]:
+            raise state["comment_error"]
+        return state["comments"]
+
+    async def files(self, trigger):
+        return state["files"]
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_await_github_app_ready", ready)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_lens_scoped_comments", comments)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_changed_files", files)
+    # The real `_open_labelled_prs` runs, so its label and draft filter is the
+    # one under test; only GitHub's HTTP response is scripted.
+    class _ListResp:
+        def raise_for_status(self):
+            if state["list_error"]:
+                raise state["list_error"]
+
+        def json(self):
+            return state["listed"]
+
+    class _ListClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, *a, **k):
+            return _ListResp()
+
+    monkeypatch.setattr(sd.httpx, "AsyncClient", lambda **k: _ListClient())
+    monkeypatch.setattr(sd.SwarmDispatcher, "_github_headers", lambda self, repo=None: {})
+    return d, state
+
+
+def test_after_a_restart_a_labelled_pending_pr_is_held_then_runs_on_completion(
+    sweep_world, monkeypatch
+):
+    d, state = sweep_world
+    state["gate"] = PENDING
+    assert d._panel_ci_holds == {}, "a fresh process remembers no hold"
+
+    async def pending_ci(self, trigger):
+        return "pending"
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_required_ci_state", pending_ci)
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert summary["resumed"] == 1
+    assert state["seated"] == []
+    assert d._panel_ci_holds[KEY].head == HEAD, "the sweep rebuilt the hold"
+
+    state["gate"] = GREEN
+    with pytest.raises(_Seated):
+        _run(d._handle_ci_status(_ci_trigger()))
+    assert state["seated"] == ["lanius"], "the check completion ran the panel"
+
+
+def test_a_labelled_green_pr_with_no_panel_at_its_head_runs_from_the_sweep(
+    sweep_world,
+):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    # A verdict for an OLDER head is not a finished panel for this one.
+    state["comments"] = [
+        {"id": 1, "created_at": "2026-11-05T00:00:00Z",
+         "body": f"<!-- vanellus-aggregation commit={OTHER_HEAD} -->\nok"},
+    ]
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert state["seated"] == ["lanius"]
+    assert summary["failed"] == 1, "the recorder's raise is caught, never escapes"
+
+
+@pytest.mark.parametrize("finished", ["aggregation", "every_lens"])
+def test_a_finished_panel_is_left_alone_and_an_unlabelled_pr_never_touched(
+    sweep_world, finished
+):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    required = {
+        lens.lens for lens in sd.select_panel(set(), state["files"], d.config.panel_max)
+    }
+    if finished == "aggregation":
+        state["comments"] = [_aggregation_comment()]
+    else:
+        state["comments"] = [
+            _lens_comment(lens, cid=i) for i, lens in enumerate(sorted(required), 1)
+        ]
+    state["listed"] = [
+        _labelled_pr(),
+        _labelled_pr(number=PR + 1, labels=("other",)),
+        _labelled_pr(number=PR + 2, labels=()),
+    ]
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert state["seated"] == []
+    assert state["gate_reads"] == 0, "no PR was driven into review"
+    assert summary["scanned"] == 1 and summary["finished"] == 1
+    assert d._panel_ci_holds == {}
+
+
+@pytest.mark.parametrize("finished", ["aggregation", "every_lens"])
+def test_a_panel_finished_with_a_blocking_verdict_is_left_alone(sweep_world, finished):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    required = sorted(
+        lens.lens for lens in sd.select_panel(set(), state["files"], d.config.panel_max)
+    )
+    if finished == "aggregation":
+        state["comments"] = [_aggregation_comment(verdict="**REQUEST_CHANGES**")]
+    else:
+        state["comments"] = [
+            _lens_comment(lens, cid=i, verdict="**REQUEST_CHANGES**" if i == 1 else "**SIGNED_OFF**")
+            for i, lens in enumerate(required, 1)
+        ]
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert state["seated"] == [] and state["gate_reads"] == 0
+    assert summary["finished"] == 1
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["aggregation_marker_only", "aggregation_malformed", "newer_aggregation_marker_only",
+     "lens_marker_only", "lens_malformed"],
+)
+def test_a_marker_without_a_verdict_at_the_head_is_recovered(sweep_world, shape):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    required = sorted(
+        lens.lens for lens in sd.select_panel(set(), state["files"], d.config.panel_max)
+    )
+    if shape == "aggregation_marker_only":
+        state["comments"] = [_aggregation_comment(verdict=None)]
+    elif shape == "newer_aggregation_marker_only":
+        state["comments"] = [_aggregation_comment(cid=8), _aggregation_comment(cid=9, verdict=None)]
+    elif shape == "aggregation_malformed":
+        state["comments"] = [_aggregation_comment(verdict="Verdict: looks good to me")]
+    else:
+        # Every lens but the first reports properly; the first leaves a marker
+        # with no verdict, or a verdict that is not on the fixed line.
+        broken = None if shape == "lens_marker_only" else "no verdict line here\n**SIGNED_OFF**"
+        state["comments"] = [
+            _lens_comment(lens, cid=i, verdict=broken if i == 1 else "**SIGNED_OFF**")
+            for i, lens in enumerate(required, 1)
+        ]
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert state["seated"] == ["lanius"], "the unfinished panel was re-driven"
+    assert summary["finished"] == 0
+
+
+def test_one_missing_required_lens_is_not_a_finished_panel(sweep_world):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    required = sorted(
+        lens.lens for lens in sd.select_panel(set(), state["files"], d.config.panel_max)
+    )
+    assert len(required) > 1
+    state["comments"] = [_lens_comment(lens, cid=i) for i, lens in enumerate(required[1:], 1)]
+    _run(d.resume_labelled_panels([REPO]))
+    assert state["seated"] == ["lanius"]
+
+
+def test_with_the_label_gate_unset_the_sweep_does_nothing(sweep_world):
+    d, state = sweep_world
+    d.config.require_label = ""
+    state["gate"] = GREEN
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert summary["scanned"] == 0
+    assert state["seated"] == [] and state["gate_reads"] == 0
+
+
+@pytest.mark.parametrize("where", ["list", "comments"])
+def test_a_github_read_failure_keeps_apis_running_and_starts_no_panel(
+    sweep_world, where
+):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    state[f"{'list' if where == 'list' else 'comment'}_error"] = httpx.ConnectError("down")
+    summary = _run(d.resume_labelled_panels([REPO]))  # must not raise
+    assert state["seated"] == [] and state["gate_reads"] == 0
+    assert d._panel_ci_holds == {}
+    if where == "comments":
+        assert summary["unreadable"] == 1
+
+
+def test_the_sweep_handles_at_most_twenty_prs(sweep_world, monkeypatch):
+    d, state = sweep_world
+    state["listed"] = [_labelled_pr(number=n) for n in range(1, 30)]
+    driven = []
+
+    async def handle_pr(self, trigger):
+        driven.append(trigger.number)
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_handle_pr", handle_pr)
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert len(driven) == 20 and summary["capped"] is True
+
+
+def test_apis_startup_runs_the_sweep_as_a_gather_sibling():
+    import inspect
+
+    import apis
+
+    src = inspect.getsource(apis.main)
+    assert "resume_labelled_panels" in src
+    gather = src[src.rfind("asyncio.gather("):]
+    assert "labelled_panel_sweep()" in gather
+
+
+# ── an admitted label add re-runs the review, a non-admitted one does not ──
+
+
+def _labeled_payload(label):
+    pr = {**_pr(), "body": "no parent here", "labels": [{"name": label}]}
+    return {"action": "labeled", "label": {"name": label},
+            "repository": {"full_name": REPO}, "pull_request": pr}
+
+
+def test_an_admitted_label_add_on_a_green_pr_with_no_parent_issue_runs_the_panel(
+    world, monkeypatch
+):
+    import github_gateway
+
+    d, state = world
+    d.config.auto_rereview_on_push = True
+    d.config.narrow_rereview = False
+    state["gate"] = GREEN
+    state["pr"] = {**_pr(), "body": "no parent here"}
+    monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", CANARY)
+
+    class _Result:
+        ok = True
+        stdout = "GATE_INHERITANCE: blocked\nGATE_PENDING: pm"
+
+    async def run_skill(agent, *args, **kwargs):
+        if agent == "lanius":
+            return _Result()
+        state["seated"].append(agent)
+        raise _Seated(agent)
+
+    async def nothing(*a, **k):
+        return None
+
+    async def no_files(*a, **k):
+        return []
+
+    async def reprove(*a, **k):
+        return set(), []
+
+    async def head(self, t):
+        return HEAD
+
+    async def gates(*a, **k):
+        return {}
+
+    monkeypatch.setattr(sd, "run_skill", run_skill)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_changed_files", no_files)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_post_gate_block", nothing)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_supersede_stale_verdicts", nothing)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_reprove_signed_off_gates", reprove)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_pr_head_sha", head)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_live_gate_status", gates)
+
+    rejected = github_gateway.parse_github_event(
+        "pull_request", _labeled_payload("other"), "d1"
+    )
+    assert rejected is None, "a label event that is not admitted builds no trigger"
+
+    trigger = github_gateway.parse_github_event(
+        "pull_request", _labeled_payload(CANARY), "d2"
+    )
+    assert trigger is not None and trigger.kind == "pr_labeled"
+    with pytest.raises(_Seated):
+        _run(d._handle_pr(trigger))
+    assert state["seated"], "the admitted label add seated the review panel"
+    assert "lanius" not in state["seated"]
+
+
+# ── PR #1616 review: a verdict counts only at the fixed position ──
+
+
+@pytest.mark.parametrize("shape", ["prose_after_marker", "prose_after_header"])
+def test_an_aggregation_that_only_quotes_a_bold_verdict_is_recovered(sweep_world, shape):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    prose = "An earlier round said **APPROVE**, but this run stopped before aggregating."
+    lead = "" if shape == "prose_after_marker" else f"{_VANELLUS_HEADER}\n"
+    state["comments"] = [
+        {"id": 9, "created_at": "2026-11-06T00:00:09Z",
+         "body": f"<!-- vanellus-aggregation commit={HEAD} -->\n{lead}{prose}"},
+    ]
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert state["seated"] == ["lanius"], "a quoted verdict is not a finished panel"
+    assert summary["finished"] == 0
+
+
+def test_a_lens_that_only_quotes_a_bold_verdict_is_not_counted_finished(sweep_world):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    required = sorted(
+        lens.lens for lens in sd.select_panel(set(), state["files"], d.config.panel_max)
+    )
+    first = required[0]
+    agent = sd.lens_by_name(first).agent
+    quoting = {
+        "id": 1, "created_at": "2026-11-06T00:00:01Z",
+        "body": (
+            f"<!-- review:{first} commit={HEAD} -->\n"
+            f"**🤖 {agent.capitalize()} — Ateles swarm, {first} lens**\n"
+            "Still reading; the last round's verdict was **SIGNED_OFF**."
+        ),
+    }
+    state["comments"] = [quoting] + [
+        _lens_comment(lens, cid=i) for i, lens in enumerate(required[1:], 2)
+    ]
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert state["seated"] == ["lanius"], "the quoting lens did not finish"
+    assert summary["finished"] == 0
+
+
+@pytest.mark.parametrize("shape", ["aggregation_single", "aggregation_fallback", "lens_fallback"])
+def test_real_apis_comment_shapes_still_count_as_finished(sweep_world, shape):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    required = sorted(
+        lens.lens for lens in sd.select_panel(set(), state["files"], d.config.panel_max)
+    )
+    if shape == "aggregation_single":
+        state["comments"] = [_aggregation_comment()]
+    elif shape == "aggregation_fallback":
+        # The dispatcher wraps Vanellus's own reply, which repeats the marker
+        # and header, so both appear twice before the verdict.
+        reply = _aggregation_comment()["body"]
+        state["comments"] = [{
+            "id": 9, "created_at": "2026-11-06T00:00:09Z",
+            "body": sd.compose_vanellus_fallback_comment(reply, commit_sha=HEAD),
+        }]
+    else:
+        # A lens fallback adds a `review:<lens>` line and the dispatcher's
+        # header ahead of the lens's own marker, header and verdict.
+        state["comments"] = [
+            {**_lens_comment(lens, cid=i),
+             "body": sd.compose_fallback_comment(
+                 lens, sd.lens_by_name(lens).agent, _lens_comment(lens)["body"], HEAD)}
+            for i, lens in enumerate(required, 1)
+        ]
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert state["seated"] == []
+    assert summary["finished"] == 1

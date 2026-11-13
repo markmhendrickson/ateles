@@ -17,6 +17,7 @@ The scenarios are synthetic and public-safe: no operator data of any kind.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import sys
 from pathlib import Path
@@ -34,10 +35,11 @@ import apis  # noqa: E402
 import model_tiering  # noqa: E402
 import producer_confidence  # noqa: E402
 from lib.daemon_runtime import gating  # noqa: E402
+from lib.capabilities import neotoma_http  # noqa: E402
 from lib.daemon_runtime.gating import ExecutionPolicy  # noqa: E402
 from unroutable_ledger import UnroutableLedger  # noqa: E402
 
-MUTATIONS = ("none", "no_producer", "round_before_gate", "skip_assessment", "no_content", "raw_preview")
+MUTATIONS = ("none", "no_producer", "round_before_gate", "skip_assessment", "no_content", "raw_preview", "no_session_branch", "dispatcher_counts_as_owner")
 BINDING = {"claude": {"local": "m-local", "mechanical": "m-mech", "mid": "m-mid", "top": "m-top"}}
 
 
@@ -93,15 +95,45 @@ def run_scenario(scenario: dict, base_task: dict, *, mutation: str = "none") -> 
     obs: dict = {
         "briefs": [], "spawns": [], "statuses": [], "runner_calls": [],
         "notifications": [], "persisted": [], "scorer_tier": None,
-        "assessments": [], "events": [],
+        "assessments": [], "events": [], "profile_reads": [],
     }
     config = scenario.get("config") or {}
     scorer = scenario.get("scorer") or {"kind": "none"}
     task = build_task(base_task, scenario.get("task"))
     gate_override = bool((scenario.get("dispatch") or {}).get("gate_override"))
     assessment_mode = config.get("assessment", "ok")
+    profile = config.get("operator_profile", {"kind": "complete_negative"})
+    if not isinstance(profile, dict) or profile.get("kind") not in {
+        "complete_negative", "response", "unreadable", "partial",
+    }:
+        raise ValueError("unsupported synthetic operator-profile mode")
 
     with pytest.MonkeyPatch.context() as mp:
+        # Identity belongs to this synthetic scenario, never the invoking
+        # operator or a sibling test directory's autouse fixtures.
+        mp.setenv("OPERATOR_NAME", "Eval Operator")
+        mp.setenv("APIS_OPERATOR_LOGIN", "eval-operator")
+
+        def _profile_read(method, path, body=None, **kwargs):
+            if (method, path, body, kwargs) != (
+                "POST", "/entities/query",
+                {"entity_type": "operator_profile", "include_snapshots": True, "limit": 5},
+                {"timeout": 5},
+            ):
+                # pytest.fail is not swallowed by the production transport's
+                # Exception-to-unknown boundary. An unexpected read fails the
+                # eval instead of quietly looking like a simulated outage.
+                pytest.fail("unexpected operator-profile external request", pytrace=False)
+            obs["profile_reads"].append((method, path, copy.deepcopy(body)))
+            if profile["kind"] == "unreadable":
+                raise neotoma_http.NeotomaConfigError("synthetic profile unavailable")
+            if profile["kind"] == "partial":
+                return {"entities": [], "total": 1}
+            if profile["kind"] == "response":
+                return copy.deepcopy(profile["response"])
+            return {"entities": [], "total": 0}
+
+        mp.setattr(neotoma_http, "request_json", _profile_read)
         mp.setattr(apis, "_unroutable", UnroutableLedger(path=_tmp_ledger()))
         mp.setattr(apis, "_created_seen", {})
         mp.setattr(apis, "READINESS_GATE", False)
@@ -112,6 +144,20 @@ def run_scenario(scenario: dict, base_task: dict, *, mutation: str = "none") -> 
             return True
 
         mp.setattr(apis, "set_task_status", _set_status)
+
+        def _fetch_task_snapshot(_id):
+            # The gate re-reads the task before each write (_task_status_still).
+            # Answer it from this harness's own view of the task: the status its
+            # set_task_status stub last recorded, else the status the task started
+            # with. A scenario's "task_changes_to" is a status that lands from
+            # outside between the decision and the first write.
+            if obs["statuses"]:
+                status = obs["statuses"][-1][1]
+            else:
+                status = scenario.get("task_changes_to") or task.get("status")
+            return {**task, "status": getattr(status, "value", status)}
+
+        mp.setattr(apis, "fetch_task_snapshot", _fetch_task_snapshot)
         mp.setattr(apis, "fetch_task_record", lambda _id: {"entity_id": _id})
         mp.setattr(apis, "fetch_entity_user_id", lambda _id: "usr_eval")
         mp.setattr(
@@ -217,12 +263,16 @@ def run_scenario(scenario: dict, base_task: dict, *, mutation: str = "none") -> 
                         self.__dict__.update(kwargs)
 
                 sdk = {name: types.ModuleType(name) for name in (
-                    "mcp", "mcp.server", "mcp.server.stdio", "mcp.types"
+                    "mcp", "mcp.server", "mcp.server.stdio", "mcp.types",
+                    "mcp.server.lowlevel", "mcp.server.lowlevel.helper_types"
                 )}
                 sdk["mcp.server"].Server = _Shape
                 sdk["mcp.server.stdio"].stdio_server = None
                 sdk["mcp.types"].Tool = _Shape
                 sdk["mcp.types"].TextContent = _Shape
+                sdk["mcp.types"].CallToolResult = _Shape
+                sdk["mcp.types"].Resource = _Shape
+                sdk["mcp.server.lowlevel.helper_types"].ReadResourceContents = _Shape
                 for name, module in sdk.items():
                     mp.setitem(sys.modules, name, module)
             spec.loader.exec_module(preview)
@@ -269,6 +319,19 @@ def run_scenario(scenario: dict, base_task: dict, *, mutation: str = "none") -> 
             mp.setattr(producer_confidence, "SCORER_TIMEOUT_SECONDS", 0)
             mp.setattr(producer_confidence, "TIMEOUT_GRACE_SECONDS", 0.05)
 
+        if mutation == "no_session_branch":
+            # The session-owned answer is removed: a session owner reads as it
+            # did before, as no route at all.
+            real_skill = apis._resolve_skill
+
+            def _no_session_answer(*a, **k):
+                skill = real_skill(*a, **k)
+                return None if skill == apis._SESSION_OWNED else skill
+
+            mp.setattr(apis, "_resolve_skill", _no_session_answer)
+        if mutation == "dispatcher_counts_as_owner":
+            # The dispatcher's own name reads as a real owner again.
+            mp.setattr(apis, "_deciding_assignee", apis._canonical_assignee)
         if mutation == "no_producer":
             async def _nothing(*a, **k):
                 return producer_confidence.ScoreAttempt(None)
@@ -317,6 +380,20 @@ def check(scenario: dict, obs: dict) -> list[str]:
     decision = brief["decision"] if brief else None
 
     outcome = "held" if held and not executed else "executed" if executed and not held else "other"
+    if outcome == "other" and not held and not executed:
+        written = [s for _i, s, _r in obs["statuses"]]
+        if not written:
+            outcome = "left_as_filed"
+        elif any(getattr(s, "value", s) == "blocked" for s in written):
+            outcome = "blocked"
+    if "notifications" in exp and len(obs["notifications"]) != exp["notifications"]:
+        fails.append(
+            f"{len(obs['notifications'])} notifications, expected {exp['notifications']}: "
+            f"{obs['notifications']!r}"
+        )
+    for needle in exp.get("any_notification_contains", []):
+        if not any(needle in n for n in obs["notifications"]):
+            fails.append(f"no notification contains {needle!r}: {obs['notifications']!r}")
     if outcome != exp["outcome"]:
         fails.append(f"outcome {outcome!r}, expected {exp['outcome']!r}")
     if bool(obs["runner_calls"]) != exp["scorer_called"]:

@@ -160,6 +160,7 @@ def _run(mod, entity_type: str, labels, extra: dict) -> _Notifier:  # noqa: ANN0
         entity_id=f"ent_{entity_type}_1",
         action="created",
         snapshot={"title": "t", "body": "b", "number": 7, "labels": labels, **extra},
+        hydrated=True,  # a snapshot the stream delivered is a snapshot that was read
     )
     asyncio.run(mod.handle_event(event, notifier, _Grants()))
     return notifier

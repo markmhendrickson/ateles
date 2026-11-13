@@ -19,6 +19,7 @@ Registered in `~/.claude.json` as the `ateles` server, launched via
 | `get_dispatch_health` | no | Dispatcher liveness, recent pipeline activity, recent dispatch failures |
 | `get_task_timeline` | no | One task's history, merged and time-ordered from every record the swarm writes, with each entry's source, plus what could not be joined |
 | `watch_swarm` | no | Bounded long-poll (≤45 s): what changed since a cursor for given tasks and checkpoints, and a new cursor |
+| `get_session_workboard` | no | On-demand derived read with a caller-selected display plan; optional cumulative history |
 
 ### Read-only by construction
 
@@ -33,6 +34,103 @@ observability handler can reach `_correct`. **Treat any diff that weakens or
 removes that test as a blocking architectural concern, not a QA nit.** A future
 mutating tool belongs behind the same operator-approval path as
 `resolve_checkpoint`, never as a free-form gate setter.
+
+`get_session_workboard` reads the existing `session_digest`, an explicit
+caller-selected display plan, and referenced task or plan snapshots. It has no
+harness argument or harness-specific configuration: a connected Claude, Codex,
+or Cursor session uses the same MCP read. It is an on-demand derived read, not
+a canonical projection or a session/authority binding. Stored task and plan
+fields render as **Recorded state**. **Working now** requires separately
+read, task-bound held-lease, qualified active runner lifecycle and recent
+activity records; interactive-session activity alone is insufficient. Operator attention requires a current open
+operator checkpoint for that task. The current adapter cannot qualify the
+canonical claimability predicate, so a stored `claimable` flag and pending/open
+states retain their recorded meaning. The table distinguishes assigned principal, lease holder, runner, and
+declared step owner rather than collapsing them into an executor.
+
+The optional history is deliberately unfiltered. Rows currently remain visible:
+a digest's cached completion, send or handoff flag does not prove that current
+obligations are discharged. Search and state filters only change visibility.
+Task rows follow current outgoing `PART_OF` relationships and expose missing,
+ambiguous, unreadable or bounded planning ascents rather than selecting a parent.
+Digest membership accepts both a bare task entity id and an object carrying
+explicit locators and historical metadata. Neither form establishes a lease or
+current execution. Invalid entries stay in cumulative history and produce one
+counted read-limit summary, grouped by the reason they could not be rendered.
+
+### Planning tree
+
+The view groups current session task membership along its actual `PART_OF`
+ascent. Planning levels come only from the registry's
+`schema_definition.planning = {level: <finite number>, read_only?: <boolean>}`
+declaration, projected by the compact schema summary. No planning type names or
+level order are built into the renderer. Task-parent prefixes remain task
+context, not a fabricated planning level. The source planning statements are
+not rewritten, and all aggregate counts cover **this session's membership**,
+never the whole plan or proof that it is complete.
+
+The declared level set must have complete, authenticated, unfiltered registry
+coverage. `GET /schemas?summary=true&limit=5000&offset=0` supplies compact rows
+and the versioned `registry_coverage` proof. An older server, fallback, partial
+page, ambiguous type or malformed declaration leaves planning coverage unknown.
+There is no fallback to type names, arbitrary registry metadata or the highest
+type encountered on one ascent. Missing, undeclared, conflicting and unreadable
+ascents remain under **Unplanned**, with their reasons and observed context.
+The read budget is a resource boundary, not a fixed number of planning levels;
+exhaustion remains explicit unknown coverage.
+
+Expand a planning record to inspect the tasks below it; their own current
+recorded status, assignment, lease, runner and next action remain distinct.
+Expansion and filters are temporary presentation state. The task-list view and
+unfiltered cumulative history remain available. Repeated unavailable-read
+classes are summarized with counts; full notices and per-row evidence stay
+accessible in collapsed detail.
+
+### Inline workboard
+
+The existing bound component also declares the standard fullscreen and PiP
+modes. Controls are offered only when the host advertises those modes, and the
+actual response mode is honored. PiP is an overlay, not a portable side rail.
+No empty-argument conversation launcher or inferred session/plan binding is
+introduced. A host that opens the already-bound component beside the chat can
+keep that view; otherwise the inline/text fallback remains the supported path.
+
+Presentation does not establish freshness. The view retains the last successful
+read time, rejects foreign scope and stale responses, refreshes on a supported
+visibility restoration, and keeps manual Refresh. Failed reads retain visibly
+stale evidence. Teardown cancels requests and prevents further refreshes; no
+periodic polling, scheduled coordination job or parallel workboard store is
+created. Actual account-level rail opening and persistence require verification
+in that host.
+
+The same server declares a content-versioned `ui://ateles/workboard-<hash>.html`
+resource using `text/html;profile=mcp-app`, linked by the tool's
+`_meta.ui.resourceUri`. It follows the stable
+[MCP Apps protocol](https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx).
+An MCP Apps host initializes the view and supplies the original tool input and
+structured result. Other hosts retain a readable table together with read
+limits, planning context and any requested cumulative history. The self-contained
+resource requests no external network, static assets, nested frames or browser
+permissions; record text renders as text. Refresh invokes only the read-only
+workboard tool through the same host/server connection. A failed refresh marks
+retained rows stale and preserves the last successful scope and read time.
+Requested history remains available across refreshes. Read coverage and adapter
+limits remain visible, and decision attention is labelled independently of the
+recorded lifecycle state. There is no automatic polling, browser storage or
+second status store.
+Primary-plan next steps retain source spaces and line breaks. The view does not
+guess word boundaries or rewrite compressed prose already stored in a plan.
+
+Selecting **Sessions** requests an optional page of up to 50 existing
+`agent_session` records. Native identity, kind, status, activity and holder stay
+distinct from task ownership, routing evidence and lease claims. Optional
+routing metadata can appear when provided by the existing registry; its absence
+does not block task delivery. Partial registry coverage is explicit.
+
+Wire tests and a synthetic bridge/DOM test exercise the tool, resource and view.
+Actual inline rendering still requires verification in the intended client's
+MCP Apps surface after qualified source deployment and targeted reconnection.
+A successful backend test alone is not client acceptance.
 
 ### Reads fail closed
 

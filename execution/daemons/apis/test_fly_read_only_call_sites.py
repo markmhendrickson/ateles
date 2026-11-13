@@ -69,6 +69,13 @@ def _review_call_sites() -> list[tuple[str, ast.Call]]:
     return sites
 
 
+def test_lens_publication_is_enabled_by_default() -> None:
+    # The dispatcher publishes a return-only lens's review itself, so the flag
+    # that refused every remote lens is on. The tests below that pin the
+    # refusal switch it off explicitly. Red before: the flag was False.
+    assert skill_runner.DISPATCHER_LENS_PUBLICATION_READY is True
+
+
 def test_every_lens_and_carry_forward_dispatch_is_read_only() -> None:
     missing = []
     for kind, call in _review_call_sites():
@@ -135,6 +142,7 @@ def test_combined_prompt_return_only_and_local_contract(monkeypatch) -> None:
 def test_individual_lens_entrance_keeps_local_prompt_and_read_only_runner_contract(
     monkeypatch, fly_env, seam,
 ) -> None:
+    monkeypatch.setattr(skill_runner, "DISPATCHER_LENS_PUBLICATION_READY", False)
     calls = []
     dispatcher = _pr_dispatcher_with_stubs(
         monkeypatch, vanellus_stdout="**REQUEST_CHANGES**\nblocking", calls=calls
@@ -173,6 +181,7 @@ def test_individual_lens_entrance_keeps_local_prompt_and_read_only_runner_contra
 def test_combined_lens_entrance_keeps_local_prompt_and_read_only_runner_contract(
     monkeypatch, fly_env, seam,
 ) -> None:
+    monkeypatch.setattr(skill_runner, "DISPATCHER_LENS_PUBLICATION_READY", False)
     dispatcher = SwarmDispatcher(_StubNotifier(), _config())
     monkeypatch.setattr(
         dispatcher, "_lens_agent_prompt",
@@ -197,6 +206,7 @@ def test_combined_lens_entrance_keeps_local_prompt_and_read_only_runner_contract
     prompt, kwargs = captured[0]
     assert kwargs["github_read_only"] is True
     assert "only write you make" in prompt
+    assert kwargs["runner"] == "local"
     _assert_lens_runner_guard(monkeypatch, kwargs)
     monkeypatch.setattr(skill_runner, "DISPATCHER_LENS_PUBLICATION_READY", True)
     monkeypatch.setattr(fly_runner, "FLY_VETTED_CLASSES", frozenset({kwargs["action_class"]}))
@@ -208,9 +218,16 @@ def test_combined_lens_entrance_keeps_local_prompt_and_read_only_runner_contract
         pending_gates=set(), live_gates={}, signals=None,
     ))
     assert len(captured) == 1
+    # Opted in, the combined pass runs return-only like a single lens: the
+    # return-only prompt, and the class (not a "local" pin) picks the runner.
     assert "<<<DISPATCHER_EXPECTATION_UPDATE>>>" in captured[0][0]
+    assert "<<<DISPATCHER_REVIEW>>>" in captured[0][0]
     assert "only write you make" not in captured[0][0]
-    assert "Post a PR comment with gh" not in captured[0][0]
+    assert "runner" not in captured[0][1]
+    assert captured[0][1]["github_read_only"] is True
+    assert captured[0][1]["seated_reviewer"] is True
+    assert captured[0][1]["repository"] == kwargs["repository"]
+    assert captured[0][1]["action_class"] == kwargs["action_class"]
 
 
 async def _async_providers():
@@ -235,6 +252,7 @@ def test_read_only_lens_fly_refusal_and_existing_local_fallback(
     fly_env, seam, monkeypatch, forced,
 ) -> None:
     spawned, fake_exec = seam
+    monkeypatch.setattr(skill_runner, "DISPATCHER_LENS_PUBLICATION_READY", False)
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "lens_review:qa")
     monkeypatch.setattr(fly_runner, "FLY_VETTED_CLASSES", frozenset({"lens_review:qa"}))
     monkeypatch.setattr(fly_runner, "build_job", lambda **kw: pytest.fail("Fly job built"))
@@ -252,3 +270,87 @@ def test_read_only_lens_fly_refusal_and_existing_local_fallback(
     else:
         assert result.ok and result.stdout == "local output"
         assert len(spawned) == 1
+
+
+def _enclosing_function(tree: ast.AST, call: ast.Call) -> str:
+    inner = ""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.lineno <= call.lineno <= (node.end_lineno or node.lineno):
+                inner = node.name
+    return inner
+
+
+def test_every_pr_lens_dispatch_names_its_repository() -> None:
+    # A Fly job's read-only GitHub token is scoped to the PR's repository and
+    # refused without one, so a lens that reviews a pull request must pass it.
+    # The issue-spec pipeline reviews an issue, not a PR, and is exempt.
+    # Red before: the panel, missing-lens re-dispatch and fix-guidance calls
+    # passed no `repository`.
+    tree = ast.parse(SWARM_DISPATCH.read_text(encoding="utf-8"))
+    missing = []
+    for kind, call in _review_call_sites():
+        if kind != "lens":
+            continue
+        if _enclosing_function(tree, call) == "_run_issue_spec_pipeline":
+            continue
+        if not any(kw.arg == "repository" for kw in call.keywords):
+            missing.append(f"run_skill at line {call.lineno}")
+    assert not missing, "PR lens dispatches without repository: " + ", ".join(missing)
+
+
+def test_panel_lens_on_fly_hands_build_job_the_pr_repository(
+    monkeypatch, fly_env, seam,
+) -> None:
+    # The 8 Nov incident: with a lens class opted onto Fly, the panel passed no
+    # repository, so the job's token mint refused "no owner/name repository".
+    # Red before: build_job saw repository="" for every panel lens.
+    dispatcher = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**REQUEST_CHANGES**\nblocking", calls=[]
+    )
+    dispatcher.config.combined_review_pass = False
+    original = swarm_dispatch.run_skill
+    lens_kwargs = []
+
+    async def recording_run_skill(skill, prompt, **kwargs):
+        if str(kwargs.get("action_class", "")).startswith("lens_review:"):
+            lens_kwargs.append(kwargs)
+        return await original(skill, prompt, **kwargs)
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", recording_run_skill)
+    monkeypatch.setattr(skill_runner, "DISPATCHER_LENS_PUBLICATION_READY", True)
+    classes = {f"lens_review:{lens}" for lens in ("pm", "arch", "security", "qa", "ux")}
+    monkeypatch.setattr(fly_runner, "FLY_VETTED_CLASSES", frozenset(classes))
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", ",".join(sorted(classes)))
+    built = []
+
+    def recording_build_job(**kw):
+        built.append(kw["repository"])
+        # Stop short of a launch; the run falls back to the local fake.
+        raise fly_runner.FlyIneligible("test stops before launch")
+
+    monkeypatch.setattr(fly_runner, "build_job", recording_build_job)
+    trigger = _trigger(body="Closes #80.")
+    asyncio.run(dispatcher._handle_pr(trigger))
+    assert lens_kwargs
+    assert all(kw["repository"] == trigger.repository for kw in lens_kwargs)
+    # The stubbed panel run_skill stops at the call; drive each captured
+    # dispatch through the real runner, opted onto Fly, to the job builder.
+    spawned, fake_exec = seam
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        for kw in lens_kwargs:
+            asyncio.run(skill_runner._run_skill_once(
+                "lanius", "Review the diff", provider="claude", role="lanius",
+                model="test", action_class=kw["action_class"],
+                repository=kw["repository"], github_token="local-token",
+                include_github_contract=True,
+                github_read_only=kw["github_read_only"],
+            ))
+    assert len(built) == len(lens_kwargs), "a panel lens never reached the Fly job builder"
+    assert all(repo == "owner/repo" for repo in built)
+    # The token mint's own precondition holds for what the panel passed.
+    for repo in built:
+        try:
+            fly_runner.mint_job_github_token(repo, "NO_SUCH_APP_PREFIX")
+        except fly_runner.FlyIneligible as exc:
+            assert "no owner/name repository" not in str(exc)

@@ -12,12 +12,14 @@ from datetime import datetime, timezone
 import base64
 import contextlib
 import copy
+import fcntl
 import json
 import logging
 import math
 import os
 import re
 import sys
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -330,7 +332,38 @@ def fly_env(monkeypatch, tmp_path):
     }.items():
         monkeypatch.setenv(name, value)
     monkeypatch.delenv("LANIUS_NEOTOMA_TOKEN", raising=False)
+    monkeypatch.setattr(fly_runner, "_ADMISSION_CACHE", {})
+    session = FakeSession()
+    monkeypatch.setattr(fly_runner, "_admission_http_client", session.client)
+    _SESSIONS[str(tmp_path)] = session
     return tmp_path
+
+
+# fly_env's stand-in Neotoma /session, by the fixture's tmp_path.
+_SESSIONS: dict[str, "FakeSession"] = {}
+
+
+class FakeSession:
+    """Neotoma's ``GET /session``: answers with an admission decision and
+    records each (signed) request."""
+
+    def __init__(self):
+        self.requests: list[httpx.Request] = []
+        self.answer: dict | None = {"aauth": {"admitted": True}}
+        self.fail = False
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if self.fail:
+            raise httpx.ConnectError("injected: Neotoma unreachable")
+        return httpx.Response(200, json=self.answer)
+
+    def client(self) -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(self.handler))
+
+
+def _session(fly_env) -> FakeSession:
+    return _SESSIONS[str(fly_env)]
 
 
 def _valid_role_jwk() -> dict[str, str]:
@@ -510,6 +543,283 @@ def test_per_job_machine_config_and_credential_set(fly_env, caplog):
     assert revoked == [MINTED]
     assert executor.ledger.snapshot()["in_flight"] == {}
     assert executor.ledger.snapshot()["spend_usd"] >= 0
+
+
+def test_key_only_claude_role_with_neotoma_tools_uses_the_signing_proxy(fly_env):
+    job = _job(neotoma_tools_granted=True)
+    spec = json.loads(base64.b64decode(next(
+        f["raw_value"] for f in fly_runner.job_files(job, fly_runner.FlyConfig.from_env())
+        if f["guest_path"].endswith("/job.json"))))
+    assert spec["neotoma_mcp"] == "proxy"
+    assert job.neotoma_tools_unavailable is False
+    assert spec["neotoma_jwk_name"] == fly_runner.AAUTH_JWK_JOB_NAME
+    assert "LANIUS_NEOTOMA_TOKEN" not in job.secrets  # nothing minted
+
+
+def test_key_wins_over_a_legacy_token_for_the_proxy(fly_env, monkeypatch):
+    monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", "lanius-own-token-0009")
+    assert _job(neotoma_tools_granted=True).neotoma_mcp == "proxy"
+
+
+def test_key_only_claude_job_is_admitted_with_a_signed_session_request(fly_env):
+    job = _job(neotoma_tools_granted=True)
+    assert job.neotoma_mcp == "proxy"
+    (request,) = _session(fly_env).requests
+    assert request.method == "GET"
+    assert str(request.url) == "https://neotoma.example.test/session"
+    assert "signature" in request.headers and "signature-key" in request.headers
+    assert "authorization" not in request.headers
+
+
+def test_key_not_admitted_by_neotoma_is_ineligible(fly_env):
+    _session(fly_env).answer = {"aauth": {"admitted": False, "admission_reason": "no_match"}}
+    with pytest.raises(fly_runner.FlyIneligible,
+                       match=r"role 'lanius''s AAuth key is not admitted by Neotoma \(no_match\)"):
+        _job(neotoma_tools_granted=True)
+
+
+def test_key_only_job_on_a_provider_without_the_proxy_is_ineligible(fly_env, monkeypatch):
+    monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
+    with pytest.raises(fly_runner.FlyIneligible,
+                       match="the Fly runner cannot yet give a codex job its Neotoma tools"):
+        fly_runner.build_job(
+            provider="codex", role="lanius", cmd=["/x/codex", "exec", "-"], stdin=b"t",
+            timeout=60, repository="owner/repo", github_requested=True,
+            mcp_config_path=None, neotoma_tools_granted=True)
+    assert _session(fly_env).requests == []  # refused before asking Neotoma
+
+
+def test_unreachable_neotoma_makes_a_key_only_job_ineligible(fly_env):
+    _session(fly_env).fail = True
+    with pytest.raises(fly_runner.FlyIneligible, match=r"\(Neotoma unreachable\)"):
+        _job(neotoma_tools_granted=True)
+
+
+def test_no_key_and_no_token_with_neotoma_tools_is_ineligible(fly_env, monkeypatch):
+    monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR")
+    with pytest.raises(fly_runner.FlyIneligible):
+        _job(neotoma_tools_granted=True)
+
+
+def test_own_token_on_a_provider_other_than_claude_needs_no_tools(fly_env, monkeypatch):
+    # The legacy own-token path gives Neotoma tools on Claude only; without
+    # granted tools the same job is unaffected.
+    monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR")
+    monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", "lanius-own-token-0009")
+    monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
+    kw = dict(provider="codex", role="lanius", cmd=["/x/codex", "exec", "-"], stdin=b"t",
+              timeout=60, repository="owner/repo", github_requested=True,
+              mcp_config_path=None)
+    assert fly_runner.build_job(**kw).neotoma_token_name == "LANIUS_NEOTOMA_TOKEN"
+    with pytest.raises(fly_runner.FlyIneligible,
+                       match="is granted Neotoma tools but has no AAuth key or own"):
+        fly_runner.build_job(**kw, neotoma_tools_granted=True)
+
+
+def test_legacy_own_token_on_claude_with_tools_builds_without_asking(fly_env, monkeypatch):
+    monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR")
+    monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", "lanius-own-token-0009")
+    job = _job(neotoma_tools_granted=True)
+    assert job.neotoma_token_name == "LANIUS_NEOTOMA_TOKEN" and job.neotoma_mcp == ""
+    assert _session(fly_env).requests == []
+
+
+def test_admission_is_cached_per_role_key(fly_env):
+    _job(neotoma_tools_granted=True)
+    _job(neotoma_tools_granted=True)
+    assert len(_session(fly_env).requests) == 1
+
+
+def test_admission_cache_ttls_and_unreachable_is_not_cached(fly_env):
+    session = _session(fly_env)
+    clock = Clock()
+    jwk = _valid_role_jwk()
+    base = "https://neotoma.example.test"
+
+    def ask():
+        return fly_runner.role_admission("lanius", jwk, base, client=session.client(),
+                                         clock=clock)  # fmt: skip
+
+    session.fail = True
+    assert ask() == (False, "Neotoma unreachable")
+    session.fail = False
+    session.answer = {"aauth": {"admitted": False, "admission_reason": "no_match"}}
+    assert ask() == (False, "no_match")
+    assert len(session.requests) == 2  # the network failure was not cached
+    session.answer = {"aauth": {"admitted": True}}
+    clock.now += 59
+    assert ask() == (False, "no_match")  # still the cached refusal
+    clock.now += 2
+    assert ask() == (True, "")  # re-checked after 60 s
+    assert len(session.requests) == 3
+    session.answer = {"aauth": {"admitted": False, "admission_reason": "no_match"}}
+    clock.now += 599
+    assert ask() == (True, "")
+    clock.now += 2
+    assert ask() == (False, "no_match")  # an admission lasts 600 s
+    assert len(session.requests) == 4
+
+
+def test_a_neotoma_outage_answer_is_not_cached(fly_env):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(503, text="deploying")
+        return httpx.Response(200, json={"aauth": {"admitted": True}})
+
+    def ask():
+        return fly_runner.role_admission(
+            "lanius", _valid_role_jwk(), "https://n.example.test",
+            client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+    assert ask() == (False, "Neotoma /session answered 503")
+    assert ask() == (True, "")
+    assert len(calls) == 2
+
+
+def test_admission_reason_is_only_a_safe_label(fly_env):
+    session = _session(fly_env)
+    session.answer = {"aauth": {"admitted": False, "admission_reason": "bad\nheader: x"}}
+    assert fly_runner.role_admission("lanius", _valid_role_jwk(), "https://n.example.test",
+                                     client=session.client()) == (False, "unrecognized")
+
+
+def _bare_claude_job(**kw):
+    """A Claude job whose local --mcp-config write failed: no slot in the argv."""
+    return fly_runner.build_job(
+        provider="claude", role="lanius", cmd=["/opt/homebrew/bin/claude", "--print"],
+        stdin=b"the task", timeout=60, repository="owner/repo", github_requested=True,
+        mcp_config_path=None, **kw)  # fmt: skip
+
+
+def test_granted_claude_job_without_mcp_config_is_ineligible(fly_env):
+    with pytest.raises(fly_runner.FlyIneligible,
+                       match="its MCP config could not be provided"):
+        _bare_claude_job(neotoma_tools_granted=True)
+    # A path that the argv does not carry is no slot either.
+    with pytest.raises(fly_runner.FlyIneligible,
+                       match="its MCP config could not be provided"):
+        fly_runner.build_job(
+            provider="claude", role="lanius", cmd=["/opt/homebrew/bin/claude", "--print"],
+            stdin=b"t", timeout=60, repository="owner/repo", github_requested=True,
+            mcp_config_path="/tmp/apis_mcp_x.json", neotoma_tools_granted=True)
+    assert _session(fly_env).requests == []  # refused before asking Neotoma
+
+
+def test_legacy_own_token_claude_job_without_mcp_config_is_ineligible(fly_env, monkeypatch):
+    monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR")
+    monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", "lanius-own-token-0009")
+    with pytest.raises(fly_runner.FlyIneligible,
+                       match="its MCP config could not be provided"):
+        _bare_claude_job(neotoma_tools_granted=True)
+
+
+def test_mcp_config_path_outside_its_flag_is_no_slot(fly_env):
+    # The path sits in the argv, but not as the --mcp-config value: run_job.py
+    # would supply no config there, so the job would be proxy-marked and toolless.
+    for cmd in (
+        ["/opt/homebrew/bin/claude", "--print", "/tmp/apis_mcp_x.json"],
+        ["/opt/homebrew/bin/claude", "--mcp-config", "/tmp/other.json",
+         "--add-dir", "/tmp/apis_mcp_x.json"],
+        ["/opt/homebrew/bin/claude", "/tmp/apis_mcp_x.json", "--mcp-config"],
+    ):
+        with pytest.raises(fly_runner.FlyIneligible,
+                           match="its MCP config could not be provided"):
+            fly_runner.build_job(
+                provider="claude", role="lanius", cmd=cmd, stdin=b"t", timeout=60,
+                repository="owner/repo", github_requested=True,
+                mcp_config_path="/tmp/apis_mcp_x.json", neotoma_tools_granted=True)
+    assert _session(fly_env).requests == []
+
+
+def test_mcp_config_flag_with_its_path_is_a_slot(fly_env):
+    job = fly_runner.build_job(
+        provider="claude", role="lanius",
+        cmd=["/opt/homebrew/bin/claude", "--add-dir", "/tmp/apis_mcp_x.json",
+             "--mcp-config", "/tmp/apis_mcp_x.json", "--print"],
+        stdin=b"t", timeout=60, repository="owner/repo", github_requested=True,
+        mcp_config_path="/tmp/apis_mcp_x.json", neotoma_tools_granted=True)
+    assert job.neotoma_mcp == "proxy"
+    i = job.argv.index("--mcp-config")
+    assert job.argv[i + 1] == fly_runner.MCP_CONFIG_PLACEHOLDER
+    # Only the flag's value is rewritten; the same path elsewhere is left alone.
+    assert job.argv.count(fly_runner.MCP_CONFIG_PLACEHOLDER) == 1
+    assert job.argv[job.argv.index("--add-dir") + 1] == "/tmp/apis_mcp_x.json"
+
+
+@pytest.mark.parametrize("kw", [
+    {},  # no Neotoma tools granted
+    {"neotoma_tools_granted": True, "owns_pending_gate": True, "github_read_only": True},
+], ids=["not-granted", "seated"])
+def test_no_mcp_slot_is_fine_without_granted_tools_or_when_seated(fly_env, kw):
+    assert _bare_claude_job(**kw).neotoma_mcp == ""
+
+
+def test_admission_is_not_shared_across_neotoma_instances(fly_env):
+    session = _session(fly_env)
+    jwk = _valid_role_jwk()
+    session.answer = {"aauth": {"admitted": True}}
+    assert fly_runner.role_admission("lanius", jwk, "https://a.example.test",
+                                     client=session.client()) == (True, "")
+    session.answer = {"aauth": {"admitted": False, "admission_reason": "no_match"}}
+    assert fly_runner.role_admission("lanius", jwk, "https://b.example.test",
+                                     client=session.client()) == (False, "no_match")
+    assert [r.url.host for r in session.requests] == ["a.example.test", "b.example.test"]
+    # Each instance's own answer stays cached for it.
+    assert fly_runner.role_admission("lanius", jwk, "https://a.example.test/",
+                                     client=session.client()) == (True, "")
+    assert len(session.requests) == 2
+
+
+def test_a_429_is_not_cached_and_is_retried(fly_env):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(429, text="slow down")
+        return httpx.Response(200, json={"aauth": {"admitted": True}})
+
+    def ask():
+        return fly_runner.role_admission(
+            "lanius", _valid_role_jwk(), "https://n.example.test",
+            client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+    assert ask() == (False, "Neotoma /session answered 429")
+    assert ask() == (True, "")
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("response", [
+    httpx.Response(200, text="not json"),
+    httpx.Response(200, json=["a", "list"]),
+    httpx.Response(200, json={"aauth": "yes"}),
+    httpx.Response(200, json={"aauth": {"admitted": "true"}}),
+], ids=["not-json", "list", "aauth-not-object", "admitted-not-bool"])
+def test_a_malformed_200_is_refused(fly_env, response):
+    def handler(request):
+        return response
+
+    admitted, reason = fly_runner.role_admission(
+        "lanius", _valid_role_jwk(), "https://n.example.test",
+        client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert admitted is False
+    assert reason == "Neotoma /session returned no readable admission decision"
+
+
+@pytest.mark.parametrize("kw", [
+    {},  # no Neotoma tools granted
+    {"neotoma_tools_granted": True, "owns_pending_gate": True, "github_read_only": True},
+], ids=["not-granted", "seated"])
+def test_no_proxy_without_granted_tools_or_an_mcp_slot(fly_env, kw):
+    job = _job(**kw)
+    assert job.neotoma_mcp == ""
+    spec = json.loads(base64.b64decode(next(
+        f["raw_value"] for f in fly_runner.job_files(job, fly_runner.FlyConfig.from_env())
+        if f["guest_path"].endswith("/job.json"))))
+    assert "neotoma_mcp" not in spec
 
 
 def test_mcp_and_shared_token_never_ship_when_role_has_only_a_key(fly_env):
@@ -1134,24 +1444,60 @@ def test_seam_forced_fly_returns_the_machine_result(fly_env, seam, monkeypatch):
         result = _once(runner="fly", repository="owner/repo",
                        github_token="")  # fmt: skip
     assert result.ok, result.error
-    assert result.stdout == (
-        "GATE_INHERITANCE: clear\n" + fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE + "\n"
-    )
+    # A key-only Claude role reaches Neotoma through the runner's signing
+    # proxy, so no tool-loss note is appended.
+    assert result.stdout == "GATE_INHERITANCE: clear\n"
     assert spawned == []
     assert minted == ["owner/repo"] and revoked == [MINTED]
     files = _files(json.loads(fake.calls("POST", "/machines")[0].content))
     argv = json.loads(files["/run/job/argv.json"])
     assert argv[0] == "claude" and fly_runner.MCP_CONFIG_PLACEHOLDER in argv
+    assert json.loads(files["/run/job/job.json"])["neotoma_mcp"] == "proxy"
     assert SHARED_BEARER not in _all_request_text(fake)
 
 
-@pytest.mark.parametrize("own_token,tools_granted,disclosed", [
-    (False, True, True),
-    (True, True, False),
-    (False, False, False),
+def test_seam_mcp_config_write_failure_refuses_fly_instead_of_running_toolless(
+        fly_env, seam, monkeypatch):
+    spawned, fake_exec = seam
+    real_mkstemp = skill_runner.tempfile.mkstemp
+
+    def failing_mkstemp(*a, **kw):
+        if kw.get("prefix") == "apis_mcp_":
+            raise OSError("injected: no space left on device")
+        return real_mkstemp(*a, **kw)
+
+    monkeypatch.setattr(skill_runner.tempfile, "mkstemp", failing_mkstemp)
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: pytest.fail("Fly reached"))
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(runner="fly", repository="owner/repo", github_token="")
+    assert not result.ok and spawned == []
+    assert result.error.startswith("fly runner refused: not eligible for Fly: ")
+    assert "its MCP config could not be provided" in result.error
+    assert _session(fly_env).requests == []
+
+
+def test_seam_key_only_job_without_the_proxy_is_refused_not_run_toolless(
+        fly_env, seam, monkeypatch):
+    spawned, fake_exec = seam
+    monkeypatch.setattr(fly_runner, "FLY_NEOTOMA_PROXY_PROVIDERS", frozenset())
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: pytest.fail("Fly reached"))
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(runner="fly", repository="owner/repo", github_token="")
+    assert not result.ok and spawned == []
+    assert result.error == ("fly runner refused: not eligible for Fly: the Fly runner "
+                            "cannot yet give a claude job its Neotoma tools")
+    assert fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE not in result.stdout
+
+
+@pytest.mark.parametrize("own_token,tools_granted,seated,disclosed", [
+    (False, True, True, True),  # a seated run gets no Neotoma tools on Fly
+    (False, True, False, False),  # the signing proxy gives them
+    (True, True, False, False),
+    (False, False, False, False),
 ])
 def test_key_only_neotoma_tool_loss_is_disclosed_in_result_and_log(
-        fly_env, seam, monkeypatch, caplog, capsys, own_token, tools_granted, disclosed):
+        fly_env, seam, monkeypatch, caplog, capsys, own_token, tools_granted, seated,
+        disclosed):
     _, fake_exec = seam
     if own_token:
         monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", "lanius-own-token-0009")
@@ -1182,17 +1528,22 @@ def test_key_only_neotoma_tool_loss_is_disclosed_in_result_and_log(
     with caplog.at_level(logging.WARNING), \
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         result = _once(runner="fly", repository="owner/repo",
-                       github_token="", notifier=Notifier())
+                       github_token="", notifier=Notifier(),
+                       **({"owns_pending_gate": True, "github_read_only": True}
+                          if seated else {}))
     note = fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE
     assert result.ok
     assert (note in result.stdout) is disclosed
     assert (note in caplog.text) is disclosed
     launch = next(event for event in events if event[0] == "launch")
-    assert (note in launch[1]) is disclosed
-    assert (any(note in message for message in launch[2])) is disclosed
+    # Never announced before the launch: a refusal inside run() would leave a
+    # false "Ran on Fly" notice (red before: the note was in launch stderr).
+    assert note not in launch[1]
+    assert not any(note in message for message in launch[2])
+    assert (note in capsys.readouterr().err) is disclosed
     assert (any(event[0] == "notify" and event[1] == note for event in events)) is disclosed
     if disclosed:
-        assert events[0][0] == "notify"
+        assert [event[0] for event in events] == ["launch", "notify"]
 
 
 def test_seam_cap_refusal_returns_cooled_until(fly_env, seam, monkeypatch):
@@ -1229,6 +1580,8 @@ def test_seam_definite_launch_failure_falls_back_or_fails(fly_env, seam, monkeyp
 def test_key_only_local_fallback_reports_the_actual_fly_failure(
         fly_env, seam, monkeypatch, caplog, capsys, error, correction):
     spawned, fake_exec = seam
+    # The correction is for a key-only job whose child has no Neotoma tools on
+    # Fly: a seated run (a job without the signing proxy is refused at build).
     monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", SHARED_BEARER)
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
     executor, _, _ = make_executor(FakeFly())
@@ -1248,7 +1601,7 @@ def test_key_only_local_fallback_reports_the_actual_fly_failure(
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         result = _once(action_class="carry_forward_check", model="m",
                        repository="owner/repo", github_token="t-local",
-                       notifier=Notifier())
+                       notifier=Notifier(), owns_pending_gate=True, github_read_only=True)
 
     assert result.ok and result.stdout == "local output" and len(spawned) == 1
     stderr = capsys.readouterr().err
@@ -1259,6 +1612,37 @@ def test_key_only_local_fallback_reports_the_actual_fly_failure(
     assert other not in stderr and other not in caplog.text
     assert all(other not in message for message in notices)
     assert fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE not in result.stdout
+    # The run never happened on Fly, so no "Ran on Fly" notice went out
+    # (red before: it was sent ahead of run()).
+    assert fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE not in notices
+    assert fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE not in stderr
+
+
+def test_key_only_notice_not_sent_when_the_job_token_mint_refuses(
+        fly_env, seam, monkeypatch, caplog):
+    # The 8 Nov incident: no repository reached the job, so the read-only
+    # token mint refused inside run() and the lens went home; the operator was
+    # still told it "Ran on Fly". Red before: the note was in `notices`.
+    spawned, fake_exec = seam
+    monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", SHARED_BEARER)
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
+    executor, _, _ = make_executor(FakeFly(), mint=fly_runner.mint_job_github_token)
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    notices = []
+
+    class Notifier:
+        def send(self, message, **kwargs):
+            notices.append(message)
+
+    with caplog.at_level(logging.WARNING), \
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(action_class="carry_forward_check", model="m",
+                       repository="", github_token="t-local",
+                       notifier=Notifier(), owns_pending_gate=True, github_read_only=True)
+    assert result.ok and result.stdout == "local output" and len(spawned) == 1
+    assert "no owner/name repository" in caplog.text
+    assert fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE not in notices
+    assert "This run was not eligible for Fly, so it ran locally with its normal tools." in notices
 
 
 @pytest.mark.parametrize("terminates", [True, False])
@@ -2490,6 +2874,255 @@ def test_a_definite_start_failure_scrubs_before_it_releases(fly_env, monkeypatch
     assert fake.machines["m-codex"]["config"]["files"] == []
 
 
+# ── A refused clean-up update: retried, logged, and settled without a launch ──
+
+FLY_REFUSAL = ("update replacing user: revert stopped flyd: insufficient memory available "
+               "to fulfill request")  # fmt: skip
+
+
+def _refusing_scrub(fake: FakeFly, times: int, on_refuse=None):
+    """A handler refusing the first *times* clean-up updates of m-codex with
+    412 and Fly's text; *on_refuse* runs as each refusal is answered."""
+    real = fake.handler
+    seen = {"scrubs": 0}
+
+    def handler(request):
+        if request.method == "POST" and request.url.path.endswith("/machines/m-codex"):
+            if json.loads(request.content)["config"].get("files") == []:
+                seen["scrubs"] += 1
+                if seen["scrubs"] <= times:
+                    if on_refuse is not None:
+                        on_refuse()
+                    return httpx.Response(412, json={"error": FLY_REFUSAL})
+        return real(request)
+
+    return handler, seen
+
+
+def _refused_scrub_executor(fake, times, on_refuse=None):
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock, record={"exit_code": 0, "stdout": "ok"})
+    handler, seen = _refusing_scrub(fake, times, on_refuse)
+    executor.client = fly_runner.FlyMachinesClient(
+        executor.config, transport=httpx.MockTransport(handler)
+    )
+    slept: list[float] = []
+
+    async def sleep(seconds):
+        slept.append(seconds)
+        clock.now += seconds  # a fake clock: the backoff takes no real time
+
+    executor._sleep = sleep
+    return executor, clock, seen, slept
+
+
+def _in_flight_count(executor, now) -> int:
+    scripts = str(_REPO_ROOT / "execution" / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import fly_jobs_in_flight
+
+    return fly_jobs_in_flight.count_in_flight(executor.ledger.path, now)
+
+
+def test_scrub_retries_a_refused_update(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    executor, clock, seen, slept = _refused_scrub_executor(fake, 2)
+    job = _codex_job()
+    rc, _, _ = asyncio.run(executor.run(job))
+    assert rc == 0 and job.remote_state == "terminated"
+    assert seen["scrubs"] == 3 and slept == [2.0, 5.0]
+    stored = fake.machines["m-codex"]["config"]
+    assert stored["files"] == [] and stored["env"] == {}
+    assert "ateles_run_id" not in stored.get("metadata", {})
+    assert executor.ledger.entry(job.run_id) is None  # settled, not marked
+    assert _in_flight_count(executor, clock.now) == 0
+    assert "m-codex" not in fake.leases
+
+
+def test_scrub_gives_up_after_its_bound(fly_env, monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    fake = _codex_fake(monkeypatch)
+    executor, clock, seen, slept = _refused_scrub_executor(fake, 10_000)
+    job = _codex_job()
+    rc, _, _ = asyncio.run(executor.run(job))
+    assert rc == 0 and job.remote_state == "unconfirmed"
+    assert slept == list(fly_runner.SCRUB_RETRY_SECONDS)
+    assert seen["scrubs"] == len(fly_runner.SCRUB_RETRY_SECONDS) + 1
+    files = fake.machines["m-codex"]["config"]["files"]
+    assert files  # still there, still this run's
+    entry = executor.ledger.entry(job.run_id)
+    assert entry is not None and entry["unconfirmed"] is True
+    refusals = [r.getMessage() for r in caplog.records
+                if r.levelno == logging.WARNING and "refused the clean-up update" in r.getMessage()]
+    assert len(refusals) == seen["scrubs"]
+    assert all("status 412" in m and "reason host_memory" in m for m in refusals)
+    assert "insufficient memory available" not in caplog.text  # Fly's own words never logged
+    text = caplog.text
+    for job_file in files:
+        assert job_file["raw_value"] not in text
+    for leaked in ("raw_value", "guest_path", "ATELES_RUN_ID", MINTED, *FORBIDDEN_VALUES):
+        assert leaked not in text
+
+
+def test_scrub_does_not_overwrite_another_runs_config_on_retry(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    newer = {"files": [{"guest_path": "/run/job/job.json", "raw_value": "eA=="}],
+             "env": {"ATELES_RUN_ID": "newer-run"},
+             "metadata": {"ateles_run_id": "newer-run"}}  # fmt: skip
+
+    def another_run_takes_it():
+        fake.machines["m-codex"]["config"] = copy.deepcopy(newer)
+        fake.machines["m-codex"]["instance_id"] = "v-newer"
+
+    executor, _, seen, slept = _refused_scrub_executor(fake, 1, another_run_takes_it)
+    rc, _, _ = asyncio.run(executor.run(_codex_job()))
+    assert rc == 0 and slept == [2.0]  # it did retry, from a fresh read
+    assert seen["scrubs"] == 1  # and wrote nothing over the other run's config
+    assert fake.machines["m-codex"]["config"] == newer
+
+
+def test_scrub_retry_does_not_hold_admission_while_it_waits(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    executor, _, _, _ = _refused_scrub_executor(fake, 2)
+    lock_path = executor.ledger.path.with_name(executor.ledger.path.name + ".admission.lock")
+    free: list[bool] = []
+
+    async def sleep(seconds):
+        with open(lock_path, "a+") as fh:  # what another dispatcher would take
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                taken = True
+            except BlockingIOError:
+                taken = False
+        free.append(taken and not executor._admission_lock().locked())
+
+    executor._sleep = sleep
+    job = _codex_job()
+    asyncio.run(executor.run(job))
+    assert free == [True, True]
+    assert job.remote_state == "terminated"
+
+
+def _seed_marked_login(executor, clock, *, run_id="ended-run", state="stopped", config=None):
+    executor.ledger.reserve(executor.config, run_id=run_id, owner=executor.instance_id,
+                            max_run_seconds=600, login=True, machine_id="m-codex",
+                            now=clock.now)  # fmt: skip
+    executor.ledger.mark_unconfirmed(run_id, reason="termination not confirmed")
+    return run_id
+
+
+def _job_config(run_id):
+    return {"mounts": [], "files": [{"guest_path": "/run/job/job.json", "raw_value": "eA=="}],
+            "env": {"ATELES_RUN_ID": run_id}, "metadata": {"ateles_run_id": run_id}}
+
+
+def test_periodic_step_settles_a_marked_reservation(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock)
+    run_id = _seed_marked_login(executor, clock)
+    fake.machines["m-codex"]["config"] = _job_config(run_id)  # the clean-up Fly refused
+    assert _in_flight_count(executor, clock.now) == 1
+    monkeypatch.setattr(fly_runner, "_EXECUTOR", executor)  # what Apis's sweep reaches
+    assert asyncio.run(fly_runner.settle_marked_reservations()) == [run_id]
+    assert executor.ledger.entry(run_id) is None
+    assert _in_flight_count(executor, clock.now) == 0
+    assert fake.machines["m-codex"]["config"]["files"] == []
+    assert "m-codex" not in fake.leases  # the cleanup lease went with it
+    assert not fake.calls("POST", "/start") and not fake.calls("POST", "/v1/apps/runner-app/machines")
+
+
+class _SweepDispatcher:
+    """Every review step of Apis's sweep pass, doing nothing: only the Fly
+    step at the head of the pass has an effect."""
+
+    class config:  # noqa: N801 — mirrors SwarmDispatcher.config
+        resume_repositories: list[str] = []
+
+    def __getattr__(self, name):
+        async def step(*args, **kwargs):
+            return None
+
+        return step
+
+
+def test_apis_sweep_pass_settles_a_marked_reservation(fly_env, monkeypatch):
+    # Drives the real sweep pass in apis.py, not the fly_runner entry point:
+    # removing the Fly step from the pass leaves the reservation in flight.
+    import apis
+
+    fake = _codex_fake(monkeypatch)
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock)
+    run_id = _seed_marked_login(executor, clock)
+    fake.machines["m-codex"]["config"] = _job_config(run_id)  # the clean-up Fly refused
+    assert _in_flight_count(executor, clock.now) == 1
+    monkeypatch.setattr(fly_runner, "_EXECUTOR", executor)
+    monkeypatch.setitem(sys.modules, "fly_runner", fly_runner)  # the module apis imports
+    asyncio.run(apis.deferred_review_sweep_pass(_SweepDispatcher()))
+    assert executor.ledger.entry(run_id) is None
+    assert _in_flight_count(executor, clock.now) == 0
+    assert fake.machines["m-codex"]["config"]["files"] == []
+    assert not fake.calls("POST", "/start")
+
+
+_FLY_TEXT_MARKER = "zq7-marker"
+
+
+@pytest.mark.parametrize(("fly_text", "label"), [
+    (f"insufficient memory available {_FLY_TEXT_MARKER}", "host_memory"),
+    (f"would OVERCOMMIT the host {_FLY_TEXT_MARKER}", "host_memory"),
+    (f"current_version mismatch {_FLY_TEXT_MARKER}", "version_conflict"),
+    (f"Version changed {_FLY_TEXT_MARKER}", "version_conflict"),
+    (f"something else {_FLY_TEXT_MARKER}", "other"),
+])
+def test_a_refused_scrub_logs_a_reason_label_and_never_flys_text(
+        fly_env, monkeypatch, caplog, fly_text, label):  # fmt: skip
+    caplog.set_level(logging.DEBUG)
+    fake = _codex_fake(monkeypatch)
+    executor, _, _ = make_executor(fake, record=None)
+    fake.machines["m-codex"]["config"] = _job_config("fly-r")
+    real = fake.handler
+
+    def handler(request):
+        if request.method == "POST" and request.url.path.endswith("/machines/m-codex"):
+            return httpx.Response(412, json={"error": fly_text})
+        return real(request)
+
+    executor.client = fly_runner.FlyMachinesClient(
+        executor.config, transport=httpx.MockTransport(handler)
+    )
+    assert asyncio.run(executor._scrub_login_machine("m-codex", "fly-r")) is False
+    refusals = [r.getMessage() for r in caplog.records
+                if "refused the clean-up update" in r.getMessage()]  # fmt: skip
+    assert refusals and all(f"status 412, reason {label})" in m for m in refusals)
+    assert _FLY_TEXT_MARKER not in caplog.text
+
+
+@pytest.mark.parametrize("case", ["unreadable", "running", "another_run"])
+def test_periodic_step_keeps_a_reservation_it_cannot_prove_clean(fly_env, monkeypatch, case):
+    fake = _codex_fake(monkeypatch)
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock)
+    run_id = _seed_marked_login(executor, clock)
+    config = _job_config(run_id)
+    if case == "unreadable":
+        fake.bad["get"] = "null"
+    elif case == "running":
+        fake.machines["m-codex"]["state"] = "started"
+        fake.stop_effective = False  # it does not stop
+    else:
+        config = _job_config("another-run")
+    fake.machines["m-codex"]["config"] = copy.deepcopy(config)
+    assert asyncio.run(executor.settle_marked()) == []
+    entry = executor.ledger.entry(run_id)
+    assert entry is not None and entry["unconfirmed"] is True
+    assert _in_flight_count(executor, clock.now) == 1
+    assert fake.machines["m-codex"]["config"] == config
+
+
 def test_only_vetted_classes_can_be_opted_in(monkeypatch):
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check,build")
     assert fly_runner.runner_classes() == frozenset({"carry_forward_check"})
@@ -3624,7 +4257,7 @@ def test_the_watchdog_never_crashes_on_an_invalid_queue_wait():
             "APIS_FLY_RUNNER_CLASSES": "carry_forward_check"}  # fmt: skip
     valid = stall_seconds({**base, "APIS_FLY_QUEUE_MAX_WAIT_SECONDS": "900"})
     for bad in ("NaN", "-5", "abc", "1e9", ""):
-        assert stall_seconds({**base, "APIS_FLY_QUEUE_MAX_WAIT_SECONDS": bad}) == valid - 900 - 120
+        assert stall_seconds({**base, "APIS_FLY_QUEUE_MAX_WAIT_SECONDS": bad}) == valid - 900 - 300 - 120
 
 
 # ── Ledger values arriving from disk ─────────────────────────────────────────
@@ -4483,3 +5116,793 @@ def test_the_runner_defines_the_same_argv_placeholders():
     spec.loader.exec_module(module)
     for name in ("WORKSPACE_PLACEHOLDER", "GIT_DIR_PLACEHOLDER", "PR_DIR_PLACEHOLDER"):
         assert getattr(module, name) == getattr(fly_runner, name)
+
+
+# ── Seated, read-only lens runs: on Fly with no Neotoma tools ───────────────
+
+
+def _seated(provider, cmd, **kw):
+    return fly_runner.build_job(
+        provider=provider, role="lanius", cmd=cmd, stdin=b"the task", timeout=60,
+        repository="owner/repo", github_requested=True,
+        mcp_config_path="/tmp/apis_mcp_x.json", owns_pending_gate=True, **kw)
+
+
+def test_a_seated_read_only_claude_run_ships_no_neotoma_mcp_and_no_role_token(
+        fly_env, claude_login, monkeypatch):  # fmt: skip
+    monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", "lanius-own-token-0009")
+    job = _seated("claude", ["/x/claude", "--print", "--mcp-config", "/tmp/apis_mcp_x.json",
+                             "--disallowed-tools", "mcp__mcpsrv_neotoma__correct"],
+                  github_read_only=True)  # fmt: skip
+    assert "--mcp-config" not in job.argv
+    assert fly_runner.MCP_CONFIG_PLACEHOLDER not in job.argv
+    assert "--strict-mcp-config" in job.argv
+    assert "--disallowed-tools" in job.argv  # the Mac-side deny still ships
+    assert job.neotoma_token_name == "" and "LANIUS_NEOTOMA_TOKEN" not in job.secrets
+    assert job.neotoma_jwk_name == fly_runner.AAUTH_JWK_JOB_NAME
+
+
+def test_a_seated_read_only_codex_run_is_built_and_an_mcp_override_is_refused(
+        fly_env, monkeypatch):  # fmt: skip
+    monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
+    cmd = ["/x/codex", "exec", "--strict-config", "--model", "m"]
+    job = _seated("codex", cmd, github_read_only=True)
+    assert job.argv[1:] == cmd[1:] and not any("mcp" in a for a in job.argv)
+    for bad in (["-c", 'mcp_servers.x.url="https://e"'], ['--config=mcp_servers.x.url="u"']):
+        with pytest.raises(fly_runner.FlyIneligible, match="MCP server"):
+            _seated("codex", [*cmd, *bad], github_read_only=True)
+
+
+def test_a_seated_run_that_is_not_read_only_or_is_cursor_stays_on_the_mac(
+        fly_env, claude_login, monkeypatch):  # fmt: skip
+    with pytest.raises(fly_runner.FlyIneligible, match="gate-owning"):
+        _seated("claude", ["/x/claude", "--print"])
+    monkeypatch.setenv("APIS_FLY_CURSOR_MACHINE_ID", "m-cursor")
+    with pytest.raises(fly_runner.FlyIneligible):
+        _seated("cursor", ["/x/cursor-agent"], github_read_only=True)
+
+
+def _panel_lens_dispatch(provider, monkeypatch, **kw):
+    """One panel lens as ``_run_panel`` dispatches it (swarm_dispatch): seated,
+    read-only, the GitHub contract on, no working directory, the lens's class
+    opted onto Fly. Returns the ``build_job`` keywords, what it raised (or
+    None), and the result."""
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "lens_review:arch")
+    monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
+    # Pinned like ``seam`` pins CLAUDE_BIN: without it a host with no codex
+    # install skips the dispatch before the Fly seam is ever reached.
+    monkeypatch.setattr(skill_runner, "CODEX_BIN", "/usr/bin/codex-test")
+    seen: dict = {}
+    real = fly_runner.build_job
+
+    def spy(**kwargs):
+        seen["kwargs"] = kwargs
+        try:
+            return real(**kwargs)
+        except fly_runner.FlyIneligible as exc:
+            seen["raised"] = exc
+            raise
+
+    monkeypatch.setattr(fly_runner, "build_job", spy)
+    result = asyncio.run(skill_runner._run_skill_once(
+        "lanius", "review the PR", provider=provider, role="lanius",
+        action_class="lens_review:arch", model="m", repository="owner/repo",
+        github_token="t-lens", include_github_contract=True,
+        owns_pending_gate=True,  # run_skill's deny: seated_reviewer=True
+        github_read_only=True, cwd=None, **kw))  # fmt: skip
+    return seen["kwargs"], seen.get("raised"), result
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+def test_build_job_accepts_a_seated_read_only_panel_lens(fly_env, seam, claude_login,
+                                                         monkeypatch, provider):  # fmt: skip
+    _, fake_exec = seam
+    monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", "lanius-own-token-0009")
+    executor, _, _ = make_executor(FakeFly())
+    launched = []
+
+    async def run(job):  # the launch itself is tested elsewhere
+        launched.append(job.provider)
+        return 0, b"VERDICT\n", b""
+
+    monkeypatch.setattr(executor, "run", run)
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        kwargs, raised, result = _panel_lens_dispatch(provider, monkeypatch)
+    # The lens path's own arguments: nothing in them sends it home.
+    assert kwargs["owns_pending_gate"] and kwargs["github_read_only"]
+    assert kwargs["neotoma_tools_granted"] and not kwargs["github_delivery_contract"]
+    assert not (kwargs["cwd"] or kwargs["local_review"] or kwargs["inference_only"]
+                or kwargs["command_wrapper"] or kwargs["codex_outer_sandboxed"])
+    assert raised is None
+    assert launched == [provider] and result.ok
+
+
+def test_a_seated_lens_whose_role_has_no_neotoma_identity_stays_off_fly(
+        fly_env, seam, claude_login, monkeypatch):  # fmt: skip
+    # Kept safety rule: the shared daemon bearer never leaves the Mac, so a
+    # role with neither its own token nor an AAuth key is not Fly work, seated
+    # or not. Its runner still needs an identity for its result record.
+    _, fake_exec = seam
+    monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR")
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        _, raised, _ = _panel_lens_dispatch(
+            "claude", monkeypatch, local_fallback_check=lambda p: None)
+    assert isinstance(raised, fly_runner.FlyIneligible)
+    assert "has no Neotoma identity of its own" in str(raised)
+
+
+def test_a_declined_lens_the_mac_may_not_run_logs_both_reasons(fly_env, seam, claude_login,
+                                                               monkeypatch, caplog):  # fmt: skip
+    spawned, fake_exec = seam
+    monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR")  # Fly declines: no role identity
+    local = "claude is not enabled for local dispatch (APIS_HARNESS_PROVIDERS)"
+    with caplog.at_level(logging.WARNING), \
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        _, raised, result = _panel_lens_dispatch(
+            "claude", monkeypatch, local_fallback_check=lambda p: local)
+    assert raised is not None and spawned == []
+    line = next(r.getMessage() for r in caplog.records if "not dispatched" in r.getMessage())
+    assert str(raised) in line and local in line
+    assert str(raised) in result.error and local in result.error
+    # Handed back to the provider loop to fail over, not a dead end.
+    assert not result.ok and result.fly_local_fallback_refused
+
+
+def test_every_lens_review_class_is_vetted_and_delivery_only_is_unchanged(monkeypatch):
+    import model_tiering
+
+    for lens in model_tiering.KNOWN_LENSES:
+        assert model_tiering.lens_review_class(lens) in fly_runner.FLY_VETTED_CLASSES
+    assert fly_runner.DELIVERY_ONLY_CLASSES == {"open_or_merge_pr"}
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "lens_review:security,lens_review:bogus")
+    assert fly_runner.runner_classes() == {"lens_review:security"}
+    assert fly_runner.wants_fly(None, "lens_review:security") is True
+    assert fly_runner.wants_fly(None, "lens_review:qa") is False
+
+
+# ── A login claim retries a version conflict from a fresh read ──────────────
+
+
+def _claim_conflicts(fake: FakeFly, executor, machine_id: str, on_conflict):
+    """Route the executor through *fake*, answering a CLAIM update (one that
+    installs a job's files) with whatever ``on_conflict(n)`` returns for the
+    n-th claim (1-based): an ``httpx.Response`` to send instead, or None to
+    let the fake handle it. Returns the claim requests, in order."""
+    claims: list[httpx.Request] = []
+
+    def handler(request):
+        if (request.method == "POST" and request.url.path.endswith(f"/machines/{machine_id}")
+                and json.loads(request.content)["config"].get("files")):  # fmt: skip
+            claims.append(request)
+            answer = on_conflict(len(claims))
+            if answer is not None:
+                fake.requests.append(request)
+                return answer
+        return fake.handler(request)
+
+    executor.client = fly_runner.FlyMachinesClient(
+        executor.config, transport=httpx.MockTransport(handler)
+    )
+    return claims
+
+
+@pytest.fixture
+def fast_claim_retry(monkeypatch):
+    monkeypatch.setattr(fly_runner, "LOGIN_CLAIM_BACKOFF_SECONDS",
+                        (0.0,) * len(fly_runner.LOGIN_CLAIM_BACKOFF_SECONDS))  # fmt: skip
+
+
+def test_a_login_claim_retries_a_412_with_the_new_version(fly_env, claude_login,
+                                                          fast_claim_retry):  # fmt: skip
+    fake = _claude_fake()
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "CLAUDE OK"})
+
+    def first_conflicts(n):
+        if n == 1:  # the previous job releasing the machine bumps its version
+            fake.machines["m-claude"]["instance_id"] = "v2"
+            return httpx.Response(412, json={"error": "machine version changed"})
+        return None
+
+    claims = _claim_conflicts(fake, executor, "m-claude", first_conflicts)
+    rc, out, _ = asyncio.run(executor.run(_job()))
+    assert rc == 0 and b"CLAUDE OK" in out
+    assert [json.loads(r.content)["current_version"] for r in claims] == ["v1", "v2"]
+    nonces = {r.headers.get("fly-machine-lease-nonce") for r in claims}
+    assert len(nonces) == 1 and None not in nonces  # the run's own lease, held throughout
+    assert len(fake.calls("POST", "/start")) == 1
+    assert executor.ledger.snapshot()["in_flight"] == {} and "m-claude" not in fake.leases
+
+
+def test_a_login_claim_conflict_then_another_runs_job_is_refused(fly_env, claude_login,
+                                                                 fast_claim_retry):  # fmt: skip
+    fake = _claude_fake()
+    executor, _, revoked = make_executor(fake, record=None)
+    other = {"files": [{"guest_path": "/run/job/job.json", "raw_value": "eA=="}],
+             "env": {"ATELES_RUN_ID": "other-run"},
+             "metadata": {"ateles_run_id": "other-run"}}  # fmt: skip
+
+    def another_run_wins(n):
+        fake.machines["m-claude"]["config"] = dict(other)
+        fake.machines["m-claude"]["instance_id"] = "v2"
+        return httpx.Response(409, json={"error": "machine version changed"})
+
+    claims = _claim_conflicts(fake, executor, "m-claude", another_run_wins)
+    with pytest.raises(fly_runner.FlyRefusal, match="another run") as exc:
+        asyncio.run(executor.run(_job()))
+    assert exc.value.cooled_until
+    assert len(claims) == 1  # the re-read refused: no second update was sent
+    assert not fake.calls("POST", "/start")
+    assert fly_runner._config_run_id(fake.machines["m-claude"]["config"]) == "other-run"
+    assert revoked == [MINTED]
+
+
+def test_a_login_claim_that_always_conflicts_is_refused_after_the_bound(
+        fly_env, claude_login, fast_claim_retry):  # fmt: skip
+    fake = _claude_fake()
+    executor, _, revoked = make_executor(fake, record=None)
+    claims = _claim_conflicts(
+        fake, executor, "m-claude",
+        lambda n: httpx.Response(409, json={"error": "machine version changed"}),
+    )
+    job = _job()
+    with pytest.raises(fly_runner.FlyRefusal,
+                       match=r"Fly refused the claude login machine update \(409, reason "
+                             r"version_conflict\); the task never launched") as exc:  # fmt: skip
+        asyncio.run(executor.run(job))
+    assert exc.value.cooled_until
+    _assert_names_refile(str(exc.value), job)
+    assert "changed while being claimed" not in str(exc.value)
+    assert len(claims) == len(fly_runner.LOGIN_CLAIM_BACKOFF_SECONDS) + 1 == 7
+    assert not fake.calls("POST", "/start")  # nothing started
+    assert not fly_runner._has_job_config(fake.machines["m-claude"]["config"])
+    assert executor.ledger.entry(job.run_id) is None and "m-claude" not in fake.leases
+    assert revoked == [MINTED]
+
+
+# ── A login claim never writes or starts past the run's deadline ────────────
+
+def _assert_names_refile(text: str, job) -> None:
+    """A terminal claim refusal tells the reader what to do: the task never
+    launched, is not retried automatically, and must be refiled; it names
+    the run and the login machine."""
+    assert "retry later" not in text
+    assert "never launched and is not retried automatically: refile it" in text
+    assert f"run {job.run_id}, machine m-claude" in text
+
+
+def test_refile_action_names_a_missing_login_machine_as_missing(fly_env):
+    """An absent machine id is said to be absent, never given a placeholder
+    name that reads like a machine."""
+    job = _job()
+    text = fly_runner.FlyExecutor._refile_action(job, None)
+    assert "never launched and is not retried automatically: refile it" in text
+    assert f"run {job.run_id}, no claude login machine configured" in text
+    assert "unknown" not in text
+    assert "machine m-" not in text
+
+
+def _past_deadline_refusal(executor, job, fake, claims, *, sent: int):
+    """Run *job* to its deadline refusal, then assert what every such refusal
+    leaves: *sent* claim updates, no start, the job config cleared, and the
+    reservation and lease released."""
+    with pytest.raises(fly_runner.FlyRefusal, match="reached the run's deadline") as exc:
+        asyncio.run(executor.run(job))
+    assert exc.value.cooled_until
+    _assert_names_refile(str(exc.value), job)
+    assert len(claims) == sent
+    assert not fake.calls("POST", "/start")
+    assert not fly_runner._has_job_config(fake.machines["m-claude"]["config"])
+    assert executor.ledger.entry(job.run_id) is None and "m-claude" not in fake.leases
+
+
+def test_a_deadline_passing_in_the_retry_sleep_stops_the_claim(fly_env, claude_login):
+    clock = Clock()
+    fake = _claude_fake()
+    executor, _, _ = make_executor(fake, record={"exit_code": 0}, clock=clock)
+    slept: list[float] = []
+
+    async def sleep(seconds):  # the claim's backoff wait, through pause()
+        slept.append(seconds)
+        clock.now += 100_000  # the deadline passes while the retry waits
+
+    executor._sleep = sleep
+
+    def first_conflicts(n):
+        if n == 1:
+            fake.machines["m-claude"]["instance_id"] = "v2"
+            return httpx.Response(412, json={"error": "machine version changed"})
+        return None
+
+    claims = _claim_conflicts(fake, executor, "m-claude", first_conflicts)
+    _past_deadline_refusal(executor, _job(), fake, claims, sent=1)
+    assert slept == [fly_runner.LOGIN_CLAIM_BACKOFF_SECONDS[0]]
+
+
+def test_a_deadline_passing_in_the_retry_read_stops_the_claim(fly_env, claude_login,
+                                                              fast_claim_retry):  # fmt: skip
+    clock = Clock()
+    fake = _claude_fake()
+    executor, _, _ = make_executor(fake, record={"exit_code": 0}, clock=clock)
+    conflicted = []
+
+    def first_conflicts(n):
+        if n == 1:
+            conflicted.append(True)
+            fake.machines["m-claude"]["instance_id"] = "v2"
+            return httpx.Response(412, json={"error": "machine version changed"})
+        return None
+
+    claims = _claim_conflicts(fake, executor, "m-claude", first_conflicts)
+    routed = executor.client
+
+    class SlowReads(fly_runner.FlyMachinesClient):
+        async def get(self, machine_id):
+            answer = await routed.get(machine_id)
+            if conflicted and len(claims) == 1:
+                clock.now += 100_000  # the retry's read / settle uses up the time
+            return answer
+
+    executor.client = SlowReads(executor.config, transport=routed._transport)
+    _past_deadline_refusal(executor, _job(), fake, claims, sent=1)
+
+
+def test_a_deadline_passing_after_the_claim_update_prevents_the_start(fly_env, claude_login,
+                                                                      fast_claim_retry):  # fmt: skip
+    clock = Clock()
+    fake = _claude_fake()
+    executor, _, _ = make_executor(fake, record={"exit_code": 0}, clock=clock)
+
+    def update_then_time_runs_out(n):
+        clock.now += 100_000  # the update lands, then the deadline passes
+        return None
+
+    claims = _claim_conflicts(fake, executor, "m-claude", update_then_time_runs_out)
+    _past_deadline_refusal(executor, _job(), fake, claims, sent=1)
+
+
+# ── A refused claim update backs off for minutes, and says why ──────────────
+
+# Fly's revert text when the host has no memory for the machine.
+_REVERT_MEMORY = ("failed to update machine: mem_overcommit_exceeded on host",
+                  "revert stopped flyd: insufficient memory available to fulfill request")
+_UNKNOWN_MARKER = "SYNTHETIC-REVERT-MARKER-7f3a"
+
+
+def _admission_free(executor) -> bool:
+    """Whether another dispatcher could take admission right now: both the
+    in-process lock and the cross-process flock."""
+    lock_path = executor.ledger.path.with_name(executor.ledger.path.name + ".admission.lock")
+    with open(lock_path, "a+") as fh:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except BlockingIOError:
+            return False
+    return not executor._admission_lock().locked()
+
+
+def _claim_backoff_executor(fake, *, record=None):
+    """An executor on a fake clock whose backoff waits take no real time,
+    recording each wait and whether admission was free during it."""
+    clock = Clock()
+    executor, _, revoked = make_executor(fake, record=record, clock=clock)
+    slept: list[float] = []
+    free: list[bool] = []
+
+    async def sleep(seconds):
+        slept.append(seconds)
+        free.append(_admission_free(executor))
+        clock.now += seconds
+
+    executor._sleep = sleep
+    return executor, clock, slept, free, revoked
+
+
+def _claim_refusals(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "refused the claim update" in r.getMessage()]
+
+
+def test_claim_outlasts_repeated_refused_updates(fly_env, claude_login):
+    fake = _claude_fake()
+    executor, _, slept, free, _ = _claim_backoff_executor(
+        fake, record={"exit_code": 0, "stdout": "CLAUDE OK"})
+    claims = _claim_conflicts(
+        fake, executor, "m-claude",
+        lambda n: httpx.Response(412, json={"error": "update reverted"}) if n <= 5 else None,
+    )
+    rc, out, _ = asyncio.run(executor.run(_job()))
+    assert rc == 0 and b"CLAUDE OK" in out
+    assert len(claims) == 6
+    assert slept == [2.0, 5.0, 15.0, 30.0, 60.0]
+    assert free == [True] * 5  # admission let go during every wait
+    nonces = {r.headers.get("fly-machine-lease-nonce") for r in claims}
+    assert len(nonces) == 1 and None not in nonces  # one lease, held throughout
+    assert len(fake.calls("POST", "/start")) == 1
+    assert executor.ledger.entry(_job().run_id) is None and "m-claude" not in fake.leases
+
+
+def test_claim_stops_at_deadline_during_backoff(fly_env, claude_login):
+    fake = _claude_fake()
+    executor, clock, slept, _, revoked = _claim_backoff_executor(fake, record={"exit_code": 0})
+    job = _job()  # timeout 60 + grace 120: a 180 s deadline
+    deadline = clock.now + job.timeout + fly_runner.APIS_DEADLINE_GRACE_SECONDS
+    sent_at: list[float] = []
+
+    def always_refused(n):
+        sent_at.append(clock.now)
+        return httpx.Response(412, json={"error": "update reverted"})
+
+    claims = _claim_conflicts(fake, executor, "m-claude", always_refused)
+    _past_deadline_refusal(executor, job, fake, claims, sent=6)
+    # 2+5+15+30+60 = 112 s; the 120 s wait would reach the deadline, so it
+    # is never started, and no update was sent at or past the deadline.
+    assert slept == [2.0, 5.0, 15.0, 30.0, 60.0]
+    assert all(t < deadline for t in sent_at)
+    assert clock.now < deadline
+    assert revoked == [MINTED]
+
+
+@pytest.mark.parametrize("reason", _REVERT_MEMORY)
+def test_refused_update_labels_from_api_text(fly_env, claude_login, caplog, reason):
+    caplog.set_level(logging.DEBUG)
+    fake = _claude_fake()
+    executor, _, _, _, _ = _claim_backoff_executor(fake, record={"exit_code": 0})
+
+    def refused_once(n):
+        if n == 1:
+            return httpx.Response(412, json={"error": reason})
+        return None
+
+    _claim_conflicts(fake, executor, "m-claude", refused_once)
+    rc, _, _ = asyncio.run(executor.run(_job()))
+    assert rc == 0
+    refusals = _claim_refusals(caplog)
+    assert len(refusals) == 1
+    assert "status 412" in refusals[0] and "reason host_memory)" in refusals[0]
+    assert reason not in caplog.text
+
+
+def test_unknown_refusal_text_is_labelled_without_its_text(fly_env, claude_login, caplog):
+    caplog.set_level(logging.DEBUG)
+    fake = _claude_fake()
+    executor, _, _, _, _ = _claim_backoff_executor(fake, record={"exit_code": 0})
+
+    def always_refused(n):
+        return httpx.Response(412, json={"error": f"update failed: {_UNKNOWN_MARKER}"})
+
+    claims = _claim_conflicts(fake, executor, "m-claude", always_refused)
+    # A long enough run that the waits are spent before its deadline.
+    job = _job(timeout=600)
+    with pytest.raises(fly_runner.FlyRefusal) as exc:
+        asyncio.run(executor.run(job))
+    assert str(exc.value).startswith(
+        "Fly refused the claude login machine update (412, reason other); "
+        "the task never launched")
+    _assert_names_refile(str(exc.value), job)
+    assert len(claims) == len(fly_runner.LOGIN_CLAIM_BACKOFF_SECONDS) + 1
+    refusals = _claim_refusals(caplog)
+    assert len(refusals) == len(claims)
+    assert all("reason other)" in m for m in refusals)
+    assert _UNKNOWN_MARKER not in caplog.text
+    assert _UNKNOWN_MARKER not in str(exc.value)
+    assert not fake.calls("POST", "/start")
+
+
+@pytest.mark.parametrize("when", ["waiting", "retaking_locks"])
+def test_cancelled_during_claim_wait_leaves_admission_free(fly_env, claude_login, when):
+    fake = _claude_fake()
+    executor, _, _ = make_executor(fake, record={"exit_code": 0})
+    _claim_conflicts(fake, executor, "m-claude",
+                     lambda n: httpx.Response(412, json={"error": "update reverted"}))
+
+    async def scenario():
+        entered = asyncio.Event()
+        lock = executor._admission_lock()
+
+        async def sleep(seconds):
+            if when == "retaking_locks":
+                # Another dispatcher takes admission during the wait, so
+                # pause() is blocked taking the locks back when cancelled.
+                await lock.acquire()
+                entered.set()
+                return
+            entered.set()
+            await asyncio.Event().wait()  # cancelled here
+
+        executor._sleep = sleep
+        task = asyncio.ensure_future(executor.run(_job()))
+        await asyncio.wait_for(entered.wait(), 10)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        task.cancel()
+        if when == "retaking_locks":
+            await asyncio.sleep(0)
+            lock.release()  # the other dispatcher finishes
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 10)
+        assert _admission_free(executor)
+
+        async def admit():
+            async with executor._admission():
+                return True
+
+        assert await asyncio.wait_for(admit(), 5)
+
+    asyncio.run(scenario())
+    assert not fake.calls("POST", "/start")
+
+
+# ── A delivery whose record never arrived, settled from GitHub ──────────────
+
+_OPENER = "ateles-pr-opener[bot]"
+_BRANCH = "cicada/task-abc-20261107T000000-aaaaaa"
+_NEW = "a" * 40
+_ADMITTED = "b" * 40
+
+
+def _pr(number=7, *, sha=_NEW, ref=_BRANCH, author=_OPENER, state="open", merged_at=None):
+    repo = {"full_name": "owner/repo"}
+    return {"number": number, "state": state, "merged_at": merged_at, "user": {"login": author},
+            "head": {"ref": ref, "sha": sha, "repo": repo}, "base": {"repo": repo}}
+
+
+def _settle(fly_env, *, sha=_NEW, pulls=None, correction=False, read_error=None,
+            record_error=None):
+    fake = FakeFly()
+    executor, _, _ = make_executor(fake)
+    calls = []
+
+    def read_github(job):
+        calls.append(job.delivery["branch"])
+        if read_error is not None:
+            raise read_error
+        return sha, [_pr()] if pulls is None else pulls
+
+    async def read_result(run_id):
+        if record_error is not None:
+            raise record_error
+        return None
+
+    async def done(handle):
+        return "stopped"
+
+    executor._read_github = read_github
+    executor._opener_login = lambda: _OPENER
+    executor._read_result = read_result
+    executor._wait_until_done = done
+    job = _job()
+    job.delivery = {"branch": _BRANCH, "base_branch": "main", "author_name": "a",
+                    "author_email": "a@example.invalid"}
+    if correction:
+        job.delivery.update(pr_number="7", head_sha=_ADMITTED)
+    handle = types.SimpleNamespace(job=job, machine_id="m1")
+    rc, out, err = asyncio.run(executor._collect(handle))
+    return job, rc, out, err, calls
+
+
+def _collect_without_record(fly_env, *, events):
+    fake = FakeFly()
+    executor, _, _ = make_executor(fake)
+
+    async def read_result(run_id):
+        return None
+
+    async def done(handle):
+        return "stopped"
+
+    async def get(machine_id):
+        return {"id": machine_id, "state": "stopped", "instance_id": "i1", "config": {},
+                "events": events}
+
+    executor._read_result = read_result
+    executor._wait_until_done = done
+    executor.client.get = get
+    job = _job()
+    handle = types.SimpleNamespace(job=job, machine_id="m1")
+    return asyncio.run(executor._collect(handle))
+
+
+def _exit(code):
+    return [{"type": "exit", "request": {"exit_event": {"exit_code": code}}},
+            {"type": "start"}]
+
+
+def test_a_refused_result_record_is_named_not_reported_as_lost(fly_env):
+    # Exit 92 is the job's "Neotoma refused the record" status.
+    rc, _, err = _collect_without_record(fly_env, events=_exit(fly_runner.EXIT_RECORD_REFUSED))
+    assert rc == 1
+    assert b"no result recorded" in err
+    assert b"result record refused by Neotoma (HTTP 401/403)" in err
+    assert b"store_structured fly_runner_result" in err
+
+
+@pytest.mark.parametrize("events", [_exit(95), _exit(0), [], None],
+                         ids=["record-failed-95", "zero", "no-events", "no-field"])
+def test_other_causes_keep_the_plain_missing_result_message(fly_env, events):
+    rc, _, err = _collect_without_record(fly_env, events=events)
+    assert rc == 1 and b"no result recorded" in err and b"refused" not in err
+
+
+def test_the_runner_and_the_image_agree_on_the_refusal_status():
+    assert fly_runner.EXIT_RECORD_REFUSED == 92
+
+
+def test_lost_record_with_a_matching_branch_and_pr_settles_as_opened(fly_env, caplog):
+    caplog.set_level("WARNING", logger="apis.fly_runner")
+    job, rc, out, _, calls = _settle(fly_env)
+    assert calls == [_BRANCH]
+    assert rc == 0 and job.outcome_unknown is False
+    got = job.delivery_result
+    assert got["delivery_status"] == "opened" and got["pr_number"] == 7
+    assert got["pr_url"] == "https://github.com/owner/repo/pull/7"
+    assert got["delivery_branch"] == _BRANCH and got["delivery_commit"] == _NEW
+    assert got["settled_from"] == "github"
+    assert any("settled from GitHub" in r.message and job.run_id in r.message
+               for r in caplog.records)
+    fields = skill_runner._fly_delivery_fields(job, unknown=job.outcome_unknown)
+    assert fields["fly_delivery_status"] == "opened" and fields["fly_pr_number"] == 7
+
+
+def test_correction_is_never_settled_from_github(fly_env):
+    # Red before this fix (observed: the test this replaces asserted it): a
+    # correction whose branch moved off the admitted head and whose target PR
+    # matched settled as ``updated``, though nothing proved this run pushed it.
+    job, rc, _, err, calls = _settle(fly_env, correction=True)
+    assert rc == 1 and job.outcome_unknown is True and job.delivery_result is None
+    assert b"no result recorded" in err
+    assert calls == []  # GitHub is not even read for a correction
+    job = _job()
+    job.delivery = {"branch": _BRANCH, "pr_number": "7", "head_sha": _ADMITTED}
+    assert fly_runner.github_delivery_proof(job, _NEW, [_pr()], _OPENER) is None
+
+
+def test_a_merged_pr_also_settles(fly_env):
+    job, rc, _, _, _ = _settle(fly_env, pulls=[_pr(state="closed", merged_at="2026-11-07")])
+    assert rc == 0 and job.delivery_result["delivery_status"] == "opened"
+
+
+@pytest.mark.parametrize("kw", [
+    {"pulls": []},                                            # branch, no PR
+    {"pulls": [_pr(7), _pr(8)]},                              # two PRs on the branch
+    {"pulls": [_pr(author="someone-else")]},                  # not the opener App
+    {"pulls": [_pr(sha="c" * 40)]},                           # PR head is not the branch's
+    {"pulls": [_pr(state="closed")]},                         # closed, not merged
+    {"sha": None},                                            # branch absent
+    {"read_error": RuntimeError("GET /repos -> HTTP 502")},   # GitHub read failed
+], ids=["no-pr", "two-prs", "other-author", "head-mismatch", "closed", "no-branch",
+        "github-read-failure"])  # fmt: skip
+def test_an_unproven_delivery_stays_unknown(fly_env, kw):
+    job, rc, _, err, _ = _settle(fly_env, **kw)
+    assert rc == 1 and job.outcome_unknown is True and job.delivery_result is None
+    assert b"no result recorded" in err
+
+
+def test_an_unreadable_record_with_github_proof_settles(fly_env):
+    job, rc, _, _, _ = _settle(fly_env, record_error=fly_runner.FlyResultUnreadable("x"))
+    assert rc == 0 and job.delivery_result["delivery_status"] == "opened"
+
+
+def test_an_unreadable_record_without_proof_keeps_its_unknown_notice(fly_env):
+    job, rc, _, err, _ = _settle(fly_env, pulls=[],
+                                 record_error=fly_runner.FlyResultUnreadable("x"))
+    assert rc == 1 and job.outcome_unknown is True and b"outcome is unknown" in err
+
+
+# ── The default GitHub reader, driven through a fake HTTP layer ─────────────
+
+
+class _FakeResponse:
+    def __init__(self, body):
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self._body
+
+
+def _fake_github(monkeypatch, routes, *, token="app-token"):
+    """Route ``urlopen`` by path prefix to a body (bytes or JSON-able) or an
+    HTTP status (int). Records every request and the identity asked for."""
+    import urllib.error
+
+    from lib import github_app_token as gat
+
+    seen = {"identity": [], "requests": []}
+
+    def identity_token(identity, repo=None):
+        seen["identity"].append((identity, repo))
+        if isinstance(token, Exception):
+            raise token
+        return token
+
+    def urlopen(req, timeout=None):
+        path = req.full_url[len(fly_runner.GITHUB_API):]
+        seen["requests"].append((req.get_method(), path, req.get_header("Authorization")))
+        for prefix, answer in routes.items():
+            if path.startswith(prefix):
+                if isinstance(answer, int):
+                    raise urllib.error.HTTPError(req.full_url, answer, "x", {}, None)
+                body = answer if isinstance(answer, bytes) else json.dumps(answer).encode()
+                return _FakeResponse(body)
+        raise AssertionError(f"unexpected GitHub request {path}")
+
+    monkeypatch.setattr(gat, "identity_token", identity_token)
+    monkeypatch.setattr(fly_runner.urllib.request, "urlopen", urlopen)
+    return seen
+
+
+def _reader_job(branch=_BRANCH):
+    job = _job()
+    job.delivery = {"branch": branch, "base_branch": "main"}
+    return job
+
+
+def test_read_github_delivery_requests_branch_and_pulls_as_app(fly_env, monkeypatch):
+    # Red before this fix (inferred, not observed): no test called
+    # read_github_delivery, so a wrong identity, an unquoted branch or a wrong
+    # pulls query would have passed every settlement test, which inject the
+    # reader.
+    from lib import github_app_token as gat
+
+    branch = "cicada/task #1"
+    quoted = "cicada%2Ftask%20%231"
+    seen = _fake_github(monkeypatch, {
+        f"/repos/owner/repo/branches/{quoted}": {"commit": {"sha": _NEW}},
+        "/repos/owner/repo/pulls?": [_pr(ref=branch)],
+    })
+    sha, pulls = fly_runner.read_github_delivery(_reader_job(branch))
+    assert seen["identity"] == [(gat.PR_OPENER_IDENTITY, "owner/repo")]
+    assert [(m, p) for m, p, _ in seen["requests"]] == [
+        ("GET", f"/repos/owner/repo/branches/{quoted}"),
+        ("GET", "/repos/owner/repo/pulls?state=all&per_page=100"
+                "&head=owner%3Acicada%2Ftask%20%231"),
+    ]
+    assert all(auth == "Bearer app-token" for _, _, auth in seen["requests"])
+    assert sha == _NEW and pulls == [_pr(ref=branch)]
+    got = fly_runner.github_delivery_proof(_reader_job(branch), sha, pulls, _OPENER)
+    assert got["delivery_status"] == "opened" and got["pr_number"] == 7
+
+
+def test_read_github_delivery_branch_404_is_unproven(fly_env, monkeypatch):
+    # Red before this fix (inferred, not observed): untested, a 404 raising or
+    # reading as an existing branch would have gone unnoticed.
+    seen = _fake_github(monkeypatch, {"/repos/owner/repo/branches/": 404})
+    job = _reader_job()
+    sha, pulls = fly_runner.read_github_delivery(job)
+    assert (sha, pulls) == (None, [])
+    assert len(seen["requests"]) == 1  # no pulls read for an absent branch
+    assert fly_runner.github_delivery_proof(job, sha, pulls, _OPENER) is None
+
+
+@pytest.mark.parametrize("case", ["http-500", "token-mint-failure", "malformed-json"])
+def test_read_github_delivery_errors_are_unproven(fly_env, monkeypatch, case):
+    # Red before this fix (inferred, not observed): untested, an error that
+    # read_github_delivery swallowed into an empty answer, or that escaped the
+    # settlement, would have gone unnoticed.
+    routes = {"/repos/owner/repo/branches/": {"commit": {"sha": _NEW}},
+              "/repos/owner/repo/pulls?": [_pr()]}
+    token = "app-token"
+    if case == "http-500":
+        routes["/repos/owner/repo/pulls?"] = 500
+    elif case == "malformed-json":
+        routes["/repos/owner/repo/branches/"] = b"{not json"
+    else:
+        token = RuntimeError("mint failed")
+    _fake_github(monkeypatch, routes, token=token)
+    with pytest.raises(Exception):
+        fly_runner.read_github_delivery(_reader_job())
+    # Through the settlement, with the default reader: unknown (None), never
+    # no_changes or a failure.
+    executor, _, _ = make_executor(FakeFly())
+    executor._read_github = fly_runner.read_github_delivery
+    executor._opener_login = lambda: _OPENER
+    job = _reader_job()
+    assert asyncio.run(executor._settle_from_github(job)) is None
+    assert job.delivery_result is None

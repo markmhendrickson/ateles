@@ -1,0 +1,1350 @@
+"""Fix rounds for a Fly-delivered PR run as Fly corrections, never on this host.
+
+A review fix round, a CI-fix round and a resumed fix round (the revision
+sweep) for a PR the Fly delivery ledger names are filed as one
+``existing_pr_correction`` task on the PR's own branch, and no builder runs
+here. The round limit still holds, a PR a readable ledger does not name keeps
+the local round, a PR whose origin cannot be established (missing or
+unreadable ledger) stops for attention, and a correction that cannot be filed
+or does not read back as filed stops the PR for attention with no local commit
+and no fix round used up. Offline: no Fly, GitHub or Neotoma calls.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+
+import pytest
+
+import build_delivery as delivery
+from swarm_dispatch import SwarmDispatcher
+from test_swarm_dispatch import _trigger as _swarm_trigger
+from test_tiering_call_sites import (  # noqa: F401 (world is a fixture)
+    _Recorder,
+    _dispatcher,
+    world,
+)
+
+REPO = "owner/repo"
+PR = 87
+BRANCH = "cicada/fly-delivered-1234"
+HEAD = "a" * 40  # what the `world` fixture's `_pr_head_sha` returns
+UX_FINDING = "[BLOCKING] naming: the flag is undiscoverable\ndetail"
+GUIDANCE = "Rename the flag to --dry-run in cli.py and update its help text."
+
+
+@pytest.fixture(autouse=True)
+def isolated_ledger(monkeypatch, tmp_path):
+    monkeypatch.setenv(delivery.FLY_DELIVERY_REGISTRY_ENV, str(tmp_path / "ledger.json"))
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
+
+
+PLAN = "ent_synthetic_plan"
+SOURCE_TASKS = ("ent_synthetic_src", "ent_synthetic_other", "ent_synthetic_corr")
+
+
+def part_of(source, *targets):
+    return {"relationships": [
+        {"relationship_type": "PART_OF", "source_entity_id": source,
+         "target_entity_id": t} for t in targets]}
+
+
+@pytest.fixture
+def stored(monkeypatch):
+    """Capture every Neotoma store the dispatcher makes; answer with an id, and
+    read the stored task and its edges back as written. A test changes
+    ``readback`` (fields overridden on read) or sets ``read_fails`` (the stored
+    correction's reads). ``graph`` answers every other read: by default each
+    source task is PART_OF one plan, ``PLAN``; a test replaces an entry, and
+    None there is a failed read."""
+    graph = {f"entities/{src}/relationships": part_of(src, PLAN) for src in SOURCE_TASKS}
+    graph[f"entities/{PLAN}"] = {"entity_id": PLAN, "entity_type": "plan"}
+    box = {"calls": [], "answer": {"entities": [{"entity_id": "ent_synthetic_fix"}]},
+           "readback": {}, "read_fails": False, "reads": [], "graph": graph}
+
+    async def store(self, entities, idempotency_key, relationships=None):
+        box["calls"].append((entities, idempotency_key, relationships))
+        return box["answer"]
+
+    async def get(self, path):
+        box["reads"].append(path)
+        if not path.startswith("entities/ent_synthetic_fix"):
+            return box["graph"].get(path)
+        if box["read_fails"] or not box["calls"]:
+            return None
+        entities, _, rels = box["calls"][-1]
+        if path.endswith("/relationships"):
+            return {"relationships": [
+                {"relationship_type": r["relationship_type"],
+                 "source_entity_id": "ent_synthetic_fix",
+                 "target_entity_id": r["target_entity_id"]}
+                for r in rels or []]}
+        return {"entity_id": "ent_synthetic_fix",
+                "snapshot": {**entities[0], **box["readback"]}}
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", store)
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_get", get)
+    return box
+
+
+@pytest.fixture
+def rounds_recorded(monkeypatch, world):
+    """Count fix-round markers the way `_fix_round_count` reads them."""
+    recorded = []
+
+    async def record(self, t, n):
+        recorded.append(n)
+        world.fix_rounds += 1
+
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", record)
+    return recorded
+
+
+async def _failing_checks(self, t):
+    return [{"name": "unit-tests", "html_url": "https://example.invalid/run/1"}]
+
+
+def ci_round(monkeypatch, d=None):
+    monkeypatch.setattr(SwarmDispatcher, "_failing_check_runs", _failing_checks)
+    d = d or _dispatcher()
+    asyncio.run(d._route_ci_failure(trigger(), parent=80))
+    return d
+
+
+def seed_fly_delivery(number=PR, branch=BRANCH, key=f"{REPO}#task:ent_synthetic_src"):
+    """A settled first delivery, as the Fly runner leaves it."""
+    assert delivery._delivery_ledger().reserve_delivery(key, {
+        "status": "opened", "branch": branch, "run_id": "run-1", "token": "seeded",
+        "commit": HEAD, "pr_number": number, "readback": "passed"})
+
+
+def trigger(**over):
+    base = dict(kind="pr_synchronize", repository=REPO, number=PR,
+                html_url=f"https://github.com/{REPO}/pull/{PR}", action="synchronize",
+                head_ref=BRANCH, base_ref="main")
+    base.update(over)
+    return _swarm_trigger(**base)
+
+
+def review_round(d=None, t=None):
+    d = d or _dispatcher()
+    asyncio.run(d._route_blocking_findings(
+        t or trigger(), parent=80, reviews=[("ux", UX_FINDING)],
+        verdict="request_changes"))
+    return d
+
+
+def corrections(box):
+    return [e for entities, _, _ in box["calls"] for e in entities
+            if e.get("task_type") == "existing_pr_correction"]
+
+
+def test_review_round_for_a_fly_pr_is_filed_as_a_fly_correction(monkeypatch, world, stored):
+    seed_fly_delivery()
+    rec = _Recorder(monkeypatch, stdout={"accipiter": GUIDANCE})
+    review_round()
+    # No builder ran on this host: the lens wrote guidance, nothing committed.
+    assert rec.of("cicada") == []
+    assert len(rec.of("accipiter")) == 1
+    [task] = corrections(stored)
+    assert task["pr_number"] == PR and task["head_sha"] == HEAD
+    assert task["assigned_to"] == "cicada"
+    assert task["action_type"] == "open_or_merge_pr"
+    assert json.loads(task["context"])["branch"] == BRANCH
+    assert json.loads(task["context"])["base_branch"] == "main"
+    assert GUIDANCE in task["description"]
+    # The correction route itself admits it, on the PR's existing branch.
+    target = delivery.existing_pr_target(task, REPO)
+    assert (target.number, target.branch, target.head_sha) == (PR, BRANCH, HEAD)
+    # The task is a peer of the task the PR was delivered from: filed under
+    # that task's plan, referring to the task, and never PART_OF it.
+    [(_, _, rels)] = stored["calls"]
+    assert rels == [{"relationship_type": "PART_OF", "source_index": 0,
+                     "target_entity_id": PLAN},
+                    {"relationship_type": "REFERS_TO", "source_index": 0,
+                     "target_entity_id": "ent_synthetic_src"}]
+    assert not any(r["relationship_type"] == "PART_OF"
+                   and r["target_entity_id"] == "ent_synthetic_src" for r in rels)
+
+
+def test_ci_fix_round_for_a_fly_pr_is_filed_as_a_fly_correction(monkeypatch, world, stored):
+    seed_fly_delivery()
+
+    async def failing(self, t):
+        return [{"name": "unit-tests", "html_url": "https://example.invalid/run/1"}]
+
+    monkeypatch.setattr(SwarmDispatcher, "_failing_check_runs", failing)
+    rec = _Recorder(monkeypatch)
+    asyncio.run(_dispatcher()._route_ci_failure(trigger(), parent=80))
+    assert rec.of("cicada") == []
+    [task] = corrections(stored)
+    assert "unit-tests" in task["description"]
+    assert json.loads(task["context"])["fix_kind"] == "CI-fix"
+    assert delivery.existing_pr_target(task, REPO).branch == BRANCH
+
+
+def test_round_limit_still_holds_for_a_fly_pr(monkeypatch, world, stored):
+    seed_fly_delivery()
+    world.fix_rounds = 2  # the configured default cap
+    rec = _Recorder(monkeypatch)
+    d = review_round()
+    asyncio.run(d._route_ci_failure(trigger(), parent=80))
+    assert rec.calls == []
+    assert corrections(stored) == []
+    assert any("auto-fix rounds did not clear review" in m for m in d.notifier.sent)
+    assert any("required CI is failing after" in m for m in d.notifier.sent)
+
+
+def test_a_pr_fly_did_not_deliver_keeps_the_local_round(monkeypatch, world, stored):
+    seed_fly_delivery(number=PR + 1)  # another PR's receipt names nothing here
+    empty_audit_file()
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
+    review_round()
+    assert rec.only("cicada").get("agent_git_identity") is True
+    assert corrections(stored) == []
+
+
+@pytest.mark.parametrize("route", ["review", "ci"])
+def test_failed_correction_filing_stops_for_attention_with_no_local_commit(
+    monkeypatch, world, stored, rounds_recorded, route
+):
+    seed_fly_delivery()
+    stored["answer"] = None  # the store did not land
+    rec = _Recorder(monkeypatch)
+    d = review_round() if route == "review" else ci_round(monkeypatch)
+    assert rec.of("cicada") == []
+    assert any("was not started" in m and "Needs your attention" in m
+               for m in d.notifier.sent)
+    # The failed filing used up no fix round.
+    assert rounds_recorded == [] and world.fix_rounds == 0
+
+
+@pytest.mark.parametrize("route", ["review", "ci"])
+def test_a_confirmed_filing_records_its_round(
+    monkeypatch, world, stored, rounds_recorded, route
+):
+    seed_fly_delivery()
+    _Recorder(monkeypatch, stdout={"accipiter": GUIDANCE})
+    review_round() if route == "review" else ci_round(monkeypatch)
+    assert len(corrections(stored)) == 1
+    assert rounds_recorded == [1]
+    # The plan is resolved from the source task first; then the stored task
+    # is read back by id, fields and both edges.
+    assert stored["reads"] == ["entities/ent_synthetic_src/relationships",
+                               f"entities/{PLAN}",
+                               "entities/ent_synthetic_fix",
+                               "entities/ent_synthetic_fix/relationships"]
+
+
+@pytest.mark.parametrize("mismatch", [
+    {"repository": "owner/other"},
+    {"pr_number": PR + 1},
+    {"head_sha": "b" * 40},
+    {"context": json.dumps({"branch": "someone/else"})},
+    {"action_type": "code_edit"},
+])
+def test_a_filing_that_reads_back_wrong_is_no_filing(
+    monkeypatch, world, stored, rounds_recorded, mismatch
+):
+    seed_fly_delivery()
+    stored["readback"] = mismatch
+    rec = _Recorder(monkeypatch)
+    d = ci_round(monkeypatch)
+    assert rec.of("cicada") == []
+    assert rounds_recorded == []
+    assert any("did not read back as filed" in m and "Needs your attention" in m
+               for m in d.notifier.sent)
+
+
+def test_a_correction_is_filed_and_read_back_with_its_admission_class(
+    monkeypatch, world, stored, rounds_recorded
+):
+    # Red before this fix (observed: the correction task carried no
+    # `admission_class`, so this assertion failed with a KeyError).
+    seed_fly_delivery()
+    _Recorder(monkeypatch)
+    ci_round(monkeypatch)
+    [task] = corrections(stored)
+    assert task["admission_class"] == "workflow_entering"
+    assert rounds_recorded == [1]
+
+
+@pytest.mark.parametrize("readback", ["missing", "other", "none"])
+def test_a_correction_reading_back_without_its_admission_class_holds(
+    monkeypatch, world, stored, rounds_recorded, readback
+):
+    # Red before this fix (observed: the read-back compared no
+    # `admission_class`, so each of these read back as filed, no hold notice
+    # was sent and the round was recorded).
+    seed_fly_delivery()
+    real_get = SwarmDispatcher._neotoma_get
+
+    async def get(self, path):
+        answer = await real_get(self, path)
+        if path == "entities/ent_synthetic_fix":
+            snapshot = dict(answer["snapshot"])
+            if readback == "missing":
+                snapshot.pop("admission_class", None)
+            else:
+                snapshot["admission_class"] = "operator_only" if readback == "other" else None
+            answer = {**answer, "snapshot": snapshot}
+        return answer
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_get", get)
+    rec = _Recorder(monkeypatch)
+    d = ci_round(monkeypatch)
+    assert rec.of("cicada") == []
+    assert rounds_recorded == [] and world.fix_rounds == 0
+    assert any("wrong admission class" in m and "Needs your attention" in m
+               for m in d.notifier.sent)
+
+
+@pytest.mark.parametrize("dropped,text", [
+    ("PART_OF", "missing its PART_OF edge to its plan"),
+    ("REFERS_TO", "missing its REFERS_TO edge to its source task"),
+    ("both", "missing its PART_OF edge to its plan and REFERS_TO edge"),
+], ids=["no-part-of", "no-refers-to", "neither"])
+def test_a_filing_missing_an_edge_is_no_filing(
+    monkeypatch, world, stored, rounds_recorded, dropped, text
+):
+    # Red before this fix (observed against the unfixed code): the read-back checked only a
+    # PART_OF edge to the source task, so a read-back with no REFERS_TO edge
+    # passed and the round was recorded, and a read-back missing the plan
+    # edge was never checked for one.
+    seed_fly_delivery()
+    real_get = SwarmDispatcher._neotoma_get
+
+    async def drop_edges(self, path):
+        answer = await real_get(self, path)
+        if path == "entities/ent_synthetic_fix/relationships":
+            answer = {"relationships": [
+                r for r in answer["relationships"]
+                if dropped != "both" and r["relationship_type"] != dropped]}
+        return answer
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_get", drop_edges)
+    rec = _Recorder(monkeypatch)
+    d = ci_round(monkeypatch)
+    assert rec.of("cicada") == []
+    assert rounds_recorded == [] and world.fix_rounds == 0
+    assert any(text in m and "Needs your attention" in m for m in d.notifier.sent)
+
+
+@pytest.mark.parametrize("answer", [None, {"relationships": None}],
+                         ids=["read-failed", "no-list"])
+def test_a_filing_whose_edges_cannot_be_read_is_no_filing(
+    monkeypatch, world, stored, rounds_recorded, answer
+):
+    # Red before this fix, no-list case (observed): an absent list
+    # read as no edges and was reported as a missing PART_OF edge rather than
+    # an unread one. The failed read already held.
+    seed_fly_delivery()
+    real_get = SwarmDispatcher._neotoma_get
+
+    async def unread(self, path):
+        if path == "entities/ent_synthetic_fix/relationships":
+            return answer
+        return await real_get(self, path)
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_get", unread)
+    _Recorder(monkeypatch)
+    d = ci_round(monkeypatch)
+    assert rounds_recorded == []
+    assert any("relationships could not be read back" in m for m in d.notifier.sent)
+
+
+# --- The correction is filed under the source task's single plan -------------
+
+
+@pytest.mark.parametrize("case", [
+    "no-parent", "two-parents", "parent-is-a-task", "relationships-read-failed",
+    "plan-read-failed",
+])
+@pytest.mark.parametrize("route", ["review", "ci"])
+def test_a_source_task_with_no_single_plan_holds(
+    monkeypatch, world, stored, rounds_recorded, case, route
+):
+    # Red before this fix (observed): the correction was stored with
+    # one PART_OF edge to the source task whatever that task's own parents
+    # were, and the source task was never read, so every case here stored a
+    # task (`stored["calls"]` non-empty), used up a round, and sent no notice.
+    seed_fly_delivery()
+    rels = "entities/ent_synthetic_src/relationships"
+    if case == "no-parent":
+        stored["graph"][rels] = part_of("ent_synthetic_src")
+    elif case == "two-parents":
+        stored["graph"][rels] = part_of("ent_synthetic_src", PLAN, "ent_synthetic_plan_2")
+        stored["graph"]["entities/ent_synthetic_plan_2"] = {"entity_type": "plan"}
+    elif case == "parent-is-a-task":
+        stored["graph"][rels] = part_of("ent_synthetic_src", "ent_synthetic_parent_task")
+        stored["graph"]["entities/ent_synthetic_parent_task"] = {"entity_type": "task"}
+    elif case == "relationships-read-failed":
+        stored["graph"][rels] = None
+    else:
+        stored["graph"][f"entities/{PLAN}"] = None
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d = review_round() if route == "review" else ci_round(monkeypatch)
+    assert rec.of("cicada") == []
+    assert stored["calls"] == []  # no task stored
+    assert rounds_recorded == [] and world.fix_rounds == 0
+    assert any("has no single plan to file the correction under" in m
+               and "Needs your attention" in m for m in d.notifier.sent)
+
+
+def test_a_filing_that_cannot_be_read_back_is_no_filing(
+    monkeypatch, world, stored, rounds_recorded
+):
+    seed_fly_delivery()
+    stored["read_fails"] = True
+    rec = _Recorder(monkeypatch)
+    d = review_round()
+    assert rec.of("cicada") == []
+    assert rounds_recorded == []
+    assert any("could not be read back" in m and "Needs your attention" in m
+               for m in d.notifier.sent)
+
+
+def test_unreadable_ledger_while_on_fly_stops_for_attention(monkeypatch, world, stored, tmp_path):
+    bad = tmp_path / "ledger.json"
+    bad.write_text("{not json", encoding="utf-8")
+    rec = _Recorder(monkeypatch)
+    d = review_round()
+    assert rec.calls == []  # not even the guidance lenses: the round never started
+    assert corrections(stored) == []
+    assert any("could not be read" in m and "Needs your attention" in m
+               for m in d.notifier.sent)
+
+
+def _resume_scan(monkeypatch, d, head_ref=BRANCH):
+    async def scan(repo, now, stale):
+        return [{
+            "number": PR, "title": "t", "body": "Closes #80.",
+            "html_url": f"https://github.com/{REPO}/pull/{PR}",
+            "user": {"login": "someone"},
+            "head": {"ref": head_ref, "sha": HEAD}, "base": {"ref": "main"},
+            "labels": [], "_blocking_review_at": "x", "_revision_pushed_at": "y",
+            "_blocking_review_body": UX_FINDING,
+        }]
+
+    monkeypatch.setattr(d, "_prs_with_unactioned_revisions", scan)
+
+
+@pytest.mark.parametrize("ledger", ["missing", "unreadable"])
+@pytest.mark.parametrize("opted_in", [True, False])
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_unknown_origin_holds_every_fix_round(
+    monkeypatch, world, stored, rounds_recorded, tmp_path, ledger, opted_in, route
+):
+    if not opted_in:
+        monkeypatch.delenv("APIS_FLY_RUNNER_CLASSES", raising=False)
+    path = tmp_path / "ledger.json"  # the isolated_ledger path
+    if ledger == "unreadable":
+        path.write_text("{not json", encoding="utf-8")
+    assert path.exists() is (ledger == "unreadable")
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
+    d = _dispatcher()
+    if route == "review":
+        review_round(d)
+    elif route == "ci":
+        ci_round(monkeypatch, d)
+    else:
+        _resume_scan(monkeypatch, d)
+        summary = asyncio.run(d.resume_unactioned_revisions([REPO]))
+        assert summary["resumed"] == 0
+    assert rec.calls == []  # no builder, not even the guidance lenses
+    assert corrections(stored) == [] and rounds_recorded == []
+    assert any("missing or could not be read" in m and "Needs your attention" in m
+               for m in d.notifier.sent)
+
+
+@pytest.mark.parametrize("opted_in", [True, False])
+def test_a_readable_ledger_with_no_receipt_keeps_the_local_round(
+    monkeypatch, world, stored, rounds_recorded, opted_in
+):
+    if not opted_in:
+        monkeypatch.delenv("APIS_FLY_RUNNER_CLASSES", raising=False)
+    ledger = delivery._delivery_ledger()
+    with ledger._locked():
+        ledger._save(ledger._load())  # readable, no receipts at all
+    empty_audit_file()
+    assert delivery._delivery_ledger().delivery_receipts() == {}
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
+    ci_round(monkeypatch)
+    assert rec.only("cicada").get("agent_git_identity") is True
+    assert corrections(stored) == [] and rounds_recorded == [1]
+
+
+def test_resumed_fix_round_for_a_fly_pr_is_filed_as_a_fly_correction(
+    monkeypatch, world, stored, rounds_recorded
+):
+    seed_fly_delivery()
+    d = _dispatcher()
+    rec = _Recorder(monkeypatch)
+    _resume_scan(monkeypatch, d)
+    summary = asyncio.run(d.resume_unactioned_revisions([REPO]))
+    assert rec.of("cicada") == []
+    [task] = corrections(stored)
+    assert UX_FINDING.splitlines()[0] in task["description"]
+    assert summary["resumed"] == 1
+    # The round is recorded once, with the marker and count the review route
+    # records for the same PR (round 1 from none). Red before the fix
+    # (observed, with the fix reverted): the resumed branch continued without
+    # recording, so `rounds_recorded` was [].
+    assert rounds_recorded == [1]
+    review_rounds = []
+
+    async def record(self, t, n):
+        review_rounds.append(n)
+
+    world.fix_rounds = 0
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", record)
+    _Recorder(monkeypatch, stdout={"accipiter": GUIDANCE})
+    review_round()
+    assert review_rounds == rounds_recorded
+
+
+def test_resumed_fly_correction_counts_toward_the_round_limit(
+    monkeypatch, world, stored, rounds_recorded
+):
+    seed_fly_delivery()
+    d = _dispatcher()
+    world.fix_rounds = d.config.max_fix_rounds - 1  # one round below the limit
+    rec = _Recorder(monkeypatch)
+    _resume_scan(monkeypatch, d)
+    first = asyncio.run(d.resume_unactioned_revisions([REPO]))
+    assert first["resumed"] == 1
+    assert len(corrections(stored)) == 1
+    assert rounds_recorded == [d.config.max_fix_rounds]
+    # A second resumed revision (a new head) now meets the limit: nothing filed.
+    async def scan_again(repo, now, stale):
+        return [{
+            "number": PR, "title": "t", "body": "Closes #80.",
+            "html_url": f"https://github.com/{REPO}/pull/{PR}",
+            "user": {"login": "someone"},
+            "head": {"ref": BRANCH, "sha": "c" * 40}, "base": {"ref": "main"},
+            "labels": [], "_blocking_review_at": "x", "_revision_pushed_at": "z",
+            "_blocking_review_body": UX_FINDING,
+        }]
+
+    monkeypatch.setattr(d, "_prs_with_unactioned_revisions", scan_again)
+    second = asyncio.run(d.resume_unactioned_revisions([REPO]))
+    assert second["resumed"] == 0
+    assert len(corrections(stored)) == 1
+    assert rounds_recorded == [d.config.max_fix_rounds]
+    assert rec.of("cicada") == []
+    assert any("auto-fix rounds did not clear review" in m for m in d.notifier.sent)
+    # Red before the fix (observed failing with the fix reverted; the exact
+    # failing assertion was not captured): no round was recorded, so
+    # `rounds_recorded` was [] after the first sweep, and the resumed branch had
+    # no limit check, so the second sweep would file a second correction.
+
+
+def test_resumed_fly_correction_not_confirmed_records_no_round(
+    monkeypatch, world, stored, rounds_recorded
+):
+    seed_fly_delivery()
+    stored["read_fails"] = True  # the filing cannot be read back
+    d = _dispatcher()
+    rec = _Recorder(monkeypatch)
+    _resume_scan(monkeypatch, d)
+    summary = asyncio.run(d.resume_unactioned_revisions([REPO]))
+    assert rec.of("cicada") == []
+    assert summary["resumed"] == 0 and summary["failed"] == 1
+    assert rounds_recorded == [] and world.fix_rounds == 0
+    assert any("could not be read back" in m and "Needs your attention" in m
+               for m in d.notifier.sent)
+    # Not red before the fix (observed passing with the fix reverted): that
+    # branch never recorded a round at all. It guards that the fix records
+    # only after a confirmed filing.
+
+
+# --- A cleared or superseded receipt still means the PR came from Fly -------
+#
+# `fly_delivery_receipt.py clear` removes the receipt but first appends its
+# identity to `<ledger>.audit.jsonl`; the automatic supersede does the same.
+# Those lines carry no PR number, so they are matched on the repository in the
+# key and on the PR's head branch (Fly branches are unique to a task).
+
+SRC_KEY = f"{REPO}#task:ent_synthetic_src"
+
+
+def readable_empty_ledger():
+    ledger = delivery._delivery_ledger()
+    with ledger._locked():
+        ledger._save(ledger._load())
+    assert ledger.delivery_receipts() == {}
+    return ledger
+
+
+def audit_file(tmp_path):
+    return tmp_path / "ledger.json.audit.jsonl"  # next to the isolated_ledger path
+
+
+def empty_audit_file():
+    """An audit file that exists and records no removal: without it, a PR no
+    active receipt names is unknown rather than "not Fly"."""
+    import fly_delivery_receipt
+
+    fly_delivery_receipt.audit_path(delivery._delivery_ledger()).write_text("", encoding="utf-8")
+
+
+def write_audit(tmp_path, *lines, raw=""):
+    readable_empty_ledger()
+    text = "".join(json.dumps(line) + "\n" for line in lines) + raw
+    audit_file(tmp_path).write_text(text, encoding="utf-8")
+
+
+def audit_line(action="clear_delivery_receipt", key=SRC_KEY, branch=BRANCH, **extra):
+    return {"by": "operator", "action": action, "stage": "removed", "key": key,
+            "status": "opened", "run_id": "run-1", "branch": branch, "commit": HEAD,
+            **extra}
+
+
+def run_route(monkeypatch, route, d=None):
+    d = d or _dispatcher()
+    summary = None
+    if route == "review":
+        review_round(d)
+    elif route == "ci":
+        ci_round(monkeypatch, d)
+    else:
+        _resume_scan(monkeypatch, d)
+        summary = asyncio.run(d.resume_unactioned_revisions([REPO]))
+    return d, summary
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_cleared_receipt_still_routes_to_fly(monkeypatch, world, stored, tmp_path, route):
+    import io
+
+    import fly_delivery_receipt
+
+    seed_fly_delivery()
+    out, err = io.StringIO(), io.StringIO()
+    assert fly_delivery_receipt.main(
+        ["clear", SRC_KEY, "--confirm", SRC_KEY],
+        ledger=delivery._delivery_ledger(), out=out, err=err) == 0, err.getvalue()
+    assert delivery._delivery_ledger().delivery_receipts() == {}
+    assert audit_file(tmp_path).exists()
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    run_route(monkeypatch, route)
+    assert rec.of("cicada") == []
+    [task] = corrections(stored)
+    assert task["pr_number"] == PR
+    assert_filed_part_of_source(stored)
+
+
+def assert_filed_part_of_source(stored):
+    """The correction was filed, and read back, PART_OF the source task's plan
+    and REFERS_TO the source task."""
+    rels = stored["calls"][-1][2]
+    assert rels == [{"relationship_type": "PART_OF", "source_index": 0,
+                     "target_entity_id": PLAN},
+                    {"relationship_type": "REFERS_TO", "source_index": 0,
+                     "target_entity_id": "ent_synthetic_src"}]
+    assert "entities/ent_synthetic_fix/relationships" in stored["reads"]
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_superseded_receipt_still_routes_to_fly(monkeypatch, world, stored, tmp_path, route):
+    write_audit(tmp_path, audit_line(
+        action="supersede_delivery_receipt", stage="superseding", status="updated",
+        source_task="ent_synthetic_src",
+        existing_pr={"pr_number": PR, "branch": BRANCH, "base_branch": "main"}))
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    run_route(monkeypatch, route)
+    assert rec.of("cicada") == []
+    assert len(corrections(stored)) == 1
+    assert_filed_part_of_source(stored)
+
+
+@pytest.mark.parametrize("line", [
+    audit_line(),  # written before audit lines carried a source task
+    audit_line(source_task=""),
+    audit_line(action="supersede_delivery_receipt", stage="superseding", status="updated",
+               existing_pr={"pr_number": PR, "branch": BRANCH, "base_branch": "main"}),
+], ids=["clear-no-field", "clear-empty", "supersede-no-field"])
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_an_audit_line_with_no_source_task_holds(
+    monkeypatch, world, stored, rounds_recorded, tmp_path, line, route
+):
+    write_audit(tmp_path, line)
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    if summary is not None:
+        assert summary["resumed"] == 0
+    assert rec.calls == []  # no builder, no guidance lenses, no local commit
+    assert corrections(stored) == [] and stored["calls"] == []
+    assert rounds_recorded == [] and world.fix_rounds == 0
+    assert any("names no single source task" in m and "Needs your attention" in m
+               for m in d.notifier.sent)
+
+
+def test_two_audit_lines_naming_different_source_tasks_hold(
+    monkeypatch, world, stored, rounds_recorded, tmp_path
+):
+    write_audit(tmp_path, audit_line(source_task="ent_synthetic_src"),
+                audit_line(source_task="ent_synthetic_other"))
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
+    d = ci_round(monkeypatch)
+    assert rec.calls == [] and stored["calls"] == [] and rounds_recorded == []
+    assert any("names no single source task" in m for m in d.notifier.sent)
+
+
+@pytest.mark.parametrize("line", [
+    audit_line(key=f"other/repo#task:ent_synthetic_src"),
+    audit_line(branch="cicada/another-task-5678"),
+    audit_line(key=f"lens:{REPO}#{PR}@{HEAD}:ux", kind="lens", lens="ux"),
+    audit_line(kind="lens"),
+], ids=["other-repository", "other-branch", "lens-key", "lens-kind"])
+def test_an_audit_line_for_something_else_keeps_the_local_round(
+    monkeypatch, world, stored, rounds_recorded, tmp_path, line
+):
+    write_audit(tmp_path, line)
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
+    ci_round(monkeypatch)
+    assert rec.only("cicada").get("agent_git_identity") is True
+    assert corrections(stored) == [] and rounds_recorded == [1]
+
+
+@pytest.mark.parametrize("corrupt", ["unparseable-line", "not-an-object", "undecodable"])
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_corrupt_audit_file_holds_the_round(
+    monkeypatch, world, stored, rounds_recorded, tmp_path, corrupt, route
+):
+    if corrupt == "unparseable-line":
+        write_audit(tmp_path, audit_line(branch="cicada/another-task-5678"), raw="{not json\n")
+    elif corrupt == "not-an-object":
+        write_audit(tmp_path, raw="[1, 2]\n")
+    else:
+        readable_empty_ledger()
+        audit_file(tmp_path).write_bytes(b"\xff\xfe\x00 not utf-8\n")
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
+    d, summary = run_route(monkeypatch, route)
+    if summary is not None:
+        assert summary["resumed"] == 0
+    assert rec.calls == []
+    assert corrections(stored) == [] and rounds_recorded == []
+    assert any("could not be read" in m and "Needs your attention" in m
+               for m in d.notifier.sent)
+
+
+# Every kind of bad line this reader can meet. The whole file is validated
+# before any match counts, so each one holds the round wherever it sits.
+BAD_AUDIT_LINES = {
+    "unparseable-line": "{not json\n",
+    "not-an-object": "[1, 2]\n",
+    "removal-key-not-a-string": json.dumps(audit_line(key=7)) + "\n",
+    "removal-branch-not-a-string": json.dumps(audit_line(branch=["x"])) + "\n",
+    "removal-source-task-not-a-string": json.dumps(audit_line(source_task=["x"])) + "\n",
+    "removal-existing-pr-not-an-object": json.dumps(audit_line(existing_pr="87")) + "\n",
+    "removal-existing-pr-branch-not-a-string": json.dumps(
+        audit_line(existing_pr={"pr_number": PR, "branch": 5})) + "\n",
+}
+
+
+def assert_held(d, summary, stored, rounds_recorded, rec):
+    if summary is not None:
+        assert summary["resumed"] == 0
+    assert rec.calls == []  # no builder, no guidance lenses, no local commit
+    assert corrections(stored) == [] and rounds_recorded == []
+    assert any("could not be read" in m and "Needs your attention" in m
+               for m in d.notifier.sent)
+
+
+@pytest.mark.parametrize("bad", sorted(BAD_AUDIT_LINES))
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_matching_audit_line_followed_by_a_bad_line_holds(
+    monkeypatch, world, stored, rounds_recorded, tmp_path, bad, route
+):
+    # The first line alone would route to Fly; the bad line after it must
+    # still be read, and makes the whole file unknown.
+    write_audit(tmp_path, audit_line(), raw=BAD_AUDIT_LINES[bad])
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    assert_held(d, summary, stored, rounds_recorded, rec)
+
+
+@pytest.mark.parametrize("bad", sorted(BAD_AUDIT_LINES) + ["undecodable"])
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_an_active_receipt_with_a_corrupt_audit_file_holds(
+    monkeypatch, world, stored, rounds_recorded, tmp_path, bad, route
+):
+    seed_fly_delivery()  # an active receipt names this PR
+    if bad == "undecodable":
+        audit_file(tmp_path).write_bytes(b"\xff\xfe\x00 not utf-8\n")
+    else:
+        audit_file(tmp_path).write_text(BAD_AUDIT_LINES[bad], encoding="utf-8")
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    assert_held(d, summary, stored, rounds_recorded, rec)
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_an_active_receipt_with_a_clean_audit_file_still_routes_to_fly(
+    monkeypatch, world, stored, tmp_path, route
+):
+    seed_fly_delivery()
+    audit_file(tmp_path).write_text(
+        json.dumps(audit_line(branch="cicada/another-task-5678")) + "\n", encoding="utf-8")
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    run_route(monkeypatch, route)
+    assert rec.of("cicada") == []
+    assert len(corrections(stored)) == 1
+
+
+def test_an_empty_audit_file_and_no_receipt_keeps_the_local_round(
+    monkeypatch, world, stored, rounds_recorded, tmp_path
+):
+    write_audit(tmp_path)  # exists, empty: no receipt was ever removed
+    assert audit_file(tmp_path).read_text(encoding="utf-8") == ""
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
+    ci_round(monkeypatch)
+    assert rec.only("cicada").get("agent_git_identity") is True
+    assert corrections(stored) == [] and rounds_recorded == [1]
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_fly_pr_with_fly_delivery_off_holds_for_the_operator(
+    monkeypatch, world, stored, rounds_recorded, route
+):
+    seed_fly_delivery()  # a readable receipt names this PR
+    monkeypatch.delenv("APIS_FLY_RUNNER_CLASSES", raising=False)
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
+    d, summary = run_route(monkeypatch, route)
+    if summary is not None:
+        assert summary["resumed"] == 0
+    assert rec.of("cicada") == []
+    assert corrections(stored) == [] and rounds_recorded == [] and world.fix_rounds == 0
+    assert any("no longer opted onto Fly" in m and "Needs your attention" in m
+               for m in d.notifier.sent)
+
+
+# --- Only a correction receipt names the PR ---------------------------------
+#
+# The first delivery's receipt was cleared while a correction receipt (keyed
+# by the PR, carrying `existing_pr`) is still active. The correction receipt
+# records no task, so the parent comes from the removal's audit line; with
+# none, or several, the round holds and nothing is stored.
+
+def seed_correction_receipt(tmp_path, *lines):
+    write_audit(tmp_path, *lines)
+    assert delivery._delivery_ledger().reserve_delivery(f"{REPO}#{PR}", {
+        "status": "updated", "run_id": "run-2", "token": "seeded", "commit": HEAD,
+        "existing_pr": {"pr_number": PR, "branch": BRANCH, "base_branch": "main"}})
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_correction_receipt_takes_its_parent_from_the_audit_line(
+    monkeypatch, world, stored, tmp_path, route
+):
+    # Red without the fix (seen on all three routes): `fly_delivered_pr`
+    # returned delivered=True with source_task="", so the correction was
+    # stored with `relationships=None` and its edge never read back:
+    #   assert None == [{'relationship_type': 'PART_OF', 'source_index': 0,
+    #                    'target_entity_id': 'ent_synthetic_src'}]
+    seed_correction_receipt(tmp_path, audit_line(source_task="ent_synthetic_src"))
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    run_route(monkeypatch, route)
+    assert rec.of("cicada") == []
+    [task] = corrections(stored)
+    assert task["pr_number"] == PR
+    assert_filed_part_of_source(stored)
+
+
+@pytest.mark.parametrize("lines", [
+    [audit_line()],
+    [audit_line(source_task="ent_synthetic_src"),
+     audit_line(source_task="ent_synthetic_other")],
+], ids=["no-task", "two-tasks"])
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_correction_receipt_with_no_single_parent_holds(
+    monkeypatch, world, stored, rounds_recorded, tmp_path, lines, route
+):
+    seed_correction_receipt(tmp_path, *lines)
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    if summary is not None:
+        assert summary["resumed"] == 0
+    assert rec.calls == []  # no builder, no guidance lenses, no local commit
+    assert stored["calls"] == []
+    assert rounds_recorded == [] and world.fix_rounds == 0
+    assert any("names a single source task" in m and "Needs your attention" in m
+               for m in d.notifier.sent)
+
+
+def test_a_correction_with_no_parent_is_never_stored(monkeypatch, world, stored):
+    # By construction: even if routing ever hands it no source task.
+    d = _dispatcher()
+    facts = delivery.FlyDeliveredPR(True, branch=BRANCH, base_branch="main")
+    ok = asyncio.run(d._file_fly_correction(
+        trigger(), kind="review", round_n=1, body=UX_FINDING, facts=facts))
+    assert ok is False and stored["calls"] == []
+    assert any("no parent task" in m for m in d.notifier.sent)
+
+
+# --- A receipt for this PR with a status the reader does not recognize ------
+#
+# Skipping it would leave a readable ledger that names the PR nowhere, and the
+# round would run locally: the very thing this module exists to stop. A
+# recognized receipt for the same PR does not outweigh it, and a recognized
+# non-delivery status such as `not_delivered` behaves as before.
+
+def seed_first_delivery_receipt(key=SRC_KEY, **entry):
+    """Write one receipt straight into the ledger file, whatever its status
+    (``reserve_delivery`` refuses a non-string one)."""
+    ledger = delivery._delivery_ledger()
+    with ledger._locked():
+        ledger._save(ledger._load())  # a valid ledger, keeping any receipts
+    raw = json.loads(ledger.path.read_text(encoding="utf-8"))
+    raw.setdefault("deliveries", {})[key] = {
+        "branch": BRANCH, "run_id": "run-1", "token": "seeded", "commit": HEAD,
+        "readback": "passed", **entry}
+    ledger.path.write_text(json.dumps(raw), encoding="utf-8")
+
+
+def assert_held_unrecognized(d, summary, stored, rounds_recorded, rec, text="does not recognize"):
+    if summary is not None:
+        assert summary["resumed"] == 0
+    assert rec.calls == []  # no builder, no guidance lenses, no local commit
+    assert corrections(stored) == [] and rounds_recorded == [] and stored["calls"] == []
+    assert any(text in m and "Needs your attention" in m for m in d.notifier.sent)
+
+
+@pytest.mark.parametrize("named_by", ["pr_number", "key"])
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_receipt_for_this_pr_with_an_unrecognized_status_holds(
+    monkeypatch, world, stored, rounds_recorded, route, named_by
+):
+    # Red without the fix (run against the unfixed `fly_delivered_pr`; the
+    # output kept below is from the review and CI routes): the receipt was
+    # skipped, the route came back "local", and the round ran here. Review:
+    #   AssertionError: assert [('accipiter'...nosed', ...})] == []
+    #   Left contains 2 more items, first extra item: ('accipiter', {...})
+    # CI:
+    #   AssertionError: assert [('cicada', {...riage', ...})] == []
+    #   Left contains one more item: ('cicada', {... 'work_class': 'ci_log_triage', ...})
+    if named_by == "pr_number":
+        seed_first_delivery_receipt(status="exhausted", pr_number=PR)
+    else:
+        seed_first_delivery_receipt(key=f"{REPO}#{PR}", status="exhausted")
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    assert_held_unrecognized(d, summary, stored, rounds_recorded, rec)
+
+
+@pytest.mark.parametrize("status", [None, 7, ["opened"], {"s": "opened"}],
+                         ids=["none", "int", "list", "dict"])
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_receipt_for_this_pr_with_a_non_string_status_holds(
+    monkeypatch, world, stored, rounds_recorded, route, status
+):
+    # The ledger reader itself rejects a receipt with no string status, so the
+    # whole ledger reads as unknown and the round holds on that ground.
+    seed_first_delivery_receipt(status=status, pr_number=PR)
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    assert_held_unrecognized(d, summary, stored, rounds_recorded, rec, text="could not be read")
+
+
+@pytest.mark.parametrize("status", [None, 7, ["opened"]], ids=["none", "int", "list"])
+def test_fly_delivered_pr_reads_a_non_string_status_as_unknown(monkeypatch, status):
+    # Belt and braces behind the ledger's own validation: should a receipt
+    # with a non-string status ever reach `fly_delivered_pr`, it is unknown.
+    readable_empty_ledger()
+
+    class Ledger:
+        path = delivery._delivery_ledger().path
+
+        def delivery_receipts(self):
+            return {SRC_KEY: {"status": status, "pr_number": PR, "branch": BRANCH}}
+
+    monkeypatch.setattr(delivery, "_delivery_ledger", Ledger)
+    facts = delivery.fly_delivered_pr(REPO, PR, BRANCH)
+    assert facts.delivered is None and "does not recognize" in facts.unknown_reason
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_recognized_receipt_does_not_hide_an_unrecognized_one(
+    monkeypatch, world, stored, rounds_recorded, route
+):
+    seed_fly_delivery()  # alone, this routes to Fly
+    seed_first_delivery_receipt(key=f"{REPO}#task:ent_synthetic_other",
+                                status="exhausted", pr_number=PR)
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    assert_held_unrecognized(d, summary, stored, rounds_recorded, rec)
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_not_delivered_receipt_for_this_pr_keeps_its_existing_handling(
+    monkeypatch, world, stored, rounds_recorded, route
+):
+    # `not_delivered` is a recognized status naming no delivered PR: it adds
+    # nothing, so with nothing else naming the PR the local round runs, as
+    # it did before this check.
+    seed_first_delivery_receipt(status="not_delivered", pr_number=PR)
+    empty_audit_file()
+    assert delivery.fly_delivered_pr(REPO, PR, BRANCH) == delivery.FlyDeliveredPR(False)
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    assert rec.of("cicada") != []
+    assert corrections(stored) == []
+    assert not any("does not recognize" in m for m in d.notifier.sent)
+
+
+def test_an_unrecognized_receipt_that_cannot_be_linked_to_this_pr_is_ignored(
+    monkeypatch, world, stored, rounds_recorded
+):
+    # A receipt on another branch that names no PR, or another PR, says
+    # nothing about this one. (Before the fail-closed fix this test pinned an
+    # unrecognized receipt on THIS branch with no PR number as "not Fly"; that
+    # was the defect, now covered by the status-partition table below.)
+    seed_first_delivery_receipt(status="exhausted", branch=BRANCH + "-other")
+    empty_audit_file()
+    assert delivery.fly_delivered_pr(REPO, PR, BRANCH) == delivery.FlyDeliveredPR(False)
+    seed_first_delivery_receipt(key=f"{REPO}#task:ent_synthetic_x", status="exhausted",
+                                pr_number=PR + 1, branch=BRANCH + "-other")
+    assert delivery.fly_delivered_pr(REPO, PR, BRANCH) == delivery.FlyDeliveredPR(False)
+
+
+# --- Every receipt status, with and without a PR number ---------------------
+#
+# A first-delivery receipt on this PR's repository and head branch decides the
+# route only when its status is a recognized settled one. Any other status
+# (unsettled, unrecognized, empty, missing, non-string) is unknown whether or
+# not the receipt records a PR number, and unknown holds every entrance.
+#
+# Red before this fix (observed: 28 of these cases failed against the unfixed
+# `fly_delivered_pr`): an unrecognized, empty, missing or non-string status
+# with no PR number matched neither the "names this PR" check nor the
+# three-status unsettled check, and an unsettled status WITH a PR number was
+# skipped by the unsettled check, so each returned `FlyDeliveredPR(False)`
+# ("not Fly") and the review, CI and resumed rounds ran the local builder.
+
+_MISSING = object()
+_UNKNOWN_STATUSES = (
+    sorted(delivery._UNSETTLED_RECEIPT_STATUSES) + ["exhausted", "", _MISSING, 7])
+_UNKNOWN_IDS = (
+    sorted(delivery._UNSETTLED_RECEIPT_STATUSES) + ["unrecognized", "empty", "missing", "int"])
+
+
+def fake_ledger(monkeypatch, status, with_pr):
+    """Serve one receipt on this branch straight to `fly_delivered_pr`,
+    bypassing the ledger file's own validation (which would reject a missing
+    or non-string status before this reader saw it)."""
+    readable_empty_ledger()
+    empty_audit_file()
+    entry = {"branch": BRANCH, "run_id": "run-1", "token": "seeded", "commit": HEAD,
+             "readback": "passed"}
+    if status is not _MISSING:
+        entry["status"] = status
+    if with_pr:
+        entry["pr_number"] = PR
+    path = delivery._delivery_ledger().path
+
+    class Ledger:
+        def __init__(self):
+            self.path = path
+
+        def delivery_receipts(self):
+            return {SRC_KEY: dict(entry)}
+
+    monkeypatch.setattr(delivery, "_delivery_ledger", Ledger)
+
+
+def _expected(status, with_pr):
+    if status in delivery._PARENT_TASK_STATUSES:
+        return True if with_pr else False
+    if isinstance(status, str) and status in delivery._SETTLED_RECEIPT_STATUSES:
+        return False
+    return None
+
+
+@pytest.mark.parametrize("with_pr", [True, False], ids=["pr", "no-pr"])
+@pytest.mark.parametrize(
+    "status", sorted(delivery._SETTLED_RECEIPT_STATUSES) + _UNKNOWN_STATUSES,
+    ids=sorted(delivery._SETTLED_RECEIPT_STATUSES) + _UNKNOWN_IDS)
+def test_every_receipt_status_reads_as_fly_not_fly_or_unknown(monkeypatch, status, with_pr):
+    fake_ledger(monkeypatch, status, with_pr)
+    facts = delivery.fly_delivered_pr(REPO, PR, BRANCH)
+    assert facts.delivered is _expected(status, with_pr)
+    if facts.delivered is None:
+        assert facts.unknown_reason  # held with a reason, never a bare unknown
+
+
+def test_the_status_partition_is_complete():
+    assert delivery._SETTLED_RECEIPT_STATUSES | delivery._UNSETTLED_RECEIPT_STATUSES \
+        == delivery._RECOGNIZED_RECEIPT_STATUSES
+    assert not delivery._SETTLED_RECEIPT_STATUSES & delivery._UNSETTLED_RECEIPT_STATUSES
+
+
+@pytest.mark.parametrize("with_pr", [True, False], ids=["pr", "no-pr"])
+@pytest.mark.parametrize("status", _UNKNOWN_STATUSES, ids=_UNKNOWN_IDS)
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_an_unknown_receipt_status_holds_every_entrance(
+    monkeypatch, world, stored, rounds_recorded, route, status, with_pr
+):
+    fake_ledger(monkeypatch, status, with_pr)
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    text = ("has not settled" if status in delivery._UNSETTLED_RECEIPT_STATUSES
+            else "does not recognize")
+    assert_held_unrecognized(d, summary, stored, rounds_recorded, rec, text=text)
+
+
+# --- A first delivery on this branch that has not settled ------------------
+#
+# The launch path can leave a receipt whose effect (the PR) came before the
+# receipt recorded it: unsettled, on this PR's head branch, no PR number yet.
+# Read as "not Fly", the round would run locally on a PR Fly delivered.
+
+@pytest.mark.parametrize("status", sorted(delivery._UNSETTLED_RECEIPT_STATUSES))
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_an_unsettled_receipt_on_this_branch_with_no_pr_number_holds(
+    monkeypatch, world, stored, rounds_recorded, route, status
+):
+    seed_first_delivery_receipt(status=status)  # branch BRANCH, no pr_number
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    assert_held_unrecognized(d, summary, stored, rounds_recorded, rec, text="has not settled")
+
+
+def test_an_unsettled_receipt_must_match_the_branch_exactly():
+    seed_first_delivery_receipt(status="launching", branch=BRANCH + "-other")
+    empty_audit_file()
+    assert delivery.fly_delivered_pr(REPO, PR, BRANCH) == delivery.FlyDeliveredPR(False)
+    seed_first_delivery_receipt(key=f"{REPO}#task:ent_synthetic_e", status="launching", branch="")
+    # An empty branch on either side never matches a receipt. With no head
+    # branch, though, the answer is unknown, not "not Fly": this assertion
+    # used to pin `FlyDeliveredPR(False)`, which let a fix round run on this
+    # host for a PR a branch-only receipt may have opened.
+    assert delivery.fly_delivered_pr(REPO, PR, "") == delivery.FlyDeliveredPR(
+        None, unknown_reason=NO_HEAD_REASON)
+    assert delivery.fly_delivered_pr(REPO, PR, BRANCH) == delivery.FlyDeliveredPR(False)
+
+
+NO_HEAD_REASON = ("this PR's head branch is unknown, so whether a Fly delivery on "
+                  "that branch opened it cannot be decided")
+
+
+def run_route_without_head(monkeypatch, route):
+    """`run_route`, with the trigger's head branch empty on every entrance."""
+    d = _dispatcher()
+    summary = None
+    if route == "review":
+        review_round(d, trigger(head_ref=""))
+    elif route == "ci":
+        monkeypatch.setattr(SwarmDispatcher, "_failing_check_runs", _failing_checks)
+        asyncio.run(d._route_ci_failure(trigger(head_ref=""), parent=80))
+    else:
+        _resume_scan(monkeypatch, d, head_ref="")
+        summary = asyncio.run(d.resume_unactioned_revisions([REPO]))
+    return d, summary
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_missing_head_branch_holds_the_round(
+    monkeypatch, world, stored, rounds_recorded, route
+):
+    # Red before this fix (observed with the new guards disabled): with an
+    # empty head branch the launching receipt on BRANCH was never matched,
+    # the empty audit file named nothing, `fly_delivered_pr` returned False
+    # and the route ran the round locally, so `rec.calls` was not empty.
+    seed_first_delivery_receipt(status="launching")  # branch BRANCH, no pr_number
+    empty_audit_file()
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route_without_head(monkeypatch, route)
+    assert_held_unrecognized(d, summary, stored, rounds_recorded, rec,
+                             text="head branch is unknown")
+
+
+def test_a_missing_head_branch_with_no_receipts_holds():
+    # Red before this fix (observed with the new guards disabled): a readable
+    # ledger with no receipt for this repository and an empty head branch
+    # returned FlyDeliveredPR(False).
+    seed_first_delivery_receipt(key="other-owner/other-repo#task:ent_synthetic_o",
+                                status="opened", pr_number=PR)
+    empty_audit_file()
+    facts = delivery.fly_delivered_pr(REPO, PR, "")
+    assert facts.delivered is None
+    assert facts.unknown_reason == NO_HEAD_REASON
+
+
+def test_a_delivery_naming_this_pr_still_routes_to_fly_without_a_head_branch():
+    # Not a red case: this pins that the new hold does not swallow a receipt
+    # that names this PR. It gives True both before and after this fix.
+    seed_first_delivery_receipt(status="opened", pr_number=PR)
+    empty_audit_file()
+    assert delivery.fly_delivered_pr(REPO, PR, "").delivered is True
+
+
+def test_an_unreadable_pr_number_or_repository_is_unknown():
+    # Red before this fix (observed with the new guards disabled; the first
+    # return was `FlyDeliveredPR(False)`): each call gave delivered False.
+    seed_first_delivery_receipt(status="opened", pr_number=PR)
+    empty_audit_file()
+    no_repo = delivery.fly_delivered_pr("", PR, BRANCH)
+    assert no_repo.delivered is None and "repository" in no_repo.unknown_reason
+    no_number = delivery.fly_delivered_pr(REPO, None, BRANCH)
+    assert no_number.delivered is None and "PR number" in no_number.unknown_reason
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_not_delivered_receipt_on_this_branch_keeps_its_existing_handling(
+    monkeypatch, world, stored, rounds_recorded, route
+):
+    seed_first_delivery_receipt(status="not_delivered")  # branch BRANCH, no pr_number
+    empty_audit_file()
+    assert delivery.fly_delivered_pr(REPO, PR, BRANCH) == delivery.FlyDeliveredPR(False)
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    run_route(monkeypatch, route)
+    assert rec.of("cicada") != [] and corrections(stored) == []
+
+
+# --- Removing a correction receipt keeps the parent -------------------------
+#
+# A correction receipt is keyed by the PR, and names its own correction task
+# (or none) in its associated keys, so its removal line never names the
+# parent. That line is marked `correction`, and the parent comes only from
+# the unmarked first-delivery line.
+
+CORR_KEY = f"{REPO}#{PR}"
+
+
+def seed_correction(associated):
+    entry = {"status": "updated", "branch": BRANCH, "run_id": "run-2", "token": "seeded-2",
+             "commit": HEAD,
+             "existing_pr": {"pr_number": PR, "branch": BRANCH, "base_branch": "main"}}
+    if associated:
+        entry["associated_keys"] = [f"{REPO}#task:ent_synthetic_corr"]
+    assert delivery._delivery_ledger().reserve_delivery(CORR_KEY, entry)
+
+
+def clear(key):
+    import io
+
+    import fly_delivery_receipt
+
+    out, err = io.StringIO(), io.StringIO()
+    assert fly_delivery_receipt.main(
+        ["clear", key, "--confirm", key],
+        ledger=delivery._delivery_ledger(), out=out, err=err) == 0, err.getvalue()
+
+
+@pytest.mark.parametrize("order", ["first-then-correction", "correction-then-first"])
+@pytest.mark.parametrize("associated", [True, False], ids=["corr-task", "no-task"])
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_removing_a_correction_receipt_files_under_the_first_deliverys_parent(
+    monkeypatch, world, stored, rounds_recorded, tmp_path, route, associated, order
+):
+    seed_fly_delivery()  # first delivery, keyed by parent task ent_synthetic_src
+    if order == "first-then-correction":
+        clear(SRC_KEY)
+        seed_correction(associated)
+        clear(CORR_KEY)
+    else:
+        seed_correction(associated)
+        clear(CORR_KEY)
+        clear(SRC_KEY)
+    assert delivery._delivery_ledger().delivery_receipts() == {}
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    run_route(monkeypatch, route)
+    assert rec.of("cicada") == []
+    [task] = corrections(stored)
+    assert task["pr_number"] == PR
+    assert_filed_part_of_source(stored)
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_marked_correction_line_does_not_resolve_two_unmarked_sources(
+    monkeypatch, world, stored, rounds_recorded, tmp_path, route
+):
+    write_audit(tmp_path,
+                audit_line(source_task="ent_synthetic_src"),
+                audit_line(source_task="ent_synthetic_other"),
+                audit_line(key=CORR_KEY, source_task="", correction=True))
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    assert_held_unrecognized(d, summary, stored, rounds_recorded, rec,
+                             text="names no single source task")
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_an_active_correction_receipt_skips_marked_removal_lines(
+    monkeypatch, world, stored, tmp_path, route
+):
+    seed_correction_receipt(tmp_path,
+                            audit_line(source_task="ent_synthetic_src"),
+                            audit_line(key=CORR_KEY, source_task="ent_synthetic_corr",
+                                       correction=True))
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    run_route(monkeypatch, route)
+    assert rec.of("cicada") == []
+    assert_filed_part_of_source(stored)
+
+
+def test_an_audit_line_with_a_non_boolean_correction_mark_is_unreadable(tmp_path):
+    write_audit(tmp_path, audit_line(source_task="ent_synthetic_src", correction="yes"))
+    assert delivery.fly_delivered_pr(REPO, PR, BRANCH).delivered is None
+
+
+# --- An audit line whose action is not a recognized one, and a missing file --
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_an_audit_line_with_a_non_string_action_holds(
+    monkeypatch, world, stored, rounds_recorded, tmp_path, route
+):
+    # Before the fix, `line.get("action") not in _RECEIPT_REMOVAL_ACTIONS`
+    # raised on the unhashable list, which only OSError was caught for. Seen
+    # against the unfixed code: the review and CI routes raised
+    #   build_delivery.py:1231: TypeError: unhashable type: 'list'
+    # and the resumed route logged "re-dispatch failed (unhashable type:
+    # 'list')" with no attention notice (AssertionError in assert_held).
+    write_audit(tmp_path, {"action": []})
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    assert_held(d, summary, stored, rounds_recorded, rec)
+    assert world.fix_rounds == 0
+
+
+@pytest.mark.parametrize("line", [
+    {"action": "something_else"},
+    audit_line(action="something_else", source_task="ent_synthetic_src"),
+    {"by": "operator", "key": SRC_KEY, "branch": BRANCH, "source_task": "ent_synthetic_src"},
+], ids=["unrecognized-action", "unrecognized-action-on-this-branch", "no-action"])
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_an_audit_line_with_an_unrecognized_or_missing_action_holds(
+    monkeypatch, world, stored, rounds_recorded, tmp_path, line, route
+):
+    # Before this fix `_removal_audit_lines` skipped a line whose action it did
+    # not recognize, or which had none, so with no receipt left the file read
+    # as "no removal" and the round ran locally: `rec.calls` held the cicada
+    # builder, `rounds_recorded == [1]`, and no attention notice was sent
+    # (observed against the unfixed code).
+    write_audit(tmp_path, line)
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    assert_held(d, summary, stored, rounds_recorded, rec)
+    assert stored["calls"] == [] and world.fix_rounds == 0
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_missing_audit_file_with_no_receipt_holds(
+    monkeypatch, world, stored, rounds_recorded, tmp_path, route
+):
+    # A cleared receipt may have its only record in the audit file, so its
+    # absence is no evidence the PR did not come from Fly.
+    readable_empty_ledger()
+    assert not audit_file(tmp_path).exists()
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    if summary is not None:
+        assert summary["resumed"] == 0
+    assert rec.calls == []  # no builder, no guidance lenses, no local commit
+    assert corrections(stored) == [] and stored["calls"] == []
+    assert rounds_recorded == [] and world.fix_rounds == 0
+    assert any("audit file" in m and "Needs your attention" in m for m in d.notifier.sent)
+

@@ -49,12 +49,19 @@ if importlib.util.find_spec("mcp") is None:
     stdio_module.stdio_server = None
     types_module.TextContent = _Shape
     types_module.Tool = _Shape
+    types_module.CallToolResult = _Shape
+    types_module.Resource = _Shape
+    lowlevel = types.ModuleType("mcp.server.lowlevel")
+    helper = types.ModuleType("mcp.server.lowlevel.helper_types")
+    helper.ReadResourceContents = _Shape
     sys.modules.update(
         {
             "mcp": mcp_module,
             "mcp.server": server_module,
             "mcp.server.stdio": stdio_module,
             "mcp.types": types_module,
+            "mcp.server.lowlevel": lowlevel,
+            "mcp.server.lowlevel.helper_types": helper,
         }
     )
 
@@ -258,6 +265,13 @@ def release_store(monkeypatch, tmp_path):
     monkeypatch.setattr(apis, "fetch_entity_user_id", REAL_FETCH_ENTITY_USER_ID)
     monkeypatch.setattr(
         gating_module, "fetch_entity_user_id", REAL_FETCH_ENTITY_USER_ID
+    )
+    # The scope gate reads the observation history strictly; serve the same
+    # observations the fixture serves to every other reader.
+    monkeypatch.setattr(
+        apis,
+        "fetch_entity_observations_strict",
+        lambda entity_id: list(gating_module._fetch_entity_observations(entity_id)),
     )
     policy = ExecutionPolicy(
         entity_id="default",
@@ -2405,6 +2419,182 @@ async def test_confidence_lowered_after_approval_regates_even_if_revision_unchan
     assert brief["status"] == "approved_requires_fresh_approval"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dispatcher", ["apis", " APIS ", "Apis@ateles-swarm"])
+async def test_approved_hold_on_a_task_assigned_to_the_dispatcher_releases(
+    monkeypatch, release_store, dispatcher
+):
+    """`dispatch_task` routes it by its tags and holds it as that agent's work.
+
+    The release re-check read the dispatcher's name as the skill, found no such
+    agent's prior, and so saw a different action type from the one the hold bound:
+    an approved task could never release, and came back as a fresh checkpoint.
+    """
+    records, brief_id, task_id = release_store
+    task = records[task_id]["snapshot"]
+    task.pop("action_type", None)
+    task.update({"assigned_to": dispatcher, "tags": ["engineering"]})
+    policy = ExecutionPolicy(
+        entity_id="default",
+        confidence_threshold=0.2,
+        high_blast_action_types=frozenset({"open_or_merge_pr"}),
+        low_blast_action_types=frozenset({"local_edit"}),
+        loaded=True,
+    )
+    assert apis._task_gate_context(task)[1] == "open_or_merge_pr"
+    _bind_v2_authorization(
+        monkeypatch,
+        records,
+        brief_id,
+        task_id,
+        action_type="open_or_merge_pr",
+        policy=policy,
+        declared=False,
+    )
+    brief = records[brief_id]["snapshot"]
+    brief["status"] = "approved"
+    dispatches = _spy_dispatch(monkeypatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is True
+    assert len(dispatches) == 1
+
+
+def _words_only_payment_task(records, task_id, **over):
+    """A task routed to the payment agent by its words alone, as dispatch does."""
+    task = records[task_id]["snapshot"]
+    for field in ("action_type", "assigned_to", "tags"):
+        task.pop(field, None)
+    task.update(
+        {"title": "Pay the rent invoice", "body": "wire the payment", **over}
+    )
+    return task
+
+
+def _per_skill_policies(monkeypatch, **strict_over):
+    """A strict policy for the payment agent, as live, and another for the rest."""
+    strict = ExecutionPolicy(
+        **{
+            "entity_id": "ent_strict_policy",
+            "confidence_threshold": 0.2,
+            "high_blast_action_types": frozenset({"payment"}),
+            "low_blast_action_types": frozenset({"local_edit"}),
+            "loaded": True,
+            **strict_over,
+        }
+    )
+    general = ExecutionPolicy(
+        entity_id="default",
+        confidence_threshold=0.2,
+        high_blast_action_types=frozenset({"payment", "send_external_comms"}),
+        low_blast_action_types=frozenset({"local_edit"}),
+        loaded=True,
+    )
+    monkeypatch.setattr(
+        apis,
+        "resolve_policy_for_agent",
+        lambda skill: strict if skill == "monedula" else general,
+    )
+    return strict, general
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "over",
+    [{}, {"tags": ["bookkeeping"]}, {"assigned_to": "apis"}],
+    ids=["no_tags", "unmapped_tags", "assigned_to_the_dispatcher"],
+)
+async def test_approved_hold_on_a_task_routed_by_its_words_releases(
+    monkeypatch, release_store, over
+):
+    """It releases on the approval signed under the agent's own policy.
+
+    `dispatch_task` held it under the payment agent's policy and action. The
+    re-check read stored tags alone, so it saw no skill and the general policy,
+    refused, and asked again under the general policy.
+    """
+    records, brief_id, task_id = release_store
+    _words_only_payment_task(records, task_id, **over)
+    strict, _general = _per_skill_policies(monkeypatch)
+    _bind_v2_authorization(
+        monkeypatch,
+        records,
+        brief_id,
+        task_id,
+        action_type="payment",
+        policy=strict,
+        declared=False,
+    )
+    _per_skill_policies(monkeypatch)
+    brief = records[brief_id]["snapshot"]
+    brief["status"] = "approved"
+    dispatches = _spy_dispatch(monkeypatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is True
+    assert len(dispatches) == 1
+    assert brief["status"] != "approved_requires_fresh_approval"
+
+
+@pytest.mark.asyncio
+async def test_approval_signed_under_another_policy_does_not_release_a_word_routed_task(
+    monkeypatch, release_store
+):
+    """The agent that would run the task decides which policy binds the release.
+
+    The envelope reads as a replacement checkpoint filed before this change did:
+    the task and its action as they are, under the general policy.
+    """
+    records, brief_id, task_id = release_store
+    _words_only_payment_task(records, task_id)
+    _strict, general = _per_skill_policies(monkeypatch)
+    _bind_v2_authorization(
+        monkeypatch,
+        records,
+        brief_id,
+        task_id,
+        action_type="payment",
+        policy=general,
+        declared=False,
+    )
+    _per_skill_policies(monkeypatch)
+    brief = records[brief_id]["snapshot"]
+    brief["status"] = "approved"
+    dispatches = _spy_dispatch(monkeypatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert dispatches == []
+    assert brief["status"] == "approved_requires_fresh_approval"
+
+
+def test_replacement_checkpoint_for_a_word_routed_task_binds_the_agents_policy(
+    monkeypatch,
+):
+    strict, _general = _per_skill_policies(monkeypatch)
+    task = {"title": "Pay the rent invoice", "body": "wire the payment"}
+
+    skill, action_type, policy, _decision = apis._task_gate_context(task)
+
+    assert (skill, action_type, policy) == ("monedula", "payment", strict)
+
+
+def test_a_word_routed_task_is_judged_by_what_the_agents_policy_reserves(monkeypatch):
+    # The agent's policy classifies nothing here, so approving could never
+    # release it; the general policy would have called it an ordinary hold.
+    _per_skill_policies(
+        monkeypatch,
+        high_blast_action_types=frozenset(),
+        low_blast_action_types=frozenset({"local_edit"}),
+    )
+    task = {"title": "Pay the rent invoice", "body": "wire the payment"}
+
+    assert apis._approval_cannot_release(task) == "unclassified"
+
+
 def test_replacement_checkpoint_for_unscored_task_carries_the_hold_estimate(
     monkeypatch,
 ):
@@ -2507,3 +2697,1007 @@ def test_bound_hold_confidence_accepts_only_a_well_formed_unscored_estimate(
     authority, expected
 ):
     assert apis._bound_hold_confidence(authority) == expected
+
+
+def _idempotent_set_status(records, writes):
+    """A ``set_task_status`` fake with Neotoma's idempotency-key semantics.
+
+    The real write keys on handler, task, status and ``key_suffix``; a second
+    write under a key Neotoma has already seen is replayed, reports success and
+    changes nothing. ``writes`` records only the writes that took effect.
+    """
+    seen: set[tuple] = set()
+
+    def set_status(task_entity_id, status, *, handler=None, reason=None,
+                   key_suffix="", **kwargs):
+        value = status.value if hasattr(status, "value") else str(status)
+        key = (handler, task_entity_id, value, key_suffix)
+        if key in seen:
+            return True
+        seen.add(key)
+        writes.append((value, key_suffix))
+        records[task_entity_id]["snapshot"]["status"] = value
+        if reason is not None:
+            records[task_entity_id]["snapshot"]["blocked_reason"] = reason
+        return True
+
+    return set_status
+
+
+@pytest.mark.asyncio
+async def test_second_release_through_a_new_checkpoint_reenters_routed(
+    monkeypatch, release_store
+):
+    """Released, failed before launch, re-held, released again: it must route.
+
+    Red before the fix: both releases keyed the routed write on
+    ``trigger="approved"`` alone, so the second release replayed the first
+    one's key, the task stayed held, and the read-back refused to spawn.
+    """
+    records, brief_id, task_id = release_store
+    task = records[task_id]["snapshot"]
+    writes: list[tuple] = []
+    monkeypatch.setattr(
+        apis, "set_task_status", _idempotent_set_status(records, writes)
+    )
+
+    first = await _resolve(brief_id, "approve")
+    assert "re-dispatched" in first["action_taken"]
+    assert task["status"] == "routed"
+
+    # The launch fails (e.g. no runner capacity); the watchdog retries it and
+    # the gate holds it again at a NEW checkpoint.
+    task["status"] = "failed"
+    task["status"] = "awaiting_approval"
+    task["blocked_reason"] = "waiting for operator approval"
+    second_id = "ent_cp2"
+    records[second_id] = json.loads(json.dumps(records[brief_id]))
+    records[second_id]["entity_id"] = second_id
+    records[second_id]["entity_version"] = "v1"
+    records[second_id]["snapshot"].update(
+        {"status": "awaiting_operator", "resolved_dispatched": False}
+    )
+    records["_observations"][second_id] = [
+        {"id": "obs-brief2-create", "user_id": TEST_OWNER}
+    ]
+
+    def read_second_approval(checkpoint_id, record, **kwargs):
+        assert checkpoint_id == second_id
+        return {"principal_sub": "ateles@ateles-swarm", "observation_id": "obs-2"}
+
+    monkeypatch.setattr(
+        gating_module, "read_authenticated_checkpoint_resolution",
+        read_second_approval,
+    )
+    monkeypatch.setattr(
+        apis, "read_authenticated_checkpoint_resolution", read_second_approval,
+        raising=False,
+    )
+
+    second = await _resolve(second_id, "approve")
+
+    assert "re-dispatched" in second["action_taken"]
+    assert task["status"] == "routed"
+    assert task["blocked_reason"] == ""
+    routed = [suffix for value, suffix in writes if value == "routed"]
+    assert len(routed) == 2 and routed[0] != routed[1]
+    assert brief_id in routed[0] and second_id in routed[1]
+
+
+@pytest.mark.asyncio
+async def test_replay_of_one_checkpoint_release_writes_routed_once(
+    monkeypatch, release_store
+):
+    """Re-delivering the SAME checkpoint's release stays idempotent."""
+    records, brief_id, task_id = release_store
+    writes: list[tuple] = []
+    monkeypatch.setattr(
+        apis, "set_task_status", _idempotent_set_status(records, writes)
+    )
+    dispatches: list = []
+    original_dispatch = apis.dispatch_task
+
+    async def spy(*args, **kwargs):
+        dispatches.append(kwargs)
+        return await original_dispatch(*args, **kwargs)
+
+    monkeypatch.setattr(apis, "dispatch_task", spy)
+
+    result = await _resolve(brief_id, "approve")
+    assert "re-dispatched" in result["action_taken"]
+    released = records[task_id]["snapshot"]
+
+    # A replayed delivery of the same checkpoint: the consumer's stamp refuses
+    # to dispatch again ...
+    await apis.handle_checkpoint_brief(
+        brief_id, records[brief_id]["snapshot"], _Notifier()
+    )
+    assert len(dispatches) == 1
+
+    # ... and even a duplicate dispatch for the same checkpoint replays the
+    # same idempotency key rather than writing a second routed transition.
+    await original_dispatch(
+        task_id, dict(released), trigger="approved", notifier=_Notifier(),
+        gate_override=True, release_key=brief_id,
+    )
+    assert [w for w in writes if w[0] == "routed"] == [
+        ("routed", f"approved-{brief_id}")
+    ]
+
+
+# ── Original authenticated effect scope (restrictive envelope extension) ──────
+#
+# These tests drive the REAL sinks (status transitions, fallback stamp, host
+# denial marker, replacement filing) against a stateful stand-in for Neotoma's
+# HTTP surface, so they assert what actually changed rather than which helper
+# was called.  Only the checkpoint store call is replaced, by a stand-in that
+# persists a fresh ordinary checkpoint into the same store.
+
+PRODUCER_JKT = "P" * 43
+EXTENSION = {"effect_scope": "review_request_only"}
+
+
+class _FakeNeotoma:
+    """Entities, observations and corrections behind gating's httpx calls."""
+
+    def __init__(self):
+        self.entities: dict[str, dict] = {}
+        self.observations: dict[str, list[dict]] = {}
+        self.corrections: list[dict] = []
+        self.fail_fields: set[str] = set()
+        self.stored: list[str] = []
+
+    def _response(self, method, url, payload, status=200):
+        import httpx
+
+        return httpx.Response(
+            status, json=payload, request=httpx.Request(method, url)
+        )
+
+    def get(self, url, headers=None, params=None, timeout=None):
+        path = url.split("/entities/", 1)[1]
+        if path.endswith("/observations"):
+            entity_id = path[: -len("/observations")]
+            rows = self.observations.get(entity_id, [])
+            limit, offset = params["limit"], params["offset"]
+            return self._response(
+                "GET",
+                url,
+                {
+                    "observations": rows[offset : offset + limit],
+                    "total": len(rows),
+                    "limit": limit,
+                    "offset": offset,
+                },
+            )
+        record = self.entities.get(path)
+        if record is None:
+            return self._response("GET", url, {"error": "missing"}, status=404)
+        return self._response("GET", url, record)
+
+    def post(self, url, headers=None, json=None, content=None, timeout=None):
+        body = json
+        field = body["field"]
+        if field in self.fail_fields:
+            return self._response("POST", url, {"error": "down"}, status=500)
+        record = self.entities[body["entity_id"]]
+        record["snapshot"][field] = body["value"]
+        self.corrections.append({"entity_id": body["entity_id"], "field": field})
+        return self._response("POST", url, {"snapshot": dict(record["snapshot"])})
+
+    def status(self, entity_id):
+        return self.entities[entity_id]["snapshot"].get("status")
+
+
+@pytest.fixture
+def neotoma(monkeypatch, tmp_path):
+    fake = _FakeNeotoma()
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    monkeypatch.setattr(gating_module, "NEOTOMA_BASE_URL", "https://neotoma.test")
+    monkeypatch.setattr(gating_module, "CHECKPOINT_PRODUCER_JKT", PRODUCER_JKT)
+    monkeypatch.setattr(gating_module.httpx, "get", fake.get)
+    monkeypatch.setattr(gating_module.httpx, "post", fake.post)
+    monkeypatch.setenv("APIS_CHECKPOINT_DENIAL_DIR", str(tmp_path / "denials"))
+    policy = ExecutionPolicy(
+        entity_id="default",
+        low_blast_action_types=frozenset({"local_edit"}),
+        high_blast_action_types=frozenset(),
+        loaded=True,
+    )
+    monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda skill: policy)
+
+    async def no_dispatch(*args, **kwargs):
+        pytest.fail("a held or denied checkpoint must never dispatch work")
+
+    monkeypatch.setattr(apis, "dispatch_task", no_dispatch)
+
+    def write_brief(**kwargs):
+        fake.stored.append(kwargs["task_entity_id"])
+        new_id = f"ent_replacement_{len(fake.stored)}"
+        _add_checkpoint(fake, new_id, kwargs["task_entity_id"], policy, status="awaiting_operator")
+        return new_id
+
+    monkeypatch.setattr(apis, "write_checkpoint_brief", write_brief)
+    fake.policy = policy
+    fake.write_brief = write_brief
+    _add_task(fake, "ent_task_1")
+    return fake
+
+
+def _add_task(fake, task_id, **over):
+    fake.entities[task_id] = {
+        "entity_id": task_id,
+        "entity_type": "task",
+        "observation_count": 1,
+        "last_observation_at": "2026-09-21T00:00:00Z",
+        "snapshot": {
+            "status": "awaiting_approval",
+            "assigned_to": "cicada",
+            "title": "Implement the bounded change",
+            "body": "Engineering work.",
+            "action_type": "local_edit",
+            "confidence": 0.3,
+            **over,
+        },
+    }
+    fake.observations[task_id] = [{"id": f"obs-{task_id}", "user_id": TEST_OWNER}]
+
+
+def _add_checkpoint(
+    fake,
+    checkpoint_id,
+    task_id,
+    policy,
+    *,
+    status="approved",
+    extension=None,
+    authenticated=True,
+    legacy=False,
+):
+    """A checkpoint whose creation observation carries (or lacks) an envelope."""
+    task = fake.entities[task_id]
+    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+    snapshot = {
+        "status": status,
+        "resolved_dispatched": False,
+        "task_entity_id": task_id,
+        "policy_entity_id": policy.entity_id,
+        "gate_action": decision.action.value,
+        "blast_radius": decision.blast_radius.value,
+        "handler": "apis",
+        "title": "Approve",
+    }
+    record = {
+        "entity_id": checkpoint_id,
+        "entity_type": CHECKPOINT_TYPE,
+        "observation_count": 1,
+        "last_observation_at": "2026-09-21T00:00:00Z",
+        "entity_version": "v1",
+        "snapshot": snapshot,
+    }
+    rows = [{"id": "obs-create", "user_id": TEST_OWNER}]
+    if not legacy:
+        payload = json.loads(
+            build_checkpoint_authorization_envelope(
+                task_record=task,
+                policy=policy,
+                decision=decision,
+                action_type="local_edit",
+                user_id=TEST_OWNER,
+                required_approver_jkt=TEST_RESOLVER_JKT,
+                producer_jkt=PRODUCER_JKT,
+            )
+        )
+        payload.update(extension or {})
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        snapshot["body"] = encoded
+        record["provenance"] = {
+            f: "obs-create"
+            for f in (
+                "body",
+                "task_entity_id",
+                "policy_entity_id",
+                "blast_radius",
+                "gate_action",
+                "handler",
+            )
+        }
+        rows[0].update(
+            {
+                "fields": {"body": encoded},
+                "provenance": {
+                    "agent_sub": "apis@ateles-swarm",
+                    "agent_thumbprint": (
+                        PRODUCER_JKT if authenticated else "Q" * 43
+                    ),
+                    "attribution_tier": "software",
+                },
+            }
+        )
+    fake.entities[checkpoint_id] = record
+    fake.observations[checkpoint_id] = rows
+    return record
+
+
+def _assert_untouched(fake, checkpoint_id, status, tmp_path):
+    assert fake.status(checkpoint_id) == status
+    assert fake.entities[checkpoint_id]["snapshot"]["resolved_dispatched"] is False
+    assert fake.corrections == [], "a held checkpoint must take no consuming write"
+    assert fake.stored == [], "a held checkpoint must file no replacement"
+    assert not (tmp_path / "denials").exists() or not list(
+        (tmp_path / "denials").iterdir()
+    ), "a held checkpoint must leave no host denial marker"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift", ["task_kind_operator_only", "task_changed"])
+async def test_restricted_scope_survives_current_task_drift(
+    neotoma, tmp_path, drift
+):
+    _add_checkpoint(
+        neotoma, "ent_cp", "ent_task_1", neotoma.policy, extension=EXTENSION
+    )
+    if drift == "task_kind_operator_only":
+        neotoma.entities["ent_task_1"]["snapshot"]["action_type"] = "operator_only"
+    else:
+        neotoma.entities["ent_task_1"]["snapshot"]["body"] = "edited after approval"
+
+    snapshot = neotoma.entities["ent_cp"]["snapshot"]
+    consumed = await apis.handle_checkpoint_brief("ent_cp", snapshot, _Notifier())
+
+    assert consumed is False
+    _assert_untouched(neotoma, "ent_cp", "approved", tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_restricted_scope_survives_invalid_rejection(neotoma, tmp_path):
+    _add_checkpoint(
+        neotoma,
+        "ent_cp",
+        "ent_task_1",
+        neotoma.policy,
+        status="rejected",
+        extension=EXTENSION,
+    )
+    snapshot = neotoma.entities["ent_cp"]["snapshot"]
+
+    consumed = await apis.handle_checkpoint_brief("ent_cp", snapshot, _Notifier())
+
+    assert consumed is False
+    _assert_untouched(neotoma, "ent_cp", "rejected", tmp_path)
+    assert neotoma.entities["ent_task_1"]["snapshot"]["status"] == "awaiting_approval"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field,value", [("gate_action", "bogus"), ("blast_radius", "never")]
+)
+async def test_restricted_scope_survives_unknown_gate_or_blast(
+    neotoma, tmp_path, field, value
+):
+    _add_checkpoint(
+        neotoma, "ent_cp", "ent_task_1", neotoma.policy, extension=EXTENSION
+    )
+    neotoma.entities["ent_cp"]["snapshot"][field] = value
+    snapshot = neotoma.entities["ent_cp"]["snapshot"]
+
+    consumed = await apis.handle_checkpoint_brief("ent_cp", snapshot, _Notifier())
+
+    assert consumed is False
+    _assert_untouched(neotoma, "ent_cp", "approved", tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_unauthenticated_extension_claim_is_held_not_ordinary(
+    neotoma, tmp_path
+):
+    """An envelope that claims a restriction but fails authentication is unknown."""
+    _add_checkpoint(
+        neotoma,
+        "ent_cp",
+        "ent_task_1",
+        neotoma.policy,
+        extension=EXTENSION,
+        authenticated=False,
+    )
+    neotoma.entities["ent_cp"]["snapshot"]["gate_action"] = "bogus"
+    snapshot = neotoma.entities["ent_cp"]["snapshot"]
+
+    consumed = await apis.handle_checkpoint_brief("ent_cp", snapshot, _Notifier())
+
+    assert consumed is False
+    _assert_untouched(neotoma, "ent_cp", "approved", tmp_path)
+
+
+def test_restricted_scope_survives_notifier_failure_and_omitted_context(
+    neotoma, tmp_path
+):
+    _add_checkpoint(
+        neotoma, "ent_cp", "ent_task_1", neotoma.policy, extension=EXTENSION
+    )
+
+    class _BrokenNotifier:
+        def send(self, *args, **kwargs):
+            raise RuntimeError("no transport")
+
+    # Called without the caller context handle_checkpoint_brief would carry
+    # (no authorization, no snapshot): the sink qualifies the scope itself.
+    assert (
+        apis._require_fresh_release_authority(
+            "ent_cp",
+            task_id="ent_task_1",
+            task_snapshot={},
+            notifier=_BrokenNotifier(),
+            reason="task changed",
+        )
+        is None
+    )
+    apis._deny_checkpoint_release("ent_cp", reason="anything")
+    assert apis._persist_checkpoint_denial("ent_cp") is False
+    for sink in (
+        gating_module.close_checkpoint_without_release,
+        gating_module.require_fresh_checkpoint_approval,
+        gating_module.supersede_checkpoint,
+    ):
+        assert sink("ent_cp", handler="apis", reason="x") is False
+    assert apis.migrate_checkpoint_authority("ent_cp", notifier=_Notifier()) is None
+    _assert_untouched(neotoma, "ent_cp", "approved", tmp_path)
+
+
+def test_unreadable_checkpoint_scope_takes_no_consuming_write(neotoma, tmp_path):
+    # No such checkpoint: the scope cannot be qualified.
+    apis._deny_checkpoint_release("ent_missing", reason="x")
+    assert apis._persist_checkpoint_denial("ent_missing") is False
+    assert neotoma.corrections == []
+    assert not (tmp_path / "denials").exists()
+
+
+@pytest.mark.asyncio
+async def test_ordinary_replacement_readback_and_retirement_still_happen(
+    neotoma, tmp_path
+):
+    _add_checkpoint(neotoma, "ent_cp", "ent_task_1", neotoma.policy)
+    neotoma.entities["ent_task_1"]["snapshot"]["body"] = "edited after approval"
+    snapshot = neotoma.entities["ent_cp"]["snapshot"]
+    notifier = _Notifier()
+
+    released = await apis.handle_checkpoint_brief("ent_cp", snapshot, notifier)
+
+    assert released is False
+    assert neotoma.stored == ["ent_task_1"]
+    replacement = neotoma.entities["ent_replacement_1"]["snapshot"]
+    assert replacement["status"] == "awaiting_operator"
+    assert neotoma.status("ent_cp") == "approved_requires_fresh_approval"
+    assert any("Fresh approval required" in m for m in notifier.sent)
+
+
+def test_failed_replacement_leaves_ordinary_approval_retriable(
+    neotoma, monkeypatch, tmp_path
+):
+    _add_checkpoint(neotoma, "ent_cp", "ent_task_1", neotoma.policy)
+    monkeypatch.setattr(apis, "write_checkpoint_brief", lambda **kw: None)
+    notifier = _Notifier()
+
+    result = apis._require_fresh_release_authority(
+        "ent_cp",
+        task_id="ent_task_1",
+        task_snapshot=neotoma.entities["ent_task_1"]["snapshot"],
+        notifier=notifier,
+        reason="task changed",
+    )
+
+    assert result is None
+    assert neotoma.status("ent_cp") == "approved"
+    assert neotoma.corrections == []
+    assert any("retry" in m.lower() for m in notifier.sent)
+
+
+def test_same_id_replacement_is_not_retired(neotoma, monkeypatch):
+    _add_checkpoint(neotoma, "ent_cp", "ent_task_1", neotoma.policy)
+    monkeypatch.setattr(apis, "write_checkpoint_brief", lambda **kw: "ent_cp")
+
+    result = apis._require_fresh_release_authority(
+        "ent_cp",
+        task_id="ent_task_1",
+        task_snapshot=neotoma.entities["ent_task_1"]["snapshot"],
+        notifier=_Notifier(),
+        reason="x",
+    )
+
+    assert result is None
+    assert neotoma.status("ent_cp") == "approved"
+    assert neotoma.corrections == []
+
+
+@pytest.mark.asyncio
+async def test_ordinary_unauthenticated_rejection_still_closes(neotoma):
+    _add_checkpoint(
+        neotoma, "ent_cp", "ent_task_1", neotoma.policy, status="rejected"
+    )
+    snapshot = neotoma.entities["ent_cp"]["snapshot"]
+
+    consumed = await apis.handle_checkpoint_brief("ent_cp", snapshot, _Notifier())
+
+    assert consumed is False  # no authenticated resolver: nothing is declined
+    assert neotoma.status("ent_cp") == "approved_no_release"
+    assert neotoma.entities["ent_task_1"]["snapshot"]["status"] == "awaiting_approval"
+
+
+def test_ordinary_forced_fallback_stamps_then_writes_host_marker(
+    neotoma, tmp_path
+):
+    _add_checkpoint(neotoma, "ent_cp", "ent_task_1", neotoma.policy)
+    neotoma.fail_fields = {"status"}  # the purpose-built close cannot land
+
+    apis._deny_checkpoint_release("ent_cp", reason="x")
+
+    assert neotoma.entities["ent_cp"]["snapshot"]["resolved_dispatched"] is True
+    assert neotoma.status("ent_cp") == "approved"
+
+    _add_checkpoint(neotoma, "ent_cp2", "ent_task_1", neotoma.policy)
+    neotoma.fail_fields = {"status", "resolved_dispatched"}  # both writes fail
+
+    apis._deny_checkpoint_release("ent_cp2", reason="x")
+
+    assert apis._checkpoint_denial_persisted("ent_cp2") is True
+    assert list((tmp_path / "denials").iterdir())
+
+
+def test_supported_legacy_migration_still_replaces_and_retires(neotoma):
+    _add_checkpoint(neotoma, "ent_legacy", "ent_task_1", neotoma.policy, legacy=True)
+
+    replacement = apis.migrate_checkpoint_authority(
+        "ent_legacy", notifier=_Notifier()
+    )
+
+    assert replacement == "ent_replacement_1"
+    assert neotoma.status("ent_legacy") == "approved_requires_fresh_approval"
+    assert neotoma.entities[replacement]["snapshot"]["status"] == "awaiting_operator"
+    assert neotoma.entities["ent_legacy"]["snapshot"]["resolved_dispatched"] is False
+
+
+# ── A later edit of a protected field cannot downgrade a restricted scope ────
+
+def _edit_field(fake, checkpoint_id, field, value):
+    """A later observation sets ``field``: provenance moves, creation stays."""
+    record = fake.entities[checkpoint_id]
+    obs_id = f"obs-edit-{field}-{len(fake.observations[checkpoint_id])}"
+    fake.observations[checkpoint_id].append(
+        {"id": obs_id, "user_id": TEST_OWNER, "fields": {field: value}}
+    )
+    record["provenance"][field] = obs_id
+    if value is None:
+        record["snapshot"].pop(field, None)
+    else:
+        record["snapshot"][field] = value
+
+
+def _stripped_body(fake, checkpoint_id):
+    payload = json.loads(fake.entities[checkpoint_id]["snapshot"]["body"])
+    for key in EXTENSION:
+        payload.pop(key)
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+_EDITS = [
+    "ordinary_fields_json",
+    "plain_text",
+    "invalid_json",
+    "removed",
+    "handler",
+    "blast_radius",
+    "gate_action",
+]
+
+
+def _downgrade(fake, checkpoint_id, edit):
+    if edit == "ordinary_fields_json":
+        _edit_field(fake, checkpoint_id, "body", _stripped_body(fake, checkpoint_id))
+    elif edit == "plain_text":
+        _edit_field(fake, checkpoint_id, "body", "reviewed, nothing special")
+    elif edit == "invalid_json":
+        _edit_field(fake, checkpoint_id, "body", '{"version": 2, ')
+    elif edit == "removed":
+        _edit_field(fake, checkpoint_id, "body", None)
+    else:
+        original = fake.entities[checkpoint_id]["snapshot"][edit]
+        _edit_field(fake, checkpoint_id, edit, str(original))
+
+
+@pytest.fixture
+def downgraded(neotoma, monkeypatch):
+    def build(edit, status="approved"):
+        _add_checkpoint(
+            neotoma,
+            "ent_cp",
+            "ent_task_1",
+            neotoma.policy,
+            status=status,
+            extension=EXTENSION,
+        )
+        _downgrade(neotoma, "ent_cp", edit)
+        return neotoma
+
+    return build
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", _EDITS)
+@pytest.mark.parametrize("status", ["approved", "rejected"])
+async def test_edited_restricted_checkpoint_is_not_consumed_by_the_consumer(
+    downgraded, tmp_path, edit, status
+):
+    fake = downgraded(edit, status=status)
+    snapshot = fake.entities["ent_cp"]["snapshot"]
+
+    consumed = await apis.handle_checkpoint_brief("ent_cp", snapshot, _Notifier())
+
+    assert consumed is False
+    _assert_untouched(fake, "ent_cp", status, tmp_path)
+
+
+@pytest.mark.parametrize("edit", _EDITS)
+def test_edited_restricted_checkpoint_is_not_migrated(downgraded, tmp_path, edit):
+    fake = downgraded(edit)
+
+    assert apis.migrate_checkpoint_authority("ent_cp", notifier=_Notifier()) is None
+    _assert_untouched(fake, "ent_cp", "approved", tmp_path)
+
+
+@pytest.mark.parametrize("edit", _EDITS)
+def test_edited_restricted_checkpoint_is_not_replaced_or_retired_by_reissue(
+    downgraded, monkeypatch, tmp_path, edit
+):
+    fake = downgraded(edit, status="awaiting_operator")
+    fake.entities["ent_task_1"]["snapshot"]["status"] = "awaiting_approval"
+    monkeypatch.setattr(
+        apis, "checkpoints_for_task", lambda task_id, strict=False: [fake.entities["ent_cp"]]
+    )
+
+    result = apis.reissue_held_task_checkpoint("ent_task_1", apply=True)
+
+    assert result.outcome == "failed"
+    _assert_untouched(fake, "ent_cp", "awaiting_operator", tmp_path)
+
+
+@pytest.mark.parametrize("edit", _EDITS)
+def test_edited_restricted_checkpoint_takes_no_effect_from_any_sink(
+    downgraded, tmp_path, edit
+):
+    fake = downgraded(edit)
+
+    assert (
+        apis._require_fresh_release_authority(
+            "ent_cp",
+            task_id="ent_task_1",
+            task_snapshot=fake.entities["ent_task_1"]["snapshot"],
+            notifier=_Notifier(),
+            reason="x",
+        )
+        is None
+    )
+    apis._deny_checkpoint_release("ent_cp", reason="x")
+    assert apis._persist_checkpoint_denial("ent_cp") is False
+    for sink in (
+        gating_module.close_checkpoint_without_release,
+        gating_module.require_fresh_checkpoint_approval,
+        gating_module.supersede_checkpoint,
+    ):
+        assert sink("ent_cp", handler="apis", reason="x") is False
+    _assert_untouched(fake, "ent_cp", "approved", tmp_path)
+
+
+def test_unreadable_observation_history_is_unknown_not_legacy(
+    neotoma, monkeypatch, tmp_path
+):
+    _add_checkpoint(neotoma, "ent_cp", "ent_task_1", neotoma.policy, legacy=True)
+    monkeypatch.setattr(apis, "fetch_entity_observations_strict", lambda cid: None)
+
+    apis._deny_checkpoint_release("ent_cp", reason="x")
+
+    _assert_untouched(neotoma, "ent_cp", "approved", tmp_path)
+
+
+def test_envelope_field_set_covers_everything_the_builder_emits():
+    task = {"entity_id": "ent_t", "snapshot": {"status": "x"}}
+    policy = ExecutionPolicy(entity_id="p", loaded=True)
+    for unscored in (False, True):
+        decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+        if unscored:
+            import dataclasses
+
+            decision = dataclasses.replace(decision, confidence_unscored=True)
+        payload = json.loads(
+            build_checkpoint_authorization_envelope(
+                task_record=task,
+                policy=policy,
+                decision=decision,
+                action_type="local_edit",
+                user_id=TEST_OWNER,
+                required_approver_jkt=TEST_RESOLVER_JKT,
+            )
+        )
+        assert set(payload) <= gating_module.CHECKPOINT_ORDINARY_ENVELOPE_FIELDS
+
+
+# -- A held checkpoint says so: one notice, a plain cause, a next step ---------
+
+
+CP_ID = "ent_cccccccccccccccccccccccc"
+TASK_ID = "ent_dddddddddddddddddddddddd"
+
+
+class _RecordingNotifier:
+    def __init__(self):
+        self.sent: list[tuple[str, object]] = []
+        self._told: set[str] = set()
+
+    def send(self, message, priority=None, handler=None, **kwargs):
+        # Honors the notifier's dedupe_key contract; the real journal-backed
+        # behavior is exercised against the real Notifier (_JournalNotifier).
+        key = kwargs.get("dedupe_key")
+        if key is not None:
+            if key in self._told:
+                return False
+            self._told.add(key)
+        self.sent.append((message, priority))
+        return True
+
+
+class _JournalNotifier:
+    """The REAL notifier (its own journal-backed dedupe), transport stubbed."""
+
+    def __init__(self, tmp_path):
+        from lib.notify import Notifier
+
+        self.sent: list[tuple[str, object]] = []
+        self._n = Notifier(rubric={"silence_start": "", "silence_end": "",
+                                   "timezone": "Europe/Madrid"})
+        self._n._digest_path = tmp_path / "digest.json"
+        self._n._dedupe_path = tmp_path / "dedupe.json"  # the shared store
+        self._n._apprise = object()
+        self._n._email_primary = False
+        self._n._deliver = lambda m, force=False, email_eligible=True: (
+            self.sent.append((m, apis.Priority.WARN)),
+            True,
+        )[1]
+
+    def send(self, *args, **kwargs):
+        return self._n.send(*args, **kwargs)
+
+
+def _only_notice(notifier):
+    assert len(notifier.sent) == 1, notifier.sent
+    return notifier.sent[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["approved", "rejected"])
+async def test_restricted_decision_notifies_once_with_cause_and_next_step(
+    neotoma, tmp_path, status
+):
+    _add_task(neotoma, TASK_ID)
+    _add_checkpoint(
+        neotoma,
+        CP_ID,
+        TASK_ID,
+        neotoma.policy,
+        status=status,
+        extension=EXTENSION,
+    )
+    notifier = _JournalNotifier(tmp_path)
+    snapshot = neotoma.entities[CP_ID]["snapshot"]
+
+    for _ in range(3):  # a poll loop re-delivers the same decision
+        assert await apis.handle_checkpoint_brief(CP_ID, snapshot, notifier) is False
+
+    message, priority = _only_notice(notifier)
+    assert priority == apis.Priority.WARN
+    assert CP_ID in message and TASK_ID in message
+    assert f"{status} decision was NOT applied" in message
+    assert "authenticated_extension" in message
+    assert "review path that issued it" in message
+    _assert_untouched(neotoma, CP_ID, status, tmp_path)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", ["plain_text", "removed", "handler"])
+async def test_unknown_decision_notifies_with_its_own_cause(
+    downgraded, tmp_path, edit
+):
+    fake = downgraded(edit)
+    notifier = _RecordingNotifier()
+
+    await apis.handle_checkpoint_brief(
+        "ent_cp", fake.entities["ent_cp"]["snapshot"], notifier
+    )
+
+    message, _ = _only_notice(notifier)
+    assert "extension_in_history_envelope_changed" in message
+    assert "an earlier version of it carried a restriction" in message
+    assert "re-read or re-file" in message and "swarm operator" in message
+    _assert_untouched(fake, "ent_cp", "approved", tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_unreadable_history_notice_names_the_unreadable_history(
+    neotoma, monkeypatch
+):
+    _add_checkpoint(neotoma, "ent_cp", "ent_task_1", neotoma.policy, legacy=True)
+    monkeypatch.setattr(apis, "fetch_entity_observations_strict", lambda cid: None)
+    notifier = _RecordingNotifier()
+
+    await apis.handle_checkpoint_brief(
+        "ent_cp", neotoma.entities["ent_cp"]["snapshot"], notifier
+    )
+
+    message, _ = _only_notice(notifier)
+    assert "history_unreadable" in message
+    assert "change history could not be read" in message
+
+
+@pytest.mark.parametrize("sink", ["deny", "fresh", "migrate"])
+def test_every_sink_sends_exactly_one_deduplicated_notice(neotoma, tmp_path, sink):
+    _add_task(neotoma, TASK_ID)
+    _add_checkpoint(
+        neotoma, CP_ID, TASK_ID, neotoma.policy, extension=EXTENSION
+    )
+    notifier = _RecordingNotifier()
+    for _ in range(2):
+        if sink == "deny":
+            apis._deny_checkpoint_release(
+                CP_ID, reason="x", notifier=notifier, task_id=TASK_ID
+            )
+        elif sink == "fresh":
+            apis._require_fresh_release_authority(
+                CP_ID,
+                task_id=TASK_ID,
+                task_snapshot={},
+                notifier=notifier,
+                reason="x",
+            )
+        else:
+            apis.migrate_checkpoint_authority(CP_ID, notifier=notifier)
+    message, priority = _only_notice(notifier)
+    assert priority == apis.Priority.WARN
+    assert CP_ID in message and TASK_ID in message
+    assert "authenticated_extension" in message
+    _assert_untouched(neotoma, CP_ID, "approved", tmp_path)
+
+
+def test_a_failed_notice_never_widens_a_held_checkpoint(neotoma, tmp_path):
+    _add_checkpoint(
+        neotoma, "ent_cp", "ent_task_1", neotoma.policy, extension=EXTENSION
+    )
+
+    class _Broken:
+        def send(self, *args, **kwargs):
+            raise RuntimeError("no transport")
+
+    assert (
+        apis._require_fresh_release_authority(
+            "ent_cp",
+            task_id="ent_task_1",
+            task_snapshot={},
+            notifier=_Broken(),
+            reason="x",
+        )
+        is None
+    )
+    apis._deny_checkpoint_release("ent_cp", reason="x", notifier=_Broken())
+    _assert_untouched(neotoma, "ent_cp", "approved", tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_ordinary_checkpoint_sends_no_held_notice(neotoma):
+    _add_checkpoint(neotoma, "ent_cp", "ent_task_1", neotoma.policy, status="rejected")
+    notifier = _RecordingNotifier()
+
+    await apis.handle_checkpoint_brief(
+        "ent_cp", neotoma.entities["ent_cp"]["snapshot"], notifier
+    )
+
+    assert not any("is held" in message for message, _ in notifier.sent)
+
+
+@pytest.mark.asyncio
+async def test_untrusted_snapshot_text_never_reaches_the_notice_or_the_log(
+    neotoma, caplog, tmp_path
+):
+    hostile = (
+        "ent_task_1\nCRITICAL forged log line http://evil.example/steal "
+        + "free text " * 200
+    )
+    _add_checkpoint(
+        neotoma, CP_ID, "ent_task_1", neotoma.policy, extension=EXTENSION
+    )
+    neotoma.entities[CP_ID]["snapshot"]["task_entity_id"] = hostile
+    notifier = _RecordingNotifier()
+    caplog.set_level("WARNING")
+
+    consumed = await apis.handle_checkpoint_brief(
+        CP_ID, neotoma.entities[CP_ID]["snapshot"], notifier
+    )
+    apis.migrate_checkpoint_authority(CP_ID, notifier=notifier)
+
+    assert consumed is False
+    message, _ = _only_notice(notifier)
+    assert f"Checkpoint {CP_ID} (task unknown) is held" in message
+    leaked = ("forged", "evil.example", "free text", "\n", "ent_task_1")
+    for text in [message] + [r.getMessage() for r in caplog.records]:
+        assert not any(token in text for token in leaked), text
+    assert any("task unknown" in message for message, _ in notifier.sent)
+    _assert_untouched(neotoma, CP_ID, "approved", tmp_path)
+
+
+def test_a_malformed_checkpoint_id_is_never_echoed(neotoma, caplog):
+    notifier = _RecordingNotifier()
+    caplog.set_level("WARNING")
+
+    apis._notify_held_checkpoint(
+        notifier,
+        "ent_x\nforged http://evil.example",
+        task_id=None,
+        scope="restricted",
+        reason="authenticated_extension",
+        effect="test",
+    )
+
+    message, _ = _only_notice(notifier)
+    assert message.startswith("Checkpoint unknown (task unknown)")
+    assert "evil" not in message
+    assert not any("evil" in r.getMessage() for r in caplog.records)
+
+
+def _notify(notifier, raw_id):
+    apis._notify_held_checkpoint(
+        notifier,
+        raw_id,
+        task_id=None,
+        scope="restricted",
+        reason="authenticated_extension",
+        effect="test",
+    )
+
+
+def test_two_malformed_ids_each_get_their_own_notice(tmp_path):
+    notifier = _JournalNotifier(tmp_path)
+
+    _notify(notifier, "bad id one")
+    _notify(notifier, "bad\nid two")
+    _notify(notifier, "bad id one")  # a repeat of the first stays suppressed
+
+    assert len(notifier.sent) == 2
+    assert all("Checkpoint unknown" in m for m, _ in notifier.sent)
+
+
+def test_a_restart_does_not_rewarn_a_held_checkpoint(tmp_path):
+    first = _JournalNotifier(tmp_path)
+    _notify(first, "ent_cp")
+    assert len(first.sent) == 1
+
+    restarted = _JournalNotifier(tmp_path)  # fresh process state, same journal
+    _notify(restarted, "ent_cp")
+    assert restarted.sent == []
+
+
+def test_a_cleared_key_allows_a_later_recurrence(tmp_path):
+    notifier = _JournalNotifier(tmp_path)
+    _notify(notifier, "ent_cp")
+    notifier._n.clear_dedupe(apis._held_checkpoint_dedupe_key("ent_cp"))
+    _notify(notifier, "ent_cp")
+    assert len(notifier.sent) == 2
+
+
+def test_a_send_that_raises_does_not_mark_the_checkpoint_told(tmp_path):
+    notifier = _JournalNotifier(tmp_path)
+    real = notifier._n.send
+
+    def boom(*a, **k):
+        raise RuntimeError("no transport")
+
+    notifier._n.send = boom
+    _notify(notifier, "ent_cp")  # swallowed, never widens scope
+    notifier._n.send = real
+    _notify(notifier, "ent_cp")
+    assert len(notifier.sent) == 1

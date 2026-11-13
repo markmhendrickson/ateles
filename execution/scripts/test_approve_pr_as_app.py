@@ -158,7 +158,15 @@ class _FakeClient:
         default_branch: "str | None" = BASE_REF,
         checks_total: "int | None" = None,
         checks_page_status: "dict[int, int] | None" = None,
+        pr_mergeable: "bool | None" = True,
+        pr_mergeable_state: "str | None" = "clean",
+        mergeability_after_first_get: "tuple[bool | None, str | None] | None" = None,
     ):
+        # GitHub's mergeability as served on the PR, and (optionally) what it
+        # turns into from the second `pulls/{n}` GET on (the pre-submit re-fetch).
+        self.pr_mergeable = pr_mergeable
+        self.pr_mergeable_state = pr_mergeable_state
+        self.mergeability_after_first_get = mergeability_after_first_get
         # Actions workflow runs on the head (check_suite_id -> workflow_id), the
         # repo's default branch (None: unreadable), and the check-runs listing's
         # reported total / per-page failures.
@@ -239,7 +247,11 @@ class _FakeClient:
             "state": self.pr_state,
             "merged_at": self.pr_merged_at,
             "base": {"ref": base},
+            "mergeable": self.pr_mergeable,
+            "mergeable_state": self.pr_mergeable_state,
         }
+        if self.pr_get_count > 1 and self.mergeability_after_first_get is not None:
+            payload["mergeable"], payload["mergeable_state"] = self.mergeability_after_first_get
         reported = self.reported_changed_files
         if reported == "auto":
             reported = len(self.file_rows) if self.file_rows is not None else len(self.changed_files)
@@ -798,6 +810,51 @@ class TestPreSubmitReVerification:
         assert code == 1
         assert client.posted == []
 
+    @pytest.mark.parametrize(
+        "mergeable,mergeable_state,phrase",
+        [(False, "dirty", "merge conflict"), (None, "unknown", "not yet computed or not recognised")],
+        ids=["conflicting", "uncomputed"],
+    )
+    async def test_unmergeable_pr_is_refused_at_the_first_fetch(
+        self, monkeypatch, capsys, mergeable, mergeable_state, phrase
+    ):
+        """Approval can be reached without the panel, so the panel's
+        mergeability hold binds here too. Red before this round, observed: the
+        tool approved (code 0, a review posted) for both."""
+        client = _FakeClient(
+            comments=_all_clear_comments(ALL_FOUR),
+            check_runs=_green_checks(),
+            pr_mergeable=mergeable,
+            pr_mergeable_state=mergeable_state,
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 1
+        assert client.posted == []
+        assert client.pr_get_count == 1, "refused at the first fetch, before any re-fetch"
+        out = capsys.readouterr().out
+        assert "refusing: " in out and phrase in out
+
+    async def test_pr_turning_conflicting_before_submit_is_refused(self, monkeypatch):
+        """Mergeable at the first fetch, conflicting at the pre-submit re-fetch.
+        Red before this round, observed: a review was posted."""
+        client = _FakeClient(
+            comments=_all_clear_comments(ALL_FOUR),
+            check_runs=_green_checks(),
+            mergeability_after_first_get=(False, "dirty"),
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 1
+        assert client.pr_get_count >= 2, "the pre-submit re-fetch ran"
+        assert client.posted == []
+
     async def test_pr_closed_before_submit_refuses(self, monkeypatch):
         client = _FakeClient(
             comments=_all_clear_comments(ALL_FOUR),
@@ -1137,7 +1194,9 @@ class TestOtherEmptyOrShrunkLensPaths:
         def _raising_select_panel(*a, **kw):
             raise RuntimeError("simulated select_panel failure")
 
-        monkeypatch.setattr(target, "select_panel", _raising_select_panel)
+        # `derive_required_lenses` reaches `select_panel` through the shared
+        # `review_panel.approval_floor`, so the failure is injected there.
+        monkeypatch.setattr(target.review_panel, "select_panel", _raising_select_panel)
 
         code = await target.run(REPO, PR, [], apply=True)
 
@@ -4898,3 +4957,96 @@ class TestRoundCap:
         comments += _cap_round_comments(ROUND_HEADS[1:2], start=600) + _all_clear_comments(ALL_FOUR)
         code, client = await self._run(monkeypatch, comments)
         assert code == 0
+
+
+# ── Approval tool fails closed on an unreadable review scope (ateles#1674) ──
+#
+# `carry_earlier_signoffs` judges by the same load-aware rule as Apis's panel
+# (`review_carry.select_rerun_for_load`): a scope file that exists but cannot be
+# read carries nothing; a missing file uses the default allowlist rule.
+
+
+def _security_carry_inputs():
+    # Every lens signed off at OLD_HEAD; only qa re-ran at HEAD. The fix adds a
+    # test file the default rule maps to qa alone, so it would carry security.
+    comments = _fix_round_comments(blocked=(), reran=("qa",))
+    pending = [
+        target.LensOutcome(
+            "security", agent="falco", head_matched=False, verdict=None,
+            passed=False, reason="no verdict at this head.",
+        )
+    ]
+    return comments, pending
+
+
+async def _carry_with_load(monkeypatch, load):
+    comments, pending = _security_carry_inputs()
+    client = _CompareClient(
+        comments=comments, check_runs=_green_checks(),
+        sides=_fix_sides(SECURITY_FIX_FILE),
+        changed_files=[SECURITY_FIX_FILE, "a_random_file.txt"],
+    )
+    monkeypatch.setattr(target, "_github_headers", lambda repo=None: {})
+    return await target.carry_earlier_signoffs(
+        client, repo=REPO, base_ref=BASE_REF, head_sha=HEAD, comments=comments,
+        lens_outcomes=pending, authors=frozenset({SWARM_LOGIN}), load=load,
+    )
+
+
+@pytest.mark.asyncio
+class TestCarryFailsClosedOnUnreadableScope:
+    async def test_unreadable_scope_carries_no_signoff(self, monkeypatch):
+        # Red before this fix: against the old code this call fails with a
+        # TypeError (no `load=` parameter), observed. That the old `scope=None`
+        # path carried security here is inferred from the code; the end-to-end
+        # test below observed it.
+        load = target.review_scope.ScopeLoad(
+            None, ".github/review_scope.json@main", "HTTP 500"
+        )
+        (outcome,) = await _carry_with_load(monkeypatch, load)
+        assert outcome.lens == "security"
+        assert not outcome.passed
+        assert not outcome.carried_from
+        assert "review scope is unreadable" in outcome.reason
+        assert "HTTP 500" in outcome.reason
+
+    async def test_unreadable_scope_refuses_approval_end_to_end(self, monkeypatch):
+        # Red before this fix, observed: `main` passed `scope_load.scope` (None
+        # after the HTTP 500) to the carry, which fell back to the default rule,
+        # carried security, and `run` returned 0 with an approval posted.
+        comments, _ = _security_carry_inputs()
+        client = _CompareClient(
+            comments=comments, check_runs=_green_checks(),
+            sides=_fix_sides(SECURITY_FIX_FILE),
+            changed_files=[SECURITY_FIX_FILE, "a_random_file.txt"],
+            scope_by_ref={BASE_REF: 500},
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        assert await target.run(REPO, PR, [], apply=True, panel_all=True) == 1
+        assert client.posted == []
+
+    async def test_absent_scope_file_uses_default_carry_rule(self, monkeypatch):
+        # Control for the test above: a missing file declares no scope, so the
+        # default rule still carries security. Against the old code this call
+        # fails with a TypeError (no `load=` parameter), observed; its behaviour
+        # was green before (see the end-to-end twin below, which passes on both).
+        # It goes red if the fix treats "absent" as "unreadable".
+        load = target.review_scope.ScopeLoad(
+            None, ".github/review_scope.json@main", target.review_scope.SCOPE_FILE_ABSENT
+        )
+        (outcome,) = await _carry_with_load(monkeypatch, load)
+        assert outcome.passed
+        assert outcome.carried_from == OLD_HEAD
+
+    async def test_absent_scope_file_still_approves_end_to_end(self, monkeypatch):
+        comments, _ = _security_carry_inputs()
+        client = _CompareClient(
+            comments=comments, check_runs=_green_checks(),
+            sides=_fix_sides(SECURITY_FIX_FILE),
+            changed_files=[SECURITY_FIX_FILE, "a_random_file.txt"],
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        assert await target.run(REPO, PR, [], apply=True, panel_all=True) == 0
+        assert "CARRIED FORWARD" in client.posted[0]["json"]["body"]

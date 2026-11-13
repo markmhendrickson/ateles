@@ -149,6 +149,61 @@ def live_pr_problem(
     return None
 
 
+# GitHub's ``mergeable_state`` values that say the head does not conflict with
+# its base. Anything else (``dirty``, ``unknown``, ``draft``, an empty or
+# missing value, a case or whitespace variant, a value GitHub adds later) holds.
+_MERGEABLE_STATES = frozenset({"clean", "unstable", "has_hooks", "blocked", "behind"})
+
+
+def merge_conflict_gate(pr: object, head: str) -> CheckGate | None:
+    """A hold when the live PR conflicts with its base or GitHub has not said, else None.
+
+    GitHub runs most CI only on a mergeable head, so a conflicting head can
+    show one green check (a secrets scan) and nothing else, which
+    ``evaluate_checks`` would read as green. ``mergeable: false`` or
+    ``mergeable_state: "dirty"`` is a conflict. Unknown is held too, never
+    read as "no conflict" (principles.md, fail closed on the field that
+    carries the safety meaning): ``mergeable`` null, missing or not a boolean,
+    or ``mergeable_state`` outside ``_MERGEABLE_STATES`` (unknown, missing, empty,
+    a case or whitespace variant, or a value not recognised). The existing re-drive
+    paths (check-completion events and the review sweeps) re-read the PR,
+    which also prompts GitHub to compute it, so that hold clears without a new
+    scheduler. Only ``mergeable: true`` with an allow-listed state returns None, and
+    the checks are then read as before. A push that resolves a conflict is a
+    new head, which re-enters the gate through the push event, its
+    check-completion event and the review sweeps.
+    """
+    mergeable = pr.get("mergeable") if isinstance(pr, dict) else None
+    mergeable_state = pr.get("mergeable_state") if isinstance(pr, dict) else None
+    state = mergeable_state.strip().lower() if isinstance(mergeable_state, str) else ""
+    short = (head or "")[:9] or "<unknown head>"
+    base = pr.get("base") if isinstance(pr, dict) else None
+    base_ref = base.get("ref") if isinstance(base, dict) else None
+    if mergeable is False or mergeable_state == "dirty":
+        return CheckGate(
+            head=head,
+            green=False,
+            reason=(
+                f"head {short}: the pull request has a merge conflict with its base "
+                f"branch {base_ref or '<unknown>'} (GitHub mergeable={mergeable!r}, "
+                f"mergeable_state={mergeable_state!r}); most CI does not run on a "
+                "conflicting head — holding until a push resolves the conflict"
+            ),
+        )
+    if mergeable is not True or state not in _MERGEABLE_STATES:
+        return CheckGate(
+            head=head,
+            green=False,
+            reason=(
+                f"head {short}: GitHub's mergeability for this pull request against "
+                f"its base branch {base_ref or '<unknown>'} is not yet computed or not "
+                f"recognised (mergeable={mergeable!r}, mergeable_state={mergeable_state!r}) "
+                "— the panel is held until it is a known non-conflicting state"
+            ),
+        )
+    return None
+
+
 def _evaluate_checks():
     """``approve_pr_as_app.evaluate_checks``, imported on first use."""
     if _SCRIPTS_DIR not in sys.path:

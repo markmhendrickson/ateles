@@ -16,8 +16,17 @@ name: Agent config validation
 # Neotoma as a clean SKIP (exit 0) rather than a crash — see the step-level
 # NOTE below for the informational/continue-on-error rollout plan.
 
+#
+# Trigger model (hardening): the workflow runs on `pull_request_target`, so the
+# workflow definition and every script executed here come from the base branch.
+# The PR contributes only the generated markdown mirrors (docs/agents and
+# .claude/skills), copied in as data after the trusted checkout; symlinks are
+# refused. The credential is attached only to the two steps that need it and is
+# never present while PR-supplied content is being copied. Same-repository PRs
+# only. A manual dispatch is honoured only from the default branch.
+
 on:
-  pull_request:
+  pull_request_target:
     paths:
       - "docs/agents/**"
       - ".claude/skills/**"
@@ -26,23 +35,45 @@ on:
       - ".github/workflows/agent-config-validation.yml"
   workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   validate:
     name: tool_allowlist + agent-doc-mirror freshness
     runs-on: ubuntu-latest
+    if: >-
+      (github.event_name == 'workflow_dispatch'
+        && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+      || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
     env:
-      NEOTOMA_BEARER_TOKEN: ${{ secrets.NEOTOMA_BEARER_TOKEN }}
       NEOTOMA_BASE_URL: ${{ vars.NEOTOMA_BASE_URL || 'https://neotoma.markmhendrickson.com' }}
     steps:
+      # Base-branch tree (pull_request_target default). Scripts run from here.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      # Bring the PR's generated mirrors in as data. No credential is exposed
+      # in this step, and only the two mirror trees are taken from the PR.
+      - name: Overlay PR mirror files (data only)
+        if: github.event_name == 'pull_request_target'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git fetch --no-tags origin "+refs/pull/${PR_NUMBER}/head:refs/pr/head"
+          rm -rf docs/agents .claude/skills
+          git checkout refs/pr/head -- docs/agents .claude/skills 2>/dev/null || true
+          if find docs/agents .claude/skills -type l 2>/dev/null | grep -q .; then
+            echo "symlinks are not allowed in the mirror trees" >&2
+            exit 1
+          fi
 
       # NOTE: non-blocking for now. NEOTOMA_BEARER_TOKEN is not yet provisioned
       # as a repo secret (same pre-existing gap loxia-pr-review.yml and
@@ -54,6 +85,8 @@ jobs:
       # secrets.
       - name: "Validate tool_allowlist grant grammar (no bash: prefix)"
         continue-on-error: true
+        env:
+          NEOTOMA_BEARER_TOKEN: ${{ secrets.NEOTOMA_BEARER_TOKEN }}
         run: python3 scripts/linters/validate_tool_allowlist.py
 
       # NOTE: non-blocking for now. As of ateles#255 the checked-in mirrors
@@ -65,4 +98,6 @@ jobs:
       # lands and the two trees are back in sync.
       - name: Validate agent-doc mirrors are in sync with Neotoma (informational)
         continue-on-error: true
+        env:
+          NEOTOMA_BEARER_TOKEN: ${{ secrets.NEOTOMA_BEARER_TOKEN }}
         run: python3 execution/scripts/render_agent_docs.py --check

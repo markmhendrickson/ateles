@@ -101,6 +101,20 @@ EXIT_JOB_INVALID = 96
 EXIT_RECORD_FAILED = 95
 # A delivering job whose clone could not be prepared: the CLI did not run.
 EXIT_DELIVERY_FAILED = 94
+# The job's Neotoma signing proxy could not reach an admitted /mcp: the CLI
+# did not run.
+EXIT_NEOTOMA_UNAVAILABLE = 93
+# Neotoma refused the result record with HTTP 401/403: the role's agent grant
+# most likely lacks store_structured on fly_runner_result. Distinct from 95 so
+# the Mac side can name the cause (fly_runner.EXIT_RECORD_REFUSED).
+EXIT_RECORD_REFUSED = 92
+RECORD_REFUSAL_STATUSES = frozenset({401, 403})
+# The last refused record write's HTTP status, for ``main``'s exit code.
+_last_refusal: dict = {"status": None}
+
+# job.json "neotoma_mcp": "" (no proxy) or "proxy" (the CLI's Neotoma MCP
+# server is this process's loopback proxy, which signs with the role's key).
+NEOTOMA_MCP_MODES = frozenset({"", "proxy"})
 
 # Repository delivery (a job whose job.json carries "delivery"). Without that
 # key nothing below runs. The token is the job's GitHub App token for one
@@ -206,6 +220,7 @@ class Job:
     system_prompt: str | None = None
     claude_token_file: str = ""
     delivery: "DeliverySpec | None" = None
+    neotoma_mcp: str = ""
 
 
 @dataclass(frozen=True)
@@ -214,6 +229,8 @@ class DeliverySpec:
     base_branch: str
     author_name: str
     author_email: str
+    pr_number: int | None = None
+    head_sha: str = ""
 
 
 @dataclass
@@ -225,8 +242,24 @@ class DeliveryRun:
     commit: str = ""
     pr_number: int | None = None
     pr_url: str = ""
+    # A correction's change-summary comment: ``posted`` (read back and
+    # confirmed) or ``not_confirmed`` (attempted, not confirmed); empty when
+    # the summary was empty or unreadable. ``+ignored`` (or ``ignored`` alone)
+    # marks a builder-written pull_request_body.md, which is never applied.
+    # The name is kept for the existing record and receipt consumers. The
+    # delivery's status never depends on it.
+    pr_description: str = ""
     work: Any = None
     base: str = ""
+
+
+def _neotoma_proxy():
+    """The signing proxy module, imported only by a job that uses it."""
+    if str(_HERE) not in sys.path:
+        sys.path.insert(0, str(_HERE))
+    import neotoma_proxy
+
+    return neotoma_proxy
 
 
 def _repo_delivery():
@@ -242,10 +275,10 @@ def _load_delivery(raw: Any, repository: str, secrets: dict[str, str],
                    child_names: tuple[str, ...]) -> DeliverySpec:  # fmt: skip
     """The job's delivery spec, or ``JobError`` naming what is wrong."""
     rd = _repo_delivery()
-    if not isinstance(raw, dict) or set(raw) != DELIVERY_KEYS:
+    if not isinstance(raw, dict) or set(raw) not in (DELIVERY_KEYS, DELIVERY_KEYS | {"pr_number", "head_sha"}):
         raise JobError("delivery must be an object with exactly "
                        + ", ".join(sorted(DELIVERY_KEYS)))  # fmt: skip
-    if not all(isinstance(raw[k], str) and raw[k] for k in DELIVERY_KEYS):
+    if not all(isinstance(raw[k], str) and raw[k] for k in raw):
         raise JobError("every delivery field must be a non-empty string")
     if DELIVERY_TOKEN_NAME not in secrets:
         raise JobError("a delivery needs its GitHub token")
@@ -258,11 +291,16 @@ def _load_delivery(raw: Any, repository: str, secrets: dict[str, str],
         raise JobError("delivery base_branch is not acceptable")
     try:
         rd.check_repository(repository)
-        rd.check_push_branch(raw["branch"], raw["base_branch"])
+        rd.check_push_branch(raw["branch"], raw["base_branch"], existing="pr_number" in raw)
+        if "pr_number" in raw and (not re.fullmatch(r"[1-9][0-9]*", raw["pr_number"])
+                                   or not re.fullmatch(r"[0-9a-f]{40}", raw["head_sha"])):
+            raise JobError("the existing PR number or exact head is invalid")
     except rd.RepoWorkError as exc:
         raise JobError(f"delivery refused: {exc.reason}") from None
     return DeliverySpec(branch=raw["branch"], base_branch=raw["base_branch"],
-                        author_name=raw["author_name"], author_email=raw["author_email"])  # fmt: skip
+                        author_name=raw["author_name"], author_email=raw["author_email"],
+                        pr_number=int(raw["pr_number"]) if "pr_number" in raw else None,
+                        head_sha=raw.get("head_sha", ""))  # fmt: skip
 
 
 def load_job(job_dir: Path) -> Job:
@@ -315,6 +353,11 @@ def load_job(job_dir: Path) -> Job:
         raise JobError("the role's AAuth key was named but not shipped")
     if not token_name and not jwk_name:
         raise JobError("the role's own Neotoma identity (token or AAuth key) is missing")
+    neotoma_mcp = spec["neotoma_mcp"] if "neotoma_mcp" in spec else ""
+    if not isinstance(neotoma_mcp, str) or neotoma_mcp not in NEOTOMA_MCP_MODES:
+        raise JobError("neotoma_mcp must be empty or \"proxy\"")
+    if neotoma_mcp == "proxy" and not jwk_name:
+        raise JobError("the Neotoma proxy needs the role's AAuth key")
     if "timeout_seconds" not in spec:
         raise JobError("timeout_seconds is missing")
     timeout_seconds = spec["timeout_seconds"]
@@ -370,6 +413,7 @@ def load_job(job_dir: Path) -> Job:
         machine_id=str(spec.get("machine_id") or os.environ.get("FLY_MACHINE_ID", "")),
         child_user=str(spec.get("child_user") or "agent"),
         delivery=delivery,
+        neotoma_mcp=neotoma_mcp,
     )
 
 
@@ -462,12 +506,42 @@ def write_mcp_config(home: Path, base_url: str, token: str) -> Path:
     return path
 
 
+def write_proxy_mcp_config(home: Path, port: int) -> Path:
+    """The Claude child's Neotoma MCP config naming the loopback signing proxy.
+    It carries no credential: the proxy signs each request itself."""
+    cfg_dir = home / ".ateles"
+    cfg_dir.mkdir(mode=0o700, exist_ok=True)
+    path = cfg_dir / "mcp.json"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "mcpServers": {
+                    "mcpsrv_neotoma": {
+                        "type": "http",
+                        "url": f"http://127.0.0.1:{int(port)}/mcp",
+                    }
+                }
+            },
+            fh,
+        )
+    return path
+
+
 def prepare_child(job: Job, home: Path, base_env,
-                  ident: tuple[int, int] | None = None) -> tuple[list[str], dict[str, str]]:
-    """The argv and environment the CLI runs with."""
+                  ident: tuple[int, int] | None = None,
+                  neotoma_proxy_port: int | None = None) -> tuple[list[str], dict[str, str]]:
+    """The argv and environment the CLI runs with. ``neotoma_proxy_port``:
+    the running signing proxy's port, for a ``neotoma_mcp == "proxy"`` job."""
     argv = list(job.argv)
     if MCP_CONFIG_PLACEHOLDER in argv:
-        if job.neotoma_token_name:
+        if job.neotoma_mcp == "proxy" and neotoma_proxy_port is not None:
+            cfg = write_proxy_mcp_config(home, neotoma_proxy_port)
+            argv = [str(cfg) if a == MCP_CONFIG_PLACEHOLDER else a for a in argv]
+        elif job.neotoma_mcp == "proxy":
+            # No proxy is running: never fall back to the token below.
+            argv = _drop_flag_with_value(argv, "--mcp-config", MCP_CONFIG_PLACEHOLDER)
+        elif job.neotoma_token_name:
             cfg = write_mcp_config(
                 home, job.neotoma_base_url, job.secrets[job.neotoma_token_name]
             )
@@ -947,6 +1021,8 @@ def build_record(
         })  # fmt: skip
         if delivery.pr_number is not None:
             record["pr_number"] = delivery.pr_number
+        if delivery.pr_description:
+            record["pr_description"] = delivery.pr_description
     return record
 
 
@@ -967,6 +1043,59 @@ def _load_httpsig_module():
     raise RuntimeError("aauth_httpsig.py is not on the runner")
 
 
+def _role_signer(job: Job):
+    """The role's own AAuth signer, from the key the job shipped. Raises when
+    the key belongs to another role; never echoes key material."""
+    httpsig = _load_httpsig_module()
+    jwk = json.loads(job.secrets[job.neotoma_jwk_name])
+    expected_sub = f"{job.role}{SWARM_SUB_SUFFIX}"
+    sub = str(jwk.get("sub") or "").strip()
+    if sub != expected_sub:
+        raise RuntimeError("the shipped AAuth key belongs to a different role")
+    return httpsig.HttpSigSigner(
+        private_jwk=jwk,
+        sub=sub,
+        iss=str(jwk.get("iss") or httpsig.DEFAULT_AAUTH_ISSUER),
+        kid=str(jwk.get("kid") or "").strip() or None,
+    )
+
+
+def _parent_euid() -> int:
+    return os.geteuid()
+
+
+def start_neotoma_proxy(job: Job, ident: tuple[int, int] | None):
+    """Start the job's signing proxy and check Neotoma admits the key.
+
+    Returns ``(proxy, port, problem)``. ``proxy`` is whatever was started (the
+    caller stops it on every path); ``problem`` is a refusal reason, or ""."""
+    # The proxy admits only the child's uid, so that uid must be a separate,
+    # unprivileged identity: root, or this process's own uid, could read the
+    # role's key and talk to the proxy as if it were the runner.
+    if ident is None or ident[0] == 0 or ident[0] == _parent_euid():
+        return None, None, "the Neotoma proxy needs a separate child uid"
+    try:
+        module = _neotoma_proxy()
+        signer = _role_signer(job)
+    except Exception as exc:  # noqa: BLE001 — never echo key material
+        return None, None, f"Neotoma proxy not healthy: setup failed ({type(exc).__name__})"
+
+    def sign(m, u, b, ct):
+        return signer.sign_headers(method=m, url=u, body=b, content_type=ct)
+
+    proxy = None
+    try:
+        proxy = module.NeotomaSigningProxy(job.neotoma_base_url, sign,
+                                           allowed_peer_uid=ident[0])  # fmt: skip
+        port = proxy.start()
+        reason = module.health_check(job.neotoma_base_url, sign)
+    except Exception as exc:  # noqa: BLE001 — never echo key material
+        reason = f"check failed ({type(exc).__name__})"
+    if reason is not None:
+        return proxy, None, f"Neotoma proxy not healthy: {reason}"
+    return proxy, port, ""
+
+
 def auth_headers_for(job: Job):
     """A function ``(url, body) -> headers`` that authenticates as the role.
 
@@ -975,18 +1104,7 @@ def auth_headers_for(job: Job):
     own Neotoma bearer. The shared daemon bearer never reaches a runner.
     """
     if job.neotoma_jwk_name:
-        httpsig = _load_httpsig_module()
-        jwk = json.loads(job.secrets[job.neotoma_jwk_name])
-        expected_sub = f"{job.role}{SWARM_SUB_SUFFIX}"
-        sub = str(jwk.get("sub") or "").strip()
-        if sub != expected_sub:
-            raise RuntimeError("the shipped AAuth key belongs to a different role")
-        signer = httpsig.HttpSigSigner(
-            private_jwk=jwk,
-            sub=sub,
-            iss=str(jwk.get("iss") or httpsig.DEFAULT_AAUTH_ISSUER),
-            kid=str(jwk.get("kid") or "").strip() or None,
-        )
+        signer = _role_signer(job)
 
         def _signed(url: str, body: bytes) -> dict[str, str]:
             return signer.sign_headers(method="POST", url=url, body=body)
@@ -1000,8 +1118,54 @@ def auth_headers_for(job: Job):
     return _bearer
 
 
-def write_record(base_url: str, auth, record: dict, *, attempts: int = 3) -> bool:
-    """POST the record to Neotoma ``/store`` as the role's own principal."""
+# How long the record write keeps retrying a temporary failure (a timeout, a
+# connection failure or a 5xx), and its backoff. A lost record leaves Apis
+# unable to say what the run did, so a busy Neotoma is waited out for a while.
+RECORD_RETRY_SECONDS = 180.0
+RECORD_BACKOFF_FIRST_SECONDS = 2.0
+RECORD_BACKOFF_MAX_SECONDS = 30.0
+RECORD_ATTEMPT_TIMEOUT_SECONDS = 30.0
+# Kept back before the run's deadline so the last attempt ends before it.
+RECORD_DEADLINE_MARGIN_SECONDS = 5.0
+
+
+def _log_refusal_detail(exc) -> None:
+    """Log the error code and message of a refused write, never a header or token.
+
+    Reads only the JSON body's ``error_code`` / ``code`` and ``message`` /
+    ``error`` fields (bounded), so the cause (for example a missing grant) is
+    in the log instead of a bare status. An unreadable body logs nothing more."""
+    body = None
+    try:
+        raw = exc.read(2048) if hasattr(exc, "read") else b""
+        body = json.loads(raw.decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 — the status alone is still logged
+        body = None  # the status alone is still logged
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            body = err
+        parts = []
+        for label, keys in (("code", ("error_code", "code")), ("message", ("message", "error"))):
+            for key in keys:
+                val = body.get(key)
+                if isinstance(val, str) and val:
+                    parts.append(f"{label}={val[:200]!r}")
+                    break
+        if parts:
+            print("fly-runner: record write refusal detail: " + ", ".join(parts), flush=True)
+
+
+def write_record(base_url: str, auth, record: dict, *, deadline: float | None = None,
+                 clock=time.time, sleep=time.sleep, opener=None) -> bool:  # fmt: skip
+    """POST the record to Neotoma ``/store`` as the role's own principal.
+
+    A temporary failure (timeout, connection failure, 5xx) is retried with
+    backoff for up to ``RECORD_RETRY_SECONDS``, and never past *deadline*
+    (less a margin). A refused write (any other HTTP status) fails at once.
+    Each attempt logs only its status; never the record or a credential."""
+    opener = opener or urllib.request.urlopen
+    _last_refusal["status"] = None
     payload = json.dumps(
         {
             "idempotency_key": f"fly-runner-result-{record['run_id']}",
@@ -1010,7 +1174,19 @@ def write_record(base_url: str, auth, record: dict, *, attempts: int = 3) -> boo
         }
     ).encode()
     url = f"{base_url}/store"
-    for attempt in range(attempts):
+    start = clock()
+    stop_by = start + RECORD_RETRY_SECONDS
+    if deadline is not None:
+        stop_by = min(stop_by, deadline - RECORD_DEADLINE_MARGIN_SECONDS)
+    backoff = RECORD_BACKOFF_FIRST_SECONDS
+    attempt = 0
+    while True:
+        attempt += 1
+        left = stop_by - clock()
+        if left <= 0:
+            print(f"fly-runner: record write gave up before attempt {attempt}: no time left",
+                  flush=True)
+            return False
         try:
             headers = {
                 "Content-Type": "application/json",
@@ -1023,13 +1199,33 @@ def write_record(base_url: str, auth, record: dict, *, attempts: int = 3) -> boo
             return False
         req = urllib.request.Request(url, data=payload, method="POST", headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                if 200 <= resp.status < 300:
-                    return True
-        except (urllib.error.URLError, OSError):
-            pass
-        time.sleep(2 * (attempt + 1))
-    return False
+            with opener(req, timeout=min(RECORD_ATTEMPT_TIMEOUT_SECONDS, left)) as resp:
+                status = resp.status
+            if 200 <= status < 300:
+                print(f"fly-runner: record write attempt {attempt}: HTTP {status}", flush=True)
+                return True
+            print(f"fly-runner: record write attempt {attempt}: HTTP {status}; refused",
+                  flush=True)
+            return False
+        except urllib.error.HTTPError as exc:
+            if exc.code < 500:
+                _last_refusal["status"] = exc.code
+                print(f"fly-runner: record write attempt {attempt}: HTTP {exc.code}; refused",
+                      flush=True)
+                _log_refusal_detail(exc)
+                return False
+            outcome = f"HTTP {exc.code}"
+        except (urllib.error.URLError, OSError) as exc:  # timeouts are OSErrors
+            outcome = type(exc).__name__
+        wait = min(backoff, stop_by - clock())
+        if wait <= 0:
+            print(f"fly-runner: record write attempt {attempt}: {outcome}; giving up",
+                  flush=True)
+            return False
+        print(f"fly-runner: record write attempt {attempt}: {outcome}; retrying in "
+              f"{wait:.0f}s", flush=True)
+        sleep(wait)
+        backoff = min(backoff * 2, RECORD_BACKOFF_MAX_SECONDS)
 
 
 def main(job_dir: Path = DEFAULT_JOB_DIR, *, writer=write_record, runner=run_cli,
@@ -1067,6 +1263,7 @@ def _main(job_dir: Path, writer, runner, started: float, deadline: float,
         return EXIT_JOB_INVALID
 
     home = ram_home(job.run_id)
+    proxy = None
     try:
         token_problem = ""
         if job.claude_token_file:
@@ -1084,7 +1281,11 @@ def _main(job_dir: Path, writer, runner, started: float, deadline: float,
             identity_problem = ""
         except RuntimeError as exc:
             ident, identity_problem = None, str(exc)
-        argv, child_env = prepare_child(job, home, os.environ, ident)
+        proxy_port, proxy_problem = None, ""
+        if job.neotoma_mcp == "proxy" and not (deadline_problem or token_problem
+                                               or identity_problem):
+            proxy, proxy_port, proxy_problem = start_neotoma_proxy(job, ident)
+        argv, child_env = prepare_child(job, home, os.environ, ident, proxy_port)
         remaining = deadline - time.time()
         delivery = None
         if job.delivery is None:
@@ -1113,6 +1314,11 @@ def _main(job_dir: Path, writer, runner, started: float, deadline: float,
             refused = identity_problem
             probe = {"ok": False, "present": ["<child user>"]}
             rc, out, err, timed_out = EXIT_PROBE_FAILED, b"", refused.encode(), False
+        elif proxy_problem:
+            delete_job_dir(job_dir)
+            refused = proxy_problem
+            probe = {"ok": False, "present": ["<neotoma proxy>"]}
+            rc, out, err, timed_out = EXIT_NEOTOMA_UNAVAILABLE, b"", refused.encode(), False
         elif not delete_job_dir(job_dir):
             refused = "job directory could not be deleted"
             probe = {"ok": False, "present": ["<job dir>"]}
@@ -1157,15 +1363,28 @@ def _main(job_dir: Path, writer, runner, started: float, deadline: float,
         except Exception as exc:  # noqa: BLE001 — never echo key material
             print(f"fly-runner: no usable role identity: {type(exc).__name__}", flush=True)
             return EXIT_RECORD_FAILED
-        stored = writer(job.neotoma_base_url, auth, record)
+        if writer is write_record:
+            stored = writer(job.neotoma_base_url, auth, record, deadline=deadline)
+        else:
+            stored = writer(job.neotoma_base_url, auth, record)
         print(
             f"fly-runner: run={job.run_id} role={job.role} provider={job.provider} "
             f"rc={rc} stdout={len(out)}B stderr={len(err)}B probe_ok={probe.get('ok')} "
             f"recorded={stored}",
             flush=True,
         )
-        return rc if stored else EXIT_RECORD_FAILED
+        if stored:
+            return rc
+        if _last_refusal["status"] in RECORD_REFUSAL_STATUSES:
+            return EXIT_RECORD_REFUSED
+        return EXIT_RECORD_FAILED
     finally:
+        if proxy is not None:
+            try:
+                proxy.stop()
+            except Exception as exc:  # noqa: BLE001 — the job is over either way
+                print(f"fly-runner: Neotoma proxy did not stop cleanly: {type(exc).__name__}",
+                      flush=True)
         shutil.rmtree(home, ignore_errors=True)
         if job.delivery is not None:
             _end_delivery()
@@ -1188,13 +1407,21 @@ def _run_delivering_job(job: Job, delivery: DeliveryRun, runner, argv: list[str]
     failure = failed_category = None
     with rd.bounded_by(work_by):
         try:
+            if spec.pr_number:
+                rd.require_existing_pr(repository=job.repository, number=spec.pr_number,
+                                       branch=spec.branch, base_branch=spec.base_branch,
+                                       head=spec.head_sha, token=token)
             delivery.work = rd.prepare_work(WORK_ROOT, run_id=job.run_id)
             delivery.base = rd.clone_origin(
                 delivery.work, url=rd.GITHUB_REMOTE.format(repository=job.repository),
-                base_branch=spec.base_branch, token=token, allow=rd.GITHUB_REMOTE_TRANSPORT)
-            rd.make_checkout(delivery.work, branch=spec.branch, base_branch=spec.base_branch,
+                base_branch=spec.branch if spec.pr_number else spec.base_branch, token=token,
+                allow=rd.GITHUB_REMOTE_TRANSPORT,
+                **({"expected_head": spec.head_sha} if spec.pr_number else {}))
+            rd.make_checkout(delivery.work, branch=spec.branch,
+                             base_branch=spec.branch if spec.pr_number else spec.base_branch,
                              repository=job.repository, ident=ident,
-                             author=(spec.author_name, spec.author_email))  # fmt: skip
+                             author=(spec.author_name, spec.author_email),
+                             **({"existing": True} if spec.pr_number else {}))  # fmt: skip
         except rd.RepoWorkError as exc:
             failure, failed_category = str(exc), exc.category
     if failure is not None:
@@ -1236,34 +1463,61 @@ def _deliver(job: Job, delivery: DeliveryRun, rc: int, timed_out: bool,
     token = job.secrets[DELIVERY_TOKEN_NAME]
     failure = failed_category = None
     pushed = False
+    push_attempted = False
+    if spec.pr_number:
+        delivery.pr_number = spec.pr_number  # admitted identity, not delivery success
     with rd.bounded_by(work_by):
         step = "not_delivered"
         try:
-            if not rd.export_agent_work(work, branch=spec.branch, base=delivery.base, ident=ident):
+            existing = {"existing": True} if spec.pr_number else {}
+            if not rd.export_agent_work(work, branch=spec.branch, base=delivery.base, ident=ident, **existing):
                 delivery.status, delivery.reason = "no_changes", "the branch adds no commits"
                 return
-            imported = rd.import_agent_work(work, branch=spec.branch, base=delivery.base)
+            imported = rd.import_agent_work(work, branch=spec.branch, base=delivery.base, **existing)
             delivery.commit = imported.head
             step = "push_failed"
+            if spec.pr_number:
+                rd.require_existing_pr(repository=job.repository, number=spec.pr_number,
+                                       branch=spec.branch, base_branch=spec.base_branch,
+                                       head=spec.head_sha, token=token)
+            push_attempted = True
             rd.push_branch(work, repository=job.repository, branch=spec.branch,
-                           default_branch=spec.base_branch, head=imported.head, token=token)
+                           default_branch=spec.base_branch, head=imported.head, token=token,
+                           **({"expected_head": spec.head_sha} if spec.pr_number else {}))
             pushed = True
             step = "pr_failed"
-            title, body = _pr_text(rd, work, job.secrets)
-            pr = rd.open_or_update_pr(repository=job.repository, branch=spec.branch,
-                                      default_branch=spec.base_branch, token=token,
-                                      title=title, body=body)  # fmt: skip
+            if spec.pr_number:
+                pr = rd.require_existing_pr(repository=job.repository, number=spec.pr_number,
+                                           branch=spec.branch, base_branch=spec.base_branch,
+                                           head=imported.head, token=token,
+                                           wait_for_head=True)
+                delivery.pr_description = _post_change_summary(rd, work, job, pr, imported.head, token)
+            else:
+                title, body = _pr_text(rd, work, job.secrets)
+                pr = rd.open_or_update_pr(repository=job.repository, branch=spec.branch,
+                                          default_branch=spec.base_branch, token=token,
+                                          title=title, body=body)  # fmt: skip
         except rd.RepoWorkError as exc:
             failure, failed_category = str(exc), exc.category
+            # These guard/deadline outcomes explicitly precede send-pack.
+            # An actual git timeout/connection failure remains uncertain.
+            if exc.category in {rd.PUSH_REFUSED, rd.NO_TIME} or exc.status == "not_started":
+                push_attempted = False
     if failure is not None and failed_category == rd.NO_TIME:
         # Nothing further was started. A completed push stays on the remote:
         # the record keeps its branch and commit, with no pull request.
         delivery.status = "no_time"
         delivery.reason = ("the branch was pushed; no time was left for the pull request"
                            if pushed else failure)  # fmt: skip
+        if spec.pr_number:
+            state = "confirmed" if pushed else "unknown" if push_attempted else "not_started"
+            delivery.reason = f"[push={state}] existing PR #{spec.pr_number}: {delivery.reason}"
         return
     if failure is not None:
         delivery.status, delivery.reason = step, failure
+        if spec.pr_number:
+            state = "confirmed" if pushed else "unknown" if push_attempted else "not_started"
+            delivery.reason = f"[push={state}] existing PR #{spec.pr_number}: {failure}"
         return
     delivery.status, delivery.reason = pr.action, ""
     delivery.pr_number, delivery.pr_url = pr.number, pr.url
@@ -1277,6 +1531,38 @@ def _pr_text(rd, work, secrets: dict[str, str]) -> tuple[str, str]:
     except rd.RepoWorkError:
         title, body = "", ""
     return scrub(title, secrets), scrub(body, secrets)
+
+
+def _post_change_summary(rd, work, job, pr, head: str, token: str) -> str:
+    """Post a correction's change summary as one comment on its pull request,
+    scrubbed of every job secret, and say what happened: ``posted`` (read back
+    and confirmed), ``not_confirmed`` (attempted, not confirmed) or ``""``
+    (empty or unreadable; nothing posted). The description is never written;
+    a builder-written ``pull_request_body.md`` only adds ``ignored``. The code
+    has already landed, so a failure here never changes the delivery's
+    outcome: it is reported in one line and on the record."""
+    try:
+        ignored = "ignored" if rd.read_pr_body(work) else ""
+    except rd.RepoWorkError:
+        ignored = ""
+    if ignored:
+        print("fly-runner: pull_request_body.md was ignored; a correction never changes the description",
+              flush=True)  # fmt: skip
+    try:
+        summary = scrub(rd.read_change_summary(work), job.secrets)
+    except rd.RepoWorkError:
+        summary = ""
+    outcome = ""
+    if summary.strip():
+        body = f"Correction round summary (run {job.run_id}, head {head[:7]}):\n\n{summary}"
+        try:
+            outcome = "posted" if rd.post_pr_comment(repository=job.repository, number=pr.number,
+                                                     token=token, body=body) else "not_confirmed"
+        except rd.RepoWorkError:
+            outcome = "not_confirmed"
+        if outcome != "posted":
+            print("fly-runner: the change summary comment could not be confirmed", flush=True)
+    return "+".join(part for part in (outcome, ignored) if part)
 
 
 def _end_delivery() -> None:
