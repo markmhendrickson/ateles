@@ -25,6 +25,7 @@ Examples:
 
 import argparse
 import contextlib
+import errno
 import hashlib
 import io
 import json
@@ -69,7 +70,7 @@ if "could not parse statement" in stderr_output.lower():
     print(f"{'=' * 80}\n")
     sys.exit(1)
 
-from ateles.runtime_paths import get_data_dir  # noqa: E402
+from ateles.runtime_paths import get_data_dir, is_cloud_evicted  # noqa: E402
 from local_fluid import BACKEND_FLUID, transcribe_fluid, format_events  # noqa: E402
 from transcript_utterances import group_utterances  # noqa: E402
 
@@ -2186,20 +2187,54 @@ def _json_safe_nonnegative_int(value) -> int:
 _HASH_BLOCK_BYTES = 1024 * 1024
 
 
-def _audio_content_hash(audio_path: Path) -> str | None:
-    """sha256 of the audio BYTES, or None when they cannot be read.
+# Reason reported when audio bytes are unreadable because cloud storage evicted
+# them to a placeholder, as distinct from any other read failure.
+AUDIO_EVICTED_BY_CLOUD_STORAGE = "evicted_by_cloud_storage"
 
-    Returning None rather than raising keeps an unreadable file on the old
-    path-keyed behaviour instead of failing a transcription run outright.
+# One line, because the importer's failure summary shows the last stderr line.
+EVICTED_AUDIO_MESSAGE = (
+    f"Cannot bind pending store: audio unreadable ({AUDIO_EVICTED_BY_CLOUD_STORAGE})."
+    " Its bytes are in iCloud, not on this Mac. Download it from iCloud"
+    " (in Finder, choose Download Now), then re-run the import."
+)
+
+
+def _audio_unreadable_reason(audio_path: Path, exc: OSError) -> str:
+    """Classify a failed audio read without naming the file.
+
+    Returns ``evicted_by_cloud_storage`` for a cloud-evicted placeholder,
+    otherwise ``errno=<code> (<NAME>)``. The path is deliberately left out:
+    recording names are private.
     """
+    if is_cloud_evicted(audio_path):
+        return AUDIO_EVICTED_BY_CLOUD_STORAGE
+    code = exc.errno
+    name = errno.errorcode.get(code, "UNKNOWN") if code is not None else "UNKNOWN"
+    return f"errno={code} ({name})"
+
+
+def _audio_content_hash_or_reason(audio_path: Path) -> tuple[str | None, str | None]:
+    """(sha256, None) when the bytes are readable, else (None, reason)."""
     try:
         digest = hashlib.sha256()
         with open(audio_path, "rb") as fh:
             while chunk := fh.read(_HASH_BLOCK_BYTES):
                 digest.update(chunk)
-        return digest.hexdigest()
-    except OSError:
-        return None
+        return digest.hexdigest(), None
+    except OSError as exc:
+        reason = _audio_unreadable_reason(audio_path, exc)
+        print(f"Audio content hash unavailable: {reason}", file=sys.stderr)
+        return None, reason
+
+
+def _audio_content_hash(audio_path: Path) -> str | None:
+    """sha256 of the audio BYTES, or None when they cannot be read.
+
+    Returning None rather than raising keeps an unreadable file on the old
+    path-keyed behaviour instead of failing a transcription run outright. The
+    failure's errno (or cloud eviction) is logged to stderr, never the path.
+    """
+    return _audio_content_hash_or_reason(audio_path)[0]
 
 
 def _transcription_idempotency_key(audio_path: Path) -> str:
@@ -2427,9 +2462,13 @@ def _pending_store_identity(audio_path: Path, mic_path: Path | None) -> dict:
     identity = {}
     for name, path in (("audio", audio_path), ("mic", mic_path)):
         if path is not None:
-            digest = _audio_content_hash(path)
+            digest, reason = _audio_content_hash_or_reason(path)
             if digest is None:
-                raise RuntimeError("Cannot bind pending store to unreadable audio")
+                if reason == AUDIO_EVICTED_BY_CLOUD_STORAGE:
+                    raise RuntimeError(EVICTED_AUDIO_MESSAGE)
+                raise RuntimeError(
+                    f"Cannot bind pending store to unreadable audio: {reason}"
+                )
             identity[name] = {"path": str(path.resolve()), "sha256": digest}
     return identity
 
