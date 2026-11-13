@@ -23,8 +23,8 @@ runs against that design — background daemons and skills that already automate
 issue triage, email, calendar, recurring payments (fiat + Bitcoin), meeting capture and recap, health
 tracking, customer development, content and social, multi-jurisdiction tax prep, and CRM.
 
-Everything is built around [Neotoma](https://github.com/markmhendrickson/neotoma) as the canonical memory
-and state layer. Agents are Neotoma entities, act under signed identities, and are audited through the same
+Everything is built around [Neotoma](https://github.com/markmhendrickson/neotoma) as the system of record
+for AI agents. Agents are Neotoma entities, act under signed identities, and are audited through the same
 observations they write. Open source. Local-first. MIT licensed.
 
 **Who it's for:** [docs/icp.md](docs/icp.md) · **What the rules are for:** [docs/foundation/charter.md](docs/foundation/charter.md)
