@@ -41,8 +41,12 @@ class _Notifier:
         pass
 
 
+_REAL_REREAD = apis._task_status_still  # conftest makes it inert for other tests
+
+
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch, tmp_path):
+    monkeypatch.setattr(apis, "_task_status_still", _REAL_REREAD)
     monkeypatch.setattr(apis, "_unroutable", UnroutableLedger(path=tmp_path / "l.json"))
     monkeypatch.setattr(apis, "_created_seen", {})
     monkeypatch.setattr(apis, "_announced", {})
