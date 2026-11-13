@@ -1091,8 +1091,18 @@ def test_pending_store_identity_reports_cloud_eviction_distinctly(tmp_path, monk
 def test_is_cloud_evicted_detects_placeholders(extras, expected):
     from ateles.runtime_paths import is_cloud_evicted
 
-    st = os.stat_result((0o100644, 1, 1, 1, 0, 0, 500, 0, 0, 0), extras)
+    # A plain stand-in, not os.stat_result: st_flags is a macOS/BSD-only
+    # field that os.stat_result() rejects on Linux.
+    st = types.SimpleNamespace(st_size=500, **extras)
     assert is_cloud_evicted(st) is expected
+
+
+def test_is_cloud_evicted_without_st_flags_uses_the_block_fallback():
+    """Linux stat results have no st_flags at all."""
+    from ateles.runtime_paths import is_cloud_evicted
+
+    assert is_cloud_evicted(types.SimpleNamespace(st_size=500, st_blocks=0)) is True
+    assert is_cloud_evicted(types.SimpleNamespace(st_size=500, st_blocks=8)) is False
 
 
 def test_is_cloud_evicted_false_for_real_file(tmp_path):

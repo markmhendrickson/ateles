@@ -35,13 +35,14 @@ SF_DATALESS = getattr(_stat, "SF_DATALESS", 0x40000000)
 def is_cloud_evicted(path_or_stat) -> bool:
     """True when a file's bytes have been evicted by cloud storage.
 
-    Accepts a path or an ``os.stat_result``. Detects the macOS SF_DATALESS
-    flag, and as a fallback a non-empty file with no allocated blocks. A file
-    that cannot be stat'ed is reported as not evicted; the caller's own read
-    surfaces that error.
+    Accepts a path or a stat result (anything with ``st_size``). Detects the
+    macOS SF_DATALESS flag, and as a fallback a non-empty file with no
+    allocated blocks. ``st_flags`` exists only on macOS/BSD; elsewhere it
+    reads as 0 and only the fallback applies. A file that cannot be stat'ed
+    is reported as not evicted; the caller's own read surfaces that error.
     """
     st = path_or_stat
-    if not isinstance(st, os.stat_result):
+    if isinstance(st, (str, bytes, os.PathLike)):
         try:
             st = os.stat(path_or_stat)
         except OSError:
