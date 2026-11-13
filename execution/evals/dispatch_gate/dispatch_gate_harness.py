@@ -144,6 +144,20 @@ def run_scenario(scenario: dict, base_task: dict, *, mutation: str = "none") -> 
             return True
 
         mp.setattr(apis, "set_task_status", _set_status)
+
+        def _fetch_task_snapshot(_id):
+            # The gate re-reads the task before each write (_task_status_still).
+            # Answer it from this harness's own view of the task: the status its
+            # set_task_status stub last recorded, else the status the task started
+            # with. A scenario's "task_changes_to" is a status that lands from
+            # outside between the decision and the first write.
+            if obs["statuses"]:
+                status = obs["statuses"][-1][1]
+            else:
+                status = scenario.get("task_changes_to") or task.get("status")
+            return {**task, "status": getattr(status, "value", status)}
+
+        mp.setattr(apis, "fetch_task_snapshot", _fetch_task_snapshot)
         mp.setattr(apis, "fetch_task_record", lambda _id: {"entity_id": _id})
         mp.setattr(apis, "fetch_entity_user_id", lambda _id: "usr_eval")
         mp.setattr(
