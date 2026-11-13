@@ -2668,6 +2668,42 @@ def _guessed_owner_is_low_stakes(skill: str, snapshot: dict) -> bool:
         return False
 
 
+async def _task_status_still(entity_id: str, expected_status, step: str) -> bool:
+    """Re-read the task and say whether a gate write may still land.
+
+    A create/dispatch decision is drawn from a snapshot read before it writes;
+    a closure or other status write can land in between (13 Nov 2026: a bulk
+    correction of old tasks had closures reverted and statuses flipped to
+    blocked / awaiting_approval from a stale snapshot). True only when the
+    re-read succeeds, the task is not terminal, and its status is still the one
+    the decision was based on. An unreadable task is False (fail closed): no
+    overwrite on an unread state. Skips are logged, never silent.
+    """
+    fresh = await asyncio.to_thread(fetch_task_snapshot, entity_id)
+    if not isinstance(fresh, dict):
+        log.warning(
+            f"[{DAEMON_NAME}] task {entity_id!r}: could not re-read before {step} "
+            "— not writing on a state that could not be confirmed"
+        )
+        return False
+    now = fresh.get("status")
+    if is_terminal(now):
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} became terminal "
+            f"(status={normalize_status(now)!r}) before {step} — not overwriting"
+        )
+        return False
+    expected = getattr(expected_status, "value", expected_status)
+    if normalize_status(now) != normalize_status(expected):
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} changed under the decision "
+            f"(status {normalize_status(expected)!r} -> {normalize_status(now)!r}) "
+            f"before {step} — not overwriting"
+        )
+        return False
+    return True
+
+
 async def dispatch_task(entity_id: str, *args, **kwargs) -> bool | None:
     """``_dispatch_task`` (its docstring has the contract), with the task held
     in ``_tasks_in_dispatch`` until it returns, so the restart-recovery sweep
@@ -3048,6 +3084,8 @@ async def _dispatch_task(
             f"(trigger={trigger}, tags={existing_tags}, assigned_to={assigned_to}) "
             "— unroutable (no owner)"
         )
+        if not await _task_status_still(entity_id, current_status, "no-owner block"):
+            return
         set_task_status(
             entity_id,
             TaskStatus.BLOCKED,
@@ -3130,6 +3168,9 @@ async def _dispatch_task(
             job.failed(f"task {entity_id} lifecycle release was not qualified")
             return
     else:
+        if not await _task_status_still(entity_id, current_status, "routed write"):
+            job.failed(f"task {entity_id} changed before routing — not routed")
+            return
         set_task_status(
             entity_id, TaskStatus.ROUTED, handler=DAEMON_NAME,
             from_status=current_status, reason="" if gate_override else None,
@@ -3159,6 +3200,10 @@ async def _dispatch_task(
             relationship_count=int(snapshot.get("relationship_count", 0) or 0),
         )
         if not assessment.ready:
+            if correction_lifecycle is None and not await _task_status_still(
+                    entity_id, TaskStatus.ROUTED, "readiness write"):
+                job.failed(f"task {entity_id} changed before readiness write")
+                return
             write_assessment(entity_id, assessment)
             ask = missing_request(assessment, title)
             set_task_status(
@@ -3343,6 +3388,10 @@ async def _dispatch_task(
             # approve.  The authenticated checkpoint binds the complete
             # read-back record after this hold lands; creating it first would
             # make our own lifecycle writes invalidate it immediately.
+            if correction_lifecycle is None and not await _task_status_still(
+                    entity_id, TaskStatus.ROUTED, "gate hold and checkpoint"):
+                job.failed(f"task {entity_id} changed before gate hold")
+                return
             set_task_status(
                 entity_id,
                 TaskStatus.AWAITING_APPROVAL,

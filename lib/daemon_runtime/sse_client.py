@@ -48,6 +48,28 @@ SSE_RECONNECT_DELAY_MAX = 60  # seconds
 SSE_READ_TIMEOUT_SECONDS = 90.0
 
 
+# Neotoma stamps ``action: "created"`` on BOTH ``entity.created`` and
+# ``observation.created``. An observation is written for every store and every
+# correction, and a correction to an existing entity emits ``observation.created``
+# before ``entity.updated`` (neotoma src/services/correction.ts,
+# src/events/substrate_store_emit.ts). Read as a creation, a correction to any
+# task a daemon had not seen since its last restart re-ran the whole create path
+# (13 Nov 2026: ~90 old tasks corrected, closures reverted, spurious PLAN
+# checkpoints). A new entity still emits ``entity.created``, so nothing that is
+# genuinely new is lost. Normalised here so every consumer keyed on
+# ``action == "created"`` is fixed at once.
+OBSERVED_ACTION = "observed"
+
+
+def _action_of(data: dict) -> str:
+    """The daemon-facing action: only an entity creation (or a legacy event that
+    names no ``event_type``) counts as ``created``."""
+    action = data.get("action", "")
+    if action == "created" and data.get("event_type") == "observation.created":
+        return OBSERVED_ACTION
+    return action
+
+
 @dataclass
 class NeotomaEvent:
     """A single event from the Neotoma SSE stream."""
@@ -55,7 +77,7 @@ class NeotomaEvent:
     event_type: str = ""  # e.g. "entity_updated", "entity_created"
     entity_type: str = ""  # e.g. "task", "event"
     entity_id: str = ""
-    action: str = ""  # created | updated | deleted
+    action: str = ""  # created | updated | deleted | observed (observation.created)
     snapshot: dict = field(default_factory=dict)
     raw: dict = field(default_factory=dict)
     # True once ``snapshot`` is known to reflect what Neotoma actually holds:
@@ -72,7 +94,7 @@ class NeotomaEvent:
             event_type=data.get("event_type", ""),
             entity_type=data.get("entity_type", ""),
             entity_id=data.get("entity_id", ""),
-            action=data.get("action", ""),
+            action=_action_of(data),
             snapshot=data.get("snapshot") or {},
             # A snapshot embedded in the event is authoritative; without one we
             # have not yet read the entity, so hydrated stays False until

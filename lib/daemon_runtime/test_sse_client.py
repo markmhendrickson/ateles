@@ -338,3 +338,35 @@ def test_slow_handler_is_not_mistaken_for_a_silent_stream(short_limits):
     )
     assert got == ["ent_a", "ent_b"]
     assert conns == 1
+
+
+# ── observation.created is not a creation ────────────────────────────────────
+
+
+def test_observation_created_is_not_read_as_a_creation():
+    """Neotoma stamps action="created" on observation.created too, and emits it
+    for every correction. It must not reach a daemon as a creation."""
+    ev = NeotomaEvent.from_raw(
+        {"event_type": "observation.created", "action": "created",
+         "entity_type": "task", "entity_id": "ent_a"}
+    )
+    assert ev.action == sc.OBSERVED_ACTION != "created"
+
+
+def test_entity_created_and_legacy_events_still_count_as_creations():
+    new = NeotomaEvent.from_raw(
+        {"event_type": "entity.created", "action": "created", "entity_type": "task"}
+    )
+    legacy = NeotomaEvent.from_raw({"action": "created", "entity_type": "task"})
+    assert new.action == "created"
+    assert legacy.action == "created"
+
+
+def test_other_actions_pass_through_unchanged():
+    for event_type, action in (
+        ("entity.updated", "updated"),
+        ("entity.deleted", "deleted"),
+        ("relationship.created", "created"),
+    ):
+        ev = NeotomaEvent.from_raw({"event_type": event_type, "action": action})
+        assert ev.action == action

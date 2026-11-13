@@ -309,3 +309,18 @@ def _path_required_lenses_off_by_default(monkeypatch):
     for cls in classes - {None}:
         if hasattr(cls, "_path_required_lenses"):
             monkeypatch.setattr(cls, "_path_required_lenses", _none_extra)
+
+
+@pytest.fixture(autouse=True)
+def _gate_reread_sees_no_change(monkeypatch):
+    """The gate's pre-write re-read of the task (`_task_status_still`) would hit
+    the network in every dispatch test, and fails closed there. Dispatch tests
+    exercise routing and gating, not that guard, so it is inert by default;
+    test_correction_is_not_creation.py restores the real one and owns its tests.
+    """
+    import apis
+
+    async def _unchanged(*_a, **_k):
+        return True
+
+    monkeypatch.setattr(apis, "_task_status_still", _unchanged)
