@@ -413,3 +413,32 @@ def test_real_producer_launched_capacity_failure_has_attempts_and_is_plain_failu
     with pytest.raises(lx.ReviewError) as info:
         _through_call_review(monkeypatch, result)
     assert not isinstance(info.value, lx.ReviewCapacityRefused)
+
+
+def test_diff_reads_pr_head_ref_without_touching_worktree(tmp_path, monkeypatch):
+    """The working tree is the trusted base; the PR is read only as a ref."""
+    import subprocess
+
+    def run(*args):
+        subprocess.run(args, cwd=tmp_path, check=True, capture_output=True)
+
+    run("git", "init", "-q", "-b", "main")
+    run("git", "config", "user.email", "t@example.invalid")
+    run("git", "config", "user.name", "t")
+    (tmp_path / "a.txt").write_text("base\n")
+    run("git", "add", "a.txt")
+    run("git", "commit", "-q", "-m", "base")
+    run("git", "update-ref", "refs/remotes/origin/main", "HEAD")
+    run("git", "checkout", "-q", "-b", "pr")
+    (tmp_path / "a.txt").write_text("changed\n")
+    (tmp_path / "b.txt").write_text("new\n")
+    run("git", "add", "-A")
+    run("git", "commit", "-q", "-m", "pr")
+    run("git", "update-ref", "refs/loxia/pr-head", "HEAD")
+    run("git", "checkout", "-q", "main")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(lx, "HEAD_REF", "refs/loxia/pr-head")
+    assert sorted(lx.get_changed_files()) == ["a.txt", "b.txt"]
+    assert "+changed" in lx.get_pr_diff()
+    assert (tmp_path / "a.txt").read_text() == "base\n"

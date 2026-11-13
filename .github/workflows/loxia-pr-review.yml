@@ -22,9 +22,18 @@ name: Loxia — External PR Review
 # by `if:` as passing for required-check purposes, but confirm that still
 # holds before relying on it.
 #
+# Trigger model (hardening): credentialed steps run only code that comes from
+# the base branch. The workflow runs on `pull_request_target`, so both the
+# workflow definition and the checked-out working tree are the base branch's,
+# never the PR's. The PR's changes are fetched as plain git objects
+# (refs/pull/<n>/head) and read through `git diff` only; nothing from the PR
+# is executed. Same-repository PRs only: fork PRs are skipped, as they were
+# before (they never had access to repository credentials). A manual
+# workflow_dispatch is honoured only when dispatched from the default branch.
+#
 # Triggers:
-#   - pull_request (opened, synchronize, reopened, labeled) on any branch
-#     targeting main — `labeled` lets the canary label added AFTER a PR was
+#   - pull_request_target (opened, synchronize, reopened, labeled) on any
+#     branch targeting main — `labeled` lets the canary label added AFTER a PR was
 #     opened start review for it. The gate below evaluates CURRENT label
 #     state (PR + parent issue), not the specific label that was just added,
 #     so an unrelated label add on a non-canary PR still correctly denies —
@@ -38,7 +47,7 @@ name: Loxia — External PR Review
 #     explicit operator/dispatch invocation is its own authorization).
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
@@ -54,20 +63,33 @@ on:
           - false
           - true
 
+# Nothing is granted by default; each job declares what it needs.
+permissions: {}
+
 jobs:
   gate:
     name: Loxia canary gate
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.base.ref == 'main'
+    if: >-
+      (github.event_name == 'workflow_dispatch'
+        && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+      || (github.event.pull_request.base.ref == 'main'
+        && github.event.pull_request.head.repo.full_name == github.repository)
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
     outputs:
       run_review: ${{ steps.check.outputs.run_review }}
     steps:
       # Shallow, single-branch checkout: this job only needs
       # execution/scripts/loxia_canary_gate.py and lib/daemon_runtime/, not
       # history — keep it cheap since it runs on every PR push, canary or not.
+      # Base-branch tree (pull_request_target default). Never the PR head.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Determine whether this PR is in the swarm-canary lane
         id: check
@@ -103,9 +125,12 @@ jobs:
       pull-requests: write
 
     steps:
+      # Base-branch tree (pull_request_target default): the code executed in
+      # this job is always the base branch's.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -145,12 +170,27 @@ jobs:
 
       - name: Determine PR number
         id: pr
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_PR_NUMBER: ${{ github.event.inputs.pr_number }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "number=${{ github.event.inputs.pr_number }}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            number="$DISPATCH_PR_NUMBER"
           else
-            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+            number="$EVENT_PR_NUMBER"
           fi
+          case "$number" in
+            ''|*[!0-9]*) echo "PR number must be numeric" >&2; exit 1 ;;
+          esac
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      # The PR's changes arrive as git objects only. They are diffed, never
+      # checked out or executed.
+      - name: Fetch PR changes as data
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: git fetch --no-tags origin "+refs/pull/${PR_NUMBER}/head:refs/loxia/pr-head"
 
       - name: Run Loxia review
         env:
@@ -166,4 +206,5 @@ jobs:
           LOXIA_REPO: ${{ github.repository }}
           LOXIA_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
           LOXIA_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          LOXIA_HEAD_REF: refs/loxia/pr-head
         run: python execution/scripts/loxia_review.py
