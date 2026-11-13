@@ -33,6 +33,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from dotenv import load_dotenv
 
@@ -138,14 +139,18 @@ def find_existing_staged_copy(audio_file: Path, destination_dir: Path) -> Path |
     """Return an already-staged copy of ``audio_file`` that can be reused.
 
     A staged copy matches when its name is a timestamped form of the same
-    original name and its size equals the source's. A copy that cloud storage
-    has evicted to a placeholder is not reused: its bytes are not on disk, so
-    transcribing it would fail exactly as the original eviction did.
+    original name and both its size and its modification time equal the
+    source's. ``shutil.copy2`` sets the copy's mtime only after all the data is
+    written, so the mtime match rejects an interrupted copy as well as a source
+    edited since. A copy that cloud storage has evicted to a placeholder is not
+    reused: its bytes are not on disk, so transcribing it would fail exactly as
+    the original eviction did. When several copies match, a current-format
+    name is preferred over the legacy form, then the latest name.
     """
     if not destination_dir.is_dir():
         return None
     try:
-        source_size = audio_file.stat().st_size
+        source_st = audio_file.stat()
     except OSError:
         return None
     matches = []
@@ -157,12 +162,16 @@ def find_existing_staged_copy(audio_file: Path, destination_dir: Path) -> Path |
             st = candidate.stat()
         except OSError:
             continue
-        if not candidate.is_file() or st.st_size != source_size:
+        if not candidate.is_file() or st.st_size != source_st.st_size:
+            continue
+        if st.st_mtime_ns != source_st.st_mtime_ns:
             continue
         if is_cloud_evicted(st):
             continue
         matches.append(candidate)
-    return sorted(matches)[-1] if matches else None
+    if not matches:
+        return None
+    return max(matches, key=lambda c: ("_voicememo_" not in c.name, c.name))
 
 
 def import_audio_file(
@@ -172,8 +181,8 @@ def import_audio_file(
     Move or copy audio file to imports directory with timestamped name.
 
     Voice Memos files are copied (system-managed); Desktop files are moved.
-    A copy reuses an existing staged copy of the same original (same name and
-    size) rather than writing another one: before this, every run re-copied
+    A copy reuses an existing staged copy of the same original (same name,
+    size and modification time) rather than writing another one: before this, every run re-copied
     the whole unstored backlog, and thousands of duplicates accumulated.
     Returns the path in the imports directory.
     """
@@ -219,9 +228,46 @@ LOOKUP_UNKNOWN = "unknown"
 EXIT_LOOKUP_UNAVAILABLE = 75
 
 
-def import_status(original_filename: str) -> str:
+class LookupResult(NamedTuple):
+    """Outcome of the already-imported lookup for one file.
+
+    ``reason`` says how an UNKNOWN lookup failed: ``cli_missing``,
+    ``nonzero_exit``, ``empty_output``, ``unparseable_output``, ``timeout`` or
+    ``error``. Each points at a different fix (PATH, credentials, waiting).
+    It is None for a lookup that answered.
     """
-    Return IMPORTED, NOT_IMPORTED, or LOOKUP_UNKNOWN for an original file.
+
+    status: str
+    reason: str | None = None
+
+
+def _lookup_argv(field: str, value: str) -> list[str]:
+    """The neotoma CLI argv for one lookup.
+
+    The value is passed as ``--identifier=<value>`` so a filename that starts
+    with ``--`` is read as the identifier, never as a CLI option.
+    """
+    return [
+        "neotoma",
+        "--json",
+        "--api-only",
+        "--base-url",
+        _neotoma_prod_base_url(),
+        "entities",
+        "search",
+        f"--identifier={value}",
+        "--entity-type",
+        "transcription",
+        "--by",
+        field,
+        "--limit",
+        "5",
+    ]
+
+
+def import_status(original_filename: str) -> LookupResult:
+    """
+    Return the IMPORTED, NOT_IMPORTED or LOOKUP_UNKNOWN status of an original file.
 
     Uses `neotoma entities search --by original_source_file` (exact match on new
     field) then falls back to `--by audio_file_name` with the filename stem (for
@@ -229,72 +275,70 @@ def import_status(original_filename: str) -> str:
     Passes the current environment so the auth token env var is available.
 
     Fails closed: only two clean, parseable "no match" answers make a file
-    NOT_IMPORTED. Any failure to get an answer is LOOKUP_UNKNOWN, and the
-    caller skips the file this run instead of treating it as new.
+    NOT_IMPORTED. Any failure to get an answer is LOOKUP_UNKNOWN, with the
+    failure class as the reason, and the caller skips the file this run
+    instead of treating it as new.
     """
     if not shutil.which("neotoma"):
-        return LOOKUP_UNKNOWN
+        return LookupResult(LOOKUP_UNKNOWN, "cli_missing")
 
-    def _search(field: str, value: str) -> bool | None:
-        """True on a match, False on a clean miss, None when the lookup failed."""
+    def _search(field: str, value: str) -> tuple[bool | None, str | None]:
+        """(True, None) on a match, (False, None) on a clean miss, or
+        (None, reason) when the lookup failed."""
         try:
             result = subprocess.run(
-                [
-                    "neotoma",
-                    "--json",
-                    "--api-only",
-                    "--base-url",
-                    _neotoma_prod_base_url(),
-                    "entities",
-                    "search",
-                    value,
-                    "--entity-type",
-                    "transcription",
-                    "--by",
-                    field,
-                    "--limit",
-                    "5",
-                ],
+                _lookup_argv(field, value),
                 capture_output=True,
                 text=True,
                 timeout=15,
                 env=os.environ,
             )
-            if result.returncode != 0 or not result.stdout.strip():
-                return None
-            data = json.loads(result.stdout)
-            if not isinstance(data, dict):
-                return None
-            entities = data.get("entities")
-            if entities is None:
-                entities = data.get("results")
-            if not isinstance(entities, list):
-                return None
-            return len(entities) > 0
+        except subprocess.TimeoutExpired:
+            return None, "timeout"
         except Exception:
-            return None
+            return None, "error"
+        if result.returncode != 0:
+            return None, "nonzero_exit"
+        if not result.stdout.strip():
+            return None, "empty_output"
+        try:
+            data = json.loads(result.stdout)
+        except ValueError:
+            return None, "unparseable_output"
+        if not isinstance(data, dict):
+            return None, "unparseable_output"
+        entities = data.get("entities")
+        if entities is None:
+            entities = data.get("results")
+        if not isinstance(entities, list):
+            return None, "unparseable_output"
+        return len(entities) > 0, None
 
     # Exact match on new field first
-    first = _search("original_source_file", original_filename)
+    first, first_reason = _search("original_source_file", original_filename)
     if first is True:
-        return IMPORTED
+        return LookupResult(IMPORTED)
     # Stem-based fallback for pre-existing rows (audio_file_name stores renamed file
     # but includes the original stem e.g. "2026-05-20-100738_20250522 210022-0E6627E9.m4a")
-    second = _search("audio_file_name", Path(original_filename).stem)
+    second, second_reason = _search("audio_file_name", Path(original_filename).stem)
     if second is True:
-        return IMPORTED
+        return LookupResult(IMPORTED)
     if first is None or second is None:
-        return LOOKUP_UNKNOWN
-    return NOT_IMPORTED
+        return LookupResult(LOOKUP_UNKNOWN, first_reason or second_reason)
+    return LookupResult(NOT_IMPORTED)
 
 
-def already_imported(original_filename: str) -> bool:
-    """True only when the lookup positively found an existing transcription.
+def _describe_error(exc: BaseException) -> str:
+    """A path-free description of an exception for operator output.
 
-    Kept for callers that need a boolean; the import loop uses
-    ``import_status`` so a failed lookup is not mistaken for "new".
+    OS errors often embed both file paths in their message, so only the errno
+    is kept.
     """
-    return import_status(original_filename) == IMPORTED
+    if isinstance(exc, OSError) and exc.errno is not None:
+        import errno as _errno
+
+        return f"{type(exc).__name__} errno={exc.errno} ({_errno.errorcode.get(exc.errno, 'UNKNOWN')})"
+    return type(exc).__name__
 
 
 def transcribe_file(
@@ -342,6 +386,7 @@ def summarize_run(
     results: list[dict],
     analyze_hint: bool = False,
     lookup_unknown: int = 0,
+    lookup_reasons: dict[str, int] | None = None,
 ) -> tuple[int, list[str]]:
     """Turn per-file transcription results into an exit code and summary lines.
 
@@ -394,9 +439,10 @@ def summarize_run(
 
     if lookup_unknown:
         lines.append(
-            f"  {lookup_unknown} file(s) skipped this run: the already-imported"
-            " lookup failed, so they were not treated as new. They are retried"
-            " on the next run."
+            f"  {lookup_unknown} file(s) skipped this run because the"
+            f" already-imported lookup failed ({_format_reasons(lookup_reasons)})."
+            " They were not treated as new and nothing was staged for them;"
+            " the next run looks them up again."
         )
 
     if imported_count:
@@ -422,6 +468,13 @@ def summarize_run(
         )
 
     return (0 if ok else 1), lines
+
+
+def _format_reasons(reasons: dict[str, int] | None) -> str:
+    """'timeout: 2, cli_missing: 1' — failure classes with counts, no names."""
+    if not reasons:
+        return "reason unknown"
+    return ", ".join(f"{k}: {v}" for k, v in sorted(reasons.items()))
 
 
 def transcript_path_from_transcribe_stdout(stdout: str) -> str | None:
@@ -527,16 +580,20 @@ def main():
     if args.files:
         source_file_pairs = []
         for raw in args.files:
-            f = Path(raw).expanduser().resolve()
+            # Do not resolve the file itself: a symlink must keep its own
+            # directory (so the Voice Memos copy rule still applies) and is
+            # always copied, never moved (see _import_pairs).
+            f = Path(raw).expanduser().absolute()
             if not f.is_file():
                 print(f"  ✗ Not a file, skipped: {f.name}", file=sys.stderr)
                 continue
             if f.suffix.lower() not in AUDIO_EXTENSIONS:
                 print(f"  ✗ Not an audio file, skipped: {f.name}", file=sys.stderr)
                 continue
-            source_file_pairs.append((f.parent, f))
+            source_file_pairs.append((f.parent.resolve(), f))
         print(f"Importing {len(source_file_pairs)} named file(s); no directory scan.")
-        return _import_pairs(source_file_pairs, args)
+        _import_pairs(source_file_pairs, args)
+        return
 
     # Resolve source directories
     if args.sources:
@@ -555,11 +612,14 @@ def main():
 
     # Find audio files across all sources
     source_file_pairs = find_audio_files_in_sources(source_paths)
-    return _import_pairs(source_file_pairs, args)
+    _import_pairs(source_file_pairs, args)
 
 
 def _import_pairs(source_file_pairs: list[tuple[Path, Path]], args) -> None:
-    """Dedup, stage, transcribe and summarise the given (source_dir, file) pairs."""
+    """Dedup, stage, transcribe and summarise the given (source_dir, file) pairs.
+
+    Returns nothing; a failed run ends the process with a non-zero exit.
+    """
     if not source_file_pairs:
         print("\nNo audio files found.")
         return
@@ -576,9 +636,10 @@ def _import_pairs(source_file_pairs: list[tuple[Path, Path]], args) -> None:
     print("\nChecking for already-imported files...")
     skipped = 0
     lookup_unknown = 0
+    lookup_reasons: dict[str, int] = {}
     to_import = []
     for source_dir, audio_file in source_file_pairs:
-        status = import_status(audio_file.name)
+        status, reason = import_status(audio_file.name)
         if status == IMPORTED:
             print(f"  ↷ Already imported: {audio_file.name}")
             skipped += 1
@@ -586,19 +647,24 @@ def _import_pairs(source_file_pairs: list[tuple[Path, Path]], args) -> None:
             to_import.append((source_dir, audio_file))
         else:
             lookup_unknown += 1
+            reason = reason or "error"
+            lookup_reasons[reason] = lookup_reasons.get(reason, 0) + 1
+            print(f"  ? Lookup failed ({reason}), not staged: {audio_file.name}")
     if skipped:
         print(f"  Skipping {skipped} already-imported file(s).")
     if lookup_unknown:
         print(
             f"  Skipping {lookup_unknown} file(s) this run: already-imported"
-            " lookup failed (status unknown, not treated as new)."
+            f" lookup failed ({_format_reasons(lookup_reasons)}); status unknown,"
+            " not treated as new."
         )
 
     if not to_import:
         if lookup_unknown:
             print(
-                "\n✗ Already-imported lookup failed for every candidate file."
-                " Nothing was copied; retry once the lookup works."
+                "\n✗ Already-imported lookup failed for every candidate file"
+                f" ({_format_reasons(lookup_reasons)}). Nothing was copied."
+                " Retry once the lookup works."
             )
             sys.exit(EXIT_LOOKUP_UNAVAILABLE)
         print("\nAll files already imported. Nothing to do.")
@@ -615,14 +681,18 @@ def _import_pairs(source_file_pairs: list[tuple[Path, Path]], args) -> None:
     for source_dir, audio_file in to_import:
         try:
             is_voice_memo = source_dir == VOICE_MEMOS_PATH.resolve()
-            destination = import_audio_file(
-                audio_file, AUDIO_IMPORTS_DIR, copy=is_voice_memo
-            )
+            # Voice Memos originals are system-managed, and a symlink must
+            # never have its target moved: both are copied.
+            copy = is_voice_memo or audio_file.is_symlink()
+            destination = import_audio_file(audio_file, AUDIO_IMPORTS_DIR, copy=copy)
             moved_files.append((source_dir, audio_file.name, destination))
-            verb = "Copied" if is_voice_memo else "Moved"
+            verb = "Copied" if copy else "Moved"
             print(f"  ✓ {verb}: {audio_file.name} → {destination.name}")
         except Exception as e:
-            print(f"  ✗ Failed to import {audio_file.name}: {e}", file=sys.stderr)
+            print(
+                f"  ✗ Failed to import {audio_file.name}: {_describe_error(e)}",
+                file=sys.stderr,
+            )
 
     if not moved_files:
         print("\n✗ No files were imported successfully. Nothing was transcribed or stored.")
@@ -661,6 +731,7 @@ def _import_pairs(source_file_pairs: list[tuple[Path, Path]], args) -> None:
         results=transcription_results,
         analyze_hint=not args.no_analyze,
         lookup_unknown=lookup_unknown,
+        lookup_reasons=lookup_reasons,
     )
     for line in summary_lines:
         print(line)

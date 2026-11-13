@@ -6,6 +6,7 @@ suppressed exactly like Telegram instead of firing on every invocation —
 the regression that produced one operator email per failed poll.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -529,3 +530,259 @@ def test_lookup_unavailable_code_matches_the_importer():
     import import_audio_from_desktop as iad
 
     assert watch.IMPORT_EXIT_LOOKUP_UNAVAILABLE == iad.EXIT_LOOKUP_UNAVAILABLE
+
+
+# ── The real main() loop: per-memo import, deferral and backoff ─────────────
+
+
+class _StopLoop(BaseException):
+    """Escapes main()'s loop (which catches Exception) after N polls."""
+
+
+class _FakeJob:
+    def __init__(self, log, summary):
+        self.log = log
+        log.append(("started", summary))
+
+    def finished(self, summary):
+        self.log.append(("finished", summary))
+
+    def failed(self, summary):
+        self.log.append(("failed", summary))
+
+
+class _FakeActivity:
+    def __init__(self):
+        self.log = []
+
+    def started(self, summary, **_kw):
+        return _FakeJob(self.log, summary)
+
+
+_START = 1_000_000.0
+
+
+def _drive_main(monkeypatch, tmp_path, memos, rc_for, polls, start=_START):
+    """Run watch.main() for ``polls`` polls against temp state.
+
+    ``rc_for(name)`` is the importer's exit code for that memo. The clock
+    advances POLL_INTERVAL_SECONDS per poll. Returns what was observed.
+    """
+    recordings = tmp_path / "Recordings"
+    recordings.mkdir(exist_ok=True)
+    for name in memos:
+        (recordings / name).write_bytes(b"\0" * 32)
+    state = tmp_path / "state"
+    state.mkdir(exist_ok=True)
+    monkeypatch.setattr(watch, "RECORDINGS_DIR", recordings)
+    monkeypatch.setattr(watch, "STATE_FILE", state / "seen_files.json")
+    monkeypatch.setattr(watch, "MEETING_STATE_FILE", state / "seen_meeting_files.json")
+    monkeypatch.setattr(watch, "HELD_STATE_FILE", state / "held_memos.json")
+    monkeypatch.setattr(watch, "DEFERRED_STATE_FILE", state / "deferred_memos.json")
+    if not (state / "seen_files.json").exists():
+        # A non-empty seen-set skips the first-run hydration from Neotoma.
+        (state / "seen_files.json").write_text('["unrelated-old-memo.m4a"]')
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+
+    import lib.daemon_runtime.checkout_identity as checkout_identity
+
+    monkeypatch.setattr(checkout_identity, "enforce_deploy_checkout", lambda *a, **k: None)
+    monkeypatch.setattr(watch, "_start_daemon_services", lambda: None)
+    monkeypatch.setattr(watch, "check_neotoma", lambda: None)
+
+    seen = {"notices": [], "telegram": [], "imports": [], "assessed": []}
+    monkeypatch.setattr(watch, "notify", lambda title, msg: seen["notices"].append(msg))
+    monkeypatch.setattr(watch, "_telegram", lambda msg: seen["telegram"].append(msg))
+    activity = _FakeActivity()
+    monkeypatch.setattr(watch, "_activity", activity)
+    monkeypatch.setattr(
+        watch, "assess_memo", lambda memo: seen["assessed"].append(memo.name) or (None, None)
+    )
+    monkeypatch.setattr(watch, "run_entity_extraction", lambda files: "")
+
+    clock = {"now": start}
+
+    class _Done:
+        def __init__(self, rc):
+            self.returncode = rc
+
+    def fake_run(cmd, **_kwargs):
+        assert cmd[1] == str(watch.IMPORT_SCRIPT), cmd
+        files = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--file"]
+        assert len(files) == 1, "piculet must import one memo per run"
+        name = Path(files[0]).name
+        seen["imports"].append((clock["now"], name))
+        return _Done(rc_for(name))
+
+    monkeypatch.setattr(watch.subprocess, "run", fake_run)
+    monkeypatch.setattr(watch.time, "time", lambda: clock["now"])
+    count = {"polls": 0}
+
+    def fake_sleep(seconds):
+        count["polls"] += 1
+        if count["polls"] >= polls:
+            raise _StopLoop()
+        clock["now"] += seconds
+
+    monkeypatch.setattr(watch.time, "sleep", fake_sleep)
+    try:
+        watch.main()
+    except _StopLoop:
+        pass
+
+    seen["activity"] = activity.log
+    seen["seen_file"] = set(json.loads((state / "seen_files.json").read_text()))
+    held_file = state / "held_memos.json"
+    seen["held"] = json.loads(held_file.read_text()) if held_file.exists() else {}
+    deferred_file = state / "deferred_memos.json"
+    seen["deferred"] = json.loads(deferred_file.read_text()) if deferred_file.exists() else {}
+    return seen
+
+
+def _unavailable(_name):
+    return watch.IMPORT_EXIT_LOOKUP_UNAVAILABLE
+
+
+def test_lasting_lookup_outage_notifies_once_and_backs_off(tmp_path, monkeypatch):
+    memo = "20261101 101010-AAAA0001.m4a"
+    out = _drive_main(monkeypatch, tmp_path, [memo], _unavailable, polls=10)
+    # 10 polls, 60 s apart: attempts at +0, +60, +180, +420 (backoff 60, 120, 240).
+    assert [t - _START for t, _ in out["imports"]] == [0, 60, 180, 420]
+    importing = [n for n in out["notices"] if n.startswith("Importing")]
+    assert importing == ["Importing 1 new memo…"]
+    assert [e for e in out["activity"] if e[0] == "started"] == [
+        ("started", "importing 1 new voice memo")
+    ]
+    assert memo not in out["seen_file"]
+    assert out["held"] == {}
+    assert out["assessed"] == []  # the clarity gate never saw it
+    entry = out["deferred"][memo]
+    assert entry["attempts"] == 4
+    assert entry["reason"] == watch.DEFERRED_REASON
+    assert entry["next_attempt_at"] - _START == 420 + 480
+    # The exit-75 warning reaches Telegram once, not once per attempt.
+    assert len([t for t in out["telegram"] if "Import deferred" in t]) == 1
+
+
+def test_deferral_backoff_survives_a_restart(tmp_path, monkeypatch):
+    memo = "20261101 101010-AAAA0002.m4a"
+    _drive_main(monkeypatch, tmp_path, [memo], _unavailable, polls=2)  # +0, +60
+    # Restart 100 s after the first start: the next attempt is due at +180.
+    out = _drive_main(monkeypatch, tmp_path, [memo], _unavailable, polls=1, start=_START + 100)
+    assert out["imports"] == []
+    assert out["notices"] == []
+    assert out["deferred"][memo]["attempts"] == 2
+
+
+def test_successful_import_marks_the_memo_seen(tmp_path, monkeypatch):
+    memo = "20261101 101010-AAAA0003.m4a"
+    out = _drive_main(monkeypatch, tmp_path, [memo], lambda _n: 0, polls=3)
+    assert len(out["imports"]) == 1
+    assert memo in out["seen_file"]
+    assert out["assessed"] == [memo]
+    assert out["deferred"] == {}
+
+
+def test_mixed_poll_defers_only_the_unknown_memo(tmp_path, monkeypatch):
+    new, unknown = "20261101 101010-AAAA0004.m4a", "20261101 101010-AAAA0005.m4a"
+    out = _drive_main(
+        monkeypatch,
+        tmp_path,
+        [new, unknown],
+        lambda n: watch.IMPORT_EXIT_LOOKUP_UNAVAILABLE if n == unknown else 0,
+        polls=1,
+    )
+    assert sorted(n for _, n in out["imports"]) == sorted([new, unknown])
+    assert new in out["seen_file"]
+    assert unknown not in out["seen_file"]
+    assert unknown not in out["held"]
+    assert out["assessed"] == [new]
+    assert out["deferred"][unknown]["reason"] == watch.DEFERRED_REASON
+    assert [n for n in out["notices"] if n.startswith("Importing")] == ["Importing 2 new memos…"]
+
+
+def test_deferred_memo_imports_once_lookup_recovers(tmp_path, monkeypatch):
+    memo = "20261101 101010-AAAA0006.m4a"
+    state = {"down": True}
+
+    def rc(_name):
+        return watch.IMPORT_EXIT_LOOKUP_UNAVAILABLE if state["down"] else 0
+
+    _drive_main(monkeypatch, tmp_path, [memo], rc, polls=1)
+    state["down"] = False
+    out = _drive_main(monkeypatch, tmp_path, [memo], rc, polls=1, start=_START + 60)
+    assert len(out["imports"]) == 1
+    assert memo in out["seen_file"]
+    assert out["deferred"] == {}
+    # Its one "Importing" notice was sent on the first attempt.
+    assert [n for n in out["notices"] if n.startswith("Importing")] == []
+
+
+def test_backoff_doubles_to_an_hour_cap():
+    assert [watch.defer_backoff_seconds(n) for n in (1, 2, 3, 6, 7, 20)] == [
+        60, 120, 240, 1920, 3600, 3600,
+    ]
+
+
+# ── Importing the module has no credential side effects ─────────────────────
+
+
+def test_importing_watch_touches_nothing_under_home_and_runs_no_secret_tools(tmp_path):
+    """Import watch.py in a fresh interpreter with HOME pointed at a decoy.
+
+    The decoy holds an env file and a sops snapshot where the daemon's
+    bootstrap looks, so an import-time bootstrap would have to open them. An
+    audit hook records any open/mkdir/rename/remove under HOME and any
+    process launch; stub op and sops record any call. Nothing real is read.
+    """
+    import subprocess as sp
+
+    home = tmp_path / "home"
+    neotoma_cfg = home / ".config" / "neotoma"
+    (neotoma_cfg / "secrets").mkdir(parents=True)
+    (neotoma_cfg / ".env").write_text("DECOY_ONLY=1\n")
+    (neotoma_cfg / "secrets" / "neotoma.sops.enc").write_text("decoy")
+    before = sorted(str(p.relative_to(home)) for p in home.rglob("*"))
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir()
+    calls = tmp_path / "secret_tool_calls.log"
+    for tool in ("op", "sops"):
+        stub = stub_bin / tool
+        stub.write_text(f'#!/bin/sh\necho {tool} >> "{calls}"\nexit 1\n')
+        stub.chmod(0o755)
+
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import os, sys\n"
+        "home = os.path.realpath(os.environ['HOME'])\n"
+        "hits = []\n"
+        "def hook(event, args):\n"
+        "    if event in ('open', 'os.mkdir', 'os.rename', 'os.remove', 'shutil.copyfile'):\n"
+        "        path = args[0] if args else None\n"
+        "        if isinstance(path, (str, bytes, os.PathLike)):\n"
+        "            p = os.path.realpath(os.fsdecode(path))\n"
+        "            if p == home or p.startswith(home + os.sep):\n"
+        "                hits.append(event + ':' + os.path.relpath(p, home))\n"
+        "    elif event in ('subprocess.Popen', 'os.posix_spawn', 'os.exec'):\n"
+        "        hits.append(event)\n"
+        "sys.addaudithook(hook)\n"
+        f"sys.path.insert(0, {str(Path(watch.__file__).parent)!r})\n"
+        "import watch\n"
+        "print('HITS=' + '|'.join(hits))\n"
+    )
+    env = {
+        "HOME": str(home),
+        "PATH": f"{stub_bin}:/usr/bin:/bin",
+        # Mirrors the pytest guard that already keeps lib.daemon_runtime and
+        # lib.activity from loading the env file; this test is about watch.py.
+        "ATELES_SKIP_DOTENV": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    result = sp.run(
+        [sys.executable, str(probe)], capture_output=True, text=True, env=env, timeout=120
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    hits_line = [ln for ln in result.stdout.splitlines() if ln.startswith("HITS=")][-1]
+    assert hits_line == "HITS=", hits_line
+    assert not calls.exists(), calls.read_text()
+    assert sorted(str(p.relative_to(home)) for p in home.rglob("*")) == before

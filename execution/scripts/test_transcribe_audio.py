@@ -1070,15 +1070,19 @@ def test_pending_store_identity_reports_cloud_eviction_distinctly(tmp_path, monk
     with pytest.raises(RuntimeError) as info:
         ta._pending_store_identity(audio, None)
     message = str(info.value)
-    assert ta.AUDIO_EVICTED_BY_CLOUD_STORAGE in message
-    assert "unreadable" not in message
+    assert f"audio unreadable ({ta.AUDIO_EVICTED_BY_CLOUD_STORAGE})." in message
+    assert "errno=" not in message
+    assert "Download it from iCloud" in message and "then re-run the import." in message
+    assert "\n" not in message  # the importer summary shows one line
     assert "private-memo-name" not in message
 
 
 @pytest.mark.parametrize(
     "extras, expected",
     [
-        ({"st_blocks": 0, "st_flags": 0x40000000}, True),   # SF_DATALESS
+        # Flag set but blocks still allocated: only the SF_DATALESS check
+        # can return True here, so this case cannot pass via the fallback.
+        ({"st_blocks": 8, "st_flags": 0x40000000}, True),
         ({"st_blocks": 0, "st_flags": 0}, True),            # no blocks, non-empty
         ({"st_blocks": 8, "st_flags": 0}, False),           # resident
     ],

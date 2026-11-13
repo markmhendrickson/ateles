@@ -29,6 +29,7 @@ notification over the existing Telegram path.
 """
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -104,6 +105,11 @@ MEETING_STATE_FILE = Path(__file__).parent / "seen_meeting_files.json"
 # listed here, and is re-surfaced to the operator on the reminder interval
 # until it is explicitly released or discarded.
 HELD_STATE_FILE = Path(__file__).parent / "held_memos.json"
+# Memos whose already-imported lookup failed (importer exit 75). They are
+# neither seen nor held: they are retried on an exponential backoff that
+# survives restarts, so a lasting lookup outage neither drops them nor
+# relaunches the importer every poll.
+DEFERRED_STATE_FILE = Path(__file__).parent / "deferred_memos.json"
 
 # Re-surface the held-memo backlog on this interval so an unconfirmed memo
 # cannot fall silently out of view. Matches the operator-alert reminder cadence.
@@ -113,30 +119,26 @@ _HELD_REMINDER_INTERVAL = 6 * 3600  # 6 hours
 RELEASE_COMMAND = "python3 execution/daemons/piculet/watch.py --release"
 
 # ---------------------------------------------------------------------------
-# Env bootstrap — runs at import time before anything else
+# Env bootstrap — runs at daemon start, never at import
 # ---------------------------------------------------------------------------
+#
+# This used to run at import time, so anything that imported this module (the
+# tests included) loaded the operator's Neotoma env file, decrypted the secret
+# snapshot or ran a live 1Password read, and wrote the token back into the env
+# file. It now runs only from the daemon and operator-command entry points.
 
-# 1. Load ~/.config/neotoma/.env so launchd picks up all Neotoma vars.
-#    Use os.environ[] (not setdefault) so daemon restarts always pick up a
-#    refreshed token written by the 1Password sync below.
-_NEOTOMA_ENV_FILE = Path.home() / ".config" / "neotoma" / ".env"
-if _NEOTOMA_ENV_FILE.exists():
-    for _line in _NEOTOMA_ENV_FILE.read_text().splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _, _v = _line.partition("=")
-            os.environ[_k.strip()] = _v.strip().strip('"').strip("'")
-
-# 2. Refresh NEOTOMA_BEARER_TOKEN — prefer an OFFLINE SOPS decrypt (no live
-#    1Password session needed), falling back to live `op read` during migration.
-#    The canonical value lives in 1Password; the age-encrypted snapshot lives in
-#    the PRIVATE ateles-private repo (ateles is public), decryptable with the
-#    machine-local age key.
 _OP_REF = "op://Private/Neotoma local bearer token/bearer_token"
-_SOPS_CANDIDATES = [
-    Path.home() / "repos" / "ateles-private" / "secrets" / "neotoma.sops.enc",
-    Path.home() / ".config" / "neotoma" / "secrets" / "neotoma.sops.enc",
-]
+
+
+def _neotoma_env_file() -> Path:
+    return Path.home() / ".config" / "neotoma" / ".env"
+
+
+def _sops_candidates() -> list[Path]:
+    return [
+        Path.home() / "repos" / "ateles-private" / "secrets" / "neotoma.sops.enc",
+        Path.home() / ".config" / "neotoma" / "secrets" / "neotoma.sops.enc",
+    ]
 
 
 def _persist_bearer_token(_token: str) -> None:
@@ -144,9 +146,10 @@ def _persist_bearer_token(_token: str) -> None:
     if not _token:
         return
     os.environ["NEOTOMA_BEARER_TOKEN"] = _token
-    if _NEOTOMA_ENV_FILE.exists():
+    env_file = _neotoma_env_file()
+    if env_file.exists():
         import re as _re
-        _env_text = _NEOTOMA_ENV_FILE.read_text()
+        _env_text = env_file.read_text()
         _new_line = f'NEOTOMA_BEARER_TOKEN="{_token}"'
         if "NEOTOMA_BEARER_TOKEN" in _env_text:
             _env_text = _re.sub(
@@ -155,48 +158,77 @@ def _persist_bearer_token(_token: str) -> None:
             )
         else:
             _env_text += f"\n{_new_line}\n"
-        _NEOTOMA_ENV_FILE.write_text(_env_text)
+        env_file.write_text(_env_text)
 
 
-_bearer = ""
-# sops' default age-key path is OS-specific; point it at the standard location
-# explicitly so launchd daemons (minimal env) can decrypt.
-_AGE_KEY_FILE = Path.home() / ".config" / "sops" / "age" / "keys.txt"
-if (not os.environ.get("SOPS_AGE_KEY_FILE") and not os.environ.get("SOPS_AGE_KEY")
-        and _AGE_KEY_FILE.exists()):
-    os.environ["SOPS_AGE_KEY_FILE"] = str(_AGE_KEY_FILE)
-# (a) Offline: decrypt the SOPS snapshot with the local age key.
-for _snap in _SOPS_CANDIDATES:
-    if not _snap.exists():
-        continue
-    try:
-        _r = subprocess.run(
-            ["sops", "--decrypt", "--input-type", "dotenv",
-             "--output-type", "dotenv", str(_snap)],
-            capture_output=True, text=True, timeout=15,
-        )
-        if _r.returncode == 0:
-            for _l in _r.stdout.splitlines():
-                _l = _l.strip()
-                if _l.startswith("NEOTOMA_BEARER_TOKEN="):
-                    _bearer = _l.partition("=")[2].strip().strip('"').strip("'")
-                    break
-        if _bearer:
-            break
-    except Exception:
-        pass  # sops/age not available — fall through to op read
-# (b) Fallback: live `op read` (requires an active 1Password session).
-if not _bearer:
-    try:
-        _r = subprocess.run(
-            ["op", "read", _OP_REF],
-            capture_output=True, text=True, timeout=10,
-        )
-        if _r.returncode == 0:
-            _bearer = _r.stdout.strip()
-    except Exception:
-        pass  # op not available or session expired — keep existing token
-_persist_bearer_token(_bearer)
+def _bootstrap_environment() -> None:
+    """Load the Neotoma env file and refresh the bearer token.
+
+    1. Load ~/.config/neotoma/.env so launchd picks up all Neotoma vars. Use
+       os.environ[] (not setdefault) so daemon restarts always pick up a
+       refreshed token written by the 1Password sync below.
+    2. Refresh NEOTOMA_BEARER_TOKEN — prefer an OFFLINE SOPS decrypt (no live
+       1Password session needed), falling back to live `op read` during
+       migration. The canonical value lives in 1Password; the age-encrypted
+       snapshot lives in the PRIVATE ateles-private repo (ateles is public),
+       decryptable with the machine-local age key.
+    """
+    global _NEOTOMA_BASE_URL, NEOTOMA_COMPANY_ENTITY_ID
+
+    env_file = _neotoma_env_file()
+    if env_file.exists():
+        for _line in env_file.read_text().splitlines():
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _, _v = _line.partition("=")
+                os.environ[_k.strip()] = _v.strip().strip('"').strip("'")
+
+    _bearer = ""
+    # sops' default age-key path is OS-specific; point it at the standard
+    # location explicitly so launchd daemons (minimal env) can decrypt.
+    age_key_file = Path.home() / ".config" / "sops" / "age" / "keys.txt"
+    if (not os.environ.get("SOPS_AGE_KEY_FILE") and not os.environ.get("SOPS_AGE_KEY")
+            and age_key_file.exists()):
+        os.environ["SOPS_AGE_KEY_FILE"] = str(age_key_file)
+    # (a) Offline: decrypt the SOPS snapshot with the local age key.
+    for _snap in _sops_candidates():
+        if not _snap.exists():
+            continue
+        try:
+            _r = subprocess.run(
+                ["sops", "--decrypt", "--input-type", "dotenv",
+                 "--output-type", "dotenv", str(_snap)],
+                capture_output=True, text=True, timeout=15,
+            )
+            if _r.returncode == 0:
+                for _l in _r.stdout.splitlines():
+                    _l = _l.strip()
+                    if _l.startswith("NEOTOMA_BEARER_TOKEN="):
+                        _bearer = _l.partition("=")[2].strip().strip('"').strip("'")
+                        break
+            if _bearer:
+                break
+        except Exception:
+            pass  # sops/age not available — fall through to op read
+    # (b) Fallback: live `op read` (requires an active 1Password session).
+    if not _bearer:
+        try:
+            _r = subprocess.run(
+                ["op", "read", _OP_REF],
+                capture_output=True, text=True, timeout=10,
+            )
+            if _r.returncode == 0:
+                _bearer = _r.stdout.strip()
+        except Exception:
+            pass  # op not available or session expired — keep existing token
+    _persist_bearer_token(_bearer)
+
+    # Module settings that come from the environment just loaded.
+    _NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "")
+    NEOTOMA_COMPANY_ENTITY_ID = os.environ.get(
+        "NEOTOMA_COMPANY_ENTITY_ID", _DEFAULT_COMPANY_ENTITY_ID
+    )
+
 
 # ---------------------------------------------------------------------------
 # lib/notify integration
@@ -209,12 +241,10 @@ if str(_REPO_ROOT) not in sys.path:
 from lib.daemon_runtime.logging_setup import configure_daemon_logging  # noqa: E402
 from lib.transcript_clarity import assess_transcript  # noqa: E402
 
-try:
-    from lib.notify import Notifier  # noqa: E402
-
-    _lib_notifier: "Notifier | None" = Notifier.from_neotoma()
-except Exception:
-    _lib_notifier = None
+# Built by _start_daemon_services(), after the environment is bootstrapped:
+# lib.notify reads the bearer token into module globals when it is imported,
+# so it must not be imported before the token refresh.
+_lib_notifier = None
 
 
 def _notify_lib(message: str, priority: str = "info") -> None:
@@ -230,25 +260,47 @@ def _notify_lib(message: str, priority: str = "info") -> None:
         pass
 
 
-# Activity-log channel (CyphorhinusBot observation feed).
-try:
-    from lib.activity import ActivityLogger  # noqa: E402
-
-    _activity: "ActivityLogger | None" = ActivityLogger(agent="piculet")
-except Exception:
-    _activity = None
+# Activity-log channel (CyphorhinusBot observation feed). Built at start too.
+_activity = None
 
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-
 # Rotating + repeat-suppressing (lib/daemon_runtime/logging_setup.py):
-# unbounded retry logging filled a 926 GB disk on 2026-08-18.
-log = configure_daemon_logging("piculet")
+# unbounded retry logging filled a 926 GB disk on 2026-08-18. The handlers
+# (a file under ~/Library/Logs) are attached at start; until then this is the
+# same named logger with no file handler.
+log = logging.getLogger("piculet")
+
+_daemon_services_started = False
+
+
+def _start_daemon_services() -> None:
+    """Bootstrap credentials, logging and notification channels. Idempotent.
+
+    Called by main() and the operator subcommands, never at import.
+    """
+    global _lib_notifier, _activity, log, _daemon_services_started
+    if _daemon_services_started:
+        return
+    _daemon_services_started = True
+    _bootstrap_environment()
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log = configure_daemon_logging("piculet")
+    try:
+        from lib.notify import Notifier
+
+        _lib_notifier = Notifier.from_neotoma()
+    except Exception:
+        _lib_notifier = None
+    try:
+        from lib.activity import ActivityLogger
+
+        _activity = ActivityLogger(agent="piculet")
+    except Exception:
+        _activity = None
 
 
 # Dedup state for operator alerts — avoids repeat messages for persistent errors.
@@ -509,14 +561,15 @@ class NeotomaUnavailableError(Exception):
 
 # Base URL resolved from env at startup. The plist also sets NEOTOMA_BASE_URL
 # so this will always resolve to prod (3180), never auto-detect dev (3080).
-_NEOTOMA_BASE_URL: str = os.environ.get("NEOTOMA_BASE_URL", "")
+# Set from the environment by _bootstrap_environment() at daemon start.
+_NEOTOMA_BASE_URL: str = ""
 
 # Canonical "Neotoma, Inc." company entity, referenced in the extraction prompt
-# so product mentions get related to it. Env-overridable so a different graph /
-# fork can point at its own company entity instead of a baked-in literal.
-NEOTOMA_COMPANY_ENTITY_ID: str = os.environ.get(
-    "NEOTOMA_COMPANY_ENTITY_ID", "ent_44835c5b0047ce26ffbe40bc"
-)
+# so product mentions get related to it. Env-overridable (read at daemon start)
+# so a different graph / fork can point at its own company entity instead of a
+# baked-in literal.
+_DEFAULT_COMPANY_ENTITY_ID = "ent_44835c5b0047ce26ffbe40bc"
+NEOTOMA_COMPANY_ENTITY_ID: str = _DEFAULT_COMPANY_ENTITY_ID
 
 
 def _neotoma_query(
@@ -653,16 +706,18 @@ def find_new_files(seen: set[str]) -> list[Path]:
 IMPORT_EXIT_LOOKUP_UNAVAILABLE = 75
 
 
-class _ImportDeferred(Exception):
-    """The importer could not tell new memos from imported ones; retry later."""
+# Retry backoff for a memo whose lookup failed: 1 min, doubling, capped at 1 h.
+DEFER_BASE_SECONDS = 60
+DEFER_MAX_SECONDS = 3600
+DEFERRED_REASON = "already-imported lookup unavailable"
 
 
 def build_import_command(new_files: list[Path]) -> list[str]:
-    """The importer invocation for exactly the memos this poll found.
+    """The importer invocation for exactly the given memos.
 
-    Passing each new file with --file (rather than --source <Recordings>) is
-    what keeps a run triggered by N new memos from rescanning the whole
-    library and re-staging every not-yet-stored recording in it.
+    Passing each file with --file (rather than --source <Recordings>) is what
+    keeps a run triggered by N new memos from rescanning the whole library and
+    re-staging every not-yet-stored recording in it.
     """
     cmd = [sys.executable, str(IMPORT_SCRIPT)]
     for f in new_files:
@@ -673,8 +728,11 @@ def build_import_command(new_files: list[Path]) -> list[str]:
 def run_import(new_files: list[Path]) -> int | None:
     """Import exactly ``new_files``; the importer handles dedup, transcription
     and Neotoma storage. Returns the importer's exit code, or None when it
-    could not be run to completion."""
-    log.info("New Voice Memos detected — running import pipeline...")
+    could not be run to completion.
+
+    The daemon calls this with one memo at a time, so an exit of
+    IMPORT_EXIT_LOOKUP_UNAVAILABLE speaks for exactly that memo."""
+    log.info("Running import pipeline for %d memo(s)...", len(new_files))
     try:
         # No --analyze/--no-analyze flag here: import_audio_from_desktop.py
         # analyses by default and only declares --no-analyze as an opt-out.
@@ -688,9 +746,12 @@ def run_import(new_files: list[Path]) -> int | None:
         if result.returncode == 0:
             log.info("Import pipeline completed successfully.")
         elif result.returncode == IMPORT_EXIT_LOOKUP_UNAVAILABLE:
+            # One deduplicated operator warning for the condition (hourly
+            # reminder at most), however many memos or polls hit it.
             log_warning(
-                "Import skipped: already-imported lookup unavailable; "
-                "new memos stay unseen and are retried next poll."
+                "Import deferred: the already-imported lookup is unavailable. "
+                "Affected memos stay unseen and unheld, and are retried with "
+                "backoff (up to hourly); the importer log names the failure."
             )
         else:
             log_warning(f"Import pipeline exited with code {result.returncode}.")
@@ -700,6 +761,190 @@ def run_import(new_files: list[Path]) -> int | None:
     except Exception as e:
         log_error(f"Import pipeline error: {e}")
     return None
+
+
+def load_deferred() -> dict:
+    """Load the deferred-memo table: memo filename -> retry state."""
+    if DEFERRED_STATE_FILE.exists():
+        try:
+            data = json.loads(DEFERRED_STATE_FILE.read_text())
+            if isinstance(data, dict):
+                return data
+        except Exception as e:
+            log.warning(f"Could not read deferred state ({e}) — starting empty.")
+    return {}
+
+
+def save_deferred(deferred: dict) -> None:
+    DEFERRED_STATE_FILE.write_text(json.dumps(deferred, indent=2, sort_keys=True))
+
+
+def defer_backoff_seconds(attempts: int) -> int:
+    """Wait before retry number ``attempts + 1``: 60, 120, 240 ... up to 3600."""
+    return min(DEFER_BASE_SECONDS * 2 ** max(attempts - 1, 0), DEFER_MAX_SECONDS)
+
+
+def memo_import_due(deferred: dict, name: str, now: float) -> bool:
+    entry = deferred.get(name)
+    if not entry:
+        return True
+    try:
+        return now >= float(entry.get("next_attempt_at", 0))
+    except (TypeError, ValueError):
+        return True
+
+
+def record_deferral(deferred: dict, name: str, now: float) -> None:
+    entry = deferred.get(name) or {}
+    attempts = int(entry.get("attempts", 0)) + 1
+    deferred[name] = {
+        "reason": DEFERRED_REASON,
+        "attempts": attempts,
+        "first_deferred_at": entry.get("first_deferred_at", now),
+        "last_attempt_at": now,
+        "next_attempt_at": now + defer_backoff_seconds(attempts),
+        "notified": True,
+    }
+
+
+def process_voice_memos(
+    new_files: list[Path], seen: set[str], held: dict, deferred: dict, now: float
+) -> None:
+    """Import, gate and record the memos one poll found.
+
+    Each memo is imported on its own, so its exit code decides its own state:
+    - exit 75 (lookup unknown): deferred — neither seen nor held — and retried
+      on a persisted exponential backoff;
+    - anything else: through the clarity gate, then marked seen (held ones
+      too, as before).
+    "Importing …" is sent at most once per memo, when its first import is
+    launched; a backed-off retry sends nothing new.
+    """
+    present = {f.name for f in new_files}
+    for gone in [name for name in deferred if name not in present]:
+        deferred.pop(gone)  # removed from Recordings, or seen by another path
+
+    due = [f for f in new_files if memo_import_due(deferred, f.name, now)]
+    if not due:
+        log.debug(f"{len(new_files)} memo(s) waiting for their lookup-retry backoff.")
+        save_deferred(deferred)
+        return
+
+    fresh = [f for f in due if not deferred.get(f.name, {}).get("notified")]
+    retries = len(due) - len(fresh)
+    log.info(
+        f"Importing {len(due)} Voice Memo(s) ({retries} lookup retr"
+        f"{'y' if retries == 1 else 'ies'}): {[f.name for f in due]}"
+    )
+    _job = None
+    if fresh:
+        n = len(fresh)
+        notify("Voice Memos", f"Importing {n} new memo{'s' if n != 1 else ''}…")
+        if _activity:
+            _job = _activity.started(
+                f"importing {n} new voice memo{'s' if n != 1 else ''}"
+            )
+
+    imported: list[Path] = []
+    deferred_now: list[Path] = []
+    try:
+        for memo in due:
+            rc = run_import([memo])
+            if rc == IMPORT_EXIT_LOOKUP_UNAVAILABLE:
+                # Nothing was staged or transcribed for this memo. Leave it
+                # unseen and unheld; with nothing copied, a retry is only a
+                # lookup.
+                record_deferral(deferred, memo.name, now)
+                deferred_now.append(memo)
+            else:
+                deferred.pop(memo.name, None)
+                imported.append(memo)
+        save_deferred(deferred)
+        for memo in deferred_now:
+            wait = int(deferred[memo.name]["next_attempt_at"] - now)
+            log.info(
+                f"Deferred {memo.name}: {DEFERRED_REASON}; "
+                f"attempt {deferred[memo.name]['attempts']}, next in {wait}s."
+            )
+
+        # --- Clarity gate -----------------------------------------------
+        # Transcription has run; decide per memo whether the transcript is
+        # measurably good enough to process without the operator. Unclear
+        # memos are held, not processed and not dropped.
+        clear_files: list[Path] = []
+        for memo in imported:
+            report, transcript = assess_memo(memo)
+            if report is None:
+                held[memo.name] = {
+                    "reason": "no transcript found to assess",
+                    "checks": [],
+                    "held_at": time.time(),
+                    "transcript": str(transcript) if transcript else None,
+                }
+                log_warning(f"Held {memo.name}: no transcript found to assess.")
+                continue
+            if report.clear:
+                clear_files.append(memo)
+                continue
+            held[memo.name] = {
+                "reason": report.summary,
+                "checks": [f.check for f in report.findings],
+                "metrics": report.metrics,
+                "held_at": time.time(),
+                "transcript": str(transcript) if transcript else None,
+            }
+            log.info(f"Held {memo.name} for confirmation: {report.summary}")
+            notify(
+                "Voice Memos",
+                format_hold_notification(memo.name, report, transcript),
+            )
+        if held:
+            save_held(held)
+
+        entity_summary = ""
+        if clear_files:
+            c = len(clear_files)
+            notify(
+                "Voice Memos",
+                f"Transcription complete for {c} memo{'s' if c != 1 else ''}. Extracting entities…",
+            )
+            entity_summary = run_entity_extraction(clear_files)
+            done_msg = f"Done — {c} memo{'s' if c != 1 else ''} imported & transcribed."
+            if entity_summary and entity_summary != "none":
+                done_msg += f"\nEntities: {entity_summary}"
+            if held:
+                done_msg += f"\n{len(held)} memo(s) held for your confirmation."
+            notify("Voice Memos", done_msg)
+        elif imported:
+            log.info("No memos passed the clarity gate this cycle — nothing extracted.")
+
+        if _job:
+            if imported:
+                _summary = (
+                    f"{len(clear_files)} memo(s) processed, "
+                    f"{len(imported) - len(clear_files)} held"
+                )
+                if deferred_now:
+                    _summary += f", {len(deferred_now)} deferred (lookup unavailable)"
+                if entity_summary and entity_summary != "none":
+                    _summary += f"; entities: {entity_summary[:80]}"
+                _job.finished(_summary)
+            else:
+                _job.failed(f"{DEFERRED_REASON}; retrying with backoff")
+    except Exception as _exc:
+        if _job:
+            _job.failed(f"import pipeline error: {type(_exc).__name__}")
+        raise
+
+    if imported:
+        # Mark every memo we imported as seen — including held ones. A held
+        # memo must NOT be re-imported on the next poll (that was the
+        # hot-loop failure), but it is also not lost: it stays in
+        # held_memos.json and is re-surfaced on the reminder interval until
+        # released or discarded. Deferred memos are deliberately not seen.
+        for f in imported:
+            seen.add(f.name)
+        save_seen(seen)
 
 
 # ---------------------------------------------------------------------------
@@ -973,6 +1218,8 @@ If no entities were extracted, output: ENTITY_SUMMARY: none
 def main() -> None:
     from lib.daemon_runtime.checkout_identity import enforce_deploy_checkout
 
+    _start_daemon_services()
+
     enforce_deploy_checkout(
         "piculet",
         Path(__file__).resolve(),
@@ -1036,6 +1283,11 @@ def main() -> None:
     if held:
         log.info(f"{len(held)} memo(s) held awaiting confirmation at startup.")
 
+    # Memos whose lookup failed, with their persisted retry backoff.
+    deferred = load_deferred()
+    if deferred:
+        log.info(f"{len(deferred)} memo(s) deferred awaiting a lookup retry at startup.")
+
     # Track consecutive poll failures to apply the same grace period in the
     # main loop (e.g. after a daemon restart mid-session).
     _consecutive_neotoma_failures = 0
@@ -1085,107 +1337,7 @@ def main() -> None:
             # --- Voice Memos ---
             new_files = find_new_files(seen)
             if new_files:
-                n = len(new_files)
-                log.info(f"Found {n} new Voice Memo(s): {[f.name for f in new_files]}")
-                notify(
-                    "Voice Memos",
-                    f"Importing {n} new memo{'s' if n != 1 else ''}…",
-                )
-                _job = _activity.started(f"importing {n} new voice memo{'s' if n != 1 else ''}") if _activity else None
-                lookup_unavailable = False
-                try:
-                    import_rc = run_import(new_files)
-                    lookup_unavailable = import_rc == IMPORT_EXIT_LOOKUP_UNAVAILABLE
-                    if lookup_unavailable:
-                        # Nothing was staged or transcribed. Leave the memos
-                        # unseen and unheld so the next poll retries them;
-                        # with nothing copied, a retry is only a lookup.
-                        raise _ImportDeferred()
-
-                    # --- Clarity gate ---------------------------------------
-                    # Transcription has run; decide per memo whether the
-                    # transcript is measurably good enough to process without
-                    # the operator. Unclear memos are held, not processed and
-                    # not dropped.
-                    clear_files: list[Path] = []
-                    for memo in new_files:
-                        report, transcript = assess_memo(memo)
-                        if report is None:
-                            held[memo.name] = {
-                                "reason": "no transcript found to assess",
-                                "checks": [],
-                                "held_at": time.time(),
-                                "transcript": str(transcript) if transcript else None,
-                            }
-                            log_warning(
-                                f"Held {memo.name}: no transcript found to assess."
-                            )
-                            continue
-                        if report.clear:
-                            clear_files.append(memo)
-                            continue
-                        held[memo.name] = {
-                            "reason": report.summary,
-                            "checks": [f.check for f in report.findings],
-                            "metrics": report.metrics,
-                            "held_at": time.time(),
-                            "transcript": str(transcript) if transcript else None,
-                        }
-                        log.info(f"Held {memo.name} for confirmation: {report.summary}")
-                        notify(
-                            "Voice Memos",
-                            format_hold_notification(memo.name, report, transcript),
-                        )
-                    if held:
-                        save_held(held)
-
-                    if clear_files:
-                        c = len(clear_files)
-                        notify(
-                            "Voice Memos",
-                            f"Transcription complete for {c} memo{'s' if c != 1 else ''}. Extracting entities…",
-                        )
-                        entity_summary = run_entity_extraction(clear_files)
-                        done_msg = (
-                            f"Done — {c} memo{'s' if c != 1 else ''} imported & transcribed."
-                        )
-                        if entity_summary and entity_summary != "none":
-                            done_msg += f"\nEntities: {entity_summary}"
-                        if held:
-                            done_msg += (
-                                f"\n{len(held)} memo(s) held for your confirmation."
-                            )
-                        notify("Voice Memos", done_msg)
-                    else:
-                        entity_summary = ""
-                        log.info(
-                            "No memos passed the clarity gate this cycle — "
-                            "nothing extracted."
-                        )
-                    if _job:
-                        _summary = (
-                            f"{len(clear_files)} memo(s) processed, "
-                            f"{len(new_files) - len(clear_files)} held"
-                        )
-                        if entity_summary and entity_summary != "none":
-                            _summary += f"; entities: {entity_summary[:80]}"
-                        _job.finished(_summary)
-                except _ImportDeferred:
-                    if _job:
-                        _job.failed("already-imported lookup unavailable")
-                except Exception as _exc:
-                    if _job:
-                        _job.failed(f"import pipeline error: {type(_exc).__name__}")
-                    raise
-                if not lookup_unavailable:
-                    # Mark every memo we handled as seen — including held
-                    # ones. A held memo must NOT be re-imported on the next
-                    # poll (that was the hot-loop failure), but it is also not
-                    # lost: it stays in held_memos.json and is re-surfaced on
-                    # the reminder interval until released or discarded.
-                    for f in new_files:
-                        seen.add(f.name)
-                    save_seen(seen)
+                process_voice_memos(new_files, seen, held, deferred, time.time())
             else:
                 log.debug("No new Voice Memos.")
 
@@ -1329,6 +1481,7 @@ def list_held() -> int:
 if __name__ == "__main__":
     # Operator subcommands run once and exit; no args starts the watcher.
     if len(sys.argv) > 1 and sys.argv[1] in ("--release", "--discard", "--list-held"):
+        _start_daemon_services()
         cmd = sys.argv[1]
         if cmd == "--list-held":
             sys.exit(list_held())

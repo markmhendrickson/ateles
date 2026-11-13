@@ -2191,6 +2191,13 @@ _HASH_BLOCK_BYTES = 1024 * 1024
 # them to a placeholder, as distinct from any other read failure.
 AUDIO_EVICTED_BY_CLOUD_STORAGE = "evicted_by_cloud_storage"
 
+# One line, because the importer's failure summary shows the last stderr line.
+EVICTED_AUDIO_MESSAGE = (
+    f"Cannot bind pending store: audio unreadable ({AUDIO_EVICTED_BY_CLOUD_STORAGE})."
+    " Its bytes are in iCloud, not on this Mac. Download it from iCloud"
+    " (in Finder, choose Download Now), then re-run the import."
+)
+
 
 def _audio_unreadable_reason(audio_path: Path, exc: OSError) -> str:
     """Classify a failed audio read without naming the file.
@@ -2458,10 +2465,7 @@ def _pending_store_identity(audio_path: Path, mic_path: Path | None) -> dict:
             digest, reason = _audio_content_hash_or_reason(path)
             if digest is None:
                 if reason == AUDIO_EVICTED_BY_CLOUD_STORAGE:
-                    raise RuntimeError(
-                        "Cannot bind pending store: audio "
-                        f"{AUDIO_EVICTED_BY_CLOUD_STORAGE}"
-                    )
+                    raise RuntimeError(EVICTED_AUDIO_MESSAGE)
                 raise RuntimeError(
                     f"Cannot bind pending store to unreadable audio: {reason}"
                 )
