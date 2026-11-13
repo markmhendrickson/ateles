@@ -30,11 +30,14 @@ So pinning means, at once:
    from the key file, like `neotoma_signed`), and every override is cleared;
 2. every bearer-style variable, and everything that would switch signing off or
    encryption on, is removed;
-3. the CLI -- and only the CLI, via an ``env`` prefix on its argv -- runs with a
+3. the dotenv bootstrap that ``import lib.daemon_runtime`` runs is switched off
+   (``ATELES_SKIP_DOTENV``), so importing this very module cannot re-add the
+   bearer to the child (``lib/daemon_runtime/__init__.py:53-90``);
+4. the CLI -- and only the CLI, via an ``env`` prefix on its argv -- runs with a
    private ``HOME`` whose config holds no token, and with
    ``NEOTOMA_PROJECT_ROOT`` pointing at a private empty "checkout" so no ``.env``
    is loaded; the rest of the chain keeps the real ``HOME``;
-4. the child is told it is pinned, and refuses if anything above is not true.
+5. the child is told it is pinned, and refuses if anything above is not true.
 
 Nothing here reads key material (only the public ``kid``/``iss`` fields) and
 nothing here prints a token; the stored-token check is boolean only.
@@ -163,6 +166,11 @@ def build_pinned_env(
         NEOTOMA_AAUTH_ISS=issuer,
         NEOTOMA_CLI_SCRIPT=str(root / "dist" / "cli" / "bootstrap.js"),
         NEOTOMA_PROJECT_ROOT=str(project),
+        # `import lib.daemon_runtime` loads the operator dotenv into os.environ
+        # (lib/daemon_runtime/__init__.py), which would put the shared bearer
+        # back into this child before any check ran. The child needs nothing
+        # from it: it inherits every non-credential setting from the parent.
+        ATELES_SKIP_DOTENV="1",
         **{PIN_ENV: identity["sub"], CLI_HOME_ENV: str(home), CLI_PROJECT_ROOT_ENV: str(project)},
     )
     return env
@@ -257,6 +265,8 @@ def pinned_child_problem(env: "dict[str, str] | None" = None) -> "str | None":
     for name in BEARER_ENV_KEYS:
         if env.get(name, "").strip():
             return f"a bearer-style credential ({name}) is present beside the pinned identity"
+    if (env.get("ATELES_SKIP_DOTENV") or "").strip().lower() not in ("1", "true", "yes"):
+        return "the operator dotenv bootstrap is not disabled (ATELES_SKIP_DOTENV)"
     home = env.get(CLI_HOME_ENV, "").strip()
     project = env.get(CLI_PROJECT_ROOT_ENV, "").strip()
     if not home or not project:
