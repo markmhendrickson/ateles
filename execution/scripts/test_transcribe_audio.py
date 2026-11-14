@@ -372,7 +372,9 @@ def test_multichannel_plain_overrides_cannot_downmix(tmp_path, monkeypatch, over
 
 def test_paired_default_preserves_system_and_mic_raw_events(tmp_path, monkeypatch):
     import local_fluid
+    import local_whisper
     import two_track_transcribe as t3
+    monkeypatch.setattr(local_whisper, "resolve_ffmpeg", lambda *a, **k: "ffmpeg")
     monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
     monkeypatch.setenv("TRANSCRIBE_PAIRED_ASR", "parakeet")
     mic, system = tmp_path / "mic.wav", tmp_path / "system.wav"

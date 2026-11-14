@@ -94,7 +94,9 @@ def test_actual_fluid_constructors_satisfy_complete_raw_contract(tmp_path, monke
                         copy.deepcopy(raw['diarization'] if args[0] == 'process' else raw['asr']))
     monkeypatch.setattr(ta, 'get_audio_duration', lambda _: 2.5)
     if paired:
+        import local_whisper
         import two_track_transcribe as t3
+        monkeypatch.setattr(local_whisper, 'resolve_ffmpeg', lambda *a, **k: 'ffmpeg')
         monkeypatch.setenv('TRANSCRIBE_PAIRED_ASR', 'parakeet')
         monkeypatch.setattr(t3, 'to_wav16', lambda ffmpeg, src, dest: dest)
         monkeypatch.setattr(t3, 'frame_levels', lambda ffmpeg, wav: [-20.0] * 30)
