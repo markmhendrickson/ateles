@@ -50,39 +50,28 @@ import sys as _sys  # noqa: E402
 from pathlib import Path as _Path  # noqa: E402
 
 
+from .shared_env import (  # noqa: E402
+    load_shared_env as _load_shared_env,
+    shared_env_path as _shared_env_path,
+    should_load as _should_load,
+)
+
+
 def _dotenv_should_load(environ: dict | None = None, modules: dict | None = None) -> bool:
     """False when this import should NOT pull the operator's dotenv into
     os.environ — under pytest, or when ATELES_SKIP_DOTENV is set truthy."""
-    env = _os.environ if environ is None else environ
-    mods = _sys.modules if modules is None else modules
-    if (env.get("ATELES_SKIP_DOTENV") or "").strip().lower() in ("1", "true", "yes"):
-        return False
-    if "pytest" in mods or env.get("PYTEST_CURRENT_TEST") is not None:
-        return False
-    return True
+    return _should_load(environ, modules)
 
 
 def _dotenv_path(environ: dict | None = None) -> _Path:
     """The dotenv file to load, overridable for tests via ATELES_DOTENV_FILE."""
-    env = _os.environ if environ is None else environ
-    override = env.get("ATELES_DOTENV_FILE")
-    if override:
-        return _Path(override)
-    return _Path.home() / ".config" / "neotoma" / ".env"
+    return _shared_env_path(environ)
 
 
 def _load_dotenv_into_environ(path: _Path, environ: dict) -> None:
-    if not path.exists():
-        return
-    for _line in path.read_text().splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _, _v = _line.partition("=")
-            _k = _k.strip()
-            _v = _v.strip().strip('"').strip("'")
-            _existing = environ.get(_k, "")
-            if not _existing or (_existing.startswith("__") and _existing.endswith("__")):
-                environ[_k] = _v
+    # Not strict: a daemon must still start and every well-formed line loads.
+    # Bad lines are reported once on stderr by number, never by text.
+    _load_shared_env(environ, path=path, strict=False)
 
 
 _NEOTOMA_ENV_FILE = _dotenv_path()

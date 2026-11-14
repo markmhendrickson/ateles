@@ -24,10 +24,8 @@ Examples:
 """
 
 import argparse
-import contextlib
 import errno
 import hashlib
-import io
 import json
 import math
 import os
@@ -41,7 +39,6 @@ from datetime import date
 from pathlib import Path
 
 import requests
-from dotenv import load_dotenv
 from openai import OpenAI, RateLimitError
 
 # Add project root to path
@@ -58,26 +55,26 @@ from lib.daemon_runtime.neotoma_store_guard import StoreDeferred  # noqa: E402
 from lib.daemon_runtime.pinned_cli_identity import (  # noqa: E402
     PIN_ENV as _PIN_ENV,
     cli_isolation_prefix,
-    load_dotenv_unless_pinned_bearer,
     pinned_child_problem,
 )
+from lib.daemon_runtime import shared_env  # noqa: E402
 
-stderr_capture = io.StringIO()
-with contextlib.redirect_stderr(stderr_capture):
-    result = load_dotenv_unless_pinned_bearer(load_dotenv, PROJECT_ROOT / ".env")
-
-stderr_output = stderr_capture.getvalue()
-if "could not parse statement" in stderr_output.lower():
-    print(f"\n{'=' * 80}")
-    print("ERROR: .env file parsing errors detected")
-    print(f"{'=' * 80}")
-    print(stderr_output.strip())
-    print(f"\n.env file path: {PROJECT_ROOT / '.env'}")
-    print(
-        "Fix the .env file syntax errors (check lines mentioned above) before continuing."
-    )
-    print(f"{'=' * 80}\n")
-    sys.exit(1)
+# Settings come from ONE host-level file (~/.config/neotoma/.env, or
+# ATELES_DOTENV_FILE), so a git worktree or runtime checkout needs no hand-made
+# files. lib.daemon_runtime already loaded it at import; this call is a no-op
+# for names already set and is skipped under pytest / ATELES_SKIP_DOTENV.
+# Not strict: a malformed line is skipped and reported once by number, and a
+# setting that lived on it fails loudly by name where it is required
+# (require_settings), so one odd line cannot stop unrelated settings loading.
+# The repo-root .env is a WARNED FALLBACK for names missing everywhere else
+# (its contents cannot be audited from a session; removal is a follow-up).
+if shared_env.should_load():
+    try:
+        shared_env.load_shared_env()
+        shared_env.load_fallback_file(PROJECT_ROOT / ".env")
+    except shared_env.SharedEnvError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 from ateles.runtime_paths import get_data_dir, is_cloud_evicted  # noqa: E402
 from local_fluid import (  # noqa: E402
@@ -1854,7 +1851,7 @@ def transcribe_audio_file(
             # speaker merged into one voice looks fine and is wrong.
             raise RuntimeError(
                 "ElevenLabs was selected for diarization but ELEVENLABS_API_KEY "
-                "is not set. Set the key, or drop the diarization request to use "
+                f"is not set (looked in the environment and {shared_env.shared_env_path()}). Set the key, or drop the diarization request to use "
                 "the free local backend (which cannot separate speakers). Not "
                 "falling back to the metered OpenAI API."
             )
@@ -1900,7 +1897,7 @@ def transcribe_audio_file(
             raise RuntimeError(
                 "No transcription backend available. The OpenAI Whisper path "
                 "requires OPENAI_API_KEY (METERED platform billing) and none is "
-                "set. A ChatGPT subscription cannot serve this endpoint: its "
+                f"set (looked in the environment and {shared_env.shared_env_path()}). A ChatGPT subscription cannot serve this endpoint: its "
                 "OAuth token is scoped to the Codex backend, not the platform "
                 "audio API. Set ELEVENLABS_API_KEY to use ElevenLabs instead, "
                 "or transcribe locally with whisper-cli."
@@ -2138,14 +2135,14 @@ def _neotoma_auth_preflight() -> tuple[bool, str]:
         if problem:
             return False, f"pinned Neotoma identity refused: {problem}."
         return True, "ok"
-    token = os.environ.get("NEOTOMA_BEARER_TOKEN", "").strip()
-    if not token:
-        return (
-            False,
-            "NEOTOMA_BEARER_TOKEN is not set; refusing to fall back to the "
-            "unauthenticated dev server (3080). Source the ateles .env or "
-            "set NEOTOMA_BEARER_TOKEN to the prod token before recording.",
+    try:
+        shared_env.require_settings(
+            "NEOTOMA_BEARER_TOKEN",
+            purpose="store to prod Neotoma (refusing to fall back to the "
+            "unauthenticated dev server)",
         )
+    except shared_env.MissingSettingError as exc:
+        return False, str(exc)
     return True, "ok"
 
 

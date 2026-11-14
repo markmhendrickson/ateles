@@ -114,6 +114,39 @@ Daemons also self-materialize at startup (see below), so often a restart is enou
    Neotoma `env_var_mapping` registry, which it mirrors).
 3. `secrets_publish.py` → commit → `secrets_materialize.py` on each machine.
 
+## Scripts: one shared settings file, no per-checkout `.env`
+
+Scripts such as `execution/scripts/transcribe_audio.py` read their settings from
+ONE host-level file, the materialized dotenv `~/.config/neotoma/.env`
+(`ATELES_DOTENV_FILE` points elsewhere). It is per machine, not per checkout, so
+a git worktree, the shared clone and a runtime checkout all see the same
+settings. There is no repo-root `.env` or `config.py` to create by hand.
+
+One-step setup, once per machine: materialize that file with the secrets tooling
+(`execution/scripts/secrets_materialize.py`, after the bootstrap above). After
+that, run the script from any checkout.
+
+Behaviour, implemented in `lib/daemon_runtime/shared_env.py`:
+
+- Only that one file is read; files are never merged first-wins, so a stale
+  value elsewhere cannot shadow the real one (ateles#885).
+- A value already in the environment wins over the file; an empty value or a
+  `__PLACEHOLDER__` counts as unset.
+- A missing setting stops the run naming the setting and the file looked in. There
+  is no default.
+- A malformed line (a name with a dash or dot, a stray note, a value spanning
+  lines) is skipped and reported once on stderr by file and line number, never by
+  text, which may hold a secret. Every other line still loads. An unreadable file
+  is reported by file and error type.
+- Syntax: `NAME=value` or `export NAME=value`; one matching pair of surrounding
+  quotes is stripped; a UTF-8 byte-order mark is tolerated; an empty or
+  whitespace-only value counts as unset.
+- `transcribe_audio.py` also reads a repo-root `.env` as a warned fallback, only
+  for names missing from the environment and the shared file; each such name is
+  reported on stderr (name and file, never the value). Move those names into the
+  shared file; the fallback is to be removed.
+- Not loaded under pytest or with `ATELES_SKIP_DOTENV=1` (ateles#1285).
+
 ## How daemons consume secrets
 
 `execution/daemons/{cyphorhinus,piculet}/watch.py` refresh
