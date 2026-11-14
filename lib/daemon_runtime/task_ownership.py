@@ -215,6 +215,21 @@ def _prefix_with_id(tokens: list[str]) -> bool:
     return False
 
 
+# A lead or desk session is named for its area, not its id: `claude-theodore-
+# lead`, `claude finances lead`. A harness marker followed by one of these role
+# words is a session; the marker alone (`Claude`, a person's name) is not, and
+# neither is the role word alone (`Finance lead`).
+_HARNESS_MARKERS = frozenset({"claude", "codex"})
+_ROLE_WORDS = frozenset({"lead", "desk"})
+
+
+def _harness_role_desk(tokens: list[str]) -> bool:
+    for i, token in enumerate(tokens):
+        if token in _HARNESS_MARKERS:
+            return any(t in _ROLE_WORDS for t in tokens[i + 1:])
+    return False
+
+
 def names_a_session(value: object) -> bool:
     """True when ``value`` names an interactive session as the owner.
 
@@ -229,6 +244,8 @@ def names_a_session(value: object) -> bool:
     - two different markers (`Claude Code session`, `coordinator chat`);
     - a marker or `root` immediately followed by an id (`Foundation coordinator
       0a1b2c3d`, `chat0a1b2c3d`);
+    - a harness marker (`claude`, `codex`) followed later by `lead` or `desk`
+      (`claude-theodore-lead`, `codex-recordings-desk`);
     - a space-free identifier starting with `session` (`session-email-review`).
 
     This reads free text, so it can be wrong in both directions, and word order
@@ -257,6 +274,8 @@ def names_a_session(value: object) -> bool:
     if len(_SESSION_MARKERS.intersection(tokens)) >= 2:
         return True
     if _prefix_with_id(tokens):
+        return True
+    if _harness_role_desk(tokens):
         return True
     return tokens[0] == "session" and not any(c.isspace() for c in first)
 

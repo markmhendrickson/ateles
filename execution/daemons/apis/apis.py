@@ -2669,6 +2669,29 @@ def _guessed_owner_is_low_stakes(skill: str, snapshot: dict) -> bool:
         return False
 
 
+_OWNERSHIP_SETTLE_S = 3.0
+
+
+async def _ownership_settled(entity_id: str, snapshot: dict) -> dict | None:
+    """Re-read a task that arrived carrying no ownership signal at all.
+
+    A task stored with an assignee, owner and tags can be dispatched before
+    those fields are visible in its snapshot, and the empty snapshot reads as
+    "no route/owner" (a session-owned task was written BLOCKED within seconds).
+    A snapshot with none of assigned_to, owner or stored tags is that race's
+    signature, so look once more after a short delay. Returns the snapshot to
+    judge: the original when it already carries a signal or the re-read still
+    shows none (a genuinely ownerless task), the fresh one when it now carries
+    one, or None when the re-read failed (not ready: write nothing).
+    """
+    if (snapshot.get("assigned_to") or snapshot.get("owner")
+            or _stored_tags(snapshot)):
+        return snapshot
+    await asyncio.sleep(_OWNERSHIP_SETTLE_S)
+    fresh = await asyncio.to_thread(fetch_task_snapshot, entity_id)
+    return fresh if isinstance(fresh, dict) else None
+
+
 async def _task_status_still(entity_id: str, expected_status, step: str) -> bool:
     """Re-read the task and say whether a gate write may still land.
 
@@ -3073,6 +3096,33 @@ async def _dispatch_task(
                 report = _unroutable.drain_unreadable()
                 if report:
                     notifier.send(report, priority=Priority.WARN, handler=DAEMON_NAME)
+            return
+
+        # ── Guard: a snapshot with no ownership signal may be a read that raced
+        # the task's own write. Judge a settled re-read instead of blocking.
+        settled = await _ownership_settled(entity_id, snapshot)
+        if settled is None:
+            log.warning(
+                f"[{DAEMON_NAME}] task {entity_id!r}: no ownership in the "
+                "snapshot and the re-read failed — not blocking, retrying later"
+            )
+            if _unroutable.note_unreadable(entity_id):
+                report = _unroutable.drain_unreadable()
+                if report:
+                    notifier.send(report, priority=Priority.WARN, handler=DAEMON_NAME)
+            return
+        if settled is not snapshot and (
+            settled.get("assigned_to") or settled.get("owner") or _stored_tags(settled)
+        ):
+            log.info(
+                f"[{DAEMON_NAME}] task {entity_id!r}: ownership appeared on "
+                "re-read — re-dispatching on the settled snapshot"
+            )
+            await _dispatch_task(
+                entity_id, settled, trigger, notifier, gate_override=gate_override,
+                snapshot_hydrated=True, detach_after_accept=detach_after_accept,
+                release_key=release_key,
+            )
             return
 
         # No inferable owner. Previously this was a silent log-and-skip — the task

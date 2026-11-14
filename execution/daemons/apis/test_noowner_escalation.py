@@ -612,6 +612,56 @@ def test_other_owners_still_block_and_page(_world, snapshot):
     assert _world["spawns"] == []
 
 
+@pytest.mark.parametrize(
+    "assignee",
+    ["claude-theodore-lead", "codex-recordings-desk", "Claude finances lead"],
+)
+def test_area_lead_session_assignee_is_left_as_filed(_world, assignee):
+    n = _Notifier()
+    _dispatch_with({"title": "Follow up", "assigned_to": assignee, "tags": []}, n)
+    _left_as_filed(_world, n)
+
+
+@pytest.mark.parametrize("assignee", ["Claude", "Claude Martin", "Finance lead", "desk"])
+def test_marker_or_role_word_alone_still_blocks(_world, assignee):
+    n = _Notifier()
+    _dispatch_with({"title": "Something with no domain words", "assigned_to": assignee,
+                    "tags": []}, n)
+    assert [s for s, _r in _world["statuses"]] == [apis.TaskStatus.BLOCKED]
+
+
+# ── a snapshot read that raced the task's own write is not "no owner" ────────
+
+_REAL_SETTLED = apis._ownership_settled
+
+
+def _race(monkeypatch, fresh):
+    monkeypatch.setattr(apis, "_ownership_settled", _REAL_SETTLED)
+    monkeypatch.setattr(apis, "_OWNERSHIP_SETTLE_S", 0)
+    monkeypatch.setattr(apis, "fetch_task_snapshot", lambda _eid: fresh)
+
+
+def test_empty_snapshot_whose_reread_shows_a_session_owner_is_left_as_filed(_world, monkeypatch):
+    _race(monkeypatch, {"title": "T", "assigned_to": "session", "owner": "claude-x-lead"})
+    n = _Notifier()
+    _dispatch_with({"title": "T", "status": "pending"}, n)
+    _left_as_filed(_world, n)
+
+
+def test_empty_snapshot_with_failed_reread_writes_nothing(_world, monkeypatch):
+    _race(monkeypatch, None)
+    n = _Notifier()
+    _dispatch_with({"title": "T", "status": "pending"}, n)
+    assert _world["statuses"] == [] and n.sent == []
+
+
+def test_empty_snapshot_still_empty_on_reread_blocks(_world, monkeypatch):
+    _race(monkeypatch, {"title": "T"})
+    n = _Notifier()
+    _dispatch_with({"title": "Something with no domain words"}, n)
+    assert [s for s, _r in _world["statuses"]] == [apis.TaskStatus.BLOCKED]
+
+
 def test_approved_session_task_is_not_spawned_and_sends_one_info_line(_world):
     n = _Notifier()
     _dispatch_with({"title": "Billing follow-up", "assigned_to": "Codex session billing",

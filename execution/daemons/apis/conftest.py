@@ -324,3 +324,16 @@ def _gate_reread_sees_no_change(monkeypatch):
         return True
 
     monkeypatch.setattr(apis, "_task_status_still", _unchanged)
+
+
+@pytest.fixture(autouse=True)
+def _ownership_reread_is_inert(monkeypatch):
+    """`_ownership_settled` re-reads (after a delay) a task with no ownership
+    signal. Dispatch tests judge the snapshot they pass; the race tests restore
+    the real one."""
+    import apis
+
+    async def _same(_entity_id, snapshot):
+        return snapshot
+
+    monkeypatch.setattr(apis, "_ownership_settled", _same)

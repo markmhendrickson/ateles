@@ -187,3 +187,21 @@ def test_non_string_assignee_counts_as_absent(value):
     assert canonical_assignee(value) is None
     assert session_owned(value, "Codex session")
     assert not session_owned(value, None)
+
+
+import pytest as _pytest_lead
+
+
+@_pytest_lead.mark.parametrize("value", [
+    "claude-theodore-lead", "codex-recordings-desk", "Claude finances lead",
+    "claude_ateles_lead",
+])
+def test_harness_marker_with_lead_or_desk_names_a_session(value):
+    assert names_a_session(value)
+
+
+@_pytest_lead.mark.parametrize("value", [
+    "Claude", "Claude Martin", "Finance lead", "desk", "Lead Claude", "Claude Leadbetter",
+])
+def test_marker_or_role_word_alone_names_no_session(value):
+    assert not names_a_session(value)
