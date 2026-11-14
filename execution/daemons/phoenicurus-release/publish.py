@@ -147,6 +147,8 @@ if str(_REPO_ROOT) not in sys.path:
 from lib.daemon_runtime.logging_setup import configure_daemon_logging
 from lib.daemon_runtime.neotoma_correct import correct_field  # noqa: E402
 
+import probe_gate  # noqa: E402  (sibling module; the daemon dir is on sys.path)
+
 # Rotating + repeat-suppressing (lib/daemon_runtime/logging_setup.py):
 # unbounded retry logging filled a 926 GB disk on 2026-08-18.
 log = configure_daemon_logging("phoenicurus-release", also_stdout=True)
@@ -923,6 +925,21 @@ def publish_github_release_draft(version: str, dry_run: bool) -> None:
     run(["gh", "release", "edit", version, "--draft=false"])
 
 
+def probe_summary(report: Path, returncode: int) -> str:
+    """One-line probe verdict: sandbox against its recorded expectations, any
+    closed host strictly. Never raises (probes are advisory)."""
+    try:
+        judged = probe_gate.judge(
+            probe_gate.parse_report(report.read_text()), open_hosts=[SANDBOX_URL]
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.error(f"probe report unreadable ({report}): {type(exc).__name__}: {exc}")
+        return "probes: no report (see log)" if returncode else "probes: ran (report unreadable)"
+    if not judged.passed:
+        log.error(f"post-deploy probes: {judged.summary()}")
+    return judged.summary()
+
+
 def post_release(version: str, dry_run: bool) -> str:
     """Probes + issue closure. Returns a short summary string for Telegram."""
     if dry_run:
@@ -931,17 +948,22 @@ def post_release(version: str, dry_run: bool) -> str:
     summary_bits = []
     # Post-deploy probes (advisory — log result, don't hard-fail the publish
     # since the tag/npm are already live; surface in Telegram).
+    report_dir = Path(tempfile.mkdtemp(prefix="phoenicurus-probes-"))
+    report = report_dir / "post_deploy_security_probes.md"
     proc = run(
         [
             "bash",
             "-lc",
             f"NEOTOMA_PROBE_HOSTS='{SANDBOX_URL}' "
-            f"bash scripts/security/deployed_probes.sh --tag {version}",
+            f"bash scripts/security/deployed_probes.sh --tag {version} "
+            f"--out '{report}'",
         ],
         check=False,
         timeout=300,
     )
-    summary_bits.append("probes: ran" if proc.returncode == 0 else "probes: see log")
+    # The script's exit code counts every anonymous answer from the open sandbox
+    # as a failure (always ~3 pass / 85 fail); judge its report per host class.
+    summary_bits.append(probe_summary(report, proc.returncode))
     # GitHub release URL.
     url = run(
         ["gh", "release", "view", version, "--json", "url", "--jq", ".url"],
