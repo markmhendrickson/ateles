@@ -114,6 +114,30 @@ Daemons also self-materialize at startup (see below), so often a restart is enou
    Neotoma `env_var_mapping` registry, which it mirrors).
 3. `secrets_publish.py` → commit → `secrets_materialize.py` on each machine.
 
+## Scripts: one shared settings file, no per-checkout `.env`
+
+Scripts such as `execution/scripts/transcribe_audio.py` read their settings from
+ONE host-level file, the materialized dotenv `~/.config/neotoma/.env`
+(`ATELES_DOTENV_FILE` points elsewhere). It is per machine, not per checkout, so
+a git worktree, the shared clone and a runtime checkout all see the same
+settings. There is no repo-root `.env` or `config.py` to create by hand.
+
+One-step setup, once per machine: materialize that file with the secrets tooling
+(`execution/scripts/secrets_materialize.py`, after the bootstrap above). After
+that, run the script from any checkout.
+
+Behaviour, implemented in `lib/daemon_runtime/shared_env.py`:
+
+- Only that one file is read; files are never merged first-wins, so a stale
+  value elsewhere cannot shadow the real one (ateles#885).
+- A value already in the environment wins over the file; an empty value or a
+  `__PLACEHOLDER__` counts as unset.
+- A missing setting stops the run naming the setting and the file looked in. There
+  is no default.
+- An unreadable file or a malformed line stops the run naming the file and the
+  line number (never the line, which may hold a secret).
+- Not loaded under pytest or with `ATELES_SKIP_DOTENV=1` (ateles#1285).
+
 ## How daemons consume secrets
 
 `execution/daemons/{cyphorhinus,piculet}/watch.py` refresh
