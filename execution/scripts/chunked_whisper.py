@@ -183,7 +183,7 @@ def _run_clip(
         segments, detected = asr(norm, language, RERUN_ARGS)
         text = " ".join(s["text"] for s in segments)
         stats["loop_after_rerun"] = has_repeat_loop(text)
-    if not clean_segments(segments):
+    if not clean_segments(segments)[0]:
         stats["status"] = "empty"
         return []
     verdict = screen_transcription(

@@ -54,9 +54,11 @@ the recordings desk's hand method). One automated step:
    operator's `locale_profile` (`session_language.py`). Nothing is dropped
    silently: a chunk the screen rejects keeps its text and reason in the raw
    evidence, and a withheld chunk, a silent chunk, an audible chunk for which
-   whisper returned no words, and every removed cross-talk segment each get a
+   whisper returned no words, every removed cross-talk segment and every
+   dropped bare tag (such as `(inaudible)`; a segment with a letter or a digit,
+   like `$300.` or `2025.`, is speech and is kept) each get a
    timed marker in the body (`[SPEECH WITHHELD ...]`, `[SKIPPED AS SILENT ...]`,
-   `[NO WORDS RECOGNISED ...]`, `[CROSS-TALK REMOVED ...]`) and a track and time
+   `[NO WORDS RECOGNISED ...]`, `[CROSS-TALK REMOVED ...]`, `[NON-SPEECH TAG DROPPED ...]`) and a track and time
    span in the header. The raw-evidence validator requires all of it. The model
    defaults to `ggml-medium.bin`; `TRANSCRIBE_WHISPER_MODEL` or
    `TRANSCRIBE_WHISPER_MODEL_NAME` override it. whisper-cli, ffmpeg and FluidAudio
@@ -97,7 +99,17 @@ cannot be measured (the length comes from ffprobe, since Tyto's recordings are
 `.m4a`, `.aac` or `.mp4`). The refusal leads with the remedy and carries the
 permanent-failure code `ERR_CALL_TOO_LONG_FOR_LOCAL_ASR`, so Tyto journals it once
 instead of retrying: set `TRANSCRIBE_PAIRED_ASR=parakeet` in Tyto's environment, or
-raise the deadline there. A call above 80% of the deadline runs, and the transcript
+raise the deadline there, then re-run the held call once (stop Tyto first; the hold is a
+recoverable disposition and clears only after a verified store):
+
+```sh
+python3 execution/daemons/tyto/tyto.py --recording-file '<the recording>' --recover-held
+```
+
+Tyto's alert carries this remedy and command itself. The length is measured with
+the ffprobe beside the configured ffmpeg (`TRANSCRIBE_FFMPEG`), then on `PATH`; a
+missing ffprobe is a transient error (Tyto retries and alerts), never a hold. A
+call above 80% of the deadline runs, and the transcript
 header carries a `long call` note.
 
 `TRANSCRIBE_PAIRED_ASR=parakeet` keeps FluidAudio's Parakeet words as the text

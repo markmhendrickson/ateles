@@ -338,9 +338,25 @@ def get_audio_duration(audio_path: Path) -> float | None:
     return _ffprobe_duration(audio_path)
 
 
+def _resolve_ffprobe() -> str | None:
+    """ffprobe next to the configured ffmpeg first, then on PATH; None when neither exists.
+
+    A daemon's PATH is minimal, while ffmpeg is configured (``TRANSCRIBE_FFMPEG``)
+    and ffprobe ships beside it.
+    """
+    configured = os.environ.get("TRANSCRIBE_FFMPEG", "").strip() or "ffmpeg"
+    ffmpeg = shutil.which(configured) or (configured if os.path.isabs(configured) and os.path.isfile(configured) else None)
+    if ffmpeg:
+        for folder in (Path(ffmpeg).parent, Path(ffmpeg).resolve().parent):
+            sibling = folder / "ffprobe"
+            if sibling.is_file() and os.access(sibling, os.X_OK):
+                return str(sibling)
+    return shutil.which("ffprobe")
+
+
 def _ffprobe_duration(audio_path: Path) -> float | None:
     """Container duration in seconds from ffprobe, or None; never raises."""
-    ffprobe_path = shutil.which("ffprobe")
+    ffprobe_path = _resolve_ffprobe()
     if not ffprobe_path:
         return None
     try:
@@ -1714,9 +1730,9 @@ def _check_whisper_time_budget(duration_seconds: float | None) -> str | None:
     estimate = duration_seconds / 60.0 * WHISPER_SECONDS_PER_CALL_MINUTE
     if estimate > budget:
         raise RuntimeError(
-            f"Set {PAIRED_ASR_ENV}=parakeet or raise {TYTO_TIMEOUT_ENV}: {duration_seconds / 60:.0f}-min call "
-            f"needs ~{estimate / 60:.0f} min of whisper, deadline {budget / 60:.0f}. Tracks kept. "
-            f"{CALL_TOO_LONG_ERROR_CODE}"
+            f"Set {PAIRED_ASR_ENV}=parakeet or raise {TYTO_TIMEOUT_ENV}, then tyto.py --recover-held: "
+            f"{duration_seconds / 60:.0f}-min call needs ~{estimate / 60:.0f} min, deadline {budget / 60:.0f}. "
+            f"Tracks kept. {CALL_TOO_LONG_ERROR_CODE}"
         )
     if estimate > 0.8 * budget:
         note = (f"long call: about {estimate / 60:.0f} of the {budget / 60:.0f} minutes allowed "
@@ -1772,6 +1788,13 @@ def _transcribe_two_files_by_segment(
 
     if source == PAIRED_ASR_WHISPER:
         lengths = [get_audio_duration(mic_path), get_audio_duration(remote_path)]
+        if None in lengths and _resolve_ffprobe() is None:
+            # Not a property of the call: a retry after ffprobe is installed works,
+            # so no permanent code. Tyto retries and alerts.
+            raise RuntimeError(
+                "ffprobe not found next to ffmpeg or on PATH, so the call length cannot be measured. "
+                "Install ffprobe (it ships with ffmpeg); Tyto will retry. Tracks kept."
+            )
         notes += [n for n in [_check_whisper_time_budget(None if None in lengths else max(lengths))] if n]
         model = _paired_model_path()
         asr = whisper_cli_asr(resolve_whisper_cli(), model)
@@ -2947,8 +2970,8 @@ def _validate_transcription_result(result: object, *, paired: bool) -> None:
         # still looping and every removed cross-talk segment must be a gap or
         # segment in the merge record, a timed marker in the body and a track-and-span
         # count in the header; a withheld chunk's text must be kept.
-        from two_track_merge import (KIND_CROSSTALK, KIND_EMPTY, KIND_SILENT, KIND_WITHHELD, MARKER_PREFIX,
-                                     chunk_outcomes, format_clock)
+        from two_track_merge import (KIND_CROSSTALK, KIND_DISCARDED, KIND_EMPTY, KIND_SILENT, KIND_WITHHELD,
+                                     MARKER_PREFIX, chunk_outcomes, clean_segments, format_clock)
         expected, looping = [], []
         for track in raw["tracks"]:
             outcome = chunk_outcomes(track.get("chunks"))
@@ -2972,7 +2995,11 @@ def _validate_transcription_result(result: object, *, paired: bool) -> None:
         counts = {kind: sum(1 for e in expected if e[2] == kind) for kind in (KIND_WITHHELD, KIND_SILENT, KIND_EMPTY)}
         require(merge.get("chunks_withheld") == counts[KIND_WITHHELD] and merge.get("chunks_silent") == counts[KIND_SILENT]
                 and merge.get("chunks_empty") == counts[KIND_EMPTY], "withheld, silent and empty chunk counts")
-        headed = bool(merge["turns"] or expected or bleed)
+        discarded = sum(len(clean_segments(track["segments"])[1]) for track in raw["tracks"])
+        require(merge.get("segments_discarded") == discarded
+                and len(merge.get("discarded_segments") or []) == discarded,
+                "discarded segments are recorded")
+        headed = bool(merge["turns"] or expected or bleed or discarded)
         if headed:
             require(transcript.startswith("[Speakers: "), "speaker header")
             phrases = {KIND_WITHHELD: "withheld by the output screen", KIND_SILENT: "skipped as silent",
@@ -2988,6 +3015,9 @@ def _validate_transcription_result(result: object, *, paired: bool) -> None:
             if looping:
                 require("still looping" in first and f"{looping[0][0]} {format_clock(looping[0][1])}" in first,
                         "header names looping chunks")
+            if discarded:
+                require("non-speech segment" in first and transcript.count(MARKER_PREFIX[KIND_DISCARDED]) >= 1,
+                        "header and body disclose dropped non-speech segments")
             if bleed:
                 require("cross-talk segment" in first and transcript.count(MARKER_PREFIX[KIND_CROSSTALK]) >= 1,
                         "header and body disclose removed cross-talk")

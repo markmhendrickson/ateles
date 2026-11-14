@@ -243,7 +243,8 @@ def test_a_130_minute_mp4_is_refused_before_any_work_with_the_remedy_first(tmp_p
             ta.transcribe_two_files(mic, system)
     message = str(refused.value)
     assert message.startswith("Set TRANSCRIBE_PAIRED_ASR=parakeet or raise TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS")
-    assert len(message) < 200 and message.endswith("ERR_CALL_TOO_LONG_FOR_LOCAL_ASR")
+    assert "--recover-held" in message
+    assert len(message) < 240 and message.endswith("ERR_CALL_TOO_LONG_FOR_LOCAL_ASR")  # Tyto shows 300 after a 26-char prefix
 
 
 @needs_ffmpeg

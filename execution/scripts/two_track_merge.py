@@ -70,14 +70,19 @@ REFERENCE_PERCENTILE = 0.90
 NO_SPEECH_TEXT = "[NO SPEECH DETECTED — local diarization and ASR returned no words.]"
 
 _BRACKET_ONLY = re.compile(r"^\s*[\(\[][^\)\]]*[\)\]]\s*$")
-_HAS_LETTER = re.compile(r"[^\W\d_]")
+_HAS_LETTER_OR_DIGIT = re.compile(r"[^\W_]")
 
 KIND_WITHHELD = "withheld"
 KIND_SILENT = "silent"
 KIND_EMPTY = "empty"
 KIND_CROSSTALK = "crosstalk"
+KIND_DISCARDED = "discarded"
 
 MARKERS = {
+    KIND_DISCARDED: (
+        "[NON-SPEECH TAG DROPPED — whisper returned only a bracketed tag or punctuation for this stretch; "
+        "the text is kept in the stored evidence.]"
+    ),
     KIND_WITHHELD: (
         "[SPEECH WITHHELD — the model returned text for this stretch but the output screen "
         "rejected it ({reason}: {detail}). It is not silence; the text is kept in the stored evidence.]"
@@ -145,19 +150,30 @@ def collapse_repeats(text: str, *, max_n: int = MAX_PHRASE_WORDS, min_reps: int 
     return " ".join(out), removed
 
 
-def clean_segments(segments: list[dict]) -> list[dict]:
-    """Drop non-speech and empty segments. Loops are collapsed later, on the joined turn."""
-    out = []
+def clean_segments(segments: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split segments into ``(kept, discarded)``. Loops are collapsed later, on the joined turn.
+
+    A segment is kept when it holds a letter OR a digit: whisper writes "twenty
+    twenty five" as "2025." and "$300." and "2,500" are answers, not noise. Only a
+    wholly bracketed tag such as "(inaudible)", or a segment with no letter or digit
+    at all, is discarded, and the caller discloses every discard.
+    """
+    kept, discarded = [], []
     for seg in segments:
         text = re.sub(r"\s+", " ", str(seg.get("text", ""))).strip()
-        if not text or _BRACKET_ONLY.match(text) or not _HAS_LETTER.search(text):
+        if not text:
             continue
         start, end = float(seg["start"]), float(seg["end"])
         if end < start:
             continue
-        out.append({"start": start, "end": end, "text": text})
-    out.sort(key=lambda s: (s["start"], s["end"]))
-    return out
+        item = {"start": start, "end": end, "text": text}
+        if _BRACKET_ONLY.match(text) or not _HAS_LETTER_OR_DIGIT.search(text):
+            discarded.append(item)
+        else:
+            kept.append(item)
+    kept.sort(key=lambda s: (s["start"], s["end"]))
+    discarded.sort(key=lambda s: (s["start"], s["end"]))
+    return kept, discarded
 
 
 # --- energy ------------------------------------------------------------------
@@ -470,6 +486,10 @@ def _header(stats: dict, diarization: dict | None, stitch: float = 4.0) -> str:
     if bleed:
         parts.append(f"{_noun(len(bleed), 'cross-talk segment')} removed ({_span_list(bleed, stitch)}), "
                      "text kept in the stored evidence")
+    gone = stats.get("discarded_segments") or []
+    if gone:
+        parts.append(f"{_noun(len(gone), 'non-speech segment')} dropped ({_span_list(gone, stitch)}), "
+                     "text kept in the stored evidence")
     if stats.get("bleed_checked"):
         parts.append("leaks not matched by text are kept, so a Mic turn may repeat a few remote words")
     elif stats.get("bleed_checked") is False:
@@ -500,7 +520,16 @@ def merge_tracks(
     """
     stats: dict = {"repeats_removed": 0, "energy_measured": bool(energy), "notes": list(notes or []),
                    "stitch_seconds": stitch_seconds}
-    cleaned = {track: clean_segments(tracks.get(track, [])) for track in (SYSTEM, MIC)}
+    cleaned, discarded = {}, []
+    for track in (SYSTEM, MIC):
+        cleaned[track], gone = clean_segments(tracks.get(track, []))
+        discarded += [{**g, "track": track} for g in gone]
+    discarded.sort(key=lambda g: (g["start"], g["track"]))
+    stats["segments_discarded"] = len(discarded)
+    stats["discarded_segments"] = [
+        {"track": g["track"], "start": round(g["start"], 2), "end": round(g["end"], 2), "text": g["text"]}
+        for g in discarded
+    ]
     stats["gaps"], stats["looping_chunks"] = [], []
     for track in (SYSTEM, MIC):
         outcome = chunk_outcomes((chunks or {}).get(track, []))
@@ -582,7 +611,8 @@ def merge_tracks(
                             "text": MARKERS[g["kind"]].format(reason=g["reason"], detail=g["detail"] or "no detail")})
     removed = [{**g, "track": g["track"]} for g in stats["gaps"] if g["kind"] in (KIND_SILENT, KIND_EMPTY)]
     removed += [{"kind": KIND_CROSSTALK, "start": d["start"], "end": d["end"], "track": d["track"]} for d in dropped]
-    for kind in (KIND_SILENT, KIND_EMPTY, KIND_CROSSTALK):
+    removed += [{"kind": KIND_DISCARDED, "start": g["start"], "end": g["end"], "track": g["track"]} for g in discarded]
+    for kind in (KIND_SILENT, KIND_EMPTY, KIND_CROSSTALK, KIND_DISCARDED):
         for run in _runs([r for r in removed if r["kind"] == kind], stitch_seconds):
             markers.append({"start": run["start"], "end": run["end"], "kind": kind, "track": run["track"],
                             "label": label_of(run["track"], run), "text": MARKERS[kind]})

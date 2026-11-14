@@ -1639,3 +1639,63 @@ def test_the_long_call_refusal_is_a_permanent_failure_not_six_retries():
     assert tyto._classify_store_error(exc) == code
     detail = tyto._subprocess_failure_detail("x" * 400 + code)
     assert code in detail
+
+
+def _hold_for_long_call(tmp_path):
+    memo = _write(tmp_path, "20260908 101500-LONG001.m4a", age_secs=100)
+    watcher = _make_watcher(tmp_path, capture_method="voice_memo", paired=False,
+                            retry_state_path=tmp_path / "retry.json")
+    watcher._mark_hard_failed(memo, "ERR_CALL_TOO_LONG_FOR_LOCAL_ASR")
+    return memo, watcher
+
+
+def test_the_long_call_alert_itself_carries_the_remedy_and_the_exact_command(tmp_path):
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    watcher = _make_watcher(memo_dir, capture_method="voice_memo", paired=False, extensions={".m4a"},
+                            max_age_secs=3600, seed_existing=True, retry_state_path=tmp_path / "retry.json",
+                            retry_secs=0)
+    memo = _write(memo_dir, "20260908 101500-LONG001.m4a", age_secs=FRESH)
+    _settled(watcher)
+
+    async def _permanent(remote_path, mic_path):
+        return "permanent", "ERR_CALL_TOO_LONG_FOR_LOCAL_ASR"
+
+    with patch.object(watcher, "_handle_recording", side_effect=_permanent):
+        asyncio.run(watcher.poll_once())
+    alerts = [c.args[0] for c in watcher._notifier.send.call_args_list if "permanently failed" in c.args[0]]
+    assert len(alerts) == 1
+    assert "ERR_CALL_TOO_LONG_FOR_LOCAL_ASR" in alerts[0]
+    assert "TRANSCRIBE_PAIRED_ASR=parakeet" in alerts[0] and "TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS" in alerts[0]
+    assert f"--recording-file '{memo}' --recover-held" in alerts[0]
+
+
+def test_other_permanent_alerts_are_unchanged(tmp_path):
+    memo = _write(tmp_path, "x.m4a")
+    assert tyto._permanent_failure_text(memo, "ERR_FILE_PATH_IS_SERVER_LOCAL", "(will not retry)") == (
+        "Transcription permanently failed for x.m4a: ERR_FILE_PATH_IS_SERVER_LOCAL (will not retry)")
+
+
+def test_a_held_long_call_is_recovered_once_the_remedy_is_applied(tmp_path):
+    memo, watcher = _hold_for_long_call(tmp_path)
+    with patch.object(watcher, "_run_transcription") as run:
+        with pytest.raises(RuntimeError, match="recover-held"):
+            watcher.process_selected_recording(memo, store_only=False, recover_held=False)
+        run.assert_not_called()
+    with patch.object(watcher, "_run_transcription", return_value="ent_recovered") as run:
+        assert watcher.process_selected_recording(memo, store_only=False, recover_held=True) == "ent_recovered"
+    run.assert_called_once()
+    assert memo not in watcher._hard_failed and memo in watcher._transcribed
+    assert json.loads((tmp_path / "retry.json").read_text())["hard_failed"] == []
+
+
+@pytest.mark.parametrize("code", ["ERR_FILE_PATH_IS_SERVER_LOCAL", "ERR_IDEMPOTENCY_MISMATCH"])
+def test_other_permanent_codes_stay_unrecoverable(tmp_path, code):
+    memo = _write(tmp_path, "20260908 101500-OTHER01.m4a", age_secs=100)
+    watcher = _make_watcher(tmp_path, capture_method="voice_memo", paired=False,
+                            retry_state_path=tmp_path / "retry.json")
+    watcher._mark_hard_failed(memo, code)
+    with patch.object(watcher, "_run_transcription") as run:
+        with pytest.raises(RuntimeError, match="not a recoverable"):
+            watcher.process_selected_recording(memo, store_only=False, recover_held=True)
+        run.assert_not_called()

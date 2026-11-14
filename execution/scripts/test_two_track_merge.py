@@ -183,7 +183,7 @@ def test_failed_diarization_is_stated_and_the_transcript_still_lands():
 
 
 def test_no_speech_returns_the_marker_with_no_header():
-    result = m.merge_tracks({m.SYSTEM: [seg(0, 2, "[silence]")], m.MIC: []})
+    result = m.merge_tracks({m.SYSTEM: [], m.MIC: []})
     assert result.turns == [] and result.text == m.NO_SPEECH_TEXT
 
 
