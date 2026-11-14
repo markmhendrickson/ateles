@@ -98,12 +98,15 @@ over Tyto's transcription deadline (`TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS`, defa
 cannot be measured (the length comes from ffprobe, since Tyto's recordings are
 `.m4a`, `.aac` or `.mp4`). The refusal leads with the remedy and carries the
 permanent-failure code `ERR_CALL_TOO_LONG_FOR_LOCAL_ASR`, so Tyto journals it once
-instead of retrying: set `TRANSCRIBE_PAIRED_ASR=parakeet` in Tyto's environment, or
-raise the deadline there, then re-run the held call once (stop Tyto first; the hold is a
-recoverable disposition and clears only after a verified store):
+instead of retrying. Re-run the held call once (stop Tyto first; the hold is a
+recoverable disposition and clears only after a verified store). The recovery command
+is a separate process and does not inherit Tyto's environment, so the setting goes on
+the command itself:
 
 ```sh
-python3 execution/daemons/tyto/tyto.py --recording-file '<the recording>' --recover-held
+TRANSCRIBE_PAIRED_ASR=parakeet python3 execution/daemons/tyto/tyto.py --recording-file '<the recording>' --recover-held
+# or keep whisper with a longer deadline:
+TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS=<seconds above the estimate> python3 execution/daemons/tyto/tyto.py --recording-file '<the recording>' --recover-held
 ```
 
 Tyto's alert carries this remedy and command itself. The length is measured with

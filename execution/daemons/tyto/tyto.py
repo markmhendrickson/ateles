@@ -610,9 +610,11 @@ SOURCE_REJECTION_ERROR_CODE = "ERR_RECORDING_SOURCE_REJECTED"
 CALL_TOO_LONG_ERROR_CODE = "ERR_CALL_TOO_LONG_FOR_LOCAL_ASR"
 PERMANENT_REMEDIES = {
     CALL_TOO_LONG_ERROR_CODE: (
-        "set TRANSCRIBE_PAIRED_ASR=parakeet (or raise TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS) in Tyto's "
-        "environment, stop Tyto, then run: python3 execution/daemons/tyto/tyto.py "
-        "--recording-file '{path}' --recover-held"
+        "stop Tyto, then run this command (the setting is a prefix on the command itself, since it is a "
+        "separate process and does not inherit Tyto's environment): "
+        "TRANSCRIBE_PAIRED_ASR=parakeet python3 execution/daemons/tyto/tyto.py "
+        "--recording-file '{path}' --recover-held. To keep whisper instead, use "
+        "TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS=<seconds above the estimate> as the prefix"
     ),
 }
 # Held dispositions an explicit --recover-held run may retry once their cause is fixed.

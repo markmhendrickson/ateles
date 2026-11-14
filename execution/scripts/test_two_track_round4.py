@@ -128,3 +128,13 @@ def test_a_missing_ffprobe_is_a_clear_transient_error_never_a_permanent_hold(tmp
     message = str(failed.value)
     assert "ffprobe not found" in message and "Tyto will retry" in message
     assert "ERR_" not in message                     # no permanent code: Tyto retries and alerts
+
+
+def test_the_refusal_prints_the_variable_as_a_prefix_with_a_value_and_stays_under_the_cut():
+    with pytest.raises(RuntimeError) as refused:
+        ta._check_whisper_time_budget(3 * 3600.0)
+    message = str(refused.value)
+    assert "TRANSCRIBE_PAIRED_ASR=parakeet" in message
+    import re
+    assert re.search(r"TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS=\d+ as a command prefix", message)
+    assert "in Tyto" not in message and len("Error transcribing audio: ") + len(message) < 300

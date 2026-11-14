@@ -1666,8 +1666,11 @@ def test_the_long_call_alert_itself_carries_the_remedy_and_the_exact_command(tmp
     alerts = [c.args[0] for c in watcher._notifier.send.call_args_list if "permanently failed" in c.args[0]]
     assert len(alerts) == 1
     assert "ERR_CALL_TOO_LONG_FOR_LOCAL_ASR" in alerts[0]
-    assert "TRANSCRIBE_PAIRED_ASR=parakeet" in alerts[0] and "TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS" in alerts[0]
-    assert f"--recording-file '{memo}' --recover-held" in alerts[0]
+    # The recovery command is a separate process: the setting must be a prefix on the command itself.
+    assert ("TRANSCRIBE_PAIRED_ASR=parakeet python3 execution/daemons/tyto/tyto.py "
+            f"--recording-file '{memo}' --recover-held") in alerts[0]
+    assert "TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS=<seconds" in alerts[0]
+    assert "in Tyto's environment" not in alerts[0]
 
 
 def test_other_permanent_alerts_are_unchanged(tmp_path):

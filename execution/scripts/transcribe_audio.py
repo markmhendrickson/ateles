@@ -1730,9 +1730,9 @@ def _check_whisper_time_budget(duration_seconds: float | None) -> str | None:
     estimate = duration_seconds / 60.0 * WHISPER_SECONDS_PER_CALL_MINUTE
     if estimate > budget:
         raise RuntimeError(
-            f"Set {PAIRED_ASR_ENV}=parakeet or raise {TYTO_TIMEOUT_ENV}, then tyto.py --recover-held: "
-            f"{duration_seconds / 60:.0f}-min call needs ~{estimate / 60:.0f} min, deadline {budget / 60:.0f}. "
-            f"Tracks kept. {CALL_TOO_LONG_ERROR_CODE}"
+            f"Rerun tyto.py --recover-held with {PAIRED_ASR_ENV}=parakeet or {TYTO_TIMEOUT_ENV}="
+            f"{math.ceil(estimate * 1.2)} as a command prefix: {duration_seconds / 60:.0f}-min call needs "
+            f"~{estimate / 60:.0f} min, deadline {budget / 60:.0f}. Tracks kept. {CALL_TOO_LONG_ERROR_CODE}"
         )
     if estimate > 0.8 * budget:
         note = (f"long call: about {estimate / 60:.0f} of the {budget / 60:.0f} minutes allowed "
