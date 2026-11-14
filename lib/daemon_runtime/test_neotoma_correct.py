@@ -156,3 +156,28 @@ def test_neotoma_agent_hygiene_posts_to_correct(monkeypatch):
     asyncio.run(agent.apply_due_date_hygiene("ent_t", {"title": "pay invoice", "body": ""}))
     logging.getLogger().removeHandler(h)
     assert any("NOT applied" in r.getMessage() for r in errs)
+
+
+def test_readback_never_passes_on_root_identity_with_empty_snapshot():
+    from lib.daemon_runtime.neotoma_correct import _readback_matches
+
+    ident = {"entity_type": "task", "title": "T"}
+    for body in (
+        {**ident, "snapshot": {}},
+        {**ident, "snapshot": None},
+        {"entity": {**ident, "snapshot": {}}},
+        {**ident, "snapshot": {"snapshot": {}}},
+    ):
+        # value None would equal a missing field, so this is the worst case
+        assert not _readback_matches(body, "notes", None), body
+        assert not _readback_matches(body, "title", "T"), body
+
+
+def test_readback_reads_present_snapshot_only():
+    from lib.daemon_runtime.neotoma_correct import _readback_matches
+
+    assert _readback_matches({"entity": {"snapshot": {"a": 1}}}, "a", 1)
+    assert _readback_matches({"snapshot": {"snapshot": {"a": 1}}}, "a", 1)
+    assert _readback_matches({"a": 1, "entity_type": "task"}, "a", 1)  # flat, no key
+    # root field is ignored when a snapshot key exists
+    assert not _readback_matches({"a": 1, "snapshot": {"b": 2}}, "a", 1)

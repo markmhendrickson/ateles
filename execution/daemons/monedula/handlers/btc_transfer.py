@@ -21,6 +21,7 @@ try:
     from ..handler_base import PaymentHandler
 except ImportError:
     from handler_base import PaymentHandler  # type: ignore[no-redef]
+from . import task_writes
 from .payment_profile import PaymentProfile
 
 log = logging.getLogger(__name__)
@@ -205,75 +206,58 @@ def _parse_payment_result(output: str) -> dict | None:
 
 
 def _update_task(profile: PaymentProfile, txid: str) -> None:
-    """Update Neotoma task with payment note and rolled due_date."""
-    import shutil
+    """Never let bookkeeping crash the tick after money has moved."""
+    try:
+        _update_task_impl(profile, txid)
+    except Exception as exc:  # noqa: BLE001
+        log.error(
+            f"[{profile.name}] payment itself settled, but the Neotoma task update "
+            f"raised: {exc} - task notes/due_date need updating by hand."
+        )
 
-    neotoma = shutil.which("neotoma")
-    if not neotoma:
-        log.warning(f"[{profile.name}] neotoma CLI not found — skipping task update")
-        return
 
+def _update_task_impl(profile: PaymentProfile, txid: str) -> None:
+    """Update Neotoma task with payment note and rolled due_date (REST + read-back)."""
     task_id = profile.neotoma_task_id
     if not task_id:
-        log.warning(
-            f"[{profile.name}] No neotoma_task_id configured — skipping task update"
+        log.error(
+            f"[{profile.name}] payment settled, but no neotoma_task_id configured - task NOT updated"
         )
         return
 
-    today = date.today()
-    mempool_url = f"https://mempool.space/tx/{txid}"
-    note = (
-        f"Payment sent {today.isoformat()}: "
-        f"{profile.amount_eur} EUR BTC txid={txid} {mempool_url}"
-    )
+    connection = task_writes.make_client()
+    if connection is None:
+        return
+    client, base = connection
 
-    try:
-        res = subprocess.run(
-            [neotoma, "--api-only", "entities", "update", task_id, "--notes", note],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=os.environ,
+    with client:
+        today = date.today()
+        mempool_url = f"https://mempool.space/tx/{txid}"
+        note = (
+            f"Payment sent {today.isoformat()}: "
+            f"{profile.amount_eur} EUR BTC txid={txid} {mempool_url}"
         )
-        if res.returncode != 0:
-            log.warning(
-                f"[{profile.name}] neotoma notes update failed: {res.stderr.strip()[:200]}"
-            )
+        if task_writes.append_note(client, base, task_id, note):
+            log.info(f"[{profile.name}] Neotoma task notes updated (read back).")
         else:
-            log.info(f"[{profile.name}] Neotoma task notes updated.")
-    except Exception as exc:
-        log.warning(f"[{profile.name}] neotoma update error: {exc}")
-
-    next_due = _find_next_event_due_date(profile)
-    if next_due:
-        try:
-            res = subprocess.run(
-                [
-                    neotoma,
-                    "--api-only",
-                    "entities",
-                    "update",
-                    task_id,
-                    "--due-date",
-                    next_due,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env=os.environ,
+            log.error(
+                f"[{profile.name}] payment settled, but Neotoma task {task_id} notes NOT "
+                f"updated; re-apply by hand: {note!r}"
             )
-            if res.returncode != 0:
-                log.warning(
-                    f"[{profile.name}] neotoma due_date update failed: {res.stderr.strip()[:200]}"
-                )
-            else:
-                log.info(f"[{profile.name}] Neotoma task due_date set to {next_due}.")
-        except Exception as exc:
-            log.warning(f"[{profile.name}] neotoma due_date update error: {exc}")
-    else:
-        log.warning(
-            f"[{profile.name}] Could not find next event date — due_date not updated."
-        )
+
+        next_due = _find_next_event_due_date(profile)
+        if not next_due:
+            log.error(
+                f"[{profile.name}] payment settled, but no next event date found - due_date NOT updated."
+            )
+            return
+        if task_writes.write_field(client, base, task_id, "task", "due_date", next_due):
+            log.info(f"[{profile.name}] Neotoma task due_date set to {next_due} (read back).")
+        else:
+            log.error(
+                f"[{profile.name}] payment settled, but Neotoma task {task_id} due_date "
+                f"NOT updated; set it to {next_due} by hand"
+            )
 
 
 def _find_next_event_due_date(profile: PaymentProfile) -> str | None:
