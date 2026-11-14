@@ -141,6 +141,53 @@ STALE_RELEASE_BLOCK_DAYS = int(
     os.environ.get("PHOENICURUS_STALE_RELEASE_BLOCK_DAYS", "3")
 )
 
+# A 'publishing' release_result older than this is checked against npm for the
+# EXACT version (read-only), independent of STALE_RELEASE_BLOCK_DAYS. A real
+# publish takes minutes, so anything past the grace is far likelier a status
+# write that never landed than work in progress; inside the grace no npm call
+# is made. A v0.28.0 duplicate stuck at 'publishing' blocked every prepare for
+# ~40 hours (22 commits) although npm already showed the version, because the
+# reconcile only ran after the 3-day stale threshold. Override with
+# PHOENICURUS_PUBLISHING_RECONCILE_GRACE_MINUTES.
+#
+# What bounds it: it must comfortably exceed the longest legitimate publish.
+# publish.py waits up to NPM_PUBLISH_WAIT_S (900s) for the registry and runs
+# `npm publish` with a 900s timeout, so one publish is ~15-30 minutes in the
+# worst case; 60 minutes leaves margin over that. A value that is unparseable
+# or <= 0 would mean "call npm on every run" and falls back to the default; a
+# positive value below the 5-minute floor is clamped up to the floor.
+_PUBLISHING_RECONCILE_GRACE_DEFAULT = 60.0
+_PUBLISHING_RECONCILE_GRACE_FLOOR = 5.0
+
+
+def _parse_publishing_grace(raw: str | None) -> float:
+    if raw is None or not raw.strip():
+        return _PUBLISHING_RECONCILE_GRACE_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.0
+    if not value > 0:  # also rejects NaN
+        log.warning(
+            "[phoenicurus-release] WARNING invalid "
+            f"PHOENICURUS_PUBLISHING_RECONCILE_GRACE_MINUTES={raw!r} (must be a "
+            f"positive number) — using {_PUBLISHING_RECONCILE_GRACE_DEFAULT:.0f}."
+        )
+        return _PUBLISHING_RECONCILE_GRACE_DEFAULT
+    if value < _PUBLISHING_RECONCILE_GRACE_FLOOR:
+        log.warning(
+            "[phoenicurus-release] WARNING "
+            f"PHOENICURUS_PUBLISHING_RECONCILE_GRACE_MINUTES={raw!r} is below "
+            f"the {_PUBLISHING_RECONCILE_GRACE_FLOOR:.0f}-minute floor — using "
+            "the floor."
+        )
+        return _PUBLISHING_RECONCILE_GRACE_FLOOR
+    return value
+
+
+# PUBLISHING_RECONCILE_GRACE_MINUTES is assigned below, after `log` exists: the
+# parser logs a warning on a bad override, and must not run before the logger.
+
 # How often to re-page the operator about the SAME still-stuck release_result,
 # once it has already crossed STALE_RELEASE_BLOCK_DAYS. ateles#1304: a
 # release_result stuck past the stale threshold used to escalate exactly ONCE
@@ -180,6 +227,10 @@ from lib import github_app_token  # noqa: E402
 # Rotating + repeat-suppressing (lib/daemon_runtime/logging_setup.py):
 # unbounded retry logging filled a 926 GB disk on 2026-08-18.
 log = configure_daemon_logging("phoenicurus-release", also_stdout=True)
+
+PUBLISHING_RECONCILE_GRACE_MINUTES = _parse_publishing_grace(
+    os.environ.get("PHOENICURUS_PUBLISHING_RECONCILE_GRACE_MINUTES")
+)
 
 
 # ---------------------------------------------------------------------------
@@ -716,25 +767,42 @@ def existing_release_status(
     return None
 
 
-def _npm_registry_version(package: str = "neotoma") -> str:
-    """Current `latest` on the npm registry, or '' if it can't be read.
+def _npm_version_published(version: str, package: str = "neotoma") -> bool:
+    """True only if npm confirms the EXACT ``version`` of ``package`` exists.
 
-    Mirrors publish.py's ``_registry_version`` exactly (same command, same
-    fail-open contract) — duplicated rather than imported because prepare.py
-    and publish.py are each meant to run standalone with no cross-import, and
-    this is a two-line shell call, not shared policy that could drift.
+    Queries ``npm view <package>@<version> version`` rather than comparing to
+    `latest`: a stuck 'publishing' row for a version that has since been
+    superseded as latest (the v0.28.0 duplicate, 2026-11-13) must still
+    reconcile. Fail-open: any npm error, timeout or non-matching output means
+    "could not confirm" and returns False, so the block is kept.
+
+    Duplicated from publish.py rather than imported on purpose: prepare.py and
+    publish.py are standalone scripts with no cross-import. publish.py's own
+    await-publish check still compares against `latest` (follow-up, not here).
     """
+    want = version.lstrip("v")
     try:
         proc = subprocess.run(
-            ["npm", "view", package, "version"],
+            ["npm", "view", f"{package}@{want}", "version"],
             capture_output=True,
             text=True,
             timeout=30,
         )
     except (subprocess.SubprocessError, OSError) as exc:
-        log.warning(f"could not read npm registry version for {package}: {exc}")
-        return ""
-    return (proc.stdout or "").strip()
+        log.warning(
+            f"[phoenicurus-release] WARNING could not confirm {package}@{want} "
+            f"on npm ({exc})."
+        )
+        return False
+    if proc.returncode != 0:
+        log.warning(
+            f"[phoenicurus-release] WARNING npm view {package}@{want} exited "
+            f"{proc.returncode} — could not confirm."
+        )
+        return False
+    # `npm view pkg@x version` prints the version (or one line per match for a
+    # range; an exact version prints once). Require an exact line match.
+    return want in (proc.stdout or "").split()
 
 
 def _reconcile_against_npm(
@@ -759,6 +827,14 @@ def _reconcile_against_npm(
     already happened. A stale WRITE should not require a human to notice a
     fact the registry already knows.
 
+    The check is for the EXACT version on npm (not `latest`), and run_prepare
+    attempts it once a 'publishing' block is past
+    PUBLISHING_RECONCILE_GRACE_MINUTES (or has no usable timestamp), not only
+    after the 3-day stale threshold: a stray duplicate v0.28.0 row blocked
+    prepare for ~40 hours (2026-11-13) because the reconcile never ran for a
+    young block, and a superseded `latest` could never have matched anyway.
+    Fail-open: an npm error or timeout means "could not confirm" -> False.
+
     Scope: only 'publishing' reconciles this way. 'prepared',
     'pending_approval', and 'approved' are stages BEFORE the irreversible
     `npm publish` step — npm showing the version live would mean something
@@ -768,8 +844,10 @@ def _reconcile_against_npm(
     already a terminal state, and this function should never override an
     operator's or publish.py's own account of what happened.
 
-    Signs the correction as phoenicurus, the same identity + entity_id-scoped
-    /correct path used everywhere else this daemon writes release_result
+    Writes the correction as phoenicurus through NeotomaWriter, the same
+    entity_id-scoped /correct path used everywhere else this daemon writes
+    release_result (signed only when signed writes are enabled for phoenicurus,
+    ATELES_SIGNED_WRITES_PHOENICURUS, which is off by default)
     (store_release_result.py cannot do this: it only creates, with no
     entity_id target — see ateles#1304's investigation notes). Returns True
     if the release_result was corrected (caller should stop treating it as a
@@ -778,14 +856,13 @@ def _reconcile_against_npm(
     if status != "publishing" or not entity_id or not version:
         return False
     want = version.lstrip("v")
-    live = _npm_registry_version()
-    if live != want:
+    if not _npm_version_published(want):
         log.info(
-            f"[phoenicurus-release] INFO npm registry shows "
-            f"{live or 'nothing'!r}, not {want!r} — {entity_id} genuinely still "
-            "publishing (or stuck before npm), not auto-reconciling."
+            f"[phoenicurus-release] INFO could not confirm {want!r} on npm — "
+            f"{entity_id} not reconciled, block stands."
         )
         return False
+    live = want
 
     log.warning(
         f"[phoenicurus-release] WARNING release_result {entity_id} ({version}) "
@@ -1149,50 +1226,59 @@ def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
     inflight = existing_release_status()
     if inflight:
         status, entity_id, version, age_days = inflight
+        hint = (
+            ""
+            if status == "publishing"
+            else " (Approve or skip the pending one first.)"
+        )
         log.info(
             f"[phoenicurus-release] INFO A release_result is already '{status}' "
-            f"({version}, {entity_id}) — not preparing another. "
-            "(Approve or skip the pending one first.)"
+            f"({version}, {entity_id}) — not preparing another.{hint}"
         )
-        if age_days is not None and age_days > STALE_RELEASE_BLOCK_DAYS:
-            log.warning(
-                f"[phoenicurus-release] WARNING release_result {entity_id} "
-                f"({version}) has blocked prep as '{status}' for "
-                f"{age_days:.1f} day(s), past the {STALE_RELEASE_BLOCK_DAYS}-day "
-                "stale threshold."
+        # Reconcile a 'publishing' block against npm (exact version, read-only)
+        # once it is past the short grace window, independent of the 3-day
+        # stale threshold. A block with no usable timestamp is checked too:
+        # the check is read-only and corrects only if that exact version is
+        # live. Inside the grace window a real publish may be in progress, so
+        # no npm call is made. Other statuses are never reconciled.
+        past_grace = age_days is None or (
+            age_days * 1440.0 > PUBLISHING_RECONCILE_GRACE_MINUTES
+        )
+        if status == "publishing" and not past_grace:
+            log.info(
+                f"[phoenicurus-release] INFO {entity_id} ({version}) is "
+                f"'publishing' for under {PUBLISHING_RECONCILE_GRACE_MINUTES:.0f} "
+                "min — a publish may be in progress, not checking npm yet."
             )
-            # Before paging anyone: is this actually still blocked, or did the
-            # terminal status write just never land? (ateles#1304 — v0.23.1's
-            # exact failure.) Only attempted once a block is already stale, so
-            # a genuinely-in-progress publish (minutes long) never triggers an
-            # npm registry call on every routine run.
+        if status == "publishing" and past_grace:
             if _reconcile_against_npm(status, entity_id, version, dry_run=dry_run):
                 log.info(
                     f"[phoenicurus-release] INFO {entity_id} reconciled against "
                     "npm — re-evaluating this run instead of blocking."
                 )
-                if not dry_run:
-                    inflight = existing_release_status()
-                if not inflight:
-                    # Fully unblocked: fall through to the CI gate below on
-                    # THIS run rather than waiting for the next trigger — a
-                    # merge or the daily sweep already got us this far.
-                    pass
-                else:
-                    if not dry_run:
-                        _mark_ran(on_merge, head)
+                if dry_run:
+                    # A dry run corrects nothing and must never page.
                     return 0
-            else:
-                # Genuinely still stuck (or reconciliation couldn't confirm
-                # either way) — escalate, but on a CADENCE rather than once
-                # ever. Before ateles#1304, this escalated exactly once per
-                # blocking entity, then logged "already escalated — not
-                # re-notifying" forever after — which is how v0.23.1 blocked
-                # 13 commits' worth of releases (3 of them security fixes) for
-                # 9+ days with a single silent-after-the-first-page warning.
-                # The on-merge path is rate-limited per COMMIT, not per day
-                # (see module docstring), so several merges landing inside one
-                # cadence window still only re-pages once that window is up.
+                inflight = existing_release_status()
+                if inflight and inflight[1] == entity_id:
+                    # The correction is not visible yet: same behavior as
+                    # before (block, no page about a row just corrected).
+                    _mark_ran(on_merge, head)
+                    return 0
+                if inflight:
+                    # A different row still blocks: judge THAT row on its own
+                    # status and age, not the one just corrected.
+                    status, entity_id, version, age_days = inflight
+        if inflight:
+            if age_days is not None and age_days > STALE_RELEASE_BLOCK_DAYS:
+                log.warning(
+                    f"[phoenicurus-release] WARNING release_result {entity_id} "
+                    f"({version}) has blocked prep as '{status}' for "
+                    f"{age_days:.1f} day(s), past the {STALE_RELEASE_BLOCK_DAYS}-day "
+                    "stale threshold."
+                )
+                # Escalate on a CADENCE rather than once (ateles#1304: a single
+                # page then silence let v0.23.1 block 13 commits for 9+ days).
                 if not dry_run and _already_escalated_stale_block(entity_id):
                     log.info(
                         f"[phoenicurus-release] INFO escalated {entity_id} "
@@ -1214,10 +1300,6 @@ def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
                     )
                     if not dry_run:
                         _mark_escalated_stale_block(entity_id)
-                if not dry_run:
-                    _mark_ran(on_merge, head)
-                return 0
-        else:
             if not dry_run:
                 _mark_ran(on_merge, head)
             return 0
