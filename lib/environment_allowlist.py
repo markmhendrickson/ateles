@@ -370,6 +370,7 @@ DAEMON_CONFIG_NAMES: frozenset[str] = frozenset(
         "TELEGRAM_TOPIC_SYLVIA",
         "TELEGRAM_TOPIC_TASKS",
         "TRANSCRIBE_BACKEND",
+        "TRANSCRIBE_PAIRED_ASR",
         "TURDUS_DRY_RUN",
         "TURDUS_MAX_MESSAGES",
         "TURDUS_POLL_INTERVAL",

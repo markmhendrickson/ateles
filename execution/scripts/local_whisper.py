@@ -323,6 +323,32 @@ def _parse_whisper_json(json_path: Path) -> tuple[str, str | None]:
     return text, language
 
 
+def timed_segments_from_json(data: dict) -> list[dict]:
+    """Timed ``{"start", "end", "text"}`` segments (seconds) from whisper-cli JSON."""
+    segments = []
+    for seg in data.get("transcription") or []:
+        chunk = (seg.get("text") or "").strip()
+        offsets = seg.get("offsets") or {}
+        if chunk:
+            segments.append({
+                "start": float(offsets["from"]) / 1000.0,
+                "end": float(offsets["to"]) / 1000.0,
+                "text": chunk,
+            })
+    return segments
+
+
+def detected_language_from_json(data: dict) -> str | None:
+    """The language whisper-cli reports having detected or used, if any."""
+    result = data.get("result")
+    if isinstance(result, dict) and result.get("language"):
+        return result["language"]
+    model = data.get("model")
+    if isinstance(model, dict):
+        return model.get("language")
+    return None
+
+
 def _timed_segments(cmd: list[str], tmp_dir: Path) -> tuple[list[dict] | None, str]:
     """Re-run the identical whisper command with timestamps; (segments, reason)."""
     stem = tmp_dir / "timed.out"
@@ -344,17 +370,7 @@ def _timed_segments(cmd: list[str], tmp_dir: Path) -> tuple[list[dict] | None, s
         json_path = Path(f"{stem}.json")
         if proc.returncode != 0 or not json_path.is_file():
             return None, f"timed whisper run failed (exit {proc.returncode})"
-        data = json.loads(json_path.read_text(encoding="utf-8"))
-        segments = []
-        for seg in data.get("transcription") or []:
-            chunk = (seg.get("text") or "").strip()
-            offsets = seg.get("offsets") or {}
-            if chunk:
-                segments.append({
-                    "start": float(offsets["from"]) / 1000.0,
-                    "end": float(offsets["to"]) / 1000.0,
-                    "text": chunk,
-                })
+        segments = timed_segments_from_json(json.loads(json_path.read_text(encoding="utf-8")))
         return (segments or None), ("no timed segments" if not segments else "")
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
         return None, f"{type(exc).__name__}"

@@ -34,6 +34,94 @@ retain the existing consent and provenance requirements. Use
 `TRANSCRIBE_FLUID_TIMEOUT` to set the subprocess deadline in seconds (default
 3600). The existing `TRANSCRIBE_FFMPEG` override is used for separate channels.
 
+## Two-track calls (`--mic-file`)
+
+A call recorded as two tracks (system = remote side, mic = operator) is merged by
+SEGMENT, never by word (`execution/scripts/two_track_transcribe.py`, ported from
+the recordings desk's hand method). One automated step:
+
+1. each track is transcribed on its own by chunked local whisper
+   (`chunked_whisper.py`): normalised (highpass + dynaudnorm, so a quiet mic is not
+   suppressed), cut into 2-minute chunks with a fresh decoder each, and each chunk
+   seam re-transcribed over a 28 s window to repair cut words. A chunk is skipped
+   as silent only when fewer than half a second of its 100 ms frames are above
+   -60 dB; a chunk-wide percentile would skip a listener's few seconds of speech.
+   A repeat check runs per chunk (a phrase of 1 to 6 words repeated back to back 4
+   or more times, or a sentence-length phrase of up to 40 words repeated 3 or more
+   times): the chunk is re-run once without context; a loop that survives is named
+   in the header and collapsed after same-speaker segments are joined. The output
+   screen judges each chunk, with the plausible languages taken from the
+   operator's `locale_profile` (`session_language.py`). Nothing is dropped
+   silently: a chunk the screen rejects keeps its text and reason in the raw
+   evidence, and a withheld chunk, a silent chunk, an audible chunk for which
+   whisper returned no words, every removed cross-talk segment and every
+   dropped bare tag (such as `(inaudible)`; a segment with a letter or a digit,
+   like `$300.` or `2025.`, is speech and is kept) each get a
+   timed marker in the body (`[SPEECH WITHHELD ...]`, `[SKIPPED AS SILENT ...]`,
+   `[NO WORDS RECOGNISED ...]`, `[CROSS-TALK REMOVED ...]`, `[NON-SPEECH TAG DROPPED ...]`) and a track and time
+   span in the header. The raw-evidence validator requires all of it. The model
+   defaults to `ggml-medium.bin`; `TRANSCRIBE_WHISPER_MODEL` or
+   `TRANSCRIBE_WHISPER_MODEL_NAME` override it. whisper-cli, ffmpeg and FluidAudio
+   are killed with their parent, so Tyto's outer timeout cannot leave one
+   running. Seam repair keeps the words it replaces in the seam's record;
+2. FluidAudio offline diarizes the two tracks mixed. Each cluster is mapped to the
+   track that carries its energy, each track measured against its own speech
+   level. Remote lines are labelled `[System]` or, with more than one remote
+   cluster, `[System/S1]`, `[System/S2]`; the operator is `[Mic]`. No name is
+   inferred;
+3. cross-talk is decided once per matched pair of segments, one on each track. The
+   quieter copy (by 3 dB, each track against its own speech level, over the
+   stretch the two share) is removed only when its words are also in the other
+   track's words over that stretch: at least three words, at least two content
+   words (five letters or more), 60% of each found, the other segment sliced to
+   the overlapping seconds and padded by 1.5 s. The other copy is protected, so
+   one utterance is never lost from both tracks. Level alone never removes a
+   segment: the operator's mic is quiet, and his real speech looks far below its
+   own track. Each removed segment keeps its text, match share, level margin and
+   the partner's span in the raw evidence. A leak that the two tracks transcribed
+   differently is kept, so a `[Mic]` turn may repeat a few remote words; the
+   header says so;
+4. whole segments are ordered by start time, consecutive ones of one speaker are
+   joined (`TRANSCRIBE_UTTERANCE_STITCH_SECONDS`), and each turn is
+   `[m:ss–m:ss] [Label]`. The first line is the usual one-line `[Speakers: ...]`
+   header: method, cluster count and mapping, that names are not established, and
+   the withheld, silent, empty, looping, cross-talk and collapsed-repeat counts
+   with their tracks and spans. If diarization fails the header says so (or that it
+   was not run) and remote lines are plain `[System]`; if levels cannot be
+   measured the clusters are not mapped, the cross-talk check is skipped and the
+   header says that.
+
+**Long calls.** Measured on a synthetic 60-minute two-track call, the whisper route
+takes about 10 s per call-minute. A call whose estimate (15 s per call-minute) is
+over Tyto's transcription deadline (`TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS`, default
+1800 s), roughly over 2 hours, is refused before any work, as is a call whose length
+cannot be measured (the length comes from ffprobe, since Tyto's recordings are
+`.m4a`, `.aac` or `.mp4`). The refusal leads with the remedy and carries the
+permanent-failure code `ERR_CALL_TOO_LONG_FOR_LOCAL_ASR`, so Tyto journals it once
+instead of retrying. Re-run the held call once (stop Tyto first; the hold is a
+recoverable disposition and clears only after a verified store). The recovery command
+is a separate process and does not inherit Tyto's environment, so the setting goes on
+the command itself:
+
+```sh
+TRANSCRIBE_PAIRED_ASR=parakeet python3 execution/daemons/tyto/tyto.py --recording-file '<the recording>' --recover-held
+# or keep whisper with a longer deadline:
+TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS=<seconds above the estimate> python3 execution/daemons/tyto/tyto.py --recording-file '<the recording>' --recover-held
+```
+
+Tyto's alert carries this remedy and command itself. The length is measured with
+the ffprobe beside the configured ffmpeg (`TRANSCRIBE_FFMPEG`), then on `PATH`; a
+missing ffprobe is a transient error (Tyto retries and alerts), never a hold. A
+call above 80% of the deadline runs, and the transcript
+header carries a `long call` note.
+
+`TRANSCRIBE_PAIRED_ASR=parakeet` keeps FluidAudio's Parakeet words as the text
+source (their runs become segments and go through the same merge); the default is
+`whisper`. The stored raw evidence holds each track's segments and chunk records,
+and the merge record (turns, cluster mapping, dropped segments).
+
+## Word alignment (Parakeet routes)
+
 The transcript assigns each timed word to all overlapping speaker segments.
 Words crossing a speaker boundary or simultaneous speakers retain an ambiguous
 label; words outside every speech segment remain `Unassigned`. The raw JSON

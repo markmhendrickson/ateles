@@ -109,6 +109,7 @@ import hashlib
 import json
 import logging
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -620,6 +621,32 @@ class ScreenshotWatcher:
 # tried to resolve the prior write under the same content key and could not
 # find it; re-sending under that key is rejected identically every time.
 SOURCE_REJECTION_ERROR_CODE = "ERR_RECORDING_SOURCE_REJECTED"
+# Operator remedy carried in the permanent-failure alert itself (not only the log),
+# for the codes whose cure is an operator action.
+CALL_TOO_LONG_ERROR_CODE = "ERR_CALL_TOO_LONG_FOR_LOCAL_ASR"
+PERMANENT_REMEDIES = {
+    CALL_TOO_LONG_ERROR_CODE: (
+        "stop Tyto, then run this command (the setting is a prefix on the command itself, since it is a "
+        "separate process and does not inherit Tyto's environment): "
+        "TRANSCRIBE_PAIRED_ASR=parakeet python3 execution/daemons/tyto/tyto.py "
+        "--recording-file {path} --recover-held. To keep whisper instead, use "
+        "TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS=<seconds above the estimate> as the prefix"
+    ),
+}
+# Held dispositions an explicit --recover-held run may retry once their cause is fixed.
+RECOVERABLE_HOLD_CODES = (
+    "capability_denied", "ERR_AUDIO_ATTACHMENT_REQUIRED", "ERR_PERSISTED_RESULT_MISMATCH",
+    "ERR_INCOMPLETE_TRANSCRIPTION_RESULT", SOURCE_REJECTION_ERROR_CODE, CALL_TOO_LONG_ERROR_CODE,
+)
+
+
+def _permanent_failure_text(path: Path, code: str, suffix: str) -> str:
+    """The permanent-failure alert text, with the operator remedy when the code has one."""
+    text = f"Transcription permanently failed for {path.name}: {code} {suffix}"
+    remedy = PERMANENT_REMEDIES.get(code)
+    return f"{text}. To fix: {remedy.format(path=shlex.quote(str(path)))}" if remedy else text
+
+
 PERMANENT_STORE_ERROR_CODES = (
     "ERR_INCOMPLETE_TRANSCRIPTION_RESULT",
     SOURCE_REJECTION_ERROR_CODE,
@@ -627,6 +654,10 @@ PERMANENT_STORE_ERROR_CODES = (
     "ERR_AUDIO_ATTACHMENT_REQUIRED",
     "ERR_FILE_PATH_IS_SERVER_LOCAL",
     "ERR_IDEMPOTENCY_MISMATCH",
+    # The paired whisper route refuses a call it cannot finish inside this
+    # daemon's own transcription deadline (or whose length it cannot measure).
+    # Deterministic: retrying only repeats the refusal and the alerts.
+    CALL_TOO_LONG_ERROR_CODE,
     # A grant rejection cannot heal by re-running ASR. Retain the source and
     # journal the rejection for explicit recovery after its cause is repaired.
     "capability_denied",
@@ -1292,9 +1323,9 @@ class RecordingWatcher:
                 # every later poll.
                 if not self._hard_failed[path].get("notified"):
                     self._notifier.send(
-                        f"Transcription permanently failed for {path.name}: "
-                        f"{self._hard_failed[path].get('error_code', 'unknown')} "
-                        "(will not retry; see retry journal)",
+                        _permanent_failure_text(
+                            path, str(self._hard_failed[path].get("error_code", "unknown")),
+                            "(will not retry; see retry journal)"),
                         priority=Priority.BLOCKER,
                         handler=DAEMON_NAME,
                     )
@@ -1372,8 +1403,7 @@ class RecordingWatcher:
                     if not self._mark_hard_failed(path, error_code or "unknown"):
                         return
                     self._notifier.send(
-                        f"Transcription permanently failed for {path.name}: "
-                        f"{error_code} (will not retry)",
+                        _permanent_failure_text(path, str(error_code), "(will not retry)"),
                         priority=Priority.BLOCKER,
                         handler=DAEMON_NAME,
                     )
@@ -1478,10 +1508,7 @@ class RecordingWatcher:
         if held is not None and not recover_held:
             raise RuntimeError("Selected file is held; explicit --recover-held is required")
         code = str(held.get("error_code", "")) if held else ""
-        if (held is not None and code not in (
-                "capability_denied", "ERR_AUDIO_ATTACHMENT_REQUIRED",
-                "ERR_PERSISTED_RESULT_MISMATCH", "ERR_INCOMPLETE_TRANSCRIPTION_RESULT",
-                SOURCE_REJECTION_ERROR_CODE)
+        if (held is not None and code not in RECOVERABLE_HOLD_CODES
                 and not code.startswith(RETRY_LIMIT_ERROR_CODE)):
             raise RuntimeError("Selected hold is not a recoverable store/source disposition")
         mic = self._find_mic_pair(path) if self._paired else None

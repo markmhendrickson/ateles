@@ -24,6 +24,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shlex
 import sys
 import time
 import wave
@@ -1624,3 +1625,102 @@ def test_normal_poll_cannot_retry_same_file_alias_of_hold(tmp_path):
     ) as run:
         asyncio.run(watcher.poll_once())
         run.assert_not_called()
+
+
+def test_the_long_call_refusal_is_a_permanent_failure_not_six_retries():
+    """A call too long for the whisper route is refused deterministically; Tyto must
+    journal it once, and the code must survive the 300-character stderr cut."""
+    code = "ERR_CALL_TOO_LONG_FOR_LOCAL_ASR"
+    source = (Path(__file__).resolve().parents[2] / "scripts" / "transcribe_audio.py").read_text()
+    assert f'CALL_TOO_LONG_ERROR_CODE = "{code}"' in source        # producer and daemon agree
+    exc = RuntimeError(
+        "Error transcribing audio: Set TRANSCRIBE_PAIRED_ASR=parakeet or raise "
+        f"TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS: 130-min call needs ~33 min of whisper, deadline 30. Tracks kept. {code}"
+    )
+    assert tyto._classify_store_error(exc) == code
+    detail = tyto._subprocess_failure_detail("x" * 400 + code)
+    assert code in detail
+
+
+def _hold_for_long_call(tmp_path):
+    memo = _write(tmp_path, "20260908 101500-LONG001.m4a", age_secs=100)
+    watcher = _make_watcher(tmp_path, capture_method="voice_memo", paired=False,
+                            retry_state_path=tmp_path / "retry.json")
+    watcher._mark_hard_failed(memo, "ERR_CALL_TOO_LONG_FOR_LOCAL_ASR")
+    return memo, watcher
+
+
+def test_the_long_call_alert_itself_carries_the_remedy_and_the_exact_command(tmp_path):
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    watcher = _make_watcher(memo_dir, capture_method="voice_memo", paired=False, extensions={".m4a"},
+                            max_age_secs=3600, seed_existing=True, retry_state_path=tmp_path / "retry.json",
+                            retry_secs=0)
+    memo = _write(memo_dir, "20260908 101500-LONG001.m4a", age_secs=FRESH)
+    _settled(watcher)
+
+    async def _permanent(remote_path, mic_path):
+        return "permanent", "ERR_CALL_TOO_LONG_FOR_LOCAL_ASR"
+
+    with patch.object(watcher, "_handle_recording", side_effect=_permanent):
+        asyncio.run(watcher.poll_once())
+    alerts = [c.args[0] for c in watcher._notifier.send.call_args_list if "permanently failed" in c.args[0]]
+    assert len(alerts) == 1
+    assert "ERR_CALL_TOO_LONG_FOR_LOCAL_ASR" in alerts[0]
+    # The recovery command is a separate process: the setting must be a prefix on the command itself.
+    assert ("TRANSCRIBE_PAIRED_ASR=parakeet python3 execution/daemons/tyto/tyto.py "
+            f"--recording-file {shlex.quote(str(memo))} --recover-held") in alerts[0]
+    assert "TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS=<seconds" in alerts[0]
+    assert "in Tyto's environment" not in alerts[0]
+
+
+def test_other_permanent_alerts_are_unchanged(tmp_path):
+    memo = _write(tmp_path, "x.m4a")
+    assert tyto._permanent_failure_text(memo, "ERR_FILE_PATH_IS_SERVER_LOCAL", "(will not retry)") == (
+        "Transcription permanently failed for x.m4a: ERR_FILE_PATH_IS_SERVER_LOCAL (will not retry)")
+
+
+def test_a_held_long_call_is_recovered_once_the_remedy_is_applied(tmp_path):
+    memo, watcher = _hold_for_long_call(tmp_path)
+    with patch.object(watcher, "_run_transcription") as run:
+        with pytest.raises(RuntimeError, match="recover-held"):
+            watcher.process_selected_recording(memo, store_only=False, recover_held=False)
+        run.assert_not_called()
+    with patch.object(watcher, "_run_transcription", return_value="ent_recovered") as run:
+        assert watcher.process_selected_recording(memo, store_only=False, recover_held=True) == "ent_recovered"
+    run.assert_called_once()
+    assert memo not in watcher._hard_failed and memo in watcher._transcribed
+    assert json.loads((tmp_path / "retry.json").read_text())["hard_failed"] == []
+
+
+@pytest.mark.parametrize("code", ["ERR_FILE_PATH_IS_SERVER_LOCAL", "ERR_IDEMPOTENCY_MISMATCH"])
+def test_other_permanent_codes_stay_unrecoverable(tmp_path, code):
+    memo = _write(tmp_path, "20260908 101500-OTHER01.m4a", age_secs=100)
+    watcher = _make_watcher(tmp_path, capture_method="voice_memo", paired=False,
+                            retry_state_path=tmp_path / "retry.json")
+    watcher._mark_hard_failed(memo, code)
+    with patch.object(watcher, "_run_transcription") as run:
+        with pytest.raises(RuntimeError, match="not a recoverable"):
+            watcher.process_selected_recording(memo, store_only=False, recover_held=True)
+        run.assert_not_called()
+
+
+@pytest.mark.parametrize("name", [
+    "plain name.m4a",
+    "it's here.m4a",
+    "call $(touch pwned).m4a",
+    "call `touch pwned`.m4a",
+    "line\nbreak.m4a",
+    "all ' $(x) ` \n together.m4a",
+])
+def test_the_printed_recovery_command_gives_back_the_exact_path_as_one_argument(tmp_path, name):
+    """The recording path is quoted in the printed command, so pasting it runs one argument."""
+    import shlex
+    memo = tmp_path / name
+    text = tyto._permanent_failure_text(memo, "ERR_CALL_TOO_LONG_FOR_LOCAL_ASR", "(will not retry)")
+    start = text.index("TRANSCRIBE_PAIRED_ASR=parakeet python3")
+    end = text.index(" --recover-held", start) + len(" --recover-held")
+    assert shlex.split(text[start:end]) == [
+        "TRANSCRIBE_PAIRED_ASR=parakeet", "python3", "execution/daemons/tyto/tyto.py",
+        "--recording-file", str(memo), "--recover-held",
+    ]

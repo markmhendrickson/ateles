@@ -371,7 +371,12 @@ def test_multichannel_plain_overrides_cannot_downmix(tmp_path, monkeypatch, over
 
 
 def test_paired_default_preserves_system_and_mic_raw_events(tmp_path, monkeypatch):
+    import local_fluid
+    import local_whisper
+    import two_track_transcribe as t3
+    monkeypatch.setattr(local_whisper, "resolve_ffmpeg", lambda *a, **k: "ffmpeg")
     monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
+    monkeypatch.setenv("TRANSCRIBE_PAIRED_ASR", "parakeet")
     mic, system = tmp_path / "mic.wav", tmp_path / "system.wav"
     mic.write_bytes(b"mic")
     system.write_bytes(b"system")
@@ -379,12 +384,16 @@ def test_paired_default_preserves_system_and_mic_raw_events(tmp_path, monkeypatc
         return {"raw_response": {"original": path.name, "aligned_words": [
             {"start": .1, "end": .5, "text": path.stem, "speaker": "S1"}
         ]}}
-    with patch.object(ta, "transcribe_fluid", side_effect=native) as run, patch.object(ta, "get_audio_duration", return_value=2):
+    with patch.object(ta, "transcribe_fluid", side_effect=native) as run, patch.object(ta, "get_audio_duration", return_value=2), \
+            patch.object(t3, "to_wav16", lambda ffmpeg, src, dest: dest), \
+            patch.object(t3, "frame_levels", side_effect=OSError("level unmeasured")), \
+            patch.object(t3, "mix_for_diarization", lambda ffmpeg, s, m, dest: dest), \
+            patch.object(local_fluid, "diarize_mono", return_value={"status": "failed", "category": "cli not found"}):
         result = ta.transcribe_two_files(mic, system)
     assert [call.args[0] for call in run.call_args_list] == [system, mic]
     assert result["backend"] == "fluid"
-    assert "[System/S1]" in result["transcription_text"]
-    assert "[Mic/S1]" in result["transcription_text"]
+    assert "[System]\nsystem" in result["transcription_text"]
+    assert "[Mic]\nmic" in result["transcription_text"]
     assert [track["result"]["original"] for track in result["raw_response"]["tracks"]] == ["system.wav", "mic.wav"]
     assert [word["speaker"] for word in result["raw_response"]["aligned_words"]] == ["System/S1", "Mic/S1"]
 
