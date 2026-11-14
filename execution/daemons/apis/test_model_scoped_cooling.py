@@ -75,7 +75,8 @@ def _binding(monkeypatch, binding) -> None:
 class Harness:
     """A fake child: records each launch's model and answers from a script."""
 
-    def __init__(self, monkeypatch, refusals: dict[str, str]):
+    def __init__(self, monkeypatch, refusals: dict[str, str], *, force_model=None,
+                 max_launches=50):
         self.launched: list[str] = []
         self.events: list[dict] = []
         self.refusals = refusals  # model -> refusal text; absent model succeeds
@@ -85,7 +86,11 @@ class Harness:
                 model_tiering.model_for_tier(provider, precomputed_tier.tier)
                 if precomputed_tier else None
             )
+            if force_model is not None:
+                effective = force_model  # a runner that ignores the model it is handed
             self.launched.append(effective)
+            if len(self.launched) > max_launches:
+                raise AssertionError(f"runaway retries: {len(self.launched)} launches")
             usage = DispatchUsage(provider=provider, model=effective, model_source="requested")
             if effective in self.refusals:
                 return SkillResult(
@@ -372,3 +377,72 @@ def test_refusing_to_substitute_is_a_provider_failover_row(monkeypatch) -> None:
     assert "from_model=opus" in rows[0]["output_summary"]
     assert "failover_reason=model_capacity" in rows[0]["output_summary"]
     assert rows[0]["usage"].model == "opus"
+
+
+# ── floor arithmetic: each operand and the choice of max is pinned ──────────
+
+
+def test_a_lower_tier_pinned_model_is_held_to_the_dispatch_tier(monkeypatch) -> None:
+    """Dispatch tier top, pinned haiku (mechanical): sonnet (mid) is declared and
+    above the pinned model, but below the dispatch tier, so only opus may follow."""
+    _binding(monkeypatch, {"claude": {**BINDING["claude"], "fallback_order": ["haiku", "sonnet", "opus"]}})
+    harness = Harness(monkeypatch, {"haiku": "You've hit your Haiku weekly limit · resets Nov 20 at 2pm (Europe/Madrid)"})
+
+    result = harness.run(
+        action_class=None, model="haiku", resolved_tier=model_tiering.resolve_tier("build")
+    )
+
+    assert result.ok
+    assert harness.launched == ["haiku", "opus"]
+
+
+def test_a_higher_tier_pinned_model_is_held_to_its_own_tier(monkeypatch) -> None:
+    """Dispatch tier mid, pinned opus (top): sonnet (mid) meets the dispatch tier
+    but is weaker than the model that was asked for, so nothing replaces it."""
+    _binding(monkeypatch, {"claude": {**BINDING["claude"], "fallback_order": ["opus", "sonnet", "haiku"]}})
+    harness = Harness(monkeypatch, {"opus": OPUS_REFUSAL})
+
+    result = harness.run(
+        action_class=None, model="opus", resolved_tier=model_tiering.resolve_tier("lens_review:pm")
+    )
+
+    assert not result.ok
+    assert harness.launched == ["opus"]
+
+
+def test_no_known_floor_means_no_substitution_even_to_the_strongest_model(monkeypatch) -> None:
+    """A pinned model bound to no tier on an untiered dispatch: opus is declared
+    and is the strongest model there is, and still is not substituted."""
+    _binding(monkeypatch, {"claude": {**BINDING["claude"], "fallback_order": ["fable", "haiku", "sonnet", "opus"]}})
+    harness = Harness(monkeypatch, {"fable": "You've hit your Fable weekly limit · resets Nov 20 at 2pm (Europe/Madrid)"})
+
+    result = harness.run(action_class=None, model="fable")
+
+    assert not result.ok
+    assert harness.launched == ["fable"]
+
+
+def test_model_meets_floor_is_false_without_a_floor() -> None:
+    for model in ("haiku", "sonnet", "opus"):
+        assert model_tiering.model_meets_floor("claude", model, None) is False
+    assert model_tiering.model_meets_floor("claude", "opus", "top") is True
+    assert model_tiering.model_meets_floor("claude", "sonnet", "top") is False
+
+
+# ── the retry bound ─────────────────────────────────────────────────────────
+
+
+def test_a_refusal_that_keeps_naming_an_unused_model_is_retried_exactly_as_often_as_the_order_allows(
+    monkeypatch,
+) -> None:
+    """The runner keeps launching sonnet whatever it is handed, and sonnet keeps
+    refusing, so the model windows never end the loop: only the bound does. The
+    first launch plus one retry per declared model is the whole budget."""
+    order = ["sonnet", "opus", "haiku"]
+    _binding(monkeypatch, {"claude": {**BINDING["claude"], "fallback_order": order}})
+    harness = Harness(monkeypatch, {"sonnet": SONNET_REFUSAL}, force_model="sonnet", max_launches=20)
+
+    result = harness.run()
+
+    assert not result.ok
+    assert len(harness.launched) == 1 + len(order)
