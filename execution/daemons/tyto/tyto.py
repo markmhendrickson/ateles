@@ -63,8 +63,13 @@ Environment variables:
                             It also carries the call folder's persistent backlog
                             guard: on the first start every pair already present
                             is journaled as handled, and every later success is
-                            added, so no start re-transcribes an old pair. A pair
-                            with a journaled pending retry is still retried.
+                            added, so no start re-transcribes an old pair. Only a
+                            pair that already shows prior processing (a
+                            .transcript.txt sidecar) and is older than the seed
+                            margin is seeded; any other pair is processed. The
+                            guard runs on the first start AND again whenever
+                            the journal is absent (a warning is sent then). A
+                            pair with a journaled pending retry is still retried.
   TYTO_NATIVE_RECORDING_RETRY_STATE  Separate platform-native retry journal.
   TYTO_VOICE_MEMO_RETRY_STATE  Durable pending-retry journal (default:
                             ~/.local/state/ateles/tyto-voice-memo-retries.json).
@@ -757,6 +762,7 @@ class RecordingWatcher:
             persist_backlog_guard and self._retry_state_path is not None
         )
         self._backlog_seeded_at: str | None = None
+        self._journal_existed = False
         self._retry_state_available = True
         if self._retry_state_path is not None:
             self._load_retry_state()
@@ -781,6 +787,7 @@ class RecordingWatcher:
         assert self._retry_state_path is not None
         if not self._retry_state_path.exists():
             return
+        self._journal_existed = True
         try:
             payload = json.loads(self._retry_state_path.read_text())
             if not isinstance(payload, dict) or payload.get("version") not in (1, 2, 3):
@@ -813,6 +820,13 @@ class RecordingWatcher:
             seeded_at = payload.get("backlog_seeded_at")
             if seeded_at is not None and not isinstance(seeded_at, str):
                 raise ValueError("invalid backlog_seeded_at")
+            if payload.get("version") == 3 and (
+                not isinstance(seeded_at, str) or not seeded_at
+            ):
+                # A v3 file is only ever written after a successful seed. One
+                # without the marker is malformed; accepting it would re-seed
+                # on top of it and could swallow a new pair.
+                raise ValueError("v3 journal without backlog_seeded_at")
             handled = payload.get("handled", []) or []
             if not isinstance(handled, list) or not all(
                 isinstance(item, str) for item in handled
@@ -827,11 +841,18 @@ class RecordingWatcher:
                     self._transcribed.add(path)
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             self._retry_state_available = False
+            kind = "Call recording" if self._paired else "Voice Memo"
             log.error(
-                f"[{DAEMON_NAME}] Voice Memo retry state is unreadable: "
-                f"{self._retry_state_path}: {exc}. Memo processing is disabled "
+                f"[{DAEMON_NAME}] {kind} retry state is unreadable: "
+                f"{self._retry_state_path}: {exc}. "
+                f"{'Call' if self._paired else 'Memo'} processing is disabled "
                 "until the journal is repaired; existing files will not be seeded "
                 "as handled."
+                + (
+                    " If this is a v3 journal read by an older Tyto, do not edit "
+                    "or delete it: roll forward to restore processing."
+                    if self._paired else ""
+                )
             )
 
 
@@ -873,8 +894,10 @@ class RecordingWatcher:
         except OSError as exc:
             self._retry_state_available = False
             log.error(
-                f"[{DAEMON_NAME}] Cannot persist Voice Memo retry state at "
-                f"{self._retry_state_path}: {exc}. Memo processing is disabled "
+                f"[{DAEMON_NAME}] Cannot persist "
+                f"{'call recording' if self._paired else 'Voice Memo'} retry state at "
+                f"{self._retry_state_path}: {exc}. "
+                f"{'Call' if self._paired else 'Memo'} processing is disabled "
                 "rather than risking a lost retry."
             )
             return False
@@ -940,6 +963,32 @@ class RecordingWatcher:
         return self._save_retry_state()
 
 
+    # A pair modified this recently is never seeded as backlog (persistent guard).
+    SEED_RECENT_SECS = 6 * 3600
+
+    def _seed_has_prior_processing(self, path: Path) -> bool:
+        """True when a pair is provably old work the guard may skip.
+
+        The persistent seed must make its worst case a duplicate transcription,
+        never a lost call, so it seeds only a pair that (a) carries a
+        ``.transcript.txt`` sidecar, evidence that a past run processed it, and
+        (b) has neither track modified within ``SEED_RECENT_SECS``. Everything
+        else (a call being recorded, a pair that landed while the daemon was
+        down or still settling, a pair with only a ``.pending-store.json``)
+        goes through normal settle-and-transcribe processing.
+        """
+        try:
+            if not path.with_name(path.name + ".transcript.txt").is_file():
+                return False
+            now = time.time()
+            mic = self._find_mic_pair(path) if self._paired else None
+            for source in (path, mic):
+                if source is not None and now - source.stat().st_mtime < self.SEED_RECENT_SECS:
+                    return False
+        except OSError:
+            return False
+        return True
+
     def _seed_existing(self) -> None:
         """Mark every currently-present eligible file as already handled."""
         if not self._retry_state_available:
@@ -954,37 +1003,61 @@ class RecordingWatcher:
             # mic is found from it), so this is one entry per pair.
             existing = [self._canonical_source(p) for p in self._dir.iterdir() if self._is_eligible_file(p)]
         except OSError:
+            # Folder missing or unreadable: leave the marker unset. poll_once
+            # re-runs the seed before processing anything, so the backlog is
+            # still guarded when the folder appears, and no journal is written
+            # with a null marker.
             return
         # A journaled retry (pending) is still retried, and a journaled hold
-        # keeps its own disposition; neither is backlog. This is how a store
-        # retry — a pair whose .pending-store.json result is waiting on a
-        # store — survives the guard: through its durable journal entry.
+        # keeps its own disposition; neither is backlog.
         seeded = [
             path for path in existing
             if path not in self._pending_retries and path not in self._hard_failed
+            and (not self._persist_backlog_guard or self._seed_has_prior_processing(path))
         ]
+        left = len([p for p in existing if p not in self._pending_retries
+                    and p not in self._hard_failed]) - len(seeded)
         self._transcribed.update(seeded)
         seeded_count = len(seeded)
         if self._persist_backlog_guard:
             self._backlog_seeded_at = datetime.now(tz=UTC).isoformat()
             if not self._save_retry_state():
                 return
-        if seeded_count:
-            unjournaled_store = sum(
+        if seeded_count or left:
+            sidecars = sum(
                 path.with_name(path.name + ".pending-store.json").exists()
                 for path in seeded
             ) if self._paired else 0
-            log.info(
+            noun = "pair(s)" if self._paired else "file(s)"
+            line = (
                 f"[{DAEMON_NAME}] Backlog guard: {seeded_count} pre-existing "
-                f"file(s) in {self._dir} marked as handled; they will not be "
+                f"{noun} in {self._dir} marked as handled; they will not be "
                 "transcribed."
-                + (
-                    f" {unjournaled_store} carry a .pending-store.json sidecar "
-                    "with no journaled retry; recover one explicitly with "
-                    "--recording-file --store-only."
-                    if unjournaled_store else ""
-                )
             )
+            if self._persist_backlog_guard:
+                line += (
+                    f" {left} {noun} without prior processing or modified in the "
+                    "last 6 hours were left for normal processing."
+                )
+            if sidecars:
+                line += (
+                    f" {sidecars} {noun} keep a .pending-store.json sidecar; "
+                    "that file stays after a store that landed, so it does not "
+                    "mean the store is unfinished. Before running "
+                    "--recording-file --store-only on one, look up its stored "
+                    "transcription by source path."
+                )
+            if self._persist_backlog_guard and not self._journal_existed:
+                log.warning(line)
+                self._notifier.send(
+                    f"Tyto backlog guard ran with no journal present: {seeded_count} "
+                    f"{noun} marked handled, {left} {noun} left for processing. Check that "
+                    "no call from the downtime is missing a transcription.",
+                    priority=Priority.WARN,
+                    handler=DAEMON_NAME,
+                )
+            else:
+                log.info(line)
         if self._pending_retries:
             log.info(
                 f"[{DAEMON_NAME}] Restored {len(self._pending_retries)} pending "
@@ -1137,6 +1210,13 @@ class RecordingWatcher:
     async def poll_once(self) -> None:
         if not self._retry_state_available:
             return
+        if self._persist_backlog_guard and self._backlog_seeded_at is None:
+            # The first seed could not read the folder. Retry it before
+            # processing anything, so the backlog is not re-run and no journal
+            # is written without the marker.
+            self._seed_existing()
+            if self._backlog_seeded_at is None or not self._retry_state_available:
+                return
         if not self._dir.exists():
             log.debug(f"[{DAEMON_NAME}] Recordings dir does not exist: {self._dir}")
             return
@@ -1336,6 +1416,10 @@ class RecordingWatcher:
         """
         if not self._retry_state_available:
             raise RuntimeError("Retry journal is unavailable; selected processing refused")
+        if self._persist_backlog_guard and self._backlog_seeded_at is None:
+            self._seed_existing()
+            if self._backlog_seeded_at is None or not self._retry_state_available:
+                raise RuntimeError("Backlog guard has not seeded; selected processing refused")
         path = self._canonical_source(path)
         if not self._is_eligible_file(path):
             raise RuntimeError("Selected file is outside this configured recording source")

@@ -18,7 +18,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -53,8 +55,14 @@ def home(tmp_path, monkeypatch):
     return fake_home
 
 
+def _age(*paths: Path, secs: float = 30 * 86400) -> None:
+    old = time.time() - secs
+    for path in paths:
+        os.utime(path, (old, old))
+
+
 def _write_pair(recordings: Path, stamp: str, *, sidecars: bool = True,
-                pending_store: bool = False) -> Path:
+                pending_store: bool = False, fresh: bool = False) -> Path:
     system = recordings / f"{stamp} system.mp4"
     system.write_bytes(b"synthetic system track " + stamp.encode())
     (recordings / f"{stamp} mic.mp4").write_bytes(b"synthetic mic track " + stamp.encode())
@@ -65,6 +73,8 @@ def _write_pair(recordings: Path, stamp: str, *, sidecars: bool = True,
         (recordings / f"{stamp} system.mp4.pending-store.json").write_text(
             json.dumps({"version": 1, "synthetic": True})
         )
+    if not fresh:
+        _age(*recordings.glob(f"{stamp} *"))
     return system.resolve()
 
 
@@ -97,6 +107,8 @@ def _journal() -> dict:
 def test_pre_existing_pairs_are_marked_handled_and_not_transcribed(home, monkeypatch, caplog):
     recordings = tyto.RECORDINGS_DIR
     systems = [_write_pair(recordings, stamp) for stamp in BACKLOG]
+    # A leftover sidecar from a store that already landed (it is never removed).
+    _write_pair(recordings, "20251231 1000", pending_store=True)
     caplog.set_level(logging.INFO)
 
     watcher, calls = _watcher(monkeypatch)
@@ -107,11 +119,18 @@ def test_pre_existing_pairs_are_marked_handled_and_not_transcribed(home, monkeyp
     guard_lines = [r.getMessage() for r in caplog.records
                    if "Backlog guard:" in r.getMessage()]
     assert len(guard_lines) == 1
-    assert f"{len(BACKLOG)} pre-existing file(s) in {recordings}" in guard_lines[0]
+    line = guard_lines[0]
+    assert f"{len(BACKLOG) + 1} pre-existing pair(s) in {recordings}" in line
+    assert "1 pair(s) keep a .pending-store.json sidecar" in line
+    assert "does not mean the store is unfinished" in line
+    assert "file(s)" not in line
     # Keyed per pair (system track), persisted in the same retry journal.
     journal = _journal()
+    assert journal["version"] == 3
     assert journal["backlog_seeded_at"]
-    assert sorted(journal["handled"]) == sorted(str(p) for p in systems)
+    assert sorted(journal["handled"]) == sorted(
+        str(p) for p in [*systems, (recordings / "20251231 1000 system.mp4").resolve()]
+    )
     assert journal["pending"] == [] and journal["hard_failed"] == []
 
 
@@ -204,3 +223,145 @@ def test_journaled_hold_keeps_its_disposition_not_marked_handled(home, monkeypat
     journal = _journal()
     assert str(held) not in journal["handled"]
     assert [h["path"] for h in journal["hard_failed"]] == [str(held)]
+
+
+def _v2_journal(**extra) -> None:
+    tyto.RECORDING_RETRY_STATE.parent.mkdir(parents=True, exist_ok=True)
+    tyto.RECORDING_RETRY_STATE.write_text(json.dumps(
+        {"version": 2, "pending": [], "hard_failed": [], **extra}
+    ))
+
+
+def test_fresh_pair_at_first_v3_start_from_v2_journal_is_transcribed(home, monkeypatch):
+    recordings = tyto.RECORDINGS_DIR
+    for stamp in BACKLOG:
+        _write_pair(recordings, stamp)
+    _v2_journal()
+    # A call being recorded now, a fresh pair that already has a transcript
+    # (still possibly new), and a pair that landed while the daemon was down
+    # (old mtime, never processed, so no transcript sidecar).
+    recording_now = _write_pair(recordings, "20260401 1000", sidecars=False, fresh=True)
+    fresh_done = _write_pair(recordings, "20260401 1100", fresh=True)
+    landed_down = _write_pair(recordings, "20260301 0900", sidecars=False)
+
+    watcher, calls = _watcher(monkeypatch)
+    _poll(watcher, times=len(BACKLOG) + 6)
+
+    assert sorted(c[0] for c in calls) == sorted([recording_now, fresh_done, landed_down])
+
+
+def test_pair_with_only_pending_store_and_no_journal_entry_is_transcribed(home, monkeypatch):
+    recordings = tyto.RECORDINGS_DIR
+    for stamp in BACKLOG:
+        _write_pair(recordings, stamp)
+    only_sidecar = _write_pair(recordings, "20251230 1700", sidecars=False, pending_store=True)
+    _v2_journal()
+
+    watcher, calls = _watcher(monkeypatch)
+    _poll(watcher, times=len(BACKLOG) + 3)
+
+    assert [c[0] for c in calls] == [only_sidecar]
+
+
+def test_unreadable_folder_at_first_start_never_swallows_a_later_pair(home, monkeypatch):
+    recordings = tyto.RECORDINGS_DIR
+    recordings.rmdir()
+    first, first_calls = _watcher(monkeypatch)
+    _poll(first, times=2)
+    assert first_calls == [] and not tyto.RECORDING_RETRY_STATE.exists()
+
+    # The folder appears with its backlog plus one genuinely new pair.
+    recordings.mkdir()
+    for stamp in BACKLOG:
+        _write_pair(recordings, stamp)
+    new = _write_pair(recordings, "20260301 1000", sidecars=False)
+    _poll(first, times=len(BACKLOG) + 4)
+    assert [c[0] for c in first_calls] == [new]
+    assert _journal()["backlog_seeded_at"] is not None
+
+    # Restart after another pair landed while the daemon was down.
+    while_down = _write_pair(recordings, "20260302 0800", sidecars=False)
+    second, second_calls = _watcher(monkeypatch)
+    _poll(second, times=4)
+    assert [c[0] for c in second_calls] == [while_down]
+
+
+def test_v3_journal_without_seed_marker_is_refused(home, monkeypatch, caplog):
+    recordings = tyto.RECORDINGS_DIR
+    _write_pair(recordings, BACKLOG[0])
+    new = _write_pair(recordings, "20260301 1000", sidecars=False)
+    for marker in ({}, {"backlog_seeded_at": None}):
+        tyto.RECORDING_RETRY_STATE.parent.mkdir(parents=True, exist_ok=True)
+        tyto.RECORDING_RETRY_STATE.write_text(json.dumps(
+            {"version": 3, "pending": [], "hard_failed": [], "handled": [], **marker}
+        ))
+        before = tyto.RECORDING_RETRY_STATE.read_text()
+        caplog.clear()
+        watcher, calls = _watcher(monkeypatch)
+        assert watcher._retry_state_available is False
+        _poll(watcher, times=3)
+        assert calls == [] and new.exists()
+        assert tyto.RECORDING_RETRY_STATE.read_text() == before
+        message = " ".join(r.getMessage() for r in caplog.records)
+        assert "Call recording retry state is unreadable" in message
+        assert "Voice Memo" not in message
+        assert "do not edit or delete" in message
+
+
+def test_explicit_recording_file_recovery_is_journaled_handled(home, monkeypatch):
+    recordings = tyto.RECORDINGS_DIR
+    _write_pair(recordings, BACKLOG[0])
+    watcher, calls = _watcher(monkeypatch)
+    _poll(watcher)
+    new = _write_pair(recordings, "20260301 1000", sidecars=False)
+    monkeypatch.setattr(watcher, "_run_transcription", lambda *a, **k: "ent_synthetic")
+    assert watcher.process_selected_recording(new, store_only=False, recover_held=False) == "ent_synthetic"
+    assert str(new) in _journal()["handled"]
+    assert _journal()["version"] == 3
+
+    restarted, restarted_calls = _watcher(monkeypatch)
+    _poll(restarted, times=3)
+    assert restarted_calls == []
+
+
+def test_stale_handled_entry_never_hides_a_journaled_retry_or_hold(home, monkeypatch):
+    recordings = tyto.RECORDINGS_DIR
+    retry = _write_pair(recordings, "20251230 1700", sidecars=False, pending_store=True)
+    held = _write_pair(recordings, "20251229 1300", sidecars=False)
+    tyto.RECORDING_RETRY_STATE.parent.mkdir(parents=True)
+    tyto.RECORDING_RETRY_STATE.write_text(json.dumps({
+        "version": 3,
+        "backlog_seeded_at": "2026-01-01T00:00:00+00:00",
+        "pending": [{"path": str(retry), "retry_after": 0, "attempts": 1}],
+        "hard_failed": [{"path": str(held), "error_code": "capability_denied",
+                         "at": "2026-01-01T00:00:00+00:00", "notified": True}],
+        "handled": [str(retry), str(held)],
+    }))
+    watcher, calls = _watcher(monkeypatch)
+    _poll(watcher, times=3)
+    assert [c[0] for c in calls] == [retry]
+    assert [h["path"] for h in _journal()["hard_failed"]] == [str(held)]
+    # The hold was already notified: no new alert.
+    assert watcher._notifier.send.call_count == 0
+
+
+def test_guard_with_no_journal_warns_through_the_notifier(home, monkeypatch, caplog):
+    recordings = tyto.RECORDINGS_DIR
+    for stamp in BACKLOG:
+        _write_pair(recordings, stamp)
+    _write_pair(recordings, "20260301 1000", sidecars=False)
+    caplog.set_level(logging.WARNING)
+    watcher, calls = _watcher(monkeypatch)
+    assert watcher._notifier.send.call_count == 1
+    text = watcher._notifier.send.call_args.args[0]
+    assert f"{len(BACKLOG)} pair(s) marked handled, 1 pair(s) left" in text
+    assert [r for r in caplog.records if "Backlog guard:" in r.getMessage()
+            and r.levelno == logging.WARNING]
+
+
+def test_guard_start_from_existing_v2_journal_does_not_notify(home, monkeypatch):
+    for stamp in BACKLOG:
+        _write_pair(tyto.RECORDINGS_DIR, stamp)
+    _v2_journal()
+    watcher, _calls = _watcher(monkeypatch)
+    assert watcher._notifier.send.call_count == 0
