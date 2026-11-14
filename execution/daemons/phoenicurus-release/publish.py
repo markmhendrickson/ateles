@@ -335,6 +335,20 @@ def _resolve_release_entity_id(version: str) -> str:
     return ids.pop()
 
 
+def _release_result_declared_fields(client) -> set[str] | None:
+    """Field names declared on the live `release_result` schema, or None if the
+    schema cannot be read (callers then attempt the write, as before)."""
+    try:
+        resp = client.get(f"{_neotoma_base()}/schemas/release_result", timeout=15)
+        resp.raise_for_status()
+        fields = resp.json()["schema_definition"]["fields"]
+        return set(fields) if isinstance(fields, dict) and fields else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"could not read release_result schema ({type(exc).__name__}); "
+                    f"will attempt every extra field")
+        return None
+
+
 def set_release_status(
     version: str,
     status: str,
@@ -364,8 +378,22 @@ def set_release_status(
     entity_id = entity_id or _resolve_release_entity_id(version)
     headers = {**_neotoma_headers(), "User-Agent": NEOTOMA_USER_AGENT}
     with httpx.Client(headers=headers) as client:
+        declared = _release_result_declared_fields(client)
         for field, value in (extra or {}).items():
             if field in ("status", "entity_type"):
+                continue
+            # An undeclared field is accepted by Neotoma and routed to
+            # raw_fragments, so the snapshot never carries it and the read-back
+            # can only fail (v0.29.0 `published_summary`). Skip the doomed write
+            # and say why; the value still reaches the log and Telegram.
+            if declared is not None and field not in declared:
+                log.warning(
+                    f"Release {version}: field {field!r} is not declared on the "
+                    f"release_result schema, so it would be routed to "
+                    f"raw_fragments and never appear on the snapshot; not "
+                    f"writing it (value kept in this log: {str(value)[:300]!r}). "
+                    f"Declare it on the schema to persist it."
+                )
                 continue
             # Extras are informational (url, reason, summary): a failed write is
             # logged but does not stop the release; the status below still is.
@@ -373,7 +401,14 @@ def set_release_status(
                 client, _neotoma_base(), entity_id, "release_result",
                 field, value, _status_key(entity_id, version, status, field),
             ):
-                log.error(f"Release {version}: writing {field} for {status} failed")
+                log.error(
+                    f"Release {version}: writing field {field!r} for {status} "
+                    f"failed: the correction was rejected or the snapshot did "
+                    f"not read back {str(value)[:80]!r} (see the preceding "
+                    f"neotoma_correct line for HTTP status vs read-back "
+                    f"mismatch). A read-back mismatch on a 2xx usually means "
+                    f"the field is undeclared on the release_result schema."
+                )
         ok = correct_field(
             client,
             _neotoma_base(),
