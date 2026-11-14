@@ -239,3 +239,45 @@ def test_update_task_never_raises_after_payment(monkeypatch, caplog, module, arg
     with caplog.at_level(logging.ERROR):
         module._update_task(_profile(), *args)  # must not raise
     assert any("payment itself settled" in r.getMessage() for r in caplog.records)
+
+
+# ── Round 3: a present `snapshot` key is the only source ─────────────────────
+
+_ID = {"entity_type": "task", "title": "Therapy"}
+_EMPTY_SNAPSHOT_BODIES = [
+    {"entity_type": "task", "snapshot": {}},
+    {**_ID, "snapshot": {}},
+    {**_ID, "snapshot": None},
+    {**_ID, "snapshot": "oops"},
+    {"entity": {**_ID, "snapshot": {}}},
+    {"entity": {**_ID, "snapshot": None}},
+    {**_ID, "snapshot": {"snapshot": {}}},
+    {**_ID, "snapshot": {**_ID, "snapshot": {}}},
+]
+
+
+@pytest.mark.parametrize("body", _EMPTY_SNAPSHOT_BODIES)
+def test_empty_snapshot_with_root_identity_writes_nothing(body) -> None:
+    import httpx
+
+    posts = []
+
+    def handler(req):
+        if req.method == "POST":
+            posts.append(req)
+        return httpx.Response(200, json=body)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    assert not task_writes.append_note(client, "https://neotoma.test", TASK, "new")
+    assert posts == []
+
+
+@pytest.mark.parametrize("body", _EMPTY_SNAPSHOT_BODIES)
+def test_extract_snapshot_rejects_empty_snapshot_key(body) -> None:
+    assert task_writes._extract_snapshot(body) is None
+
+
+def test_flat_entity_without_snapshot_key_still_reads() -> None:
+    body = {**_ID, "notes": "flat note"}
+    assert task_writes._extract_snapshot(body)["notes"] == "flat note"
+    assert task_writes._extract_snapshot({"entity": {**_ID, "notes": "n"}})["notes"] == "n"

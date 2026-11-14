@@ -26,7 +26,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from lib.daemon_runtime.neotoma_correct import correct_field  # noqa: E402
+from lib.daemon_runtime.neotoma_correct import (  # noqa: E402
+    correct_field,
+    unwrap_snapshot,
+)
 
 log = logging.getLogger(__name__)
 
@@ -63,38 +66,18 @@ def _idem(entity_id: str, field: str, value: Any) -> str:
 _IDENTITY_FIELDS = ("title", "entity_type", "canonical_name", "name")
 
 
-def _has_identity(*dicts: Any) -> bool:
-    return any(
-        isinstance(d, dict) and any(d.get(k) for k in _IDENTITY_FIELDS) for d in dicts
-    )
-
-
 def _extract_snapshot(body: Any) -> dict | None:
-    """Unwrap a GET /entities response using every shape the repo accepts.
+    """Unwrap a GET /entities response; None unless it is a usable task snapshot.
 
-    Shapes: ``{snapshot}``, ``{entity: {snapshot}}``, ``{snapshot: {snapshot}}``
-    and a flat entity. Returns None unless the unwrapped dict carries an
-    identity field (itself or its wrapper), so an empty or unrecognised
-    response is a failed read, never "no notes".
+    Uses the shared ``unwrap_snapshot`` (a present ``snapshot`` key is the only
+    source; empty or null means unreadable) and additionally requires the
+    snapshot itself to carry an identity field, so an identity-less response is
+    a failed read, never "no notes".
     """
-    if not isinstance(body, dict):
+    snap = unwrap_snapshot(body)
+    if snap is None or not any(snap.get(k) for k in _IDENTITY_FIELDS):
         return None
-    entity = body.get("entity") if isinstance(body.get("entity"), dict) else None
-    top = body.get("snapshot") if isinstance(body.get("snapshot"), dict) else None
-    candidates: list[tuple[dict, dict]] = []
-    if top is not None:
-        if isinstance(top.get("snapshot"), dict):
-            candidates.append((top["snapshot"], top))
-        candidates.append((top, body))
-    if entity is not None:
-        if isinstance(entity.get("snapshot"), dict):
-            candidates.append((entity["snapshot"], entity))
-        candidates.append((entity, entity))
-    candidates.append((body, body))
-    for snap, holder in candidates:
-        if snap and _has_identity(snap, holder):
-            return snap
-    return None
+    return snap
 
 
 def _snapshot(client: httpx.Client, base: str, entity_id: str) -> dict | None:

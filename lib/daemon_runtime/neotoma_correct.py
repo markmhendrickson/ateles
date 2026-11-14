@@ -25,17 +25,39 @@ def _describe(value: Any) -> str:
     return repr(value)
 
 
+def unwrap_snapshot(body: Any) -> dict | None:
+    """The entity's snapshot dict from a GET /entities response, or None.
+
+    Whenever a ``snapshot`` key exists (at the root, or under ``entity``) ONLY
+    that value is used: if it is empty, null or not a mapping the result is
+    None, never the surrounding object. A root that carries ``entity_type`` but
+    an empty ``snapshot`` therefore reads as unreadable, not as a flat entity
+    with no fields. A nested ``{snapshot: {snapshot: ...}}`` is unwrapped one
+    level with the same rule. The flat-entity reading applies only when no
+    ``snapshot`` key exists anywhere.
+    """
+    if not isinstance(body, dict):
+        return None
+    entity = body.get("entity")
+    if "snapshot" in body:
+        snap = body["snapshot"]
+    elif isinstance(entity, dict):
+        snap = entity["snapshot"] if "snapshot" in entity else entity
+    else:
+        snap = body
+    if isinstance(snap, dict) and "snapshot" in snap:
+        snap = snap["snapshot"]
+    if not isinstance(snap, dict) or not snap:
+        return None
+    return snap
+
+
 def _readback_matches(
     body: Any, field: str, value: Any, same: Callable[[Any, Any], bool] | None = None
 ) -> bool:
-    if not isinstance(body, dict):
+    inner = unwrap_snapshot(body)
+    if inner is None:
         return False
-    snap = body.get("snapshot")
-    if not isinstance(snap, dict) and isinstance(body.get("entity"), dict):
-        snap = body["entity"]  # {"entity": {"snapshot": {...}}} wrapper
-    if not isinstance(snap, dict):
-        snap = body
-    inner = snap.get("snapshot") if isinstance(snap.get("snapshot"), dict) else snap
     actual = inner.get(field)
     if same is not None:
         try:
