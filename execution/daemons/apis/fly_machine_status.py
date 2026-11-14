@@ -88,7 +88,14 @@ INVALID_ARGUMENTS_TEXT = "fly_machine_status: invalid arguments\n" + USAGE
 # else would change the request path, so it is refused before any call.
 _APP_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}", re.ASCII)
 _MACHINE_ID_RE = re.compile(r"[A-Za-z0-9]{1,64}", re.ASCII)
-_TOKEN_RE = re.compile(r"[\x21-\x7e]+", re.ASCII)
+# A deploy token is either one printable no-space token (``fo1_...``,
+# ``fm2_...``) or a Fly macaroon, which is one scheme word, a single space and
+# a no-space token (``FlyV1 fm2_a,fm2_b``; commas are inside the token).
+# fly_runner sends the value as ``Authorization: Bearer <token>``, so nothing
+# else may pass: no CR, LF, tab or other control character, no leading or
+# trailing space and no second space (header injection). This is stricter than
+# "any printable ASCII including space" and still accepts both real forms.
+_TOKEN_RE = re.compile(r"(?:[A-Za-z][A-Za-z0-9]{0,15} )?[\x21-\x7e]+", re.ASCII)
 # Loggers that could carry a request URL, header or response text. Each is
 # silenced together with every child logger (httpcore traces through
 # ``httpcore.http11``, ``httpcore.connection`` and so on, and a parent's
