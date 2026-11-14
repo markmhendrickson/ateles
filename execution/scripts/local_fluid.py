@@ -9,14 +9,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import shutil
 import subprocess
 import tempfile
+import wave
 from pathlib import Path
 
 from transcript_utterances import group_utterances
+
+log = logging.getLogger("local_fluid")
 
 BACKEND_FLUID = "fluid"
 ENGINE_FLUID = "local_fluid_audio"
@@ -38,14 +42,14 @@ def resolve_fluid_cli() -> str:
     return found
 
 
-def _run_json(cli: str, args: list[str], output: Path) -> dict:
+def _run_json(cli: str, args: list[str], output: Path, *, timeout: float | None = None) -> dict:
     stage = args[0] if args else "unknown"
     try:
         result = subprocess.run(
             [cli, *args, str(output)],
             capture_output=True,
             text=True,
-            timeout=float(os.environ.get("TRANSCRIBE_FLUID_TIMEOUT", "3600")),
+            timeout=timeout if timeout is not None else float(os.environ.get("TRANSCRIBE_FLUID_TIMEOUT", "3600")),
         )
     except subprocess.TimeoutExpired as exc:
         raise LocalFluidUnavailable(
@@ -158,19 +162,58 @@ def _resolve_compute_units() -> str:
 
 
 DIARIZATION_METHOD = "FluidAudio offline"
-_FAILURE_REASON_MAX = 300
+
+# Optional step on a short memo: bound it by the audio, never the 1 h default.
+MONO_TIMEOUT_FLOOR_SECONDS = 60.0
+MONO_TIMEOUT_CAP_SECONDS = 900.0
+MONO_TIMEOUT_PER_AUDIO_SECOND = 4.0
+
+# Fixed, path-free vocabulary for the stored header. Detail goes to the log.
+FAIL_CLI_NOT_FOUND = "cli not found"
+FAIL_TIMED_OUT = "timed out"
+FAIL_EXITED = "exited with error"
+FAIL_UNREADABLE = "unreadable output"
+
+_CLI_MISSING_LOGGED = False
+_BUILD_ID_CACHE: dict[str, str | None] = {}
 
 
 def _cli_build_id(cli: str) -> str | None:
-    """Short content hash of the CLI binary: the CLI reports no version string."""
+    """Short content hash of the CLI binary (it reports no version); cached."""
+    if cli in _BUILD_ID_CACHE:
+        return _BUILD_ID_CACHE[cli]
     try:
         digest = hashlib.sha256()
         with open(cli, "rb") as handle:
             while block := handle.read(1024 * 1024):
                 digest.update(block)
-        return digest.hexdigest()[:12]
+        value = digest.hexdigest()[:8]
     except OSError:
-        return None
+        value = None
+    _BUILD_ID_CACHE[cli] = value
+    return value
+
+
+def _mono_timeout(wav_path: Path) -> float:
+    try:
+        with wave.open(str(wav_path), "rb") as handle:
+            duration = handle.getnframes() / float(handle.getframerate() or 1)
+    except (OSError, EOFError, wave.Error):
+        duration = 0.0
+    return min(
+        MONO_TIMEOUT_CAP_SECONDS,
+        max(MONO_TIMEOUT_FLOOR_SECONDS, duration * MONO_TIMEOUT_PER_AUDIO_SECOND),
+    )
+
+
+def _failure_category(message: str) -> str:
+    if "unavailable" in message and "CLI" in message:
+        return FAIL_CLI_NOT_FOUND
+    if "timed out" in message:
+        return FAIL_TIMED_OUT
+    if "FluidAudio failed (" in message:
+        return FAIL_EXITED
+    return FAIL_UNREADABLE
 
 
 def diarize_mono(wav_path: Path) -> dict:
@@ -178,9 +221,11 @@ def diarize_mono(wav_path: Path) -> dict:
     multichannel path uses, and describe the outcome. Never raises.
 
     Diarization is fail-open: a failure is returned as ``status="failed"`` with
-    the reason, so the transcript still lands and its header says so. Raw
-    speaker embeddings are dropped; only speaker/time segments are kept.
+    a fixed ``category`` (no paths or CLI output), so the transcript still lands
+    and its header says so. The detail is logged. Raw speaker embeddings are
+    dropped; only speaker/time segments are kept.
     """
+    global _CLI_MISSING_LOGGED
     try:
         cli = resolve_fluid_cli()
         compute_units = _resolve_compute_units()
@@ -190,6 +235,7 @@ def diarize_mono(wav_path: Path) -> dict:
                 ["process", str(wav_path), "--mode", "offline",
                  "--compute-units", compute_units, "--output"],
                 Path(temporary) / "diar.json",
+                timeout=_mono_timeout(wav_path),
             )
         segments = []
         for segment in raw.get("segments") or []:
@@ -209,32 +255,35 @@ def diarize_mono(wav_path: Path) -> dict:
             "segments": segments,
         }
     except Exception as exc:  # noqa: BLE001 - diarization must never block a transcript
-        reason = " ".join(str(exc).split()) or type(exc).__name__
-        if len(reason) > _FAILURE_REASON_MAX:
-            reason = reason[:_FAILURE_REASON_MAX] + "..."
-        return {"status": "failed", "method": DIARIZATION_METHOD, "reason": reason}
+        message = " ".join(str(exc).split()) or type(exc).__name__
+        category = _failure_category(message)
+        if category != FAIL_CLI_NOT_FOUND or not _CLI_MISSING_LOGGED:
+            _CLI_MISSING_LOGGED = _CLI_MISSING_LOGGED or category == FAIL_CLI_NOT_FOUND
+            log.warning("Mono diarization failed (%s); transcript continues "
+                        "undiarized: %s", category, message[:1000])
+        return {"status": "failed", "method": DIARIZATION_METHOD, "category": category}
 
 
 def diarization_header(diarization: dict) -> str:
-    """One-line transcript header naming the diarization method and outcome."""
+    """One-line transcript header: the outcome first, then method and build."""
     method = diarization.get("method") or DIARIZATION_METHOD
     if diarization.get("status") == "ok":
         build = diarization.get("cli_build")
-        detail = ", ".join(
-            [f"cli build {build}" if build else "version not reported by CLI"]
-            + ([diarization["compute_units"]] if diarization.get("compute_units") else [])
-        )
+        how = f"detected locally by {method}" + (f" (build {build})" if build else "")
         count = diarization.get("speaker_count", 0)
-        if count == 0:
-            outcome = "no speech segments detected"
-        else:
-            outcome = f"{count} speaker{'' if count == 1 else 's'}"
+        outcome = str(count) if count else "no separate speakers found"
         note = diarization.get("note")
-        return f"[Diarization: {method} ({detail}) - {outcome}{'; ' + note if note else ''}]"
+        return f"[Speakers: {outcome}, {how}{'; ' + note if note else ''}]"
     return (
-        f"[Diarization: {method} FAILED - {diarization.get('reason', 'unknown reason')}; "
+        f"[Speakers: not detected, {method} failed "
+        f"({diarization.get('category', FAIL_UNREADABLE)}); "
         "transcript is not speaker-attributed]"
     )
+
+
+def format_clock(seconds: float) -> str:
+    total = int(seconds)
+    return f"{total // 60}:{total % 60:02d}"
 
 
 def attribute_segments(segments: list[dict], diarization: dict) -> list[dict]:
@@ -262,7 +311,7 @@ def attribute_segments(segments: list[dict], diarization: dict) -> list[dict]:
 
 def format_turns(turns: list[dict]) -> str:
     return "\n\n".join(
-        f"[{turn['start']:.2f}\u2013{turn['end']:.2f}] [{turn['speaker']}]\n{turn['text']}"
+        f"[{format_clock(turn['start'])}\u2013{format_clock(turn['end'])}] [{turn['speaker']}]\n{turn['text']}"
         for turn in turns
     )
 

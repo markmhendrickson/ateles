@@ -3,9 +3,16 @@
 Meeting capture uses FluidAudio for speaker segmentation and Parakeet v3 for
 timestamped transcription on Apple Silicon. Single-channel memos keep local whisper.cpp
 for the text and are also diarized by the same offline FluidAudio stage; the
-transcript's first line is a header naming the method and outcome (speaker count,
-or the failure reason - a diarization failure never blocks the transcript).
-With more than one speaker, whisper is re-run with timestamps to attribute turns.
+transcript's first line is a header that leads with the outcome, for example
+`[Speakers: 1, detected locally by FluidAudio offline (build adb146b0)]`. A
+diarization failure never blocks the transcript: the header then names a fixed
+failure category (`cli not found`, `timed out`, `exited with error` or
+`unreadable output`) and the detail goes to the log only. With more than one
+speaker, whisper is re-run with timestamps (and screened like the first pass) to
+attribute turns, shown as `[m:ss–m:ss] [S1]`. The header and turn prefixes are not
+speech: `lib/transcript_clarity.py` strips them before any length or rate check.
+The stage is bounded by four times the audio length (60 s to 900 s). A retry reuses
+the pending-store result, so the header does not change between attempts.
 `--no-diarize` / `RECORD_MEETING_DIARIZE=0` skip it and add no header. No API credential is needed.
 
 Install the [FluidAudio CLI](https://github.com/FluidInference/FluidAudio) from a

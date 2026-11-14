@@ -2757,7 +2757,7 @@ def _validate_transcription_result(result: object, *, paired: bool) -> None:
             diar = result["diarization"]
             require(isinstance(diar, dict) and diar.get("status") in ("ok", "failed")
                     and text(diar.get("method")), "diarization")
-            require(diar["status"] != "failed" or text(diar.get("reason")), "diarization.reason")
+            require(diar["status"] != "failed" or text(diar.get("category")), "diarization.category")
     elif backend == BACKEND_FLUID:
         events = fluid_raw(result.get("raw_response"), two_tracks=paired)
         if not events:

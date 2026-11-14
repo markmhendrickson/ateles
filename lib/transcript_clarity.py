@@ -379,6 +379,20 @@ def is_bracket_only(text: str) -> bool:
     return not remainder.split()
 
 
+_DIARIZATION_HEADER = re.compile(r"\A\s*\[Speakers: [^\]\n]*\](?:\s*\n|\s*\Z)")
+_TURN_PREFIX = re.compile(r"^\[\d+:\d\d[\u2013-]\d+:\d\d\] \[[^\]\n]*\]\s*$", re.MULTILINE)
+
+
+def strip_diarization_markup(text: str) -> str:
+    """Remove the transcriber's speaker header and turn prefixes.
+
+    They are not speech. Left in, they add words and sentences and would lift a
+    short or truncated transcript over the word-count and rate thresholds.
+    """
+    text = _DIARIZATION_HEADER.sub("", text or "", count=1)
+    return _TURN_PREFIX.sub("", text)
+
+
 def assess_transcript(
     text: str,
     duration_seconds: float | None = None,
@@ -398,7 +412,7 @@ def assess_transcript(
         A ClarityReport. ``clear`` is True only when no check flagged.
     """
     findings: list[ClarityFinding] = []
-    stripped = (text or "").strip()
+    stripped = strip_diarization_markup(text).strip()
     words = stripped.split()
     sentences = _sentences(stripped)
     metrics: dict = {

@@ -560,3 +560,34 @@ def test_bracket_only_genuine_greeting_is_unaffected():
     assert not is_bracket_only("Привет. А? Привет")
     assert report.metrics["language_verdict"] == "unexpected"
     assert 4 in {f.check for f in report.findings}
+
+
+# --- speaker header and turn prefixes are not speech -------------------------
+
+_HEADER = "[Speakers: 1, detected locally by FluidAudio offline (build adb146b0)]\n\n"
+_SHORT = "Remember to call the plumber tomorrow about the leak"
+
+
+def test_speaker_header_does_not_lift_a_short_memo_over_the_truncation_gate():
+    plain = assess_transcript(_SHORT, duration_seconds=60.0)
+    with_header = assess_transcript(_HEADER + _SHORT, duration_seconds=60.0)
+    assert not plain.clear
+    assert not with_header.clear
+    assert with_header.metrics["words"] == plain.metrics["words"] == 9
+
+
+def test_rate_gate_ignores_the_header_words():
+    body = " ".join(f"alpha{i}" for i in range(28))  # 28 distinct words in 60 s: 0.47 words/s, flagged
+    assert not assess_transcript(body, duration_seconds=60.0).clear
+    assert not assess_transcript(_HEADER + body, duration_seconds=60.0).clear
+
+
+def test_turn_prefixes_are_not_counted_as_words():
+    turns = "[0:00–0:04] [S1]\nHello there.\n\n[0:05–0:08] [S2]\nHi."
+    report = assess_transcript(_HEADER + turns, duration_seconds=8.0)
+    assert report.metrics["words"] == 3
+
+
+def test_header_only_transcript_is_empty():
+    assert not assess_transcript(_HEADER.strip(), duration_seconds=5.0).clear
+    assert any(f.check == 3 for f in assess_transcript(_HEADER.strip()).findings)

@@ -471,8 +471,21 @@ def transcribe_local(
             diarization = diarize_mono(wav_path)
             if diarization["status"] == "ok" and diarization["speaker_count"] > 1:
                 segments, why = _timed_segments(cmd, tmp_dir)
+                if segments is not None:
+                    # The timed text did not pass the result-side screen the
+                    # first run's text does; screen it the same way.
+                    timed_verdict = screen_transcription(
+                        " ".join(seg["text"] for seg in segments),
+                        expected_language=language,
+                        detected_language=detected,
+                        window_seconds=None,
+                    )
+                    if timed_verdict.filtered:
+                        segments, why = None, f"screened: {timed_verdict.reason}"
                 if segments is None:
-                    diarization["note"] = f"speaker turns not attributed ({why})"
+                    diarization["note"] = "speaker turns could not be attached"
+                    print(f"Timed whisper pass unusable ({why}); "
+                          "keeping untimed text.", file=sys.stderr)
 
     # --- Result-side screen, AFTER the model ------------------------------
     # The loudness gate above has a structural ceiling and this file class is
