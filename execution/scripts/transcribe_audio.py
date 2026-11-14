@@ -1642,6 +1642,103 @@ def split_audio_file(
         raise RuntimeError(f"Failed to split audio file: {e}") from e
 
 
+PAIRED_ASR_ENV = "TRANSCRIBE_PAIRED_ASR"
+PAIRED_ASR_WHISPER = "whisper"
+PAIRED_ASR_PARAKEET = "parakeet"
+# Medium is what the recordings desk validated on long calls: the turbo model
+# repeated sentences and dropped passages where medium did not.
+PAIRED_DEFAULT_MODEL_NAME = "ggml-medium.bin"
+
+
+def _paired_asr_source() -> str:
+    source = os.environ.get(PAIRED_ASR_ENV, "").strip().lower() or PAIRED_ASR_WHISPER
+    if source not in (PAIRED_ASR_WHISPER, PAIRED_ASR_PARAKEET):
+        raise ValueError(
+            f"{PAIRED_ASR_ENV}={source!r} is not a known source. "
+            f"Valid: {PAIRED_ASR_WHISPER}, {PAIRED_ASR_PARAKEET}."
+        )
+    return source
+
+
+def _transcribe_two_files_by_segment(
+    mic_path: Path, remote_path: Path, *, language: str | None, verbose: bool
+) -> dict:
+    """Local two-track path: per-track ASR segments merged by segment.
+
+    Replaces the word-level merge, which labelled each word by diarization
+    overlap and so interleaved the speakers and split one person across several
+    tags. The merge, energy mapping, cross-talk drop and (for whisper) chunking
+    with its repeat check are one automated step; see ``two_track_transcribe``.
+    """
+    from chunked_whisper import transcribe_track, whisper_cli_asr
+    from local_fluid import diarize_mono
+    from local_whisper import resolve_ffmpeg, resolve_model_path, resolve_whisper_cli
+    from two_track_transcribe import transcribe_two_tracks
+
+    source = _paired_asr_source()
+    lang = None if not language or language == "auto" else language
+    ffmpeg = resolve_ffmpeg()
+
+    if source == PAIRED_ASR_WHISPER:
+        model_env = {k: v for k, v in os.environ.items() if k.startswith("TRANSCRIBE_WHISPER_")}
+        if not model_env.get("TRANSCRIBE_WHISPER_MODEL") and not model_env.get("TRANSCRIBE_WHISPER_MODEL_NAME"):
+            model_env["TRANSCRIBE_WHISPER_MODEL_NAME"] = PAIRED_DEFAULT_MODEL_NAME
+        model = resolve_model_path(model_env)
+        asr = whisper_cli_asr(resolve_whisper_cli(), model)
+        model_label = f"whisper.cpp {model.name} (chunked) + FluidAudio offline"
+
+        def track_asr(label: str, wav16: Path, original: Path) -> dict:
+            if verbose:
+                print(f"    Transcribing {label} track in 2-minute chunks ({model.name})...", file=sys.stderr)
+            found = transcribe_track(wav16, asr=asr, language=lang, ffmpeg=ffmpeg)
+            segments = [{**seg, "text": _postprocess_transcript(seg["text"])} for seg in found["segments"]]
+            return {
+                "asr": {"source": PAIRED_ASR_WHISPER, "model": model.name},
+                "segments": segments,
+                "chunks": found["chunks"],
+            }
+    else:
+        model_label = "FluidAudio offline + Parakeet v3"
+
+        def track_asr(label: str, wav16: Path, original: Path) -> dict:
+            native = transcribe_fluid(original, language=language, verbose=verbose)
+            words = native["raw_response"]["aligned_words"]
+            utterances = group_utterances(
+                [{**w, "group": label} for w in words], gap=_utterance_gap_seconds(), stitch=0.0
+            )
+            return {
+                "asr": {"source": PAIRED_ASR_PARAKEET},
+                "segments": [{"start": u["start"], "end": u["end"], "text": u["text"]} for u in utterances],
+                "result": native["raw_response"],
+            }
+
+    done = transcribe_two_tracks(
+        mic_path, remote_path, track_asr=track_asr, ffmpeg=ffmpeg,
+        diarize=diarize_mono, stitch_seconds=_utterance_stitch_seconds(),
+    )
+    tracks = done["tracks"]
+    aligned_words: list[dict] = []
+    if source == PAIRED_ASR_PARAKEET:
+        # The native per-track result stays the raw evidence; aligned_words keep
+        # the track-scoped speaker ids the raw-evidence validator checks.
+        for track in tracks:
+            aligned_words.extend(
+                {**word, "speaker": f"{track['channel']}/{word['speaker']}"}
+                for word in track["result"]["aligned_words"]
+            )
+    return {
+        "transcription_text": done["text"],
+        "language": language or "auto",
+        "backend": BACKEND_FLUID,
+        "transcription_engine": "local_fluid_audio",
+        "transcription_model": model_label,
+        "audio_duration_seconds": max(get_audio_duration(mic_path) or 0, get_audio_duration(remote_path) or 0),
+        "file_size_bytes": mic_path.stat().st_size + remote_path.stat().st_size,
+        "raw_response": {"tracks": tracks, "aligned_words": aligned_words, "segment_merge": done["merge"]},
+        "mic_file": str(mic_path), "remote_file": str(remote_path),
+    }
+
+
 def transcribe_two_files(
     mic_path: Path,
     remote_path: Path,
@@ -1652,9 +1749,10 @@ def transcribe_two_files(
     """
     Transcribe mic and system tracks with deterministic channel prefixes.
 
-    Local FluidAudio processes each original mono track on its original timeline.
-    Speaker IDs remain scoped to their physical track; overlapping utterances
-    stay whole. An explicitly selected ElevenLabs backend combines the tracks
+    The local route transcribes each original mono track separately and merges
+    the two by SEGMENT (``two_track_transcribe``): every utterance stays whole,
+    identity follows the physical track, FluidAudio on the mixed tracks splits
+    the remote side, and clusters are mapped to tracks by energy. An explicitly selected ElevenLabs backend combines the tracks
     into stereo for its multichannel API. Both paths preserve raw model output.
 
     mic_path    — operator microphone track (mono) → labeled [Mic]
@@ -1664,22 +1762,9 @@ def transcribe_two_files(
     """
     selected = resolve_backend(explicit=backend, channel_count=2)
     if selected == BACKEND_FLUID:
-        tracks = []
-        events = []
-        for label, path in (("System", remote_path), ("Mic", mic_path)):
-            result = transcribe_fluid(path, language=language, verbose=verbose)
-            tracks.append({"channel": label, "result": result["raw_response"]})
-            for word in result["raw_response"]["aligned_words"]:
-                events.append({**word, "speaker": f"{label}/{word['speaker']}"})
-        return {
-            "transcription_text": format_events(events, gap=_utterance_gap_seconds(), stitch=_utterance_stitch_seconds()), "language": language or "auto",
-            "backend": BACKEND_FLUID, "transcription_engine": "local_fluid_audio",
-            "transcription_model": "FluidAudio offline + Parakeet v3",
-            "audio_duration_seconds": max(get_audio_duration(mic_path) or 0, get_audio_duration(remote_path) or 0),
-            "file_size_bytes": mic_path.stat().st_size + remote_path.stat().st_size,
-            "raw_response": {"tracks": tracks, "aligned_words": events},
-            "mic_file": str(mic_path), "remote_file": str(remote_path),
-        }
+        return _transcribe_two_files_by_segment(
+            mic_path, remote_path, language=language, verbose=verbose
+        )
     if selected != BACKEND_ELEVENLABS:
         raise RuntimeError("Paired transcription supports local FluidAudio or explicitly selected ElevenLabs")
 
@@ -2604,7 +2689,7 @@ def _processing_fingerprint() -> str:
         "TRANSCRIBE_TAG_AUDIO_EVENTS", "TRANSCRIBE_NUM_SPEAKERS",
         "TRANSCRIBE_WHISPER_MODEL", "TRANSCRIBE_WHISPER_MODEL_NAME", "TRANSCRIBE_WHISPER_CLI",
         "TRANSCRIBE_FLUID_CLI", "TRANSCRIBE_FLUID_COMPUTE_UNITS", "TRANSCRIBE_FFMPEG",
-        "ELEVENLABS_STT_MODEL_ID", "ELEVENLABS_STT_COMPRESS_THRESHOLD_MB",
+        "TRANSCRIBE_PAIRED_ASR", "ELEVENLABS_STT_MODEL_ID", "ELEVENLABS_STT_COMPRESS_THRESHOLD_MB",
         "ELEVENLABS_STT_UPLOAD_MP3_BITRATE", "ELEVENLABS_STT_MULTICHANNEL_MAX_SECONDS",
         "LIVE_TRANSCRIPT_SILENCE_THRESHOLD_DB",
     )
@@ -2633,6 +2718,7 @@ def _processing_fingerprint() -> str:
         "source": {name: _audio_content_hash(Path(__file__).with_name(name)) for name in (
             "transcribe_audio.py", "local_whisper.py", "local_fluid.py",
             "transcript_utterances.py", "hallucination_filter.py", "silence_gate.py",
+            "two_track_merge.py", "two_track_transcribe.py", "chunked_whisper.py",
         )},
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -2733,6 +2819,36 @@ def _validate_transcription_result(result: object, *, paired: bool) -> None:
         require(alignment_matches(raw["aligned_words"], expected_events), "raw_response.aligned_words consistency")
         return expected_events
 
+    def segment_merge_raw(raw, transcript):
+        """Raw evidence of the segment-merge two-track route (see two_track_transcribe)."""
+        merge = raw["segment_merge"]
+        require(isinstance(merge, dict) and isinstance(merge.get("turns"), list), "raw_response.segment_merge")
+        require(isinstance(raw.get("tracks"), list) and len(raw["tracks"]) == 2
+                and {t.get("channel") for t in raw["tracks"] if isinstance(t, dict)} == {"System", "Mic"},
+                "raw_response.tracks channels")
+        sources = set()
+        for track in raw["tracks"]:
+            require(isinstance(track.get("asr"), dict) and text(track["asr"].get("source")), "raw_response.tracks asr")
+            sources.add(track["asr"]["source"])
+            require(isinstance(track.get("segments"), list) and all(
+                isinstance(seg, dict) and number(seg.get("start")) and number(seg.get("end"))
+                and seg["end"] >= seg["start"] and isinstance(seg.get("text"), str)
+                for seg in track["segments"]), "raw_response.tracks segments")
+        require(len(sources) == 1, "raw_response.tracks asr source")
+        diar = merge.get("diarization")
+        require(diar is None or (isinstance(diar, dict) and diar.get("status") in ("ok", "failed")), "segment_merge.diarization")
+        for turn in merge["turns"]:
+            require(isinstance(turn, dict) and number(turn.get("start")) and number(turn.get("end"))
+                    and text(turn.get("label")) and text(turn.get("text")), "segment_merge.turns")
+        if "parakeet" in sources:
+            fluid_raw(raw, two_tracks=True)
+        else:
+            require(raw.get("aligned_words") == [], "raw_response.aligned_words")
+        if merge["turns"]:
+            require(transcript.startswith("[Speakers: "), "speaker header")
+        else:
+            require(transcript == format_events([]), "silent segment-merge transcription_text")
+
     require(isinstance(result, dict), "result")
     backend = result.get("backend")
     require(isinstance(backend, str) and backend in VALID_BACKENDS, "backend")
@@ -2758,6 +2874,9 @@ def _validate_transcription_result(result: object, *, paired: bool) -> None:
             require(isinstance(diar, dict) and diar.get("status") in ("ok", "failed")
                     and text(diar.get("method")), "diarization")
             require(diar["status"] != "failed" or text(diar.get("category")), "diarization.category")
+    elif backend == BACKEND_FLUID and paired and isinstance(result.get("raw_response"), dict) \
+            and "segment_merge" in result["raw_response"]:
+        segment_merge_raw(result["raw_response"], result["transcription_text"])
     elif backend == BACKEND_FLUID:
         events = fluid_raw(result.get("raw_response"), two_tracks=paired)
         if not events:
