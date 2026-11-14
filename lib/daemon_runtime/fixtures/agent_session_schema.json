@@ -1,0 +1,20 @@
+{
+  "_source": "Neotoma describe_entity_type(agent_session), schema_version 0.2.0, read 2026-11-14 from the operator prod instance",
+  "entity_type": "agent_session",
+  "required_fields": ["harness", "native_session_id"],
+  "fields": {
+    "harness": "string", "native_session_id": "string", "kind": "string", "title": "string",
+    "summary": "string", "model": "string", "status": "string", "message_count": "number",
+    "created_at": "date", "last_activity_at": "date", "cwd": "string", "repo": "string",
+    "repo_remote_url": "string", "source_branch": "string", "branch": "string",
+    "git_head_sha": "string", "worktree_path": "string", "origin_device": "string",
+    "parent_session_id": "string", "is_archived": "boolean", "auto_archive_exempt": "boolean",
+    "is_pinned": "boolean", "is_bridged": "boolean", "bridge_session_ids": "array",
+    "trigger_kind": "string", "trigger_ref": "string", "dispatch_parent": "string",
+    "aauth_sub": "string", "workflow_definition_ref": "string", "gate_name": "string",
+    "resume_command": "string", "holder": "string", "task_id": "string"
+  },
+  "store_rules": {
+    "idempotency": "A store whose idempotency_key was already used with different entity content is rejected 400 ERR_IDEMPOTENCY_MISMATCH (neotoma src/actions.ts, store handler)."
+  }
+}
