@@ -595,3 +595,37 @@ def test_repo_scoped_token_requires_owner_and_name(configured, repo):
     with pytest.raises(gat.AppTokenError, match="owner/name"):
         gat.repo_scoped_token(repo)
     assert configured.calls == []
+
+
+# ── rate limits on the urllib path ──
+
+
+def _http_error(code, headers, body=b'{"message": "x"}'):
+    import io
+    import urllib.error
+
+    return urllib.error.HTTPError("https://api.github.com/x", code, "err", headers, io.BytesIO(body))
+
+
+def _raise_http(monkeypatch, exc):
+    def _urlopen(req, timeout=None):
+        raise exc
+
+    monkeypatch.setattr(gat.urllib.request, "urlopen", _urlopen)
+
+
+def test_rate_limited_request_is_an_app_token_error_with_the_reset_line(monkeypatch):
+    exc = _http_error(403, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1800000000"})
+    _raise_http(monkeypatch, exc)
+    with pytest.raises(gat.AppTokenRateLimited) as ei:
+        gat._request("GET", "/app", "jwt")
+    assert isinstance(ei.value, gat.AppTokenError)
+    assert str(ei.value) == "GET /app -> HTTP 403 x"  # unchanged text
+    assert "2027-01-15 08:00:00 UTC" in ei.value.limit_message
+
+
+def test_plain_permission_403_is_not_a_rate_limit(monkeypatch):
+    _raise_http(monkeypatch, _http_error(403, {"x-ratelimit-remaining": "50"}))
+    with pytest.raises(gat.AppTokenError) as ei:
+        gat._request("GET", "/app", "jwt")
+    assert not isinstance(ei.value, gat.AppTokenRateLimited)

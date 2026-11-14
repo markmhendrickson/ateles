@@ -18,6 +18,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import sys
 from pathlib import Path
 
 import httpx
@@ -1092,3 +1093,59 @@ def test_the_reply_check_and_the_lens_reader_agree_on_what_is_a_marker(text, is_
     assert bool(verdict_review) is is_marker
     assert bool(lens_authors._LENS_MARKER_RE.search(text)) is is_marker
     assert bool(lens_authors.claimed_lenses(text)) is is_marker
+
+
+def _real_lens_authors():
+    """A fresh copy of the module: the suite's autouse fixture stubs
+    `_login_for_token` on the shared one."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("lens_authors_real", lens_authors.__file__)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["lens_authors_real"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestRateLimitedLoginLookup:
+    def test_a_rate_limited_lookup_still_admits_nobody_but_records_the_reset_line(
+        self, monkeypatch
+    ):
+        import io
+        import urllib.error
+
+        def _urlopen(req, timeout=None):
+            raise urllib.error.HTTPError(
+                req.full_url,
+                403,
+                "forbidden",
+                {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1800000000"},
+                io.BytesIO(b'{"message": "API rate limit exceeded"}'),
+            )
+
+        la = _real_lens_authors()
+        monkeypatch.setattr(la.urllib.request, "urlopen", _urlopen)
+        try:
+            assert la._login_for_token("tok") == ""
+            assert "2027-01-15 08:00:00 UTC" in la.rate_limit_notice()
+        finally:
+            la.clear_cache()
+        assert la.rate_limit_notice() == ""
+
+    def test_a_plain_permission_failure_records_nothing(self, monkeypatch):
+        import io
+        import urllib.error
+
+        def _urlopen(req, timeout=None):
+            raise urllib.error.HTTPError(
+                req.full_url, 403, "forbidden", {"x-ratelimit-remaining": "9"},
+                io.BytesIO(b'{"message": "Resource not accessible"}'),
+            )
+
+        la = _real_lens_authors()
+        monkeypatch.setattr(la.urllib.request, "urlopen", _urlopen)
+        try:
+            assert la._login_for_token("tok2") == ""
+            assert la.rate_limit_notice() == ""
+        finally:
+            la.clear_cache()

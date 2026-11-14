@@ -98,6 +98,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 DEFAULT_APP_ENV_PREFIX = "ATELES_REVIEWER_APP"
 # Per-identity Apps: ``<APP_IDENTITY_ENV_PREFIX>_<IDENTITY>`` (see module doc).
@@ -130,6 +131,53 @@ class AppTokenError(RuntimeError):
 
     The message never contains a token or key material.
     """
+
+
+class AppTokenRateLimited(AppTokenError):
+    """GitHub refused a mint/lookup because a rate limit is exhausted.
+
+    A plain `AppTokenError` for every existing caller (same message as before);
+    `limit_message` carries the one-line reset description for a caller that
+    wants to show it.
+    """
+
+    def __init__(self, message: str, limit_message: str) -> None:
+        super().__init__(message)
+        self.limit_message = limit_message
+
+
+def rate_limit_message(status: int, headers, body: str, *, now: datetime | None = None) -> str:
+    """One line describing a GitHub rate-limit refusal, or "" when *status* is not one.
+
+    A rate limit is a 403/429 where `x-ratelimit-remaining` is 0, or whose body
+    says so (a secondary limit, or "rate limit"). A 429 with no signal at all is
+    still one, of unknown kind. A plain permission 403 returns "".
+    """
+    if status not in (403, 429):
+        return ""
+    hdr = {str(k).lower(): str(v) for k, v in dict(headers).items()}
+    low = (body or "").lower()
+    secondary = "secondary rate limit" in low or "abuse detection" in low
+    exhausted = hdr.get("x-ratelimit-remaining") == "0"
+    if not (exhausted or secondary or "rate limit" in low or status == 429):
+        return ""
+    clock = now or datetime.now(timezone.utc)
+    kind = "secondary" if secondary else (hdr.get("x-ratelimit-resource") or "unknown")
+    when = ""
+    retry_after = hdr.get("retry-after", "")
+    reset: datetime | None = None
+    if retry_after.isdigit():
+        reset = clock + timedelta(seconds=int(retry_after))
+        when = f"retry after {retry_after}s; "
+    elif hdr.get("x-ratelimit-reset", "").isdigit():
+        reset = datetime.fromtimestamp(int(hdr["x-ratelimit-reset"]), tz=timezone.utc)
+    if reset is None:
+        return f"GitHub rate limit hit ({kind}); no reset time given, wait a few minutes."
+    local = reset.astimezone(ZoneInfo("Europe/Madrid"))
+    return (
+        f"GitHub rate limit hit ({kind}): {when}resets "
+        f"{reset:%Y-%m-%d %H:%M:%S} UTC / {local:%Y-%m-%d %H:%M:%S} Europe/Madrid."
+    )
 
 
 @dataclass(frozen=True)
@@ -458,7 +506,11 @@ def _request(method: str, path: str, bearer: str) -> dict:
             detail = json.loads(exc.read() or b"{}").get("message", "")
         except Exception:  # noqa: BLE001
             pass
-        raise AppTokenError(f"{method} {path} -> HTTP {exc.code} {detail}".strip()) from None
+        text = f"{method} {path} -> HTTP {exc.code} {detail}".strip()
+        limit = rate_limit_message(exc.code, exc.headers or {}, detail)
+        if limit:
+            raise AppTokenRateLimited(text, limit) from None
+        raise AppTokenError(text) from None
     except urllib.error.URLError as exc:
         raise AppTokenError(f"{method} {path} -> {exc.reason}") from None
     return json.loads(body or b"{}")

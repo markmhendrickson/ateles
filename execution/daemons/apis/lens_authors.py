@@ -82,6 +82,7 @@ import re
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -315,6 +316,23 @@ _LIVE_LOGIN_FAILURE_TTL_S = 30.0
 _LIVE_LOGIN_TIMEOUT_S = 10
 _live_lock = threading.Lock()
 _live_login_cache: dict[str, tuple[str, float]] = {}
+# The one-line reset description of the last rate-limited lookup, or "". A
+# lookup that fails still admits nobody (unchanged); this lets an interactive
+# caller say WHY. Daemons never read it.
+_rate_limit_notice = ""
+
+
+def rate_limit_notice() -> str:
+    """The reset line of the last lookup that GitHub rate-limited, or ""."""
+    with _live_lock:
+        return _rate_limit_notice
+
+
+def _note_rate_limit(message: str) -> None:
+    global _rate_limit_notice
+    if message:
+        with _live_lock:
+            _rate_limit_notice = message
 
 
 def _norm(login: object) -> str:
@@ -343,6 +361,8 @@ def _app_bot_logins() -> tuple[set[str], bool]:
             return set(), False
         login = _norm(_github_app_token.bot_login())
     except Exception as exc:  # noqa: BLE001 — an unreadable App contributes nothing
+        if isinstance(exc, _github_app_token.AppTokenRateLimited):
+            _note_rate_limit(exc.limit_message)
         log.warning("lens authors: swarm App login unreadable (%s)", exc.__class__.__name__)
         return set(), True
     if login and _LOGIN_RE.fullmatch(login):
@@ -467,6 +487,14 @@ def _login_for_token(token: str) -> str:
         with urllib.request.urlopen(req, timeout=_LIVE_LOGIN_TIMEOUT_S) as resp:
             login = _norm((json.loads(resp.read() or b"{}") or {}).get("login"))
     except Exception as exc:  # noqa: BLE001 — a token that cannot be resolved admits nobody
+        if isinstance(exc, urllib.error.HTTPError):
+            try:
+                body = exc.read().decode("utf-8", "replace")[:500]
+            except Exception:  # noqa: BLE001
+                body = ""
+            _note_rate_limit(
+                _github_app_token.rate_limit_message(exc.code, exc.headers or {}, body)
+            )
         log.warning("lens authors: a shared agent token's account is unreadable (%s)", exc.__class__.__name__)
     if login and not _LOGIN_RE.fullmatch(login):
         login = ""
@@ -477,8 +505,10 @@ def _login_for_token(token: str) -> str:
 
 def clear_cache() -> None:
     """Drop cached token-to-login lookups (tests)."""
+    global _rate_limit_notice
     with _live_lock:
         _live_login_cache.clear()
+        _rate_limit_notice = ""
 
 
 @dataclass(frozen=True)
