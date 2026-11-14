@@ -60,14 +60,18 @@ from lib.daemon_runtime.pinned_cli_identity import (  # noqa: E402
 from lib.daemon_runtime import shared_env  # noqa: E402
 
 # Settings come from ONE host-level file (~/.config/neotoma/.env, or
-# ATELES_DOTENV_FILE), never a per-checkout .env, so a git worktree or runtime
-# checkout needs no hand-made files. lib.daemon_runtime already loaded it at
-# import; this call makes the script's own contract explicit and loud: an
-# unreadable or malformed file stops the run naming the file and line.
-# Missing settings are named where they are needed (require_settings).
+# ATELES_DOTENV_FILE), so a git worktree or runtime checkout needs no hand-made
+# files. lib.daemon_runtime already loaded it at import; this call is a no-op
+# for names already set and is skipped under pytest / ATELES_SKIP_DOTENV.
+# Not strict: a malformed line is skipped and reported once by number, and a
+# setting that lived on it fails loudly by name where it is required
+# (require_settings), so one odd line cannot stop unrelated settings loading.
+# The repo-root .env is a WARNED FALLBACK for names missing everywhere else
+# (its contents cannot be audited from a session; removal is a follow-up).
 if shared_env.should_load():
     try:
         shared_env.load_shared_env()
+        shared_env.load_fallback_file(PROJECT_ROOT / ".env")
     except shared_env.SharedEnvError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)

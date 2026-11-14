@@ -13,8 +13,10 @@ root with):
   second file therefore cannot shadow the authoritative one.
 * The process environment wins over the file (explicit override). An empty or
   plist-placeholder (``__X__``) value counts as unset.
-* A file that cannot be read or has a malformed line is an error naming the file
-  and the line NUMBER. A line's text is never shown: it may be a credential.
+* A file that cannot be read is an error naming the file. A malformed line is
+  skipped and reported once, by file and line NUMBER only (never its text, which
+  may be a credential); every well-formed line still loads, so one odd line
+  cannot strip a daemon of its other settings. ``strict=True`` raises instead.
 * A required setting that is absent is an error naming the setting and where it
   was looked for. There is no default.
 
@@ -68,65 +70,136 @@ def should_load(environ: dict | None = None, modules: dict | None = None) -> boo
     return not ("pytest" in mods or env.get("PYTEST_CURRENT_TEST") is not None)
 
 
+_PLACEHOLDER = re.compile(r"^__[A-Za-z0-9_]+__$")
+_reported: set[tuple[str, int]] = set()
+
+
 def _unset(value: str | None) -> bool:
+    """Empty, whitespace-only, or an exact ``__NAME__`` plist placeholder."""
     v = (value or "").strip()
-    return not v or (v.startswith("__") and v.endswith("__"))
+    return not v or bool(_PLACEHOLDER.match(v))
 
 
-def parse_dotenv(path: Path) -> dict[str, str]:
-    """Parse ``path`` strictly. Raises ``SharedEnvError`` naming file and line number."""
+def parse_dotenv_lenient(path: Path) -> tuple[dict[str, str], list[int]]:
+    """Parse ``path``; return (settings, malformed line numbers).
+
+    Raises ``SharedEnvError`` only when the file cannot be read. Accepts
+    ``NAME=value`` and ``export NAME=value`` (the old loader stored the latter
+    under the name ``export NAME``), a UTF-8 byte-order mark, and one matching
+    pair of surrounding quotes, which is stripped.
+    """
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError) as exc:
         raise SharedEnvError(
-            f"Cannot read the shared settings file {path}: {type(exc).__name__}. "
-            "Fix its permissions or encoding; no settings were loaded."
+            f"Cannot read the settings file {path}: {type(exc).__name__}. "
+            "Fix its permissions or encoding; no settings were loaded from it."
         ) from None
     values: dict[str, str] = {}
+    bad: list[int] = []
     for number, raw in enumerate(text.splitlines(), start=1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         match = _LINE.match(line)
         if not match:
-            raise SharedEnvError(
-                f"Malformed line {number} in the shared settings file {path} "
-                "(expected NAME=value). Fix that line; no settings were loaded."
-            )
+            bad.append(number)
+            continue
         name, value = match.group(1), match.group(2).strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
         values[name] = value
+    return values, bad
+
+
+def _bad_lines_message(path: Path, bad: list[int]) -> str:
+    return (
+        f"settings file {path} has {len(bad)} malformed line(s): "
+        f"{', '.join(str(n) for n in bad)} (line numbers only; expected "
+        "NAME=value, where NAME has only letters, digits and underscores, on "
+        "one line). They were skipped; every other setting loaded."
+    )
+
+
+def parse_dotenv(path: Path) -> dict[str, str]:
+    """Strict parse: raises ``SharedEnvError`` naming file and line numbers."""
+    values, bad = parse_dotenv_lenient(path)
+    if bad:
+        raise SharedEnvError("Malformed " + _bad_lines_message(path, bad))
     return values
 
 
+def _warn_bad(path: Path, bad: list[int]) -> None:
+    fresh = [n for n in bad if (str(path), n) not in _reported]
+    if not fresh:
+        return
+    _reported.update((str(path), n) for n in fresh)
+    print(f"WARNING: {_bad_lines_message(path, fresh)}", file=sys.stderr)
+
+
 def load_shared_env(
-    environ: dict | None = None, *, path: Path | None = None, strict: bool = True
+    environ: dict | None = None, *, path: Path | None = None, strict: bool = False
 ) -> LoadReport:
     """Fill ``environ`` (default ``os.environ``) from the shared dotenv.
 
-    Existing non-empty values win. A missing file is not an error here (a
-    caller that needs a setting uses :func:`require_settings`, which then names
-    the file). ``strict=False`` reports an unusable file on stderr instead of
-    raising, for import-time daemon bootstrap that must not crash.
+    Existing set values win. Every well-formed line loads; malformed lines are
+    reported once on stderr by number (or raise, with ``strict=True``). A missing
+    file is not an error here (a caller that needs a setting uses
+    :func:`require_settings`, which names the file). An unreadable file raises
+    when strict, else warns.
     """
     env = os.environ if environ is None else environ
     target = path or shared_env_path(env)
     if not target.exists():
         return LoadReport(path=target, found=False)
     try:
-        values = parse_dotenv(target)
+        values, bad = parse_dotenv_lenient(target)
     except SharedEnvError as exc:
         if strict:
             raise
         print(f"WARNING: {exc}", file=sys.stderr)
         return LoadReport(path=target, found=True)
+    if bad:
+        if strict:
+            raise SharedEnvError("Malformed " + _bad_lines_message(target, bad))
+        _warn_bad(target, bad)
     loaded = []
     for name, value in values.items():
         if _unset(env.get(name)):
             env[name] = value
             loaded.append(name)
     return LoadReport(path=target, found=True, loaded=loaded)
+
+
+def load_fallback_file(path: Path, environ: dict | None = None) -> list[str]:
+    """Last-resort source: fill ONLY names unset in ``environ``, warning per name.
+
+    For a legacy per-checkout file whose contents cannot be audited. Callers
+    run it after :func:`load_shared_env`, so the environment and the shared file
+    both win. Each name resolved only from here is reported on stderr by name
+    and file, never value.
+    """
+    env = os.environ if environ is None else environ
+    if not path.exists():
+        return []
+    try:
+        values, bad = parse_dotenv_lenient(path)
+    except SharedEnvError as exc:
+        print(f"WARNING: {exc}", file=sys.stderr)
+        return []
+    _warn_bad(path, bad)
+    used = []
+    for name, value in values.items():
+        if _unset(env.get(name)) and not _unset(value):
+            env[name] = value
+            used.append(name)
+            print(
+                f"WARNING: setting {name} resolved only from the legacy file "
+                f"{path}; add it to the shared settings file "
+                f"{shared_env_path(env)} (the fallback will be removed).",
+                file=sys.stderr,
+            )
+    return used
 
 
 def require_settings(

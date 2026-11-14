@@ -69,8 +69,8 @@ def _dotenv_path(environ: dict | None = None) -> _Path:
 
 
 def _load_dotenv_into_environ(path: _Path, environ: dict) -> None:
-    # Not strict: a daemon must still start. An unreadable or malformed file is
-    # reported on stderr (file and line number, never a value), not skipped silently.
+    # Not strict: a daemon must still start and every well-formed line loads.
+    # Bad lines are reported once on stderr by number, never by text.
     _load_shared_env(environ, path=path, strict=False)
 
 
