@@ -2401,7 +2401,15 @@ def _cool_after_capacity_failure(
     if refusal.model and model_fallback:
         ran = (result.usage.model or "") if result.usage else ""
         order = model_tiering.configured_model_fallback_order(provider)
-        if not order:
+        if not ran:
+            # No model was pinned (the CLI ran its ambient default), so there
+            # is no model to substitute for: retrying would relaunch the same
+            # default. Cool the provider.
+            log.warning(
+                f"[apis] {provider} refused with a {refusal.model} limit but this "
+                "run pinned no model; cooling the whole provider"
+            )
+        elif not order:
             log.warning(
                 f"[apis] {provider} refused with a {refusal.model} limit but the "
                 f"vendor_binding declares no {model_tiering.FALLBACK_ORDER_KEY} "
@@ -5058,10 +5066,19 @@ async def run_skill(
         if wanted_model and selected != local_provider.LOCAL_PROVIDER:
             cooled = model_cooled(selected, wanted_model)
             if cooled is not None:
+                # The floor is the tier the dispatch resolved to and/or the tier
+                # an explicitly pinned model is bound to, whichever is higher; a
+                # pinned model bound to no tier has no floor and is not replaced.
+                floors = [
+                    t for t in (
+                        precomputed_tier.tier if precomputed_tier else None,
+                        model_tiering.bound_tier(selected, wanted_model),
+                    ) if t
+                ]
                 replacement = model_tiering.next_fallback_model(
                     selected,
                     wanted_model,
-                    floor_tier=precomputed_tier.tier if precomputed_tier else None,
+                    floor_tier=max(floors, key=model_tiering._tier_index) if floors else None,
                     skip=lambda candidate: model_cooled(selected, candidate)
                     is not None,
                 )
@@ -5221,9 +5238,6 @@ def _tier_bound_binaries(
     if not (usable - {local_provider.LOCAL_PROVIDER}):
         return binaries
     return filtered
-
-# Same-provider retries after a model-scoped cap, per provider per dispatch.
-MODEL_FALLBACK_MAX_RETRIES = 4
 
 # The cheapest tier a frontier provider can run: the one just above "local" in
 # model_tiering.TIERS. Pinned by a test so a change to the ladder cannot move the
@@ -5782,10 +5796,12 @@ async def _run_provider_attempts(
                 # One model's cap, not the provider's: run the same provider
                 # again straight away. Its attempt substitutes the next declared
                 # model (or reports none and the loop moves on). Bounded by the
-                # models there are, so a refusal that keeps naming a model the
-                # run did not use cannot loop.
+                # models the order declares (each retry cools one more), so it
+                # cannot loop.
                 model_retries[selected] = model_retries.get(selected, 0) + 1
-                if model_retries[selected] <= MODEL_FALLBACK_MAX_RETRIES:
+                if model_retries[selected] <= len(
+                    model_tiering.configured_model_fallback_order(selected)
+                ):
                     pending.insert(index, selected)
                 last_result = result
                 log.warning(

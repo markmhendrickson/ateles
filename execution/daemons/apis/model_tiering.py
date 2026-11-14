@@ -356,11 +356,12 @@ def model_meets_floor(
 
     A model is only as strong as the tier the vendor_binding binds it to: one
     bound to no tier cannot be shown to meet the floor, so it is refused rather
-    than assumed adequate.  No floor (an untiered or explicitly pinned dispatch)
-    accepts any declared model.
+    than assumed adequate.  An unknown floor (``None``) refuses every model: a
+    caller that cannot say how strong the work needs its model to be has no
+    basis for substituting a different one.
     """
     if floor_tier is None:
-        return True
+        return False
     floor = _tier_index(floor_tier)
     if floor < 0:
         return False
@@ -371,12 +372,30 @@ def model_meets_floor(
     return False
 
 
+def bound_tier(
+    provider: str, model: str, *, binding: dict[str, dict[str, str]] | None = None
+) -> str | None:
+    """The strongest tier ``model`` is bound to for ``provider``, or ``None``.
+
+    The floor an explicitly pinned model implies: what the operator bound it as
+    is the least strength a stand-in may have.  ``None`` when it is bound to no
+    tier (including no vendor_binding at all).
+    """
+    active = configured_vendor_binding() if binding is None else binding
+    tiers = [
+        tier
+        for tier, bound in active.get(provider.strip().lower(), {}).items()
+        if _model_matches(bound, model)
+    ]
+    return max(tiers, key=_tier_index) if tiers else None
+
+
 def next_fallback_model(
     provider: str,
     current_model: str,
     *,
     order: tuple[str, ...] | None = None,
-    floor_tier: str | None = None,
+    floor_tier: str | None,
     skip=lambda model: False,
 ) -> str | None:
     """The next declared model after ``current_model``, or ``None``.
@@ -386,6 +405,7 @@ def next_fallback_model(
     unavailable (``skip``, e.g. itself cooled) or that falls below the
     dispatch's tier floor is passed over, and a current model absent from the
     order has no fallback: nothing outside the declaration is ever chosen.
+    ``floor_tier`` is required and ``None`` (floor unknown) yields no fallback.
     """
     declared = configured_model_fallback_order(provider) if order is None else order
     position = next(

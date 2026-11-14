@@ -99,7 +99,7 @@ class Harness:
         monkeypatch.setattr(skill_runner, "_run_skill_once", fake_once)
         monkeypatch.setattr(skill_runner, "_emit_harness_event", fake_emit)
 
-    def run(self, action_class="lens_review:pm", **kw):
+    def run(self, action_class="lens_review:pm", **kw):  # noqa: D102
         return asyncio.run(
             skill_runner.run_skill(
                 "pavo", "review", role="pavo", action_class=action_class, **kw
@@ -188,9 +188,19 @@ def test_next_model_is_after_the_current_one_and_within_the_floor() -> None:
     assert model_tiering.next_fallback_model("claude", "sonnet", order=order, floor_tier="mid") == "opus"
     # haiku is declared but sits below mid, so it is never a stand-in at mid.
     assert model_tiering.next_fallback_model("claude", "opus", order=order, floor_tier="mid") is None
-    assert model_tiering.next_fallback_model("claude", "opus", order=order, floor_tier=None) == "haiku"
+    # Opus is top: neither declared model after it is strong enough.
+    assert model_tiering.next_fallback_model("claude", "opus", order=order, floor_tier="top") is None
+    # An unknown floor substitutes nothing.
+    assert model_tiering.next_fallback_model("claude", "opus", order=order, floor_tier=None) is None
     # A model the order does not name has no fallback.
-    assert model_tiering.next_fallback_model("claude", "fable", order=order) is None
+    assert model_tiering.next_fallback_model("claude", "fable", order=order, floor_tier="mid") is None
+
+
+def test_a_pinned_model_implies_the_tier_it_is_bound_to() -> None:
+    assert model_tiering.bound_tier("claude", "opus") == "top"
+    assert model_tiering.bound_tier("claude", "claude-sonnet-5-5") == "mid"  # family part of the id
+    assert model_tiering.bound_tier("claude", "sonnet") == "mid"
+    assert model_tiering.bound_tier("claude", "fable") is None
 
 
 def test_the_config_checker_accepts_a_fallback_order(tmp_path) -> None:
@@ -293,3 +303,72 @@ def test_review_prompt_refusals_still_cool_the_provider(monkeypatch) -> None:
     assert scoped is None
     assert harness_router.persisted_cooling("claude") is not None
     assert harness_router.model_cooled("claude", "sonnet") is None
+
+
+def test_a_pinned_model_is_never_replaced_by_a_weaker_one(monkeypatch) -> None:
+    """The arch finding: a pinned model has no resolved tier, yet must not be
+    downgraded; its floor is the tier the vendor_binding binds it to."""
+    _binding(monkeypatch, {"claude": {**BINDING["claude"], "fallback_order": ["opus", "sonnet", "haiku"]}})
+    harness = Harness(monkeypatch, {"opus": OPUS_REFUSAL})
+
+    result = harness.run(action_class=None, model="opus")
+
+    assert not result.ok
+    assert harness.launched == ["opus"]  # neither sonnet (mid) nor haiku (mechanical)
+    assert harness_router.persisted_cooling("claude") is None
+    assert harness_router.model_cooled("claude", "opus")
+
+
+def test_a_pinned_model_may_move_to_an_equal_or_stronger_declared_one(monkeypatch) -> None:
+    harness = Harness(monkeypatch, {"sonnet": SONNET_REFUSAL})
+    assert harness.run(action_class=None, model="sonnet").ok
+    assert harness.launched == ["sonnet", "opus"]
+
+
+def test_a_pinned_model_bound_to_no_tier_is_not_replaced(monkeypatch) -> None:
+    _binding(monkeypatch, {"claude": {**BINDING["claude"], "fallback_order": ["fable", "opus"]}})
+    harness = Harness(monkeypatch, {"fable": "You've hit your Fable weekly limit · resets Nov 20 at 2pm (Europe/Madrid)"})
+
+    result = harness.run(action_class=None, model="fable")
+
+    assert not result.ok
+    assert harness.launched == ["fable"]
+
+
+def test_an_unpinned_untiered_dispatch_launches_once_then_cools_the_provider(monkeypatch) -> None:
+    """No model was named, so there is nothing to substitute: one launch, not a
+    string of retries of the same ambient default."""
+    harness = Harness(monkeypatch, {None: SONNET_REFUSAL})
+
+    result = harness.run(action_class=None)
+
+    assert not result.ok
+    assert harness.launched == [None]
+    assert harness_router.persisted_cooling("claude") is not None
+    assert harness_router.model_cooled("claude", "sonnet") is None
+
+
+def test_retries_are_bounded_by_the_declared_order(monkeypatch) -> None:
+    """Every declared model refusing ends the dispatch after one launch each."""
+    refusals = {"sonnet": SONNET_REFUSAL, "opus": OPUS_REFUSAL}
+    _binding(monkeypatch, {"claude": {**BINDING["claude"], "fallback_order": ["sonnet", "opus"]}})
+    harness = Harness(monkeypatch, refusals)
+
+    result = harness.run()
+
+    assert not result.ok
+    assert harness.launched == ["sonnet", "opus"]
+
+
+def test_refusing_to_substitute_is_a_provider_failover_row(monkeypatch) -> None:
+    harness = Harness(monkeypatch, {"opus": OPUS_REFUSAL})
+    _binding(monkeypatch, {"claude": {**BINDING["claude"], "fallback_order": ["opus", "sonnet"]}})
+
+    harness.run(action_class="build")
+
+    rows = [e for e in harness.events if "to_model=none" in e.get("output_summary", "")]
+    assert len(rows) == 1
+    assert rows[0]["event_type"] == "provider_failover"
+    assert "from_model=opus" in rows[0]["output_summary"]
+    assert "failover_reason=model_capacity" in rows[0]["output_summary"]
+    assert rows[0]["usage"].model == "opus"
