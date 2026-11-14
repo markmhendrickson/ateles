@@ -32,3 +32,5 @@ d73b2ce6ddd2d81b1342f28295b63047a88a19ad:execution/evals/fly_delivery_receipt/fl
 # EARLIER commit of the PR. The later commit marks the line gitleaks:allow; the
 # PR-range scan reads history.
 d4093a9e47e7a75ac949f9172164077c5e1907c1:lib/daemon_runtime/test_policy_fetch_cache.py:generic-api-key:25
+# fail-closed settings PR: a suffix-spoof test address in an EARLIER commit; the later commit builds it at runtime. The PR-range scan reads history.
+65be4bc294afed81ffdf9cac180149b72f1a9789:execution/daemons/riparia/test_riparia.py:pii-email:46

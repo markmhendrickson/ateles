@@ -410,7 +410,7 @@ Further rules on current Neotoma:
 
 Entity-level grants gate Neotoma operations. **Tool-level grants** extend the
 same `agent_grant` entity to gate arbitrary MCP tool calls — across any MCP
-server, not just Neotoma. Two different enforcement points read those grants, and they do not key on the same thing: **Neotoma-side admission is key-bound** (a request is admitted only via a grant pinning the signing key), whereas the **local tool proxy** (`GrantChecker` in `lib/daemon_runtime/grant_checker.py`, plus `mcp_tool_grant_proxy`) looks grants up by the daemon's `aauth_sub` using the operator bearer token, is **advisory** (permissive when Neotoma is unreachable), and is not bound to any key. The intent is that a Monedula invocation cannot call `github_harness` tools even if that server is connected at dispatch. Treat that as a Neotoma-side guarantee only for calls made with the key the Monedula grant pins (another key claiming the Monedula sub is not admitted on v0.24.0 and later; on releases up to `v0.23.1` a grant without a thumbprint pin would have admitted it), and as an advisory check, not a guarantee, at the local proxy.
+server, not just Neotoma. Two different enforcement points read those grants, and they do not key on the same thing: **Neotoma-side admission is key-bound** (a request is admitted only via a grant pinning the signing key), whereas the **local tool proxy** (`GrantChecker` in `lib/daemon_runtime/grant_checker.py`, plus `mcp_tool_grant_proxy`) looks grants up by the daemon's `aauth_sub` using the operator bearer token, **fails closed** (denies when Neotoma is unreachable, the token or agent identity is missing, or no grant declares tool capabilities; the only opt-out is the explicit `ATELES_GRANTS_ADVISORY=1`), and is not bound to any key. The intent is that a Monedula invocation cannot call `github_harness` tools even if that server is connected at dispatch. Treat that as a Neotoma-side guarantee only for calls made with the key the Monedula grant pins (another key claiming the Monedula sub is not admitted on v0.24.0 and later; on releases up to `v0.23.1` a grant without a thumbprint pin would have admitted it), and as a fail-closed check at the local proxy (not key-bound).
 
 ### Grant shape
 
@@ -474,10 +474,10 @@ Launch (in `.mcp.json` or Anthus dispatch config):
 }
 ```
 
-**Permissive fallback:** if Neotoma is unreachable, or the agent has *no* grant
-declaring *any* tool capability, calls pass through (advisory mode). This lets
-un-migrated agents keep working while migrated agents get hard enforcement —
-the boundary tightens per-agent as `tool:` capabilities are added to each grant.
+**Fail closed:** if Neotoma is unreachable, `ATELES_AGENT_SUB` is unset, or the
+agent has *no* grant declaring *any* tool capability, calls are denied. Add
+`tool:` capabilities to each agent's grant; running unenforced requires the
+explicit `ATELES_GRANTS_ADVISORY=1`.
 
 For owned MCP servers (`github_harness`, `mcpsrv_neotoma`, `parquet`),
 per-server enforcement (option A) can be layered in for defence-in-depth;

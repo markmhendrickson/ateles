@@ -125,14 +125,73 @@ def test_check_tool_denied_when_absent():
     assert constraints is None
 
 
-def test_check_tool_permissive_when_no_tool_grants_anywhere():
-    # Un-migrated agent: no grant declares any tool caps → permissive fallback.
+def test_check_tool_denies_when_no_tool_grants_anywhere(monkeypatch):
+    # Grants that declare no tool caps used to permit; now they deny.
+    monkeypatch.delenv("ATELES_GRANTS_ADVISORY", raising=False)
     c = GrantChecker("cicada@ateles-swarm")
     c._grants = [GrantChecker._parse(_legacy_grant_entity())]
     c._loaded = True
     allowed, constraints = c.check_tool("btc-wallet", "btc_send_transfer")
-    assert allowed is True
+    assert allowed is False
     assert constraints is None
+
+
+def _degraded_checkers():
+    no_token = GrantChecker("x@ateles-swarm")
+    no_token._load_error = "NEOTOMA_BEARER_TOKEN not set"
+    no_token._loaded = True
+    no_grants = GrantChecker("x@ateles-swarm")
+    no_grants._loaded = True
+    not_loaded = GrantChecker("x@ateles-swarm")
+    return [no_token, no_grants, not_loaded]
+
+
+def test_degraded_grant_read_denies_by_default(monkeypatch):
+    for value in (None, "", "  ", "0", "true", "yes", "on"):
+        if value is None:
+            monkeypatch.delenv("ATELES_GRANTS_ADVISORY", raising=False)
+        else:
+            monkeypatch.setenv("ATELES_GRANTS_ADVISORY", value)
+        for c in _degraded_checkers():
+            assert c.is_active() is False
+            assert c.check_capability("a2a:task:create") is False
+            assert c.has_capability("a2a:task:create") is False
+            assert c.check_tool("s", "t") == (False, None)
+
+
+def test_load_without_token_denies(monkeypatch):
+    import lib.daemon_runtime.grant_checker as gc
+
+    monkeypatch.delenv("ATELES_GRANTS_ADVISORY", raising=False)
+    monkeypatch.setattr(gc, "NEOTOMA_BEARER_TOKEN", "")
+    c = GrantChecker("x@ateles-swarm").load()
+    assert c.is_active() is False
+    assert c.check_tool("s", "t") == (False, None)
+
+
+def test_advisory_flag_is_the_only_opt_out_and_is_announced(monkeypatch, caplog):
+    import logging
+
+    import lib.daemon_runtime.grant_checker as gc
+
+    monkeypatch.setattr(gc, "_advisory_announced", False)
+    monkeypatch.setenv("ATELES_GRANTS_ADVISORY", "1")
+    with caplog.at_level(logging.WARNING):
+        assert gc.grants_advisory() is True
+        assert gc.grants_advisory() is True
+    warnings = [r for r in caplog.records if "ATELES_GRANTS_ADVISORY" in r.getMessage()]
+    assert len(warnings) == 1  # announced once, naming the flag
+    for c in _degraded_checkers():
+        assert c.is_active() is True
+        assert c.check_capability("x") is True
+        assert c.check_tool("s", "t") == (True, None)
+
+
+def test_advisory_flag_defaults_off(monkeypatch):
+    import lib.daemon_runtime.grant_checker as gc
+
+    monkeypatch.delenv("ATELES_GRANTS_ADVISORY", raising=False)
+    assert gc.grants_advisory() is False
 
 
 def test_check_tool_denied_when_grant_suspended():
@@ -213,3 +272,44 @@ def _run_all() -> int:
 
 if __name__ == "__main__":
     sys.exit(_run_all())
+
+
+def test_suspended_and_revoked_fail_closed_on_degraded_read(monkeypatch):
+    monkeypatch.delenv("ATELES_GRANTS_ADVISORY", raising=False)
+    for c in _degraded_checkers():
+        assert c.is_suspended() is True
+        assert c.is_revoked() is True
+    monkeypatch.setenv("ATELES_GRANTS_ADVISORY", "1")
+    for c in _degraded_checkers():
+        assert c.is_suspended() is False
+        assert c.is_revoked() is False
+
+
+def test_suspended_and_revoked_unchanged_with_readable_grants(monkeypatch):
+    monkeypatch.delenv("ATELES_GRANTS_ADVISORY", raising=False)
+    c = _checker_with(_monedula_grant_entity())
+    assert c.is_suspended() is False and c.is_revoked() is False
+    e = _monedula_grant_entity()
+    e["snapshot"]["status"] = "revoked"
+    assert _checker_with(e).is_revoked() is True
+
+
+def test_load_error_is_exposed(monkeypatch):
+    import lib.daemon_runtime.grant_checker as gc
+
+    monkeypatch.setattr(gc, "NEOTOMA_BEARER_TOKEN", "")
+    c = GrantChecker("x@ateles-swarm").load()
+    assert c.load_error
+    assert _checker_with(_monedula_grant_entity()).load_error is None
+
+
+def test_read_problem_names_cause_without_logging(monkeypatch):
+    monkeypatch.delenv("ATELES_GRANTS_ADVISORY", raising=False)
+    c = GrantChecker("x@ateles-swarm")
+    c._loaded = True
+    assert "no agent_grant" in c.read_problem()
+    c._load_error = "NEOTOMA_BEARER_TOKEN not set"
+    assert c.read_problem() == "NEOTOMA_BEARER_TOKEN not set"
+    assert _checker_with(_monedula_grant_entity()).read_problem() is None
+    monkeypatch.setenv("ATELES_GRANTS_ADVISORY", "1")
+    assert c.read_problem() is None

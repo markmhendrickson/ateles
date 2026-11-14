@@ -165,17 +165,21 @@ async def handle_webhook(request: web.Request) -> web.Response:
     notifier: Notifier = request.app["notifier"]
     delivery_id = request.headers.get("X-Delivery-Id", "unknown")
 
-    # 1. Verify HMAC signature
-    if WEBHOOK_SECRET:
-        sig_header = request.headers.get("X-Neotoma-Signature", "")
-        body = await request.read()
-        if not _verify_signature(body, sig_header):
-            log.warning(
-                f"[apus] Signature verification failed for delivery {delivery_id}"
-            )
-            return web.Response(status=401, text="Signature mismatch")
-    else:
-        body = await request.read()
+    # 1. Verify HMAC signature. An unset/empty secret refuses the delivery
+    # (fail closed): absence of configuration must never disable authentication.
+    if not _webhook_secret():
+        log.error(
+            "[apus] APUS_WEBHOOK_SECRET is not set - refusing delivery %s",
+            delivery_id,
+        )
+        return web.Response(status=503, text="Webhook authentication not configured")
+    sig_header = request.headers.get("X-Neotoma-Signature", "")
+    body = await request.read()
+    if not _verify_signature(body, sig_header):
+        log.warning(
+            f"[apus] Signature verification failed for delivery {delivery_id}"
+        )
+        return web.Response(status=401, text="Signature mismatch")
 
     # 2. Parse payload
     try:
@@ -399,14 +403,24 @@ def _apply_and_commit(
     return sha
 
 
+def _webhook_secret() -> str:
+    """The configured webhook secret; "" means NOT configured (unset, empty or
+    whitespace-only). A real secret is returned unmodified so the HMAC key is
+    unchanged."""
+    return WEBHOOK_SECRET if (WEBHOOK_SECRET or "").strip() else ""
+
+
 def _verify_signature(body: bytes, sig_header: str) -> bool:
-    """Verify HMAC-SHA256 webhook signature."""
-    if not WEBHOOK_SECRET or not sig_header:
-        return not bool(WEBHOOK_SECRET)  # if no secret configured, allow all
+    """Verify HMAC-SHA256 webhook signature. Fails closed: no secret or no
+    signature header means False, never "allow all"."""
+    secret = _webhook_secret()
+    if not secret or not sig_header:
+        return False
     expected = (
-        "sha256=" + hmac.new(WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
+        "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     )
-    return hmac.compare_digest(expected, sig_header)
+    # Compare as bytes: str compare_digest raises TypeError on non-ASCII input.
+    return hmac.compare_digest(expected.encode(), sig_header.encode("utf-8", "replace"))
 
 
 def _log_delivery_to_neotoma(
@@ -474,10 +488,10 @@ async def main() -> None:
     # 3. Load notification rubric
     notifier = Notifier.from_neotoma()
 
-    if not WEBHOOK_SECRET:
-        log.warning(
-            f"[{DAEMON_NAME}] APUS_WEBHOOK_SECRET not set — "
-            "webhook signature verification disabled"
+    if not _webhook_secret():
+        log.error(
+            f"[{DAEMON_NAME}] APUS_WEBHOOK_SECRET not set - "
+            "every webhook delivery will be refused (503) until it is configured"
         )
 
     # 4. Start webhook server

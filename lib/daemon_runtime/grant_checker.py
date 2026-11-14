@@ -6,9 +6,11 @@ Loads agent_grant entities from Neotoma by aauth_sub and exposes:
   - check_capability(cap) — True if the named capability is active
   - suspend / restore / revoke — write state changes back to Neotoma
 
-If Neotoma is unreachable the checker is permissive (allows all) and logs a
-warning. Grant checks are advisory in Phase 5; hard-blocking enforcement is
-Phase 6 once the PS-layer AAuth integration lands (#30).
+Grant checks FAIL CLOSED: an unset bearer token, an unreachable Neotoma, zero
+matching grants, and grants that declare no tool grants all deny. Permissiveness
+is reachable only through the explicit ATELES_GRANTS_ADVISORY=1 flag (see
+grants_advisory()), which is announced once at WARNING. Absence of configuration
+is never a way to turn enforcement off.
 
 Grant entity schema (agent_grant in Neotoma):
   {
@@ -35,6 +37,41 @@ import httpx
 from lib.daemon_runtime.neotoma_correct import correct_field
 
 log = logging.getLogger(__name__)
+
+ADVISORY_FLAG = "ATELES_GRANTS_ADVISORY"
+_advisory_announced = False
+
+
+def grants_advisory() -> bool:
+    """True only when ATELES_GRANTS_ADVISORY is exactly "1" (after strip).
+
+    The single, explicit opt-out for grant enforcement. Unset, empty,
+    whitespace, "0", "true", "yes" and every other value are OFF, so a missing
+    or malformed setting can never disable enforcement. Read at call time. The
+    first time it is on, one WARNING names the flag so it is visible that
+    enforcement is off.
+    """
+    global _advisory_announced
+    on = os.environ.get(ADVISORY_FLAG, "").strip() == "1"
+    if on and not _advisory_announced:
+        _advisory_announced = True
+        log.warning(
+            f"{ADVISORY_FLAG}=1: grant enforcement is ADVISORY; missing or "
+            "failed grant checks will be permitted"
+        )
+    return on
+
+
+def _deny_unless_advisory(who: str, what: str) -> bool:
+    """Shared degraded-read rule: deny (ERROR, names the cause) unless advisory."""
+    if grants_advisory():
+        return True
+    log.error(
+        f"[grant_checker:{who}] {what} - denying. Check NEOTOMA_BEARER_TOKEN, "
+        f"Neotoma reachability and that an agent_grant exists for this sub "
+        f"({ADVISORY_FLAG}=1 would turn enforcement off)"
+    )
+    return False
 
 NEOTOMA_BASE_URL = os.environ.get(
     "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
@@ -109,8 +146,8 @@ class GrantChecker:
     """
     Load and check agent_grant entities for a given aauth_sub.
 
-    Permissive fallback if Neotoma is unreachable — checks advisory only until
-    PS-layer AAuth enforcement lands (issue #30).
+    Fails closed when the grant read is degraded (no token, unreachable Neotoma,
+    no grants) unless the explicit advisory flag is on (see grants_advisory()).
     """
 
     def __init__(self, aauth_sub: str) -> None:
@@ -123,7 +160,7 @@ class GrantChecker:
         """Fetch all agent_grant entities for this sub from Neotoma."""
         if not NEOTOMA_BEARER_TOKEN:
             self._load_error = "NEOTOMA_BEARER_TOKEN not set"
-            log.warning(f"[grant_checker:{self.aauth_sub}] {self._load_error} — permissive fallback")
+            log.error(f"[grant_checker:{self.aauth_sub}] {self._load_error} - grant checks will deny")
             self._loaded = True
             return self
 
@@ -158,41 +195,77 @@ class GrantChecker:
             )
         except Exception as exc:
             self._load_error = str(exc)
-            log.warning(
-                f"[grant_checker:{self.aauth_sub}] Could not load grants: {exc} — "
-                "permissive fallback"
+            log.error(
+                f"[grant_checker:{self.aauth_sub}] Could not load grants: "
+                f"{type(exc).__name__} - grant checks will deny"
             )
         self._loaded = True
         return self
 
     def is_active(self) -> bool:
-        """True if at least one active grant exists (or Neotoma was unreachable)."""
+        """True if at least one active grant exists.
+
+        A degraded read (not loaded, load error, zero grants) denies unless the
+        advisory flag is on.
+        """
         if self._load_error or not self._loaded:
-            return True
+            return _deny_unless_advisory(self.aauth_sub, "grant read unavailable")
         if not self._grants:
-            return True  # no grants recorded = permissive
+            return _deny_unless_advisory(self.aauth_sub, "no grants recorded")
         return any(g.is_active for g in self._grants)
 
+    @property
+    def load_error(self) -> Optional[str]:
+        """Why the grant read failed, or None. Never contains secret values."""
+        return self._load_error
+
+    def read_problem(self) -> Optional[str]:
+        """Why the grant could not be read (no secret values), else None.
+
+        None when the read worked, or when the advisory flag is on. Lets a
+        daemon tell "could not read the grant" apart from "grant revoked".
+        """
+        if grants_advisory() or not self._degraded():
+            return None
+        if self._load_error:
+            return self._load_error
+        if not self._loaded:
+            return "grants not loaded"
+        return "no agent_grant recorded for this sub"
+
+    def _degraded(self) -> bool:
+        return bool(self._load_error) or not self._loaded or not self._grants
+
     def is_suspended(self) -> bool:
-        """True if ALL grants are suspended (not just one)."""
-        if self._load_error or not self._grants:
-            return False
+        """True if ALL grants are suspended (not just one).
+
+        A degraded read (load error, not loaded, zero grants) counts as
+        suspended unless the advisory flag is on, so daemons gating on this
+        stop rather than dispatch on an unreadable grant.
+        """
+        if self._degraded():
+            return not _deny_unless_advisory(self.aauth_sub, "grant read unavailable or empty")
         return all(g.is_suspended for g in self._grants)
 
     def is_revoked(self) -> bool:
-        """True if ALL grants are revoked."""
-        if self._load_error or not self._grants:
-            return False
+        """True if ALL grants are revoked. A degraded read counts as revoked
+        unless the advisory flag is on (see is_suspended)."""
+        if self._degraded():
+            return not _deny_unless_advisory(self.aauth_sub, "grant read unavailable or empty")
         return all(g.is_revoked for g in self._grants)
 
     def check_capability(self, capability: str) -> bool:
         """
         True if the agent has an active grant covering the named capability.
-        Permissive if Neotoma was unreachable.
+        A degraded read denies unless the advisory flag is on.
         """
-        if self._load_error or not self._grants:
-            return True
+        if self._load_error or not self._loaded or not self._grants:
+            return _deny_unless_advisory(self.aauth_sub, "grant read unavailable or empty")
         return any(g.is_active and g.has_capability(capability) for g in self._grants)
+
+    def has_capability(self, capability: str) -> bool:
+        """Alias of check_capability (the name AgentGrant and the A2A gateway use)."""
+        return self.check_capability(capability)
 
     def check_tool(self, server: str, tool: str) -> tuple[bool, Optional[dict]]:
         """
@@ -203,18 +276,14 @@ class GrantChecker:
           - constraints: the param-constraint dict to enforce (may be empty),
             or None when denied.
 
-        Permissive fallback (allowed=True, constraints=None) when Neotoma was
-        unreachable or no grants are recorded — enforcement is advisory until
-        the proxy and grant tightening land for all agents.
+        A degraded read (load error, no grants) and grants that declare no tool
+        grants at all deny (False, None) unless the advisory flag is on, in
+        which case (True, None) is returned.
         """
-        if self._load_error or not self._grants:
-            return True, None
-        # If NO grant declares any tool_grants at all, fall back to permissive —
-        # tool-level enforcement only kicks in once an agent has been migrated
-        # to declare its tool capabilities (avoids breaking un-migrated agents).
-        any_tool_grants = any(g.tool_grants for g in self._grants)
-        if not any_tool_grants:
-            return True, None
+        if self._load_error or not self._loaded or not self._grants:
+            return _deny_unless_advisory(self.aauth_sub, "grant read unavailable or empty"), None
+        if not any(g.tool_grants for g in self._grants):
+            return _deny_unless_advisory(self.aauth_sub, "no tool grants declared"), None
         for g in self._grants:
             if not g.is_active:
                 continue

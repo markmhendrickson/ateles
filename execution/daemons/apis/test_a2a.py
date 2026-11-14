@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -395,15 +396,72 @@ def test_authorize_caller():
     )
     assert not ok and reason == "grant_not_active"
 
-    # checker raises → advisory allow (current phase)
+    # checker raises → DENY by default; permit only under the explicit flag
     def _boom(_sub):
         raise RuntimeError("neotoma down")
 
-    ok, reason = gw.authorize_caller(
-        "ext@a", require_auth=True, grant_checker_factory=_boom
-    )
-    assert ok and reason == "grant_check_unavailable_advisory"
+    prior = os.environ.pop("ATELES_GRANTS_ADVISORY", None)
+    try:
+        ok, reason = gw.authorize_caller(
+            "ext@a", require_auth=True, grant_checker_factory=_boom
+        )
+        assert not ok and reason == "grant_check_unavailable"
+
+        os.environ["ATELES_GRANTS_ADVISORY"] = "1"
+        ok, reason = gw.authorize_caller(
+            "ext@a", require_auth=True, grant_checker_factory=_boom
+        )
+        assert ok and reason == "grant_check_unavailable_advisory"
+    finally:
+        os.environ.pop("ATELES_GRANTS_ADVISORY", None)
+        if prior is not None:
+            os.environ["ATELES_GRANTS_ADVISORY"] = prior
     print("✓ authorize_caller all branches")
+
+
+def test_require_auth_env_only_explicit_zero_disables():
+    prior = os.environ.get("APIS_A2A_REQUIRE_AUTH")
+    try:
+        for value, expected in ((None, True), ("", True), ("  ", True), ("1", True),
+                                ("false", True), ("no", True), (" 0 ", True), ("0", False)):
+            if value is None:
+                os.environ.pop("APIS_A2A_REQUIRE_AUTH", None)
+            else:
+                os.environ["APIS_A2A_REQUIRE_AUTH"] = value
+            assert gw._require_auth_from_env() is expected, value
+    finally:
+        os.environ.pop("APIS_A2A_REQUIRE_AUTH", None)
+        if prior is not None:
+            os.environ["APIS_A2A_REQUIRE_AUTH"] = prior
+    print("✓ APIS_A2A_REQUIRE_AUTH fails closed")
+
+
+def test_authorize_caller_real_checker_with_unreadable_grants_denies():
+    """Real GrantChecker (no Neotoma token): was an AttributeError / permit."""
+    from lib.daemon_runtime.grant_checker import GrantChecker
+
+    prior = os.environ.pop("ATELES_GRANTS_ADVISORY", None)
+    try:
+        def _unloaded(sub):
+            c = GrantChecker(sub)
+            c._load_error = "unreachable"
+            c._loaded = True
+            return c
+
+        ok, reason = gw.authorize_caller(
+            "ext@a", require_auth=True, grant_checker_factory=_unloaded
+        )
+        assert not ok and reason == "grant_check_unavailable"
+
+        os.environ["ATELES_GRANTS_ADVISORY"] = "1"
+        ok, reason = gw.authorize_caller(
+            "ext@a", require_auth=True, grant_checker_factory=_unloaded
+        )
+        assert ok and reason == "grant_check_unavailable_advisory"
+    finally:
+        os.environ.pop("ATELES_GRANTS_ADVISORY", None)
+        if prior is not None:
+            os.environ["ATELES_GRANTS_ADVISORY"] = prior
 
 
 # ── Runner ──────────────────────────────────────────────────────────────────
@@ -427,6 +485,8 @@ _TESTS = [
     test_a2a_and_sse_routing_paths_agree,
     test_a2a_and_sse_assigned_to_three_way_agree,
     test_authorize_caller,
+    test_require_auth_env_only_explicit_zero_disables,
+    test_authorize_caller_real_checker_with_unreadable_grants_denies,
 ]
 
 
