@@ -7,6 +7,7 @@ Raw model outputs are returned for preservation alongside the readable text.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -144,6 +145,128 @@ def format_events(events: list[dict], *, gap: float = 1.2, stitch: float = 4.0) 
     )
 
 
+def _resolve_compute_units() -> str:
+    # The offline CLI's default `all` placement may use Metal and fail with a
+    # command-buffer timeout. Use its documented off-GPU mode from the outset;
+    # this keeps the same local diarization model and does not drop speakers.
+    compute_units = os.environ.get("TRANSCRIBE_FLUID_COMPUTE_UNITS", "cpu-only").strip()
+    if compute_units not in {"cpu-only", "ane", "all"}:
+        raise LocalFluidUnavailable(
+            "TRANSCRIBE_FLUID_COMPUTE_UNITS must be cpu-only, ane or all"
+        )
+    return compute_units
+
+
+DIARIZATION_METHOD = "FluidAudio offline"
+_FAILURE_REASON_MAX = 300
+
+
+def _cli_build_id(cli: str) -> str | None:
+    """Short content hash of the CLI binary: the CLI reports no version string."""
+    try:
+        digest = hashlib.sha256()
+        with open(cli, "rb") as handle:
+            while block := handle.read(1024 * 1024):
+                digest.update(block)
+        return digest.hexdigest()[:12]
+    except OSError:
+        return None
+
+
+def diarize_mono(wav_path: Path) -> dict:
+    """Diarize one 16 kHz mono WAV with the same offline FluidAudio stage the
+    multichannel path uses, and describe the outcome. Never raises.
+
+    Diarization is fail-open: a failure is returned as ``status="failed"`` with
+    the reason, so the transcript still lands and its header says so. Raw
+    speaker embeddings are dropped; only speaker/time segments are kept.
+    """
+    try:
+        cli = resolve_fluid_cli()
+        compute_units = _resolve_compute_units()
+        with tempfile.TemporaryDirectory(prefix="local-fluid-diar-") as temporary:
+            raw = _run_json(
+                cli,
+                ["process", str(wav_path), "--mode", "offline",
+                 "--compute-units", compute_units, "--output"],
+                Path(temporary) / "diar.json",
+            )
+        segments = []
+        for segment in raw.get("segments") or []:
+            start = _time(segment.get("startTimeSeconds"))
+            end = _time(segment.get("endTimeSeconds"))
+            speaker = segment.get("speakerId")
+            if end <= start or not isinstance(speaker, str) or not speaker:
+                raise LocalFluidUnavailable("Invalid FluidAudio speaker segment")
+            segments.append({"start": start, "end": end, "speaker": speaker})
+        segments.sort(key=lambda item: (item["start"], item["speaker"]))
+        return {
+            "status": "ok",
+            "method": DIARIZATION_METHOD,
+            "compute_units": compute_units,
+            "cli_build": _cli_build_id(cli),
+            "speaker_count": len({item["speaker"] for item in segments}),
+            "segments": segments,
+        }
+    except Exception as exc:  # noqa: BLE001 - diarization must never block a transcript
+        reason = " ".join(str(exc).split()) or type(exc).__name__
+        if len(reason) > _FAILURE_REASON_MAX:
+            reason = reason[:_FAILURE_REASON_MAX] + "..."
+        return {"status": "failed", "method": DIARIZATION_METHOD, "reason": reason}
+
+
+def diarization_header(diarization: dict) -> str:
+    """One-line transcript header naming the diarization method and outcome."""
+    method = diarization.get("method") or DIARIZATION_METHOD
+    if diarization.get("status") == "ok":
+        build = diarization.get("cli_build")
+        detail = ", ".join(
+            [f"cli build {build}" if build else "version not reported by CLI"]
+            + ([diarization["compute_units"]] if diarization.get("compute_units") else [])
+        )
+        count = diarization.get("speaker_count", 0)
+        if count == 0:
+            outcome = "no speech segments detected"
+        else:
+            outcome = f"{count} speaker{'' if count == 1 else 's'}"
+        note = diarization.get("note")
+        return f"[Diarization: {method} ({detail}) - {outcome}{'; ' + note if note else ''}]"
+    return (
+        f"[Diarization: {method} FAILED - {diarization.get('reason', 'unknown reason')}; "
+        "transcript is not speaker-attributed]"
+    )
+
+
+def attribute_segments(segments: list[dict], diarization: dict) -> list[dict]:
+    """Label timed ASR segments with the diarized speaker of greatest overlap.
+
+    A segment overlapping no speech stays ``Unassigned``; nothing is guessed.
+    Consecutive segments from one speaker merge into one turn.
+    """
+    speech = diarization.get("segments") or []
+    turns: list[dict] = []
+    for segment in segments:
+        overlap: dict[str, float] = {}
+        for item in speech:
+            shared = min(segment["end"], item["end"]) - max(segment["start"], item["start"])
+            if shared > 0:
+                overlap[item["speaker"]] = overlap.get(item["speaker"], 0.0) + shared
+        speaker = max(sorted(overlap), key=overlap.get) if overlap else "Unassigned"
+        if turns and turns[-1]["speaker"] == speaker:
+            turns[-1]["end"] = segment["end"]
+            turns[-1]["text"] += " " + segment["text"]
+        else:
+            turns.append({**segment, "speaker": speaker})
+    return turns
+
+
+def format_turns(turns: list[dict]) -> str:
+    return "\n\n".join(
+        f"[{turn['start']:.2f}\u2013{turn['end']:.2f}] [{turn['speaker']}]\n{turn['text']}"
+        for turn in turns
+    )
+
+
 def transcribe_fluid(
     audio_path: Path,
     *,
@@ -154,14 +277,7 @@ def transcribe_fluid(
     cli = resolve_fluid_cli()
     if not audio_path.is_file():
         raise FileNotFoundError(audio_path)
-    # The offline CLI's default `all` placement may use Metal and fail with a
-    # command-buffer timeout. Use its documented off-GPU mode from the outset;
-    # this keeps the same local diarization model and does not drop speakers.
-    compute_units = os.environ.get("TRANSCRIBE_FLUID_COMPUTE_UNITS", "cpu-only").strip()
-    if compute_units not in {"cpu-only", "ane", "all"}:
-        raise LocalFluidUnavailable(
-            "TRANSCRIBE_FLUID_COMPUTE_UNITS must be cpu-only, ane or all"
-        )
+    compute_units = _resolve_compute_units()
     all_events, raw = [], []
     with tempfile.TemporaryDirectory(prefix="local-fluid-") as temporary:
         root = Path(temporary)

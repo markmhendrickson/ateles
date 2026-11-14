@@ -1001,7 +1001,7 @@ def test_voice_memo_uses_channel_appropriate_local_backend(
         fluid.assert_called_once_with(memo, language=None, verbose=True, channel_count=2)
         whisper.assert_not_called()
     else:
-        whisper.assert_called_once_with(memo, language=None, verbose=True)
+        whisper.assert_called_once_with(memo, language=None, verbose=True, diarize=True)
         fluid.assert_not_called()
     cloud.assert_not_called()
     assert memo.read_bytes() == original

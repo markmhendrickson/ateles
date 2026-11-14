@@ -1,8 +1,12 @@
 # Local speaker diarization
 
 Meeting capture uses FluidAudio for speaker segmentation and Parakeet v3 for
-timestamped transcription on Apple Silicon. Single-speaker memos continue to use
-local whisper.cpp unless diarization is requested. No API credential is needed.
+timestamped transcription on Apple Silicon. Single-channel memos keep local whisper.cpp
+for the text and are also diarized by the same offline FluidAudio stage; the
+transcript's first line is a header naming the method and outcome (speaker count,
+or the failure reason - a diarization failure never blocks the transcript).
+With more than one speaker, whisper is re-run with timestamps to attribute turns.
+`--no-diarize` / `RECORD_MEETING_DIARIZE=0` skip it and add no header. No API credential is needed.
 
 Install the [FluidAudio CLI](https://github.com/FluidInference/FluidAudio) from a
 reviewed release, following its installation instructions. Put `fluidaudiocli` on

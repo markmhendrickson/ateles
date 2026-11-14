@@ -80,7 +80,14 @@ if "could not parse statement" in stderr_output.lower():
     sys.exit(1)
 
 from ateles.runtime_paths import get_data_dir, is_cloud_evicted  # noqa: E402
-from local_fluid import BACKEND_FLUID, transcribe_fluid, format_events  # noqa: E402
+from local_fluid import (  # noqa: E402
+    BACKEND_FLUID,
+    attribute_segments,
+    diarization_header,
+    format_events,
+    format_turns,
+    transcribe_fluid,
+)
 from transcript_utterances import group_utterances  # noqa: E402
 
 try:
@@ -1764,15 +1771,37 @@ def transcribe_audio_file(
     if resolved_backend == BACKEND_LOCAL:
         if verbose:
             print("    Transcribing locally with whisper-cli (free, on-device)...")
-        local = transcribe_local(
-            audio_path, language=language, verbose=verbose
+        # Every transcript is diarized locally with FluidAudio (operator rule),
+        # unless the caller explicitly opted out (--no-diarize, or
+        # RECORD_MEETING_DIARIZE=0 -- live chunks and similar machine consumers).
+        # An opt-out leaves the transcript exactly as before, with no header.
+        diarize = (
+            use_diarization is not False
+            and os.environ.get("RECORD_MEETING_DIARIZE") != "0"
         )
-        return {
-            "transcription_text": _postprocess_transcript(
-                local["transcription_text"]
-            )
+        local = transcribe_local(
+            audio_path, language=language, verbose=verbose, diarize=diarize
+        )
+        text = (
+            _postprocess_transcript(local["transcription_text"])
             if not local.get("silence")
-            else local["transcription_text"],
+            else local["transcription_text"]
+        )
+        diarization = local.get("diarization")
+        if diarization is not None and not local.get("silence"):
+            if local.get("segments"):
+                turns = attribute_segments(
+                    [
+                        {**seg, "text": _postprocess_transcript(seg["text"])}
+                        for seg in local["segments"]
+                    ],
+                    diarization,
+                )
+                text = format_turns(turns)
+            text = f"{diarization_header(diarization)}\n\n{text}"
+        return {
+            "transcription_text": text,
+            **({"diarization": diarization} if diarization is not None else {}),
             "language": local["language"],
             "audio_duration_seconds": get_audio_duration(audio_path),
             "file_size_bytes": audio_path.stat().st_size,
@@ -2724,6 +2753,11 @@ def _validate_transcription_result(result: object, *, paired: bool) -> None:
     if backend == BACKEND_LOCAL:
         require("rms_db" in result and number(result["rms_db"], nullable=True, nonnegative=False), "rms_db")
         require(type(result.get("silence")) is bool, "silence")
+        if "diarization" in result:
+            diar = result["diarization"]
+            require(isinstance(diar, dict) and diar.get("status") in ("ok", "failed")
+                    and text(diar.get("method")), "diarization")
+            require(diar["status"] != "failed" or text(diar.get("reason")), "diarization.reason")
     elif backend == BACKEND_FLUID:
         events = fluid_raw(result.get("raw_response"), two_tracks=paired)
         if not events:

@@ -323,6 +323,43 @@ def _parse_whisper_json(json_path: Path) -> tuple[str, str | None]:
     return text, language
 
 
+def _timed_segments(cmd: list[str], tmp_dir: Path) -> tuple[list[dict] | None, str]:
+    """Re-run the identical whisper command with timestamps; (segments, reason)."""
+    stem = tmp_dir / "timed.out"
+    timed = []
+    skip_next = False
+    for index, part in enumerate(cmd):
+        if skip_next:
+            skip_next = False
+            continue
+        if part == "--no-timestamps":
+            continue
+        if part == "--output-file":
+            timed += [part, str(stem)]
+            skip_next = True
+            continue
+        timed.append(part)
+    try:
+        proc = subprocess.run(timed, capture_output=True, text=True, timeout=3600)
+        json_path = Path(f"{stem}.json")
+        if proc.returncode != 0 or not json_path.is_file():
+            return None, f"timed whisper run failed (exit {proc.returncode})"
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        segments = []
+        for seg in data.get("transcription") or []:
+            chunk = (seg.get("text") or "").strip()
+            offsets = seg.get("offsets") or {}
+            if chunk:
+                segments.append({
+                    "start": float(offsets["from"]) / 1000.0,
+                    "end": float(offsets["to"]) / 1000.0,
+                    "text": chunk,
+                })
+        return (segments or None), ("no timed segments" if not segments else "")
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+        return None, f"{type(exc).__name__}"
+
+
 def transcribe_local(
     audio_path: Path,
     *,
@@ -330,8 +367,16 @@ def transcribe_local(
     verbose: bool = False,
     silence_threshold_db: float | None = None,
     threads: int | None = None,
+    diarize: bool = False,
 ) -> dict:
     """Transcribe one file with whisper-cli.
+
+    With ``diarize=True`` the same 16 kHz mono WAV is also run through local
+    FluidAudio (``local_fluid.diarize_mono``) and the outcome is returned under
+    ``diarization``. That stage is fail-open: a failure is recorded, never
+    raised. Only when it finds more than one speaker is whisper run a second
+    time WITH timestamps, to return timed ``segments`` for speaker attribution;
+    the single-speaker text is exactly what a non-diarized run produces.
 
     Returns ``{"transcription_text", "language", "backend", "rms_db",
     "silence"}``. On a silence-gated file the text is an explicit no-speech
@@ -416,6 +461,19 @@ def transcribe_local(
 
         text, detected = _parse_whisper_json(json_path)
 
+        diarization = None
+        segments = None
+        if diarize and text:
+            try:
+                from scripts.local_fluid import diarize_mono
+            except ImportError:  # pragma: no cover - path-dependent import
+                from local_fluid import diarize_mono  # type: ignore[no-redef]
+            diarization = diarize_mono(wav_path)
+            if diarization["status"] == "ok" and diarization["speaker_count"] > 1:
+                segments, why = _timed_segments(cmd, tmp_dir)
+                if segments is None:
+                    diarization["note"] = f"speaker turns not attributed ({why})"
+
     # --- Result-side screen, AFTER the model ------------------------------
     # The loudness gate above has a structural ceiling and this file class is
     # exactly where it runs out. Measured here on 2026-09-13: the operator's
@@ -469,6 +527,8 @@ def transcribe_local(
         "transcription_model": model.name,
         "rms_db": None if rms_db is None else round(rms_db, 1),
         "silence": False,
+        **({"diarization": diarization} if diarization is not None else {}),
+        **({"segments": segments} if segments else {}),
     }
 
 
