@@ -29,6 +29,7 @@ from strandings import (
     REASON_BAD_AMOUNT,
     REASON_BAD_PAYMENT_TYPE,
     REASON_FETCH_FAILED,
+    REASON_FETCH_REJECTED,
     REASON_UNREACHABLE,
     Stranding,
     build_escalation_entity,
@@ -155,7 +156,7 @@ def test_http_rejection_strands_every_profile(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", boom)
     strandings: list = []
     assert load_profiles_from_neotoma(strandings) == []
-    assert [s.reason for s in strandings] == [REASON_FETCH_FAILED]
+    assert [s.reason for s in strandings] == [REASON_FETCH_REJECTED]
 
 
 # ---------------------------------------------------------------------------
@@ -389,16 +390,22 @@ def test_escalate_is_a_noop_when_nothing_is_stranded(monkeypatch, tmp_path):
     assert posted == []
 
 
-def test_idempotency_key_is_stable_within_a_day(monkeypatch, tmp_path):
-    """A retry inside one window must not create duplicate escalations."""
+def test_idempotency_key_binds_content_so_a_same_day_retry_is_not_a_400(
+    monkeypatch, tmp_path
+):
+    """Neotoma rejects a reused key whose content differs. The body carries the
+    observation time, so a retry at another time needs another key; an exact
+    resend (same content) still reuses the key and cannot duplicate."""
     keys: list = []
     monkeypatch.setattr(
         "strandings._post_escalation", lambda e, k: keys.append(k) or True
     )
     escalate([_s()], state_file=tmp_path / "a.json", now=1000.0)
-    escalate([_s()], state_file=tmp_path / "b.json", now=1000.0 + 3600)
-    assert len(keys) == 2
-    assert keys[0] == keys[1], "same condition, same day — same idempotency key"
+    escalate([_s()], state_file=tmp_path / "b.json", now=1000.0)
+    escalate([_s()], state_file=tmp_path / "c.json", now=1000.0 + 3600)
+    assert keys[0] == keys[1], "same content — same idempotency key"
+    assert keys[0] != keys[2], "different content must not reuse the key"
+    assert keys[0].rsplit("-", 1)[0] == keys[2].rsplit("-", 1)[0]
 
 
 def test_corrupt_state_file_escalates_rather_than_suppresses(monkeypatch, tmp_path):
@@ -492,7 +499,7 @@ def test_stranded_notify_passes_stable_dedupe_key(monkeypatch, tmp_path):
     assert len(notes) == 1
     msg, priority, kwargs = notes[0]
     fp = stranded_fingerprint([s])
-    assert kwargs.get("dedupe_key") == f"monedula:stranded:{fp}"
+    assert kwargs.get("dedupe_key") == f"monedula:stranded:{fp}|outcome=confirmed"
     assert kwargs.get("email_eligible") is True
     assert "payment_profiles_stranded" in msg
     assert s.label in msg

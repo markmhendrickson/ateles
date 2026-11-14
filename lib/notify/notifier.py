@@ -828,6 +828,22 @@ class Notifier:
             log.error(f"[notify] Delivery error: {exc}")
             return False
 
+    def is_dedupe_open(self, key: str) -> bool:
+        """True when ``key`` was already reported and not yet cleared."""
+        return self._is_duplicate(key)
+
+    def has_transport(self, email_eligible: bool = True) -> bool:
+        """True when at least one delivery route is configured.
+
+        A Notifier built without Apprise or Telegram credentials (and with no
+        email route) accepts ``send()`` and delivers nothing. Email counts only
+        for an email-eligible send. Callers that
+        must not lose an alert silently ask this first.
+        """
+        if self._apprise is not None and len(self._apprise) > 0:
+            return True
+        return bool(email_eligible and self._email_primary and self._notify_to)
+
     def in_silence_window(self) -> bool:
         """True while warn and operator-decision notices are held, not sent.
 

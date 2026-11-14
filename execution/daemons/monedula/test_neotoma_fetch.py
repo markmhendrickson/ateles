@@ -115,7 +115,7 @@ def test_http_error_logs_at_error_level(monkeypatch, caplog, code: int) -> None:
     assert errors, f"HTTP {code} must log at ERROR, not WARNING"
     msg = errors[0].message
     assert str(code) in msg
-    assert "NO payments" in msg, "must state the consequence, not just the code"
+    assert "no profiles loaded from Neotoma" in msg, "must state the consequence"
 
 
 def test_http_error_names_the_two_likely_causes(monkeypatch, caplog) -> None:

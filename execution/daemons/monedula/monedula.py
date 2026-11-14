@@ -56,12 +56,41 @@ if str(_REPO_ROOT) not in sys.path:
 
 from lib.daemon_runtime.logging_setup import configure_daemon_logging
 
-try:
-    from lib.notify import Notifier  # noqa: E402
+# The notifier is built lazily and RETRIED on every use while it is missing.
+# It used to be built once at import with the failure swallowed, so a Neotoma
+# or import failure at daemon start left it None and every later alert (payment
+# approval raised / stale / held / rejected) was dropped until a restart.
+_notifier: Any = None
 
-    _notifier: Notifier | None = Notifier.from_neotoma()
-except Exception:  # lib unavailable or Neotoma unreachable at import time
-    _notifier = None
+# Set when an alert of WARN priority or above could not be handed to a working
+# transport this process. Read by the entrypoint to turn a run that could not
+# alert into a non-zero exit, and persisted as a streak in the gate-health file.
+_notify_undeliverable = False
+
+
+def _get_notifier() -> Any:
+    """Return the Notifier, building it now if a prior attempt failed."""
+    global _notifier
+    if _notifier is not None:
+        return _notifier
+    try:
+        from lib.notify import Notifier  # noqa: E402
+
+        _notifier = Notifier.from_neotoma()
+    except Exception as exc:  # noqa: BLE001 — retried on the next call
+        log.error(
+            f"operator notifier could not be built ({type(exc).__name__}); "
+            "will retry on the next alert"
+        )
+        _notifier = None
+    return _notifier
+
+
+def _mark_notify_undeliverable(priority: str) -> None:
+    global _notify_undeliverable
+    if priority.lower() == "info":
+        return  # INFO is dropped by the Notifier by design; nothing was lost
+    _notify_undeliverable = True
 
 
 def _notify(
@@ -70,7 +99,7 @@ def _notify(
     dedupe_key: str | None = None,
     email_eligible: bool = True,
 ) -> None:
-    """Send via lib/notify if available; silently skip if not.
+    """Send via lib/notify. A failure to deliver is logged at ERROR, never silent.
 
     ``dedupe_key``, when given, is forwarded to Notifier.send() so a
     repeating, still-open condition notifies once instead of on every tick
@@ -82,28 +111,62 @@ def _notify(
     message body alone (ateles#1127) — the underlying condition still has a
     durable Neotoma record via the escalation entity this daemon files
     separately.
+
+    Failures log only a length and hash of the message (it can carry payee-
+    identifying profile labels), never its text.
     """
-    if _notifier is None:
+    notifier = _get_notifier()
+    if notifier is None:
+        _mark_notify_undeliverable(priority)
         log.error(
             "operator alert could not be delivered (no notifier available): "
-            f"{message[:160]}"
+            f"{_alert_ref(message)}"
         )
         return
     try:
         from lib.notify import Priority
 
+        has_transport = getattr(notifier, "has_transport", None)
+        if callable(has_transport) and not has_transport(
+            email_eligible=email_eligible
+        ):
+            _mark_notify_undeliverable(priority)
+            log.error(
+                "operator alert could not be delivered (notifier has no working "
+                f"transport): {_alert_ref(message)}"
+            )
+            return
         p = getattr(Priority, priority.upper(), Priority.INFO)
-        _notifier.send(
+        was_open = False
+        if dedupe_key:
+            is_open = getattr(notifier, "is_dedupe_open", None)
+            was_open = bool(is_open(dedupe_key)) if callable(is_open) else False
+        delivered = notifier.send(
             message,
             priority=p,
             handler="monedula",
             dedupe_key=dedupe_key,
             email_eligible=email_eligible,
         )
+        # send() returns False for a real delivery failure as well as for a
+        # deduped repeat, a silence-window hold and a dropped INFO. BLOCKER and
+        # CRITICAL are never held or dropped, so False there is a failure
+        # unless this call was a suppressed repeat of an already-reported key.
+        if (
+            delivered is False
+            and priority.lower() in ("blocker", "critical")
+            and not was_open
+        ):
+            _mark_notify_undeliverable(priority)
+            log.error(
+                "operator alert was not delivered by the notifier: "
+                f"{_alert_ref(message)}"
+            )
     except Exception as exc:
+        _mark_notify_undeliverable(priority)
         log.error(
             f"operator alert could not be delivered ({type(exc).__name__}): "
-            f"{message[:160]}"
+            f"{_alert_ref(message)}"
         )
 
 
@@ -154,10 +217,11 @@ def _outcome_alert(item: Any, result: Any) -> tuple[str, str]:
 
 def _clear_notify_dedupe(dedupe_key: str) -> None:
     """Release a dedupe key once its condition has resolved. Never raises."""
-    if _notifier is None:
+    notifier = _get_notifier()
+    if notifier is None:
         return
     try:
-        _notifier.clear_dedupe(dedupe_key)
+        notifier.clear_dedupe(dedupe_key)
     except Exception:
         pass
 
@@ -961,6 +1025,31 @@ def _reset_gate_failure_streak(*, path: Path | None = None) -> None:
         _save_gate_health(state, path)
 
 
+def _record_notify_health(*, path: Path | None = None) -> int:
+    """Persist how many consecutive runs could not deliver an alert.
+
+    Uses the existing gate-health file (the daemon's one persisted health
+    record) rather than a new store. Returns the streak after this run; a
+    run that delivered everything resets it to 0.
+    """
+    state = _load_gate_health(path)
+    streak = int(state.get("consecutive_notify_failures", 0))
+    new = streak + 1 if _notify_undeliverable else 0
+    if new != streak:
+        state["consecutive_notify_failures"] = new
+        if new:
+            state["last_notify_failure_at"] = time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+            )
+        _save_gate_health(state, path)
+    if new:
+        log.error(
+            f"operator alerts undeliverable for {new} consecutive run(s) — "
+            "check the notifier transport (Telegram/Apprise or email)."
+        )
+    return new
+
+
 # ---------------------------------------------------------------------------
 # Escalation writer (ateles#554)
 # ---------------------------------------------------------------------------
@@ -1353,9 +1442,9 @@ class _SessionJournalError(Exception):
 def _profile_load_degraded(handlers_loaded: list, strandings: list) -> bool:
     """True when profiles could not be loaded: the fetch failed, or every
     profile was stranded (strandings present and no handler loaded)."""
-    from strandings import REASON_FETCH_FAILED
+    from strandings import FETCH_REASONS
 
-    if any(getattr(st, "reason", None) == REASON_FETCH_FAILED for st in strandings):
+    if any(getattr(st, "reason", None) in FETCH_REASONS for st in strandings):
         return True
     return bool(strandings) and not handlers_loaded
 
@@ -2115,7 +2204,20 @@ def main() -> bool:
     return not strandings
 
 
-if __name__ == "__main__":
+def _alert_ref(message: str) -> str:
+    """Log-safe reference to an alert: its length only, never its text (which
+    can carry payee labels) and no hash (unsalted, so guessable)."""
+    return f"{len(message)} chars"
+
+
+def run_entrypoint() -> int:
+    """Run one tick and return the process exit code.
+
+    Non-zero when the run was not clean (stranded profile, failed consent
+    channel) or when a clean run could not deliver an operator alert. The
+    health streak is recorded AFTER the final alert, so it reflects every
+    alert this run tried to send.
+    """
     _notify("monedula started", priority="info")
     try:
         clean = main()
@@ -2132,7 +2234,15 @@ if __name__ == "__main__":
                 "Monedula run completed with a STRANDED payment profile or a "
                 "FAILED consent channel — see the escalations filed in Neotoma."
             )
-            sys.exit(1)
+        _record_notify_health()
+        if not clean:
+            return 1
+        if _notify_undeliverable:
+            # The run itself was clean, but an operator alert could not be
+            # delivered: surface it as a failed run, not a clean one.
+            log.error("Monedula run could not deliver an operator alert (see above).")
+            return 1
+        return 0
     except Exception as exc:
         log.exception(f"Monedula fatal error: {exc}")
         _notify(f"monedula fatal error: {exc}", priority="blocker")
@@ -2140,4 +2250,12 @@ if __name__ == "__main__":
             telegram_send(f"🔴 Monedula fatal error: {exc}")
         except Exception:
             pass
-        sys.exit(1)
+        try:
+            _record_notify_health()
+        except Exception:  # noqa: BLE001 — bookkeeping must not mask the fatal exit
+            pass
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(run_entrypoint())
