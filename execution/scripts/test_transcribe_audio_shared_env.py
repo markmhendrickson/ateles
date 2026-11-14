@@ -85,15 +85,59 @@ def test_absent_shared_file_is_named_not_defaulted(fresh_checkout, tmp_path):
     assert "REFUSED" in out and "does not exist" in out
 
 
-def test_malformed_shared_file_stops_the_run_naming_file_and_line(
+def test_malformed_line_is_skipped_once_and_other_settings_still_load(
     fresh_checkout, tmp_path
 ):
     home = tmp_path / "home"
-    path = _shared(home, "OK_NAME=1\nthis line is junk synthetic-secret-text\n")
+    path = _shared(
+        home,
+        "OK_NAME=1\nthis line is junk synthetic-secret-text\n"
+        "NEOTOMA_BEARER_TOKEN=synthetic-token\n",
+    )
     done = _run(fresh_checkout, home)
-    assert done.returncode != 0
-    assert str(path) in done.stderr and "line 2" in done.stderr
+    assert done.stdout.splitlines()[0] == "OK", done.stdout + done.stderr
+    assert done.stderr.count("malformed line") == 1
+    assert str(path) in done.stderr and "2" in done.stderr
     assert "synthetic-secret-text" not in done.stdout + done.stderr
+
+
+def test_setting_lost_to_a_malformed_line_is_named_when_required(fresh_checkout, tmp_path):
+    home = tmp_path / "home"
+    _shared(home, "NEOTOMA-BEARER-TOKEN=synthetic-token\n")
+    done = _run(fresh_checkout, home)
+    out = done.stdout + done.stderr
+    assert "REFUSED" in out and "NEOTOMA_BEARER_TOKEN" in out and "malformed" in out
+
+
+def test_repo_root_env_is_a_warned_fallback_only_for_missing_names(
+    fresh_checkout, tmp_path
+):
+    home = tmp_path / "home"
+    _shared(home, "SOMETHING_ELSE=1\n")
+    legacy = fresh_checkout / ".env"
+    legacy.write_text("NEOTOMA_BEARER_TOKEN=synthetic-legacy\n")
+    done = _run(fresh_checkout, home)
+    assert done.stdout.splitlines()[0] == "OK", done.stdout + done.stderr
+    assert "NEOTOMA_BEARER_TOKEN" in done.stderr and str(legacy) in done.stderr
+    assert "synthetic-legacy" not in done.stdout + done.stderr
+
+
+def test_shared_file_wins_over_repo_root_env_without_warning(fresh_checkout, tmp_path):
+    home = tmp_path / "home"
+    _shared(home, "NEOTOMA_BEARER_TOKEN=synthetic-shared\n")
+    (fresh_checkout / ".env").write_text("NEOTOMA_BEARER_TOKEN=synthetic-stale\n")
+    done = _run(fresh_checkout, home)
+    assert done.stdout.splitlines()[0] == "OK"
+    assert "legacy file" not in done.stderr
+
+
+def test_skip_flag_loads_nothing_from_either_file(fresh_checkout, tmp_path):
+    home = tmp_path / "home"
+    _shared(home, "NEOTOMA_BEARER_TOKEN=synthetic-token\n")
+    (fresh_checkout / ".env").write_text("NEOTOMA_BEARER_TOKEN=synthetic-stale\n")
+    done = _run(fresh_checkout, home, {"ATELES_SKIP_DOTENV": "1"})
+    assert done.stdout.splitlines()[0] == "REFUSED", done.stdout + done.stderr
+    assert "legacy file" not in done.stderr
 
 
 def test_a_given_value_overrides_the_file(fresh_checkout, tmp_path):
