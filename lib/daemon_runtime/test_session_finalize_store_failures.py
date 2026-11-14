@@ -82,7 +82,7 @@ def test_repeated_status_update_is_not_an_idempotency_mismatch(monkeypatch):
     monkeypatch.setattr(sf, "_entity_readback_matches", lambda *a, **k: True)
     assert sf.update_run_session_status(_run(), status="completed") is True
     assert sf.update_run_session_status(_run(), status="completed") is True
-    assert len({b["idempotency_key"] for b in fake.bodies}) == 2
+    assert len({b["idempotency_key"] for b in fake.bodies}) == 1  # true replay, deduped
 
 
 def test_store_failure_logs_response_body(monkeypatch, caplog):
@@ -128,3 +128,87 @@ def test_success_resets_failure_streak(monkeypatch):
     for _ in range(getattr(sf, "ESCALATE_AFTER_CONSECUTIVE_FAILURES", 5) + 2):
         sf._post_store(body)
     assert not any(p["entities"] and p["entities"][0].get("entity_type") == "daemon_report" for p in posts)
+
+
+def _always_fail(posts):
+    def post(url, headers=None, json=None, timeout=None):  # noqa: A002
+        posts.append(json)
+        req = httpx.Request("POST", url)
+        if json["entities"][0].get("entity_type") == "daemon_report":
+            return httpx.Response(200, request=req, content=b"{}")
+        return httpx.Response(503, request=req, content=b"<html>gateway 10.0.0.1</html>")
+    return post
+
+
+def _reports(posts):
+    return [p for p in posts if p["entities"][0].get("entity_type") == "daemon_report"]
+
+
+def test_update_run_session_status_escalates_once_after_n_failures(monkeypatch):
+    posts: list[dict] = []
+    monkeypatch.setattr(sf.httpx, "post", _always_fail(posts))
+    n = getattr(sf, "ESCALATE_AFTER_CONSECUTIVE_FAILURES", 5)
+    for _ in range(n + 4):
+        assert sf.update_run_session_status(_run(), status="completed") is False
+    reports = _reports(posts)
+    assert len(reports) == 1
+    msg = reports[0]["entities"][0]["message"]
+    assert "ent_t:approved-0" in msg and "completed" in msg
+    assert "10.0.0.1" not in msg  # HTML body scrubbed
+    assert len(getattr(sf, "_consecutive_failures", {})) <= 1  # one logical write
+
+
+def test_update_run_session_status_success_resets_streak(monkeypatch):
+    posts: list[dict] = []
+    monkeypatch.setattr(sf.httpx, "post", _always_fail(posts))
+    n = getattr(sf, "ESCALATE_AFTER_CONSECUTIVE_FAILURES", 5)
+    for _ in range(n - 1):
+        sf.update_run_session_status(_run(), status="completed")
+    fake = _FakeNeotoma()
+    monkeypatch.setattr(sf.httpx, "post", fake.post)
+    monkeypatch.setattr(sf, "_entity_readback_matches", lambda *a, **k: True)
+    assert sf.update_run_session_status(_run(), status="completed") is True
+    monkeypatch.setattr(sf.httpx, "post", _always_fail(posts))
+    for _ in range(n - 1):
+        sf.update_run_session_status(_run(), status="completed")
+    assert _reports(posts) == []
+
+
+def test_failure_tracking_is_bounded(monkeypatch):
+    monkeypatch.setattr(sf.httpx, "post", _always_fail([]))
+    cap = getattr(sf, "MAX_TRACKED_WRITES", 256)
+    for i in range(cap + 50):
+        sf._post_store({"entities": [{"entity_type": "x"}], "idempotency_key": f"k{i}"})
+    assert len(sf._consecutive_failures) <= cap
+
+
+def test_retry_transient_branch_records_outcomes(monkeypatch):
+    posts: list[dict] = []
+    monkeypatch.setattr(sf.httpx, "post", _always_fail(posts))
+    n = getattr(sf, "ESCALATE_AFTER_CONSECUTIVE_FAILURES", 5)
+    body = {"entities": [{"entity_type": "x"}], "idempotency_key": "rk"}
+    for _ in range(n):
+        sf._post_store(body, retry_transient=True, streak_key="w")
+    assert len(_reports(posts)) == 1
+    ok = _FakeNeotoma()
+    monkeypatch.setattr(sf.httpx, "post", ok.post)
+    sf._post_store(body, retry_transient=True, streak_key="w")
+    assert "w" not in sf._consecutive_failures
+
+
+def test_finalize_session_failures_escalate(monkeypatch):
+    posts: list[dict] = []
+    monkeypatch.setattr(sf.httpx, "post", _always_fail(posts))
+    n = getattr(sf, "ESCALATE_AFTER_CONSECUTIVE_FAILURES", 5)
+    for _ in range(n):
+        assert sf.finalize_session(trigger_text="t", outcome_text="o", handler="apis") is False
+    assert len(_reports(posts)) == 1
+
+
+def test_response_body_scrubbed_to_code_and_message():
+    resp = httpx.Response(
+        400, request=httpx.Request("POST", "https://x/store"),
+        content=b'{"error":{"code":"ERR_X","message":"bad","trace":"10.1.1.1"}}',
+    )
+    text = sf.describe_store_error(httpx.HTTPStatusError("400", request=resp.request, response=resp))
+    assert "ERR_X bad" in text and "10.1.1.1" not in text

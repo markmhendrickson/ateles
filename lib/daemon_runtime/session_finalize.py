@@ -21,6 +21,7 @@ construction (build_finalize_payload) is unit-tested; the I/O (httpx /store,
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -57,14 +58,41 @@ ESCALATE_AFTER_CONSECUTIVE_FAILURES = int(
     os.environ.get("ATELES_FINALIZE_ESCALATE_AFTER", "5")
 )
 ESCALATION_DAEMON_NAME = "apis"
+# Streak state is per process (a restart resets it) and bounded: the oldest
+# entry is dropped past this many distinct logical writes.
+MAX_TRACKED_WRITES = 256
 
 _failure_lock = threading.Lock()
 _consecutive_failures: dict[str, int] = {}
 _escalated: set[str] = set()
 
 
+def _scrub_response_body(body: str) -> str:
+    """Reduce a response body to what a reader needs.
+
+    A JSON error keeps only its code and message; anything else (for example a
+    gateway HTML page, which can carry request ids or client addresses) is
+    reported by size only.  Truncated with a marker.
+    """
+    text = ""
+    try:
+        parsed = json.loads(body)
+        err = parsed.get("error", parsed) if isinstance(parsed, dict) else {}
+        if isinstance(err, dict):
+            text = " ".join(
+                str(err[k]) for k in ("code", "message") if err.get(k)
+            )
+    except ValueError:
+        pass
+    if not text:
+        text = f"(non-JSON response body, {len(body)} bytes, not copied)"
+    if len(text) > RESPONSE_BODY_LOG_LIMIT:
+        text = text[:RESPONSE_BODY_LOG_LIMIT] + "...[truncated]"
+    return text
+
+
 def describe_store_error(exc: BaseException) -> str:
-    """Exception text plus the (truncated) response body of an HTTP error.
+    """Exception text plus the scrubbed response body of an HTTP error.
 
     Never includes request headers or the request body.
     """
@@ -76,26 +104,32 @@ def describe_store_error(exc: BaseException) -> str:
         except Exception:  # noqa: BLE001 - a streamed/closed body must not mask the error
             body = ""
         if body:
-            if len(body) > RESPONSE_BODY_LOG_LIMIT:
-                body = body[:RESPONSE_BODY_LOG_LIMIT] + "...[truncated]"
-            text = f"{text} | response body: {body}"
+            text = f"{text} | response body: {_scrub_response_body(body)}"
     return text
 
 
-def _emit_failure_report(key: str, count: int, last_error: str) -> None:
-    """Write the existing ``daemon_report`` failure signal. Fail-open, one try."""
+def _emit_failure_report(label: str, count: int, last_error: str) -> None:
+    """Write the existing ``daemon_report`` failure signal. Fail-open, one try.
+
+    Same entity shape as ``generalizer.emit_report`` and the Aquila emitter;
+    this module is sync and shared by every daemon, so it cannot await that
+    async helper.
+    """
     payload = {
         "entity_type": "daemon_report",
         "daemon_name": ESCALATION_DAEMON_NAME,
         "aauth_sub": f"{ESCALATION_DAEMON_NAME}@ateles-swarm",
         "severity": "error",
         "message": (
-            f"[finalize] store has failed {count} consecutive times for "
-            f"{key}: {last_error[:300]}"
+            f"Apis could not record {label} after {count} consecutive attempts; "
+            f"the task or session may stay unreconciled until this is fixed. "
+            f"Last error: {last_error[:300]}"
+            + ("...[truncated]" if len(last_error) > 300 else "")
         ),
         "report_at": datetime.now(timezone.utc).isoformat(),
-        "details": json.dumps({"idempotency_key": key, "consecutive_failures": count}),
+        "details": json.dumps({"write": label, "consecutive_failures": count}),
     }
+    digest = hashlib.sha256(label.encode()).hexdigest()[:16]
     try:
         resp = httpx.post(
             f"{NEOTOMA_BASE_URL}/store",
@@ -103,7 +137,7 @@ def _emit_failure_report(key: str, count: int, last_error: str) -> None:
             json={
                 "entities": [payload],
                 "observation_source": "workflow_state",
-                "idempotency_key": f"finalize-failure-{key}-{count}",
+                "idempotency_key": f"finalize-failure-{digest}-{count}",
             },
             timeout=20,
         )
@@ -112,26 +146,35 @@ def _emit_failure_report(key: str, count: int, last_error: str) -> None:
         log.error("[finalize] could not write failure daemon_report: %s", describe_store_error(exc))
 
 
-def _record_store_outcome(key: str | None, ok: bool, error: str = "") -> None:
-    """Count consecutive failures per write key; escalate once per streak."""
-    if not key:
+def _record_store_outcome(streak_key: str | None, ok: bool, error: str = "", label: str = "") -> None:
+    """Count consecutive failures per LOGICAL write; escalate once per streak.
+
+    ``streak_key`` identifies the write (entity type, session, status), never
+    the per-call idempotency key.
+    """
+    if not streak_key:
         return
     with _failure_lock:
         if ok:
-            _consecutive_failures.pop(key, None)
-            _escalated.discard(key)
+            _consecutive_failures.pop(streak_key, None)
+            _escalated.discard(streak_key)
             return
-        count = _consecutive_failures.get(key, 0) + 1
-        _consecutive_failures[key] = count
-        escalate = count >= ESCALATE_AFTER_CONSECUTIVE_FAILURES and key not in _escalated
+        count = _consecutive_failures.pop(streak_key, 0) + 1
+        _consecutive_failures[streak_key] = count  # re-insert: newest last
+        while len(_consecutive_failures) > MAX_TRACKED_WRITES:
+            oldest = next(iter(_consecutive_failures))
+            del _consecutive_failures[oldest]
+            _escalated.discard(oldest)
+        escalate = count >= ESCALATE_AFTER_CONSECUTIVE_FAILURES and streak_key not in _escalated
         if escalate:
-            _escalated.add(key)
+            _escalated.add(streak_key)
     if escalate:
+        what = label or streak_key
         log.error(
-            "[finalize] store for %s failed %d consecutive times; escalating: %s",
-            key, count, error,
+            "[finalize] %s failed %d consecutive times; escalating: %s",
+            what, count, error,
         )
-        _emit_failure_report(key, count, error)
+        _emit_failure_report(what, count, error)
 
 
 def build_finalize_payload(
@@ -339,15 +382,25 @@ def build_turn_payload(
     }
 
 
-def _post_store(body: dict, *, retry_transient: bool = False) -> dict | None:
+def _post_store(
+    body: dict,
+    *,
+    retry_transient: bool = False,
+    streak_key: str | None = None,
+    label: str = "",
+) -> dict | None:
     """POST a /store body. Returns the parsed JSON, or None. Fail-open.
 
     ``retry_transient`` opts one caller into bounded retry of timeouts and
     connection errors (same body, so same idempotency key, every attempt).
+    ``streak_key`` names the logical write for failure counting (defaults to
+    the idempotency key); ``label`` is the operator-readable description.
     """
     if not NEOTOMA_BEARER_TOKEN:
         log.warning("[finalize] no bearer token — store skipped")
         return None
+    streak = streak_key or body.get("idempotency_key")
+
     def _send() -> dict:
         resp = httpx.post(
             f"{NEOTOMA_BASE_URL}/store",
@@ -360,15 +413,16 @@ def _post_store(body: dict, *, retry_transient: bool = False) -> dict | None:
 
     try:
         if retry_transient:
-            return call_with_transient_retry(_send, label="run-session store")
-        result = _send()
-        _record_store_outcome(body.get("idempotency_key"), True)
-        return result
+            result = call_with_transient_retry(_send, label="run-session store")
+        else:
+            result = _send()
     except Exception as exc:  # noqa: BLE001 — never crash the caller
         detail = describe_store_error(exc)
         log.warning("[finalize] store failed: %s", detail)
-        _record_store_outcome(body.get("idempotency_key"), False, detail)
+        _record_store_outcome(streak, False, detail, label)
         return None
+    _record_store_outcome(streak, True)
+    return result
 
 
 def create_run_conversation(
@@ -681,23 +735,30 @@ def recover_run_session(
 def update_run_session_status(run: RunSession, *, status: str) -> bool:
     """Record and verify a run's terminal lifecycle state."""
     # Neotoma rejects (400 ERR_IDEMPOTENCY_MISMATCH) a reused idempotency key
-    # whose content differs.  ``last_activity_at`` changes on every call, so
-    # the key must carry it: a stable key made every retry after the first
-    # write fail forever (the watchdog re-runs this each sweep).
-    last_activity_at = datetime.now(timezone.utc).isoformat()
-    data = _post_store({
-        "entities": [{
-            "entity_type": "agent_session",
-            "harness": "ateles-swarm",
-            "native_session_id": run.native_session_id,
-            "status": status,
-            "last_activity_at": last_activity_at,
-        }],
-        "observation_source": "workflow_state",
-        "idempotency_key": (
-            f"run-session-{run.native_session_id}-{status}-{last_activity_at}"
-        ),
-    })
+    # whose content differs.  The write is therefore deterministic (no volatile
+    # timestamp) and its key carries a hash of exactly that content: an
+    # identical re-send (a watchdog sweep, a transient retry) is a true replay
+    # that Neotoma dedupes, and only a genuinely different write gets a new key.
+    entity = {
+        "entity_type": "agent_session",
+        "harness": "ateles-swarm",
+        "native_session_id": run.native_session_id,
+        "status": status,
+    }
+    content_hash = hashlib.sha256(
+        json.dumps(entity, sort_keys=True).encode()
+    ).hexdigest()[:16]
+    data = _post_store(
+        {
+            "entities": [entity],
+            "observation_source": "workflow_state",
+            "idempotency_key": (
+                f"run-session-{run.native_session_id}-{status}-{content_hash}"
+            ),
+        },
+        streak_key=f"agent_session:{run.native_session_id}:{status}",
+        label=f"run {run.native_session_id} status '{status}'",
+    )
     if not data:
         return False
     return _entity_readback_matches(
@@ -740,12 +801,15 @@ def finalize_session(**kwargs) -> bool:
             timeout=20,
         )
         resp.raise_for_status()
-        _record_store_outcome(body.get("idempotency_key"), True)
+        _record_store_outcome(f"finalize:{kwargs.get('handler')}", True)
         return True
     except Exception as exc:  # noqa: BLE001 — never crash the caller
         detail = describe_store_error(exc)
         log.warning("[finalize] store failed: %s", detail)
-        _record_store_outcome(body.get("idempotency_key"), False, detail)
+        _record_store_outcome(
+            f"finalize:{kwargs.get('handler')}", False, detail,
+            f"the end-of-session capture for {kwargs.get('handler')}",
+        )
         return False
 
 
