@@ -93,6 +93,13 @@ def test_actual_fluid_constructors_satisfy_complete_raw_contract(tmp_path, monke
     monkeypatch.setattr(local_fluid, '_run_json', lambda cli, args, output:
                         copy.deepcopy(raw['diarization'] if args[0] == 'process' else raw['asr']))
     monkeypatch.setattr(ta, 'get_audio_duration', lambda _: 2.5)
+    if paired:
+        import two_track_transcribe as t3
+        monkeypatch.setenv('TRANSCRIBE_PAIRED_ASR', 'parakeet')
+        monkeypatch.setattr(t3, 'to_wav16', lambda ffmpeg, src, dest: dest)
+        monkeypatch.setattr(t3, 'frame_levels', lambda ffmpeg, wav: [-20.0] * 30)
+        monkeypatch.setattr(t3, 'mix_for_diarization', lambda ffmpeg, s, m, dest: dest)
+        monkeypatch.setattr(local_fluid, 'diarize_mono', lambda wav: {'status': 'failed', 'category': 'cli not found'})
     result = ta.transcribe_two_files(mic, audio, backend='fluid') if paired else local_fluid.transcribe_fluid(audio)
     ta._validate_transcription_result(result, paired=paired)
 
