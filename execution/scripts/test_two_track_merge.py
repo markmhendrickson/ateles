@@ -1,5 +1,4 @@
 """Two-track merge by segment: synthetic fixtures, no audio and no models."""
-import math
 import sys
 from pathlib import Path
 
