@@ -206,11 +206,18 @@ Exit codes:
     0    approved, or dry run completed with every gate passing
     1    refused, or a gate failed
     2    usage error (argparse)
-    75   GitHub rate limit exhausted (primary/core or secondary). One line is
-         printed naming the limit and when it resets (UTC and Europe/Madrid,
-         from `x-ratelimit-reset`, or `retry-after`); no traceback. Nothing was
-         submitted. Wait for the reset and re-run. Any other HTTP error (a plain
-         403 for permissions, a 404, a 5xx) is NOT this code and behaves as before.
+    75   GitHub rate limit exhausted (primary/core or secondary) BEFORE any review
+         was posted. One line names the limit and when it resets (UTC and
+         Europe/Madrid, from `x-ratelimit-reset` or `retry-after`); no traceback.
+         Nothing was submitted, so it is safe to wait for the reset and re-run.
+    76   GitHub rate limit exhausted AFTER a review POST had been sent. The output
+         lists which lens approvals landed, which did not, and any approval that
+         may have landed but could not be read back. Do NOT re-run blindly: check
+         the PR's reviews first, since a re-run would approve the landed lenses
+         again.
+    Any other HTTP error (a plain 403 for permissions, a 404, a 5xx) is neither
+    code and behaves as before. Script callers should key on the exit code, not
+    on the text.
 
 This script never prints, logs, or commits the App private key or any token.
 """
@@ -222,7 +229,6 @@ import asyncio
 import os
 import re
 import sys
-from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -441,9 +447,12 @@ class CheckOutcome:
         self.reason = reason
 
 
-# Exit code for an exhausted GitHub rate limit (sysexits EX_TEMPFAIL: retry later).
-# 0/1 are pass/refuse, 2 is argparse; 75 is unused anywhere else in this script.
+# Exit codes for an exhausted GitHub rate limit (75 is sysexits EX_TEMPFAIL:
+# retry later). 0/1 are pass/refuse and 2 is argparse. 75 means nothing was
+# submitted, so a re-run is safe; 76 means a review POST had already been sent,
+# so a blind re-run could approve twice.
 EXIT_RATE_LIMITED = 75
+EXIT_RATE_LIMITED_AFTER_SUBMIT = 76
 
 
 class GitHubRateLimited(BaseException):
@@ -452,43 +461,27 @@ class GitHubRateLimited(BaseException):
     Deliberately a BaseException: many call sites here catch `Exception` to
     fail closed on an unreadable lookup, and that would swallow the signal and
     lose the reset time. `main` is the one place that catches it.
+
+    *submitted* is "" while no review POST has been sent (nothing is on the PR);
+    otherwise a sentence naming what landed, what did not and what may have.
     """
 
+    def __init__(self, message: str, submitted: str = "") -> None:
+        super().__init__(message)
+        self.limit_line = message
+        self.submitted = submitted
 
-def rate_limit_message(
-    status: int, headers: "httpx.Headers | dict", body: str, *, now: datetime | None = None
-) -> str:
-    """One line describing a rate-limit refusal, or "" when *status* is not one.
+    def report(self) -> str:
+        if self.submitted:
+            return (
+                f"{self.limit_line} {self.submitted} Do not re-run blindly: check the "
+                "PR's reviews first, because a re-run would approve the landed lenses again."
+            )
+        return f"{self.limit_line} Nothing was submitted; re-run after the reset."
 
-    A rate limit is a 403/429 where `x-ratelimit-remaining` is 0, or the body
-    says so. A plain 403 (permissions) is not one and returns "".
-    """
-    if status not in (403, 429):
-        return ""
-    hdr = {str(k).lower(): str(v) for k, v in dict(headers).items()}
-    low = (body or "").lower()
-    secondary = "secondary rate limit" in low or "abuse detection" in low
-    exhausted = hdr.get("x-ratelimit-remaining") == "0"
-    if not (exhausted or secondary or "rate limit" in low or (status == 429)):
-        return ""
-    clock = now or datetime.now(timezone.utc)
-    kind = "secondary" if secondary else (hdr.get("x-ratelimit-resource") or "core")
-    when = ""
-    retry_after = hdr.get("retry-after", "")
-    reset: datetime | None = None
-    if retry_after.isdigit():
-        reset = clock + timedelta(seconds=int(retry_after))
-        when = f"retry after {retry_after}s, at "
-    elif hdr.get("x-ratelimit-reset", "").isdigit():
-        reset = datetime.fromtimestamp(int(hdr["x-ratelimit-reset"]), tz=timezone.utc)
-    if reset is None:
-        return f"GitHub rate limit hit ({kind}); no reset time given, wait a few minutes and re-run."
-    local = reset.astimezone(ZoneInfo("Europe/Madrid"))
-    return (
-        f"GitHub rate limit hit ({kind}): {when}resets "
-        f"{reset:%Y-%m-%d %H:%M:%S} UTC / {local:%Y-%m-%d %H:%M:%S} Europe/Madrid. "
-        f"Nothing was submitted; re-run after the reset."
-    )
+
+# One definition shared with the urllib paths (`lib.github_app_token`).
+rate_limit_message = _github_app_token.rate_limit_message
 
 
 async def _raise_on_rate_limit(response: httpx.Response) -> None:
@@ -1929,7 +1922,14 @@ async def submit_app_approval(
 
     # 4. Read the created review back. The POST's own response body is NOT
     # treated as proof — only this independent GET is.
-    readback_resp = await client.get(f"{url}/{review_id}", headers=headers)
+    try:
+        readback_resp = await client.get(f"{url}/{review_id}", headers=headers)
+    except GitHubRateLimited as exc:
+        raise GitHubRateLimited(
+            exc.limit_line,
+            f"The {expected_login or 'swarm App'} approval (review {review_id}) was "
+            "posted but could not be read back, so it may have landed.",
+        ) from None
     if readback_resp.status_code >= 400:
         raise RuntimeError(
             f"review read-back failed: HTTP {readback_resp.status_code} — approval NOT "
@@ -2079,6 +2079,15 @@ def _check_approver_identities(
         seen[key] = who
 
 
+def _raise_if_app_rate_limited(exc: Exception) -> None:
+    """Turn a rate-limited App mint/login lookup into the one-line signal.
+
+    Raised before any review is posted, so it reports "nothing was submitted".
+    """
+    if isinstance(exc, _github_app_token.AppTokenRateLimited):
+        raise GitHubRateLimited(exc.limit_message) from None
+
+
 async def submit_approvals(
     client: httpx.AsyncClient,
     *,
@@ -2138,6 +2147,7 @@ async def submit_approvals(
             )
             login = await asyncio.to_thread(_github_app_token.bot_login, prefix)
         except _github_app_token.AppTokenError as exc:
+            _raise_if_app_rate_limited(exc)
             raise RuntimeError(
                 f"could not mint the {outcome.lens} lens's App token ({exc}) — "
                 "submitting nothing"
@@ -2155,6 +2165,7 @@ async def submit_approvals(
         try:
             shared_login = await asyncio.to_thread(_github_app_token.bot_login)
         except _github_app_token.AppTokenError as exc:
+            _raise_if_app_rate_limited(exc)
             raise RuntimeError(
                 f"could not read the swarm App's login ({exc}) — submitting nothing"
             ) from None
@@ -2165,6 +2176,7 @@ async def submit_approvals(
                 _github_app_token.identity_bot_login, opener
             )
         except _github_app_token.AppTokenError as exc:
+            _raise_if_app_rate_limited(exc)
             raise RuntimeError(
                 f"the PR-opener App is declared but its login cannot be read ({exc}), "
                 "so no approver can be checked against it — submitting nothing"
@@ -2221,6 +2233,21 @@ async def submit_approvals(
                 expected_base_ref=expected_base_ref,
             )
             landed.append((", ".join(o.lens for o in lenses), login, review))
+    except GitHubRateLimited as exc:
+        if not landed and not exc.submitted:
+            raise
+        done_lenses = {name for names, _, _ in landed for name in names.split(", ")}
+        todo = [o.lens for o in lens_outcomes if o.lens not in done_lenses]
+        done = (
+            "; ".join(f"{names} as {lg} (review {r.get('id')})" for names, lg, r in landed)
+            or "none"
+        )
+        detail = (
+            f"Approvals already landed: {done}; not landed: {', '.join(todo) or 'none'}."
+        )
+        if exc.submitted:
+            detail += f" {exc.submitted}"
+        raise GitHubRateLimited(exc.limit_line, detail) from None
     except Exception as exc:
         done_lenses = {name for names, _, _ in landed for name in names.split(", ")}
         todo = [o.lens for o in lens_outcomes if o.lens not in done_lenses]
@@ -2507,6 +2534,9 @@ async def run(
         except Exception as exc:  # noqa: BLE001 — unreadable identities admit nobody
             print(f"lens comment identities unreadable ({exc.__class__.__name__})")
             authors = frozenset()
+        _limit_notice = lens_authors.rate_limit_notice()
+        if _limit_notice:
+            raise GitHubRateLimited(_limit_notice)
         _print_ignored(lens_authors.ignored_lens_comments(comments, authors), authors)
 
         # The three-round cap (operator ruling 2026-10-27). Counted from the same
@@ -2712,7 +2742,9 @@ def main() -> int:
             "content can still appear), or set "
             "ATELES_APPROVE_PANEL_REQUIRED_ONLY=1 to change the default. "
             "Exit codes: 0 pass, 1 refused, 2 usage, 75 GitHub rate limit "
-            "exhausted (the reset time is printed; nothing was submitted)."
+            "exhausted before any review was posted (reset time printed; safe to "
+            "re-run after it), 76 rate limit hit after a review was posted (the "
+            "output lists what landed; check the PR before re-running)."
         ),
     )
     parser.add_argument("--repo", required=True, help="owner/name")
@@ -2773,8 +2805,8 @@ def main() -> int:
     try:
         return _run_cli(args, extra_lenses)
     except GitHubRateLimited as exc:
-        print(str(exc))
-        return EXIT_RATE_LIMITED
+        print(exc.report())
+        return EXIT_RATE_LIMITED_AFTER_SUBMIT if exc.submitted else EXIT_RATE_LIMITED
 
 
 def _run_cli(args: argparse.Namespace, extra_lenses: list[str]) -> int:

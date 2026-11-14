@@ -5069,7 +5069,11 @@ class TestGitHubRateLimit:
     def _exhausted(self, request):
         return httpx.Response(
             403,
-            headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(self.RESET)},
+            headers={
+                "x-ratelimit-remaining": "0",
+                "x-ratelimit-resource": "core",
+                "x-ratelimit-reset": str(self.RESET),
+            },
             json={"message": "API rate limit exceeded for installation."},
         )
 
@@ -5147,3 +5151,229 @@ class TestGitHubRateLimit:
 
         with pytest.raises(target.GitHubRateLimited):
             asyncio.run(go())
+
+
+# ── Round 2: a limit AFTER a review POST must never say "nothing was submitted" ──
+
+
+class _ReadbackLimited(_FakeClient):
+    """The review POST succeeds; the read-back GET of it is rate limited (what
+    the response hook raises on the real client)."""
+
+    async def get(self, url, headers=None, params=None):
+        if "/reviews/" in url:
+            raise target.GitHubRateLimited("GitHub rate limit hit (core): resets soon.")
+        return await super().get(url, headers=headers, params=params)
+
+
+class TestRateLimitAfterSubmission:
+    @pytest.mark.asyncio
+    async def test_limit_on_the_readback_after_a_posted_review_says_it_may_have_landed(
+        self, monkeypatch
+    ):
+        client = _ReadbackLimited(comments=_all_clear_comments(ALL_FOUR), check_runs=_green_checks())
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        with pytest.raises(target.GitHubRateLimited) as ei:
+            await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert len(client.posted) == 1  # the approval really was sent
+        exc = ei.value
+        assert "may have landed" in exc.submitted
+        report = exc.report()
+        assert "Nothing was submitted" not in report
+        assert "Do not re-run blindly" in report
+
+    @pytest.mark.asyncio
+    async def test_limit_on_a_second_lens_post_names_what_landed_and_what_did_not(
+        self, monkeypatch
+    ):
+        _install_lens_apps(monkeypatch, ["pm", "qa"])
+
+        class _SecondLimited(_PerLensClient):
+            async def post(self, url, json=None, headers=None):
+                if len(self.posted) == 1:
+                    raise target.GitHubRateLimited("GitHub rate limit hit (core): resets soon.")
+                return await super().post(url, json=json, headers=headers)
+
+        client = _SecondLimited(
+            comments=_own_app_comments(["pm", "qa"], apps_for=["pm", "qa"]),
+            check_runs=_green_checks(),
+        )
+        _install_client(monkeypatch, client)
+
+        with pytest.raises(target.GitHubRateLimited) as ei:
+            await target.run(REPO, PR, [], apply=True)
+
+        assert len(client.posted) == 1
+        report = ei.value.report()
+        assert "pm as ateles-reviewer-pm[bot] (review 1001)" in report
+        assert "not landed: qa" in report
+        assert "Nothing was submitted" not in report
+        assert "approve the landed lenses again" in report
+
+    @pytest.mark.asyncio
+    async def test_limit_before_the_first_post_still_says_nothing_was_submitted(
+        self, monkeypatch
+    ):
+        _install_lens_apps(monkeypatch, ["pm", "qa"])
+
+        class _FirstLimited(_PerLensClient):
+            async def post(self, url, json=None, headers=None):
+                raise target.GitHubRateLimited("GitHub rate limit hit (core): resets soon.")
+
+        client = _FirstLimited(
+            comments=_own_app_comments(["pm", "qa"], apps_for=["pm", "qa"]),
+            check_runs=_green_checks(),
+        )
+        _install_client(monkeypatch, client)
+
+        with pytest.raises(target.GitHubRateLimited) as ei:
+            await target.run(REPO, PR, [], apply=True)
+
+        assert ei.value.submitted == ""
+        assert "Nothing was submitted" in ei.value.report()
+
+    def test_main_exits_76_after_submission_and_75_before(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["approve_pr_as_app.py", "--repo", REPO, "--pr", str(PR)])
+
+        async def _after(*a, **k):
+            raise target.GitHubRateLimited("limit line.", "A review may have landed.")
+
+        monkeypatch.setattr(target, "run", _after)
+        assert target.main() == target.EXIT_RATE_LIMITED_AFTER_SUBMIT == 76
+        assert "Nothing was submitted" not in capsys.readouterr().out
+
+        async def _before(*a, **k):
+            raise target.GitHubRateLimited("limit line.")
+
+        monkeypatch.setattr(target, "run", _before)
+        assert target.main() == 75
+
+    def test_help_and_docstring_describe_both_codes(self):
+        assert "76" in target.__doc__ and "Do NOT re-run blindly" in target.__doc__
+        assert "nothing was submitted\n" not in target.__doc__.split("Exit codes:")[1].split("75")[0]
+        import subprocess
+
+        out = subprocess.run(
+            [sys.executable, target.__file__, "--help"], capture_output=True, text=True
+        ).stdout
+        flat = " ".join(out.split())
+        assert "76" in flat and "check the PR before re-running" in flat
+
+
+class TestRunUsesTheHookedClient:
+    def test_new_client_carries_the_rate_limit_hook(self):
+        assert target._raise_on_rate_limit in target._new_client().event_hooks["response"]
+
+    def test_run_builds_its_client_with_new_client_and_a_limit_exits_75(
+        self, monkeypatch, capsys
+    ):
+        real_hooks = target._new_client().event_hooks
+        built = []
+
+        def handler(request):
+            return httpx.Response(
+                403,
+                headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1800000000"},
+                json={"message": "API rate limit exceeded"},
+            )
+
+        def spy():
+            built.append(1)
+            return httpx.AsyncClient(
+                transport=httpx.MockTransport(handler), event_hooks=real_hooks
+            )
+
+        monkeypatch.setattr(target, "_new_client", spy)
+        monkeypatch.setattr(sys, "argv", ["approve_pr_as_app.py", "--repo", REPO, "--pr", str(PR)])
+        assert target.main() == 75
+        assert built == [1]
+        assert "2027-01-15 08:00:00 UTC" in capsys.readouterr().out
+
+
+class TestRateLimitMessageDetails:
+    def test_retry_after_wording_has_no_stray_at(self):
+        msg = target.rate_limit_message(
+            403,
+            {"retry-after": "60"},
+            "You have exceeded a secondary rate limit.",
+            now=datetime(2026, 11, 14, 9, 0, 0, tzinfo=timezone.utc),
+        )
+        assert "retry after 60s; resets 2026-11-14 09:01:00 UTC" in msg
+        assert " at resets" not in msg
+
+    def test_429_with_retry_after(self):
+        msg = target.rate_limit_message(
+            429, {"retry-after": "30"}, "", now=datetime(2026, 11, 14, 9, 0, 0, tzinfo=timezone.utc)
+        )
+        assert "retry after 30s" in msg and "09:00:30 UTC" in msg
+
+    def test_bare_429_is_labelled_unknown_not_core(self):
+        msg = target.rate_limit_message(429, {}, "")
+        assert "(unknown)" in msg and "core" not in msg
+
+    def test_403_with_remaining_left_and_no_wording_is_not_a_limit(self):
+        assert target.rate_limit_message(403, {"x-ratelimit-remaining": "9"}, "Forbidden") == ""
+
+    def test_403_with_remaining_zero_is_core(self):
+        msg = target.rate_limit_message(
+            403,
+            {"x-ratelimit-remaining": "0", "x-ratelimit-resource": "core",
+             "x-ratelimit-reset": "1800000000"},
+            "",
+        )
+        assert "(core)" in msg
+
+
+@pytest.mark.asyncio
+class TestRateLimitOnTheUrllibPaths:
+    async def test_a_rate_limited_lens_app_mint_reports_the_reset_and_submits_nothing(
+        self, monkeypatch
+    ):
+        from lib import github_app_token as gat
+
+        _install_lens_apps(monkeypatch, ["pm", "qa"])
+
+        def _limited(repo, prefix=None, **k):
+            raise gat.AppTokenRateLimited(
+                "POST /app/installations/1/access_tokens -> HTTP 403",
+                "GitHub rate limit hit (core): resets 2027-01-15 08:00:00 UTC.",
+            )
+
+        monkeypatch.setattr(gat, "installation_token", _limited)
+        client = _PerLensClient(
+            comments=_own_app_comments(["pm", "qa"], apps_for=["pm", "qa"]),
+            check_runs=_green_checks(),
+        )
+        _install_client(monkeypatch, client)
+
+        with pytest.raises(target.GitHubRateLimited) as ei:
+            await target.run(REPO, PR, [], apply=True)
+
+        assert client.posted == []
+        assert "Nothing was submitted" in ei.value.report()
+        assert "2027-01-15 08:00:00 UTC" in ei.value.report()
+
+    async def test_a_rate_limited_login_lookup_in_lens_authors_exits_with_the_reset_line(
+        self, monkeypatch
+    ):
+        import lens_authors
+
+        client = _FakeClient(comments=_all_clear_comments(ALL_FOUR), check_runs=_green_checks())
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        def _resolve():
+            lens_authors._note_rate_limit("GitHub rate limit hit (core): resets 2027-01-15.")
+            return frozenset()
+
+        monkeypatch.setattr(target, "lens_comment_authors", _resolve)
+        try:
+            with pytest.raises(target.GitHubRateLimited) as ei:
+                await target.run(REPO, PR, ALL_FOUR, apply=True)
+        finally:
+            lens_authors.clear_cache()
+        assert client.posted == []
+        assert "resets 2027-01-15" in ei.value.report()
