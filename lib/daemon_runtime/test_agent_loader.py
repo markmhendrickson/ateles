@@ -183,7 +183,7 @@ def test_load_active_policies_returns_matching_agent_policy(monkeypatch):
     def fake_post(url, json=None, **kw):
         if url.endswith("/list_relationships"):
             return _Resp(relationships_payload)
-        if url.endswith("/entities/query") and (json or {}).get("entity_type") == "agent_definition":
+        if url.endswith("/retrieve_entity_by_identifier"):
             return _Resp(definition_payload)
         return _Resp(policy_payload)
 
@@ -319,6 +319,126 @@ def test_a_result_for_a_different_name_is_not_absence(monkeypatch):
     with pytest.raises(al.AgentDefinitionUnavailable) as raised:
         al.AgentLoader("apis").load(allow_undefined=True)
     assert raised.value.code == "bad_response"
+
+
+# --- Exact-identifier load (2026-11-12: Fly lens jobs timed out on the name search) ---
+
+
+def _identifier_row(entity_id, name, **extra):
+    """A row in the shape /retrieve_entity_by_identifier returns: `id`, not
+    `entity_id`, and the field dict doubly nested under `snapshot.snapshot`."""
+    row = {
+        "id": entity_id,
+        "entity_type": "agent_definition",
+        "canonical_name": f"agent_definition:{name}",
+        "merged_to_entity_id": None,
+        "snapshot": {"entity_id": entity_id, "snapshot": {
+            "name": name, "prompt_markdown": "# prompt", "tool_allowlist": ["Bash"],
+            "status": "active"}},
+    }
+    row.update(extra)
+    return row
+
+
+def test_load_uses_the_identifier_route_and_never_searches(monkeypatch):
+    """The definition is read by exact identifier, not by the slow name search.
+
+    FAILS on origin/main: the loader POSTs `/entities/query` with a `search` field.
+    """
+    _no_signing(monkeypatch)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    seen = []
+
+    def fake_post(url, json=None, **kw):
+        seen.append((url, json))
+        return _Resp({"entities": [_identifier_row("ent_pavo", "pavo")], "total": 1,
+                      "match_mode": "direct"})
+
+    monkeypatch.setattr(al.httpx, "post", fake_post)
+
+    d = al.AgentLoader("pavo").load()
+    assert d.entity_id == "ent_pavo" and d.prompt_markdown == "# prompt"
+    assert len(seen) == 1
+    url, body = seen[0]
+    assert url.endswith("/retrieve_entity_by_identifier")
+    assert body["identifier"] == "pavo" and body["entity_type"] == "agent_definition"
+    assert "search" not in body
+    assert not any(u.endswith("/entities/query") for u, _ in seen)
+
+
+def test_identifier_route_ignores_other_types_and_merged_rows(monkeypatch):
+    """Live hosted returns the merged-away row and other entity types beside the
+    definition (alias hits); only the one live agent_definition counts."""
+    _no_signing(monkeypatch)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    payload = {"entities": [
+        _identifier_row("ent_waxwing", "waxwing"),
+        {"id": "ent_syn", "entity_type": "synthesis", "snapshot": None},
+        {"id": "ent_old", "entity_type": "agent_definition",
+         "merged_to_entity_id": "ent_waxwing", "snapshot": None},
+    ], "total": 3}
+    monkeypatch.setattr(al.httpx, "post", lambda url, **kw: _Resp(payload))
+
+    assert al.AgentLoader("waxwing").load().entity_id == "ent_waxwing"
+
+
+def test_identifier_route_with_no_definition_row_is_absence(monkeypatch):
+    """A complete 200 holding no live definition (empty, or only other types) is
+    the definite `not_found`, and still refuses by default."""
+    _no_signing(monkeypatch)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    for payload in (
+        {"entities": [], "total": 0, "match_mode": "none"},
+        {"entities": [{"id": "ent_syn", "entity_type": "synthesis", "snapshot": None}],
+         "total": 1},
+    ):
+        monkeypatch.setattr(al.httpx, "post", lambda url, p=payload, **kw: _Resp(p))
+        with pytest.raises(al.AgentDefinitionUnavailable) as raised:
+            al.AgentLoader("ghost").load()
+        assert raised.value.code == "not_found"
+
+
+def test_identifier_route_partial_page_is_not_absence(monkeypatch):
+    _no_signing(monkeypatch)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    payload = {"entities": [{"id": "ent_syn", "entity_type": "synthesis", "snapshot": None}],
+               "total": 5}
+    monkeypatch.setattr(al.httpx, "post", lambda url, **kw: _Resp(payload))
+    with pytest.raises(al.AgentDefinitionUnavailable) as raised:
+        al.AgentLoader("ghost").load()
+    assert raised.value.code == "bad_response"
+
+
+def test_identifier_route_timeout_is_retried_then_succeeds(monkeypatch):
+    """A transient failure on the identifier route is retried within the budget."""
+    _no_signing(monkeypatch)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    calls = []
+
+    def flaky(url, json=None, **kw):
+        calls.append(url)
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("slow")
+        return _Resp({"entities": [_identifier_row("ent_falco", "falco")], "total": 1})
+
+    monkeypatch.setattr(al.httpx, "post", flaky)
+    assert al.AgentLoader("falco").load().entity_id == "ent_falco"
+    assert len(calls) == 2 and all(u.endswith("/retrieve_entity_by_identifier") for u in calls)
+
+
+def test_resolve_agent_definition_id_uses_the_identifier_route():
+    seen = []
+
+    def fake_request(url, body, timeout):
+        seen.append((url, body))
+        return {"entities": [_identifier_row("ent_corvus", "corvus")], "total": 1}
+
+    assert al.resolve_agent_definition_id(
+        "corvus@ateles-swarm", "https://neotoma.example", _request=fake_request
+    ) == "ent_corvus"
+    url, body = seen[0]
+    assert url == "https://neotoma.example/retrieve_entity_by_identifier"
+    assert "search" not in body
 
 
 class TestPolicyScoping:
