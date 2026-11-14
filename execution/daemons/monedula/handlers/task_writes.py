@@ -66,14 +66,27 @@ def _idem(entity_id: str, field: str, value: Any) -> str:
 _IDENTITY_FIELDS = ("title", "entity_type", "canonical_name", "name")
 
 
+def _has_snapshot_key(body: Any) -> bool:
+    """True only when a ``snapshot`` key is present at the root or under ``entity``."""
+    if not isinstance(body, dict):
+        return False
+    if "snapshot" in body:
+        return True
+    entity = body.get("entity")
+    return isinstance(entity, dict) and "snapshot" in entity
+
+
 def _extract_snapshot(body: Any) -> dict | None:
     """Unwrap a GET /entities response; None unless it is a usable task snapshot.
 
-    Uses the shared ``unwrap_snapshot`` (a present ``snapshot`` key is the only
-    source; empty or null means unreadable) and additionally requires the
-    snapshot itself to carry an identity field, so an identity-less response is
-    a failed read, never "no notes".
+    A response is readable only when a ``snapshot`` mapping is present (root or
+    under ``entity``). There is no flat-entity reading: ``entity_type``,
+    ``canonical_name`` and ``entity_id`` are entity metadata, so a response
+    carrying only those is unreadable, never "a task with no notes". The
+    snapshot itself must also carry an identity field.
     """
+    if not _has_snapshot_key(body):
+        return None
     snap = unwrap_snapshot(body)
     if snap is None or not any(snap.get(k) for k in _IDENTITY_FIELDS):
         return None

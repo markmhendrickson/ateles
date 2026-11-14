@@ -253,6 +253,11 @@ _EMPTY_SNAPSHOT_BODIES = [
     {"entity": {**_ID, "snapshot": None}},
     {**_ID, "snapshot": {"snapshot": {}}},
     {**_ID, "snapshot": {**_ID, "snapshot": {}}},
+    # Round 4: no snapshot key at all is unreadable (entity metadata is not identity)
+    {"entity_id": "e", "entity_type": "task", "canonical_name": "T"},
+    {"entity": None, "entity_type": "task", "title": "T"},
+    {"entity": [1], "entity_type": "task"},
+    {"snapshot": {"snapshot": {"snapshot": {}}}},
 ]
 
 
@@ -277,7 +282,26 @@ def test_extract_snapshot_rejects_empty_snapshot_key(body) -> None:
     assert task_writes._extract_snapshot(body) is None
 
 
-def test_flat_entity_without_snapshot_key_still_reads() -> None:
-    body = {**_ID, "notes": "flat note"}
-    assert task_writes._extract_snapshot(body)["notes"] == "flat note"
-    assert task_writes._extract_snapshot({"entity": {**_ID, "notes": "n"}})["notes"] == "n"
+def test_flat_entity_without_snapshot_key_is_unreadable() -> None:
+    assert task_writes._extract_snapshot({**_ID, "notes": "flat note"}) is None
+    assert task_writes._extract_snapshot({"entity": {**_ID, "notes": "n"}}) is None
+
+
+def test_snapshot_under_root_or_entity_still_reads() -> None:
+    assert task_writes._extract_snapshot({"snapshot": {**_ID, "notes": "a"}})["notes"] == "a"
+    assert task_writes._extract_snapshot({"entity": {"snapshot": {**_ID, "notes": "b"}}})["notes"] == "b"
+
+
+def test_append_note_is_idempotent_when_note_already_present() -> None:
+    import httpx
+
+    posts = []
+
+    def handler(req):
+        if req.method == "POST":
+            posts.append(req)
+        return httpx.Response(200, json={"snapshot": {**_ID, "notes": "old\nnew note"}})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    assert task_writes.append_note(client, "https://neotoma.test", TASK, "new note")
+    assert posts == []
