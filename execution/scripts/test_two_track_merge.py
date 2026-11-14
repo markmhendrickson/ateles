@@ -104,7 +104,7 @@ def test_mic_leak_of_the_remote_voice_is_dropped():
         (m.SYSTEM, "we should move the meeting to Thursday"), (m.MIC, "sounds good to me"),
     ]
     assert result.stats["bleed_dropped"] == 1
-    assert "1 cross-talk segments dropped" in result.text.splitlines()[0]
+    assert "1 cross-talk segment removed" in result.text.splitlines()[0]
 
 
 def test_real_cross_talk_is_kept_when_both_voices_are_at_speech_level():
@@ -213,7 +213,7 @@ def test_a_withheld_chunk_is_a_timed_marker_in_the_body_and_a_count_in_the_heade
                                                 detail="letters outside en/es/ca: ö", withheld_text="kept")]}
     result = m.merge_tracks(tracks, chunks=chunks)
     header = result.text.splitlines()[0]
-    assert "1 chunks withheld by the output screen (System 2:00–4:00 foreign_diacritic)" in header
+    assert "1 chunk withheld by the output screen (System 2:00–4:00 foreign_diacritic)" in header
     assert "\n\n[2:00–4:00] [System]\n[SPEECH WITHHELD" in result.text
     assert result.text.index("hello there") < result.text.index("SPEECH WITHHELD")
     assert header.count("]") == 1
@@ -228,7 +228,7 @@ def test_all_chunks_withheld_is_not_reported_as_no_words():
 def test_silent_and_still_looping_chunks_are_counted_in_the_header():
     chunks = {m.SYSTEM: [chunk(0, "ok", loop_after_rerun=True), chunk(120, "silent")], m.MIC: [chunk(0, "silent")]}
     header = m.merge_tracks({m.SYSTEM: [seg(1, 3, "hello there")]}, chunks=chunks).text.splitlines()[0]
-    assert "2 chunks skipped as silent" in header and "1 chunks still looping after a re-run" in header
+    assert "2 chunks skipped as silent (Mic 0:00\u20132:00, System 2:00\u20134:00)" in header and "1 chunk still looping after a re-run (System 0:00\u20132:00)" in header
 
 
 def test_header_does_not_claim_energy_mapping_when_levels_were_not_measured():

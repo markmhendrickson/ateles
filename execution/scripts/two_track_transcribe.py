@@ -10,55 +10,43 @@ One automated step in place of the hand procedure:
 4. both tracks normalised and mixed, run through FluidAudio offline diarization
    (fail-open: a failure is recorded in the header, the transcript still lands);
 5. ``two_track_merge.merge_tracks`` by segment, with clusters mapped to tracks by
-   energy and cross-talk dropped.
+   energy and cross-talk removed, every removal marked and counted.
+
+ffmpeg and FluidAudio are tied to this process (``guarded_process``): Tyto's outer
+deadline kills it with SIGKILL, and neither child may keep running afterwards.
 """
 
 from __future__ import annotations
 
-import math
-import re
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Callable
 
 try:
-    from scripts.chunked_whisper import NORMALIZE_FILTER
-    from scripts.two_track_merge import FRAME_SECONDS, MIC, SYSTEM, EnergyProfile, merge_tracks
+    from scripts.chunked_whisper import NORMALIZE_FILTER, frame_levels
+    from scripts.guarded_process import check_guarded, guard_pattern
+    from scripts.two_track_merge import MIC, SYSTEM, EnergyProfile, merge_tracks
 except ImportError:  # pragma: no cover - path-dependent import
-    from chunked_whisper import NORMALIZE_FILTER  # type: ignore[no-redef]
-    from two_track_merge import FRAME_SECONDS, MIC, SYSTEM, EnergyProfile, merge_tracks  # type: ignore[no-redef]
+    from chunked_whisper import NORMALIZE_FILTER, frame_levels  # type: ignore[no-redef]
+    from guarded_process import check_guarded, guard_pattern  # type: ignore[no-redef]
+    from two_track_merge import MIC, SYSTEM, EnergyProfile, merge_tracks  # type: ignore[no-redef]
+
+__all__ = ["frame_levels", "to_wav16", "mix_for_diarization", "transcribe_two_tracks"]
 
 # track_asr(label, wav16, original_path) -> {"segments": [...], <evidence keys>}
 TrackAsr = Callable[[str, Path, Path], dict]
 
-_LEVEL = re.compile(r"lavfi\.astats\.Overall\.RMS_level=(-?inf|-?[0-9.]+)")
+FFMPEG_TIMEOUT_SECONDS = 1800
 
 
 def to_wav16(ffmpeg: str, src: Path, dest: Path) -> Path:
-    subprocess.run(
+    check_guarded(
         [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(src),
          "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(dest)],
-        check=True, capture_output=True, timeout=1800,
+        timeout=FFMPEG_TIMEOUT_SECONDS,
     )
     return dest
-
-
-def frame_levels(ffmpeg: str, wav: Path) -> list[float]:
-    """RMS level in dB for each ``FRAME_SECONDS`` of a 16 kHz track (``-inf`` = silent)."""
-    samples = int(16000 * FRAME_SECONDS)
-    proc = subprocess.run(
-        [ffmpeg, "-hide_banner", "-nostats", "-loglevel", "error", "-nostdin", "-i", str(wav), "-af",
-         f"asetnsamples=n={samples}:p=0,astats=metadata=1:reset=1,"
-         "ametadata=mode=print:key=lavfi.astats.Overall.RMS_level:file=-",
-         "-f", "null", "-"],
-        capture_output=True, text=True, timeout=1800, check=True,
-    )
-    values = []
-    for match in _LEVEL.finditer(proc.stdout):
-        raw = match.group(1)
-        values.append(-math.inf if "inf" in raw else float(raw))
-    return values
 
 
 def mix_for_diarization(ffmpeg: str, system16: Path, mic16: Path, dest: Path) -> Path:
@@ -67,10 +55,10 @@ def mix_for_diarization(ffmpeg: str, system16: Path, mic16: Path, dest: Path) ->
         f"[0:a]{NORMALIZE_FILTER}[s];[1:a]{NORMALIZE_FILTER}[m];"
         "[s][m]amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.95[out]"
     )
-    subprocess.run(
+    check_guarded(
         [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(system16), "-i", str(mic16),
          "-filter_complex", graph, "-map", "[out]", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(dest)],
-        check=True, capture_output=True, timeout=1800,
+        timeout=FFMPEG_TIMEOUT_SECONDS,
     )
     return dest
 
@@ -83,12 +71,13 @@ def transcribe_two_tracks(
     ffmpeg: str,
     diarize: Callable[[Path], dict],
     stitch_seconds: float = 4.0,
+    notes: list[str] | None = None,
 ) -> dict:
     """Run the whole step. Returns ``{"text", "turns", "tracks", "merge"}``.
 
     ``tracks`` is the per-track evidence (whatever ``track_asr`` returned, in
     System, Mic order). ``merge`` is the merge statistics and the diarization
-    outcome, for the stored raw evidence.
+    outcome, for the stored raw evidence. ``notes`` become header clauses.
     """
     with tempfile.TemporaryDirectory(prefix="two-track-") as tmp:
         work = Path(tmp)
@@ -104,8 +93,10 @@ def transcribe_two_tracks(
 
         diarization = None
         if any(results[label]["segments"] for label in (SYSTEM, MIC)):
+            mix = work / "mix.wav"
             try:
-                diarization = diarize(mix_for_diarization(ffmpeg, wavs[SYSTEM], wavs[MIC], work / "mix.wav"))
+                with guard_pattern(str(mix)):
+                    diarization = diarize(mix_for_diarization(ffmpeg, wavs[SYSTEM], wavs[MIC], mix))
             except (subprocess.SubprocessError, OSError):
                 diarization = {"status": "failed", "category": "unreadable output"}
 
@@ -115,6 +106,7 @@ def transcribe_two_tracks(
         energy=energy,
         stitch_seconds=stitch_seconds,
         chunks={label: results[label].get("chunks", []) for label in (SYSTEM, MIC)},
+        notes=notes,
     )
     return {
         "text": merged.text,

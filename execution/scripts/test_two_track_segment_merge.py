@@ -38,11 +38,11 @@ def _words(text, start, speakers):
 # as FluidAudio's do on a short overlap with the operator.
 SYSTEM_WORDS = (
     _words("so the plan is to ship on Friday", 0.0, ["S1", "S1", "S1 + S2", "S1", "S1 + S2", "S1", "S1"])
-    + _words("and then we review it", 8.0, ["S1"])
+    + _words("and then we review the budget again", 8.0, ["S1"])
 )
 MIC_WORDS = (
     _words("yeah right", 1.3, ["S1"])                  # the operator's real backchannel, mid-sentence
-    + _words("and then we review it", 8.0, ["S1"])    # the remote voice leaking into the mic, 35 dB down
+    + _words("and then we review the budget again", 8.0, ["S1"])    # the remote voice leaking into the mic, 35 dB down
     + _words("okay sounds good", 12.0, ["S1"])
 )
 
@@ -97,10 +97,10 @@ def test_one_speaker_is_not_split_across_tags_and_the_leak_is_dropped(tracks, mo
     assert "S1 + S2" not in text
     # The operator's backchannel is its own whole turn, ordered by start time.
     assert "[Mic]\nyeah right" in text
-    assert text.index("so the plan") < text.index("yeah right") < text.index("and then we review it")
+    assert text.index("so the plan") < text.index("yeah right") < text.index("and then we review the budget again")
     # The remote voice leaking into the quiet mic is not printed twice.
-    assert text.count("review it") == 1
-    assert text.splitlines()[0].startswith("[Speakers: ") and "1 cross-talk segments dropped" in text.splitlines()[0]
+    assert text.count("review the budget again") == 1
+    assert text.splitlines()[0].startswith("[Speakers: ") and "1 cross-talk segment removed" in text.splitlines()[0]
 
 
 def test_default_route_is_chunked_whisper_with_the_same_merge(tracks):
@@ -125,7 +125,7 @@ def test_default_route_is_chunked_whisper_with_the_same_merge(tracks):
     assert seen == ["system", "mic"]
     assert result["backend"] == "fluid" and "ggml-medium.bin" in result["transcription_model"]
     text = result["transcription_text"]
-    assert "[System]\nso the plan is to ship on Friday\n" in text and text.count("review it") == 1
+    assert "[System]\nso the plan is to ship on Friday\n" in text and text.count("review the budget again") == 1
     raw = result["raw_response"]
     assert [t["channel"] for t in raw["tracks"]] == ["System", "Mic"]
     assert raw["segment_merge"]["bleed_dropped"] == 1 and raw["aligned_words"] == []
@@ -195,8 +195,8 @@ def test_a_screened_chunk_is_a_timed_marker_and_a_header_count_never_silence(tra
     result = _run_with(tracks, monkeypatch, _screened_track)
     text = result["transcription_text"]
     header = text.splitlines()[0]
-    assert "1 chunks withheld by the output screen (System 2:00–4:00 foreign_diacritic)" in header
-    assert "1 chunks skipped as silent" in header
+    assert "1 chunk withheld by the output screen (System 2:00–4:00 foreign_diacritic)" in header
+    assert "1 chunk skipped as silent (System 4:00\u20135:00)" in header
     assert "[2:00–4:00] [System]\n[SPEECH WITHHELD" in text
     assert "foreign_diacritic" in text and "ASR returned no words" not in text
     chunk = result["raw_response"]["tracks"][0]["chunks"][1]
@@ -263,11 +263,69 @@ def test_a_call_too_long_for_the_deadline_is_refused_before_any_work(tracks, mon
             ta.transcribe_two_files(mic, system)
 
 
-def test_a_long_call_that_fits_only_warns(tracks, monkeypatch, capsys):
+def test_a_long_call_that_fits_puts_its_note_in_the_header_not_only_on_stderr(tracks, monkeypatch):
     monkeypatch.setattr(ta, "get_audio_duration", lambda path: 100 * 60.0)
-    ta._check_whisper_time_budget(100 * 60.0)
-    assert "expected to take about" in capsys.readouterr().err
-    ta._check_whisper_time_budget(10 * 60.0)
-    assert capsys.readouterr().err == ""
-    monkeypatch.setenv("TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS", "14400")
-    ta._check_whisper_time_budget(3 * 3600.0)  # a longer deadline admits it
+
+    def plain(wav16):
+        return {"segments": [{"start": 1.0, "end": 3.0, "text": "welcome everyone"}], "chunks": []}
+
+    result = _run_with(tracks, monkeypatch, plain)
+    assert "long call: about 25 of the 30 minutes allowed" in result["transcription_text"].splitlines()[0]
+    ta._validate_transcription_result(result, paired=True)
+
+
+def _empty_chunk_track(wav16):
+    if wav16.stem == "mic":
+        return {"segments": [], "chunks": []}
+    chunks = [{"kind": "chunk", "index": 0, "start": 0.0, "end": 120.0, "status": "ok"},
+              {"kind": "chunk", "index": 1, "start": 120.0, "end": 240.0, "status": "empty", "loud_seconds": 30.0},
+              {"kind": "chunk", "index": 2, "start": 240.0, "end": 360.0, "status": "ok", "loop_after_rerun": True}]
+    return {"segments": [{"start": 1.0, "end": 5.0, "text": "welcome everyone to the call"}], "chunks": chunks}
+
+
+def test_an_empty_audible_chunk_is_disclosed_and_the_validator_requires_it(tracks, monkeypatch):
+    result = _run_with(tracks, monkeypatch, _empty_chunk_track)
+    text = result["transcription_text"]
+    assert "audible chunk with no words recognised (System 2:00\u20134:00" in text.splitlines()[0]
+    assert "still looping after a re-run (System 4:00\u20136:00" in text.splitlines()[0]
+    assert "[NO WORDS RECOGNISED" in text
+    ta._validate_transcription_result(result, paired=True)
+    for needle, replacement in (("[NO WORDS RECOGNISED", "[…"), ("with no words recognised", "with nothing"),
+                                ("still looping", "fine")):
+        broken = dict(result, transcription_text=text.replace(needle, replacement))
+        with pytest.raises(ta.IncompleteTranscriptionResult):
+            ta._validate_transcription_result(broken, paired=True)
+    merge = dict(result["raw_response"]["segment_merge"], gaps=[])
+    with pytest.raises(ta.IncompleteTranscriptionResult):
+        ta._validate_transcription_result(
+            dict(result, raw_response=dict(result["raw_response"], segment_merge=merge)), paired=True)
+
+
+def test_the_validator_requires_the_header_count_of_withheld_chunks(tracks, monkeypatch):
+    result = _run_with(tracks, monkeypatch, _screened_track)
+    header, rest = result["transcription_text"].split("\n", 1)
+    broken = dict(result, transcription_text=header.replace("withheld by the output screen", "kept") + "\n" + rest)
+    with pytest.raises(ta.IncompleteTranscriptionResult):
+        ta._validate_transcription_result(broken, paired=True)
+
+
+def _word_track(wav16):
+    words = SYSTEM_WORDS if wav16.stem == "system" else MIC_WORDS
+    groups = ([w for w in words if w["start"] < 6], [w for w in words if 6 <= w["start"] < 11],
+              [w for w in words if w["start"] >= 11])
+    return {"segments": [{"start": g[0]["start"], "end": g[-1]["end"], "text": " ".join(w["text"] for w in g)}
+                         for g in groups if g], "chunks": []}
+
+
+def test_removed_cross_talk_is_disclosed_and_the_validator_requires_it(tracks, monkeypatch):
+    result = _run_with(tracks, monkeypatch, _word_track)
+    text = result["transcription_text"]
+    assert "[CROSS-TALK REMOVED" in text and "cross-talk segment removed (Mic" in text.splitlines()[0]
+    ta._validate_transcription_result(result, paired=True)
+    broken = dict(result, transcription_text=text.replace("[CROSS-TALK REMOVED", "[…"))
+    with pytest.raises(ta.IncompleteTranscriptionResult):
+        ta._validate_transcription_result(broken, paired=True)
+    merge = dict(result["raw_response"]["segment_merge"], bleed_segments=[])
+    with pytest.raises(ta.IncompleteTranscriptionResult):
+        ta._validate_transcription_result(
+            dict(result, raw_response=dict(result["raw_response"], segment_merge=merge)), paired=True)

@@ -612,6 +612,10 @@ PERMANENT_STORE_ERROR_CODES = (
     "ERR_AUDIO_ATTACHMENT_REQUIRED",
     "ERR_FILE_PATH_IS_SERVER_LOCAL",
     "ERR_IDEMPOTENCY_MISMATCH",
+    # The paired whisper route refuses a call it cannot finish inside this
+    # daemon's own transcription deadline (or whose length it cannot measure).
+    # Deterministic: retrying only repeats the refusal and the alerts.
+    "ERR_CALL_TOO_LONG_FOR_LOCAL_ASR",
     # A grant rejection cannot heal by re-running ASR. Retain the source and
     # journal the rejection for explicit recovery after its cause is repaired.
     "capability_denied",

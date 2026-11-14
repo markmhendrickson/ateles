@@ -42,39 +42,63 @@ the recordings desk's hand method). One automated step:
 
 1. each track is transcribed on its own by chunked local whisper
    (`chunked_whisper.py`): normalised (highpass + dynaudnorm, so a quiet mic is not
-   suppressed), cut into 2-minute chunks with a fresh decoder each, a silent chunk
-   skipped by the calibrated silence gate, and each chunk seam re-transcribed over
-   a 28 s window to repair cut words. A repeat check runs per chunk (a phrase of 1
-   to 6 words repeated back to back 4 or more times is a collapse): the chunk is
-   re-run once without context; a loop that survives is counted in the header and
-   collapsed after same-speaker segments are joined. The output screen judges each
-   chunk, with the plausible languages taken from the operator's `locale_profile`
-   (`session_language.py`). A chunk it rejects is never dropped silently: its text
-   and reason stay in the raw evidence, the transcript shows a timed
-   `[SPEECH WITHHELD ...]` marker at its place, and the header counts it. Silent
-   chunks are counted in the header too. The model defaults to `ggml-medium.bin`;
-   `TRANSCRIBE_WHISPER_MODEL` or `TRANSCRIBE_WHISPER_MODEL_NAME` override it. A
-   whisper-cli child is killed with its parent, so Tyto's outer timeout cannot
-   leave one running;
+   suppressed), cut into 2-minute chunks with a fresh decoder each, and each chunk
+   seam re-transcribed over a 28 s window to repair cut words. A chunk is skipped
+   as silent only when fewer than half a second of its 100 ms frames are above
+   -60 dB; a chunk-wide percentile would skip a listener's few seconds of speech.
+   A repeat check runs per chunk (a phrase of 1 to 6 words repeated back to back 4
+   or more times, or a sentence-length phrase of up to 40 words repeated 3 or more
+   times): the chunk is re-run once without context; a loop that survives is named
+   in the header and collapsed after same-speaker segments are joined. The output
+   screen judges each chunk, with the plausible languages taken from the
+   operator's `locale_profile` (`session_language.py`). Nothing is dropped
+   silently: a chunk the screen rejects keeps its text and reason in the raw
+   evidence, and a withheld chunk, a silent chunk, an audible chunk for which
+   whisper returned no words, and every removed cross-talk segment each get a
+   timed marker in the body (`[SPEECH WITHHELD ...]`, `[SKIPPED AS SILENT ...]`,
+   `[NO WORDS RECOGNISED ...]`, `[CROSS-TALK REMOVED ...]`) and a track and time
+   span in the header. The raw-evidence validator requires all of it. The model
+   defaults to `ggml-medium.bin`; `TRANSCRIBE_WHISPER_MODEL` or
+   `TRANSCRIBE_WHISPER_MODEL_NAME` override it. whisper-cli, ffmpeg and FluidAudio
+   are killed with their parent, so Tyto's outer timeout cannot leave one
+   running. Seam repair keeps the words it replaces in the seam's record;
 2. FluidAudio offline diarizes the two tracks mixed. Each cluster is mapped to the
    track that carries its energy, each track measured against its own speech
    level. Remote lines are labelled `[System]` or, with more than one remote
    cluster, `[System/S1]`, `[System/S2]`; the operator is `[Mic]`. No name is
    inferred;
-3. a segment is dropped as cross-talk only when its words (at least three, mostly
-   found) also appear in the other track's ASR over the same stretch AND it is the
-   quieter of the two there. Level alone never drops a segment: the operator's mic
-   is quiet, and his real speech looks far below its own track. Each dropped
-   segment keeps its text, match share and level margin in the raw evidence, and
-   the header counts them;
+3. cross-talk is decided once per matched pair of segments, one on each track. The
+   quieter copy (by 3 dB, each track against its own speech level, over the
+   stretch the two share) is removed only when its words are also in the other
+   track's words over that stretch: at least three words, at least two content
+   words (five letters or more), 60% of each found, the other segment sliced to
+   the overlapping seconds and padded by 1.5 s. The other copy is protected, so
+   one utterance is never lost from both tracks. Level alone never removes a
+   segment: the operator's mic is quiet, and his real speech looks far below its
+   own track. Each removed segment keeps its text, match share, level margin and
+   the partner's span in the raw evidence. A leak that the two tracks transcribed
+   differently is kept, so a `[Mic]` turn may repeat a few remote words; the
+   header says so;
 4. whole segments are ordered by start time, consecutive ones of one speaker are
    joined (`TRANSCRIBE_UTTERANCE_STITCH_SECONDS`), and each turn is
    `[m:ss–m:ss] [Label]`. The first line is the usual one-line `[Speakers: ...]`
    header: method, cluster count and mapping, that names are not established, and
-   the withheld, silent, looping, cross-talk and collapsed-repeat counts. If
-   diarization fails the header says so (or that it was not run) and remote lines
-   are plain `[System]`; if levels cannot be measured the clusters are not mapped,
-   the cross-talk check is skipped and the header says that.
+   the withheld, silent, empty, looping, cross-talk and collapsed-repeat counts
+   with their tracks and spans. If diarization fails the header says so (or that it
+   was not run) and remote lines are plain `[System]`; if levels cannot be
+   measured the clusters are not mapped, the cross-talk check is skipped and the
+   header says that.
+
+**Long calls.** Measured on a synthetic 60-minute two-track call, the whisper route
+takes about 10 s per call-minute. A call whose estimate (15 s per call-minute) is
+over Tyto's transcription deadline (`TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS`, default
+1800 s), roughly over 2 hours, is refused before any work, as is a call whose length
+cannot be measured (the length comes from ffprobe, since Tyto's recordings are
+`.m4a`, `.aac` or `.mp4`). The refusal leads with the remedy and carries the
+permanent-failure code `ERR_CALL_TOO_LONG_FOR_LOCAL_ASR`, so Tyto journals it once
+instead of retrying: set `TRANSCRIBE_PAIRED_ASR=parakeet` in Tyto's environment, or
+raise the deadline there. A call above 80% of the deadline runs, and the transcript
+header carries a `long call` note.
 
 `TRANSCRIBE_PAIRED_ASR=parakeet` keeps FluidAudio's Parakeet words as the text
 source (their runs become segments and go through the same merge); the default is

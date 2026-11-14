@@ -7,17 +7,22 @@ long track is never given to it whole:
 
 1. normalise (highpass + dynaudnorm) so a quiet microphone is not suppressed;
 2. cut into 2-minute chunks, each a fresh whisper process (decoder state reset);
-3. a chunk below the speech floor is not transcribed (whisper fabricates on
-   silence), using the repo's calibrated silence gate on the un-normalised audio;
+3. a chunk is skipped as silent only when it has no audible stretch: fewer than
+   ``MIN_LOUD_SECONDS`` of 100 ms frames above ``FRAME_FLOOR_DB``. A chunk-wide
+   percentile would skip a listener's 5 seconds of speech in two quiet minutes;
 4. repeat check per chunk: a phrase of 1 to 6 words repeated back to back 4 or
-   more times is a collapse. The chunk is re-run once without prior context. A
-   loop that survives is recorded on the chunk (``loop_after_rerun``) and counted
-   in the transcript header; the merge collapses it after same-speaker segments
-   are joined. If the output screen rejects the chunk instead, see 5;
+   more times, or a sentence-length phrase (up to 40 words) repeated 3 or more
+   times, is a collapse. The chunk is re-run once without prior context. A loop
+   that survives is recorded on the chunk (``loop_after_rerun``) and counted in
+   the transcript header with its track and span; the merge collapses it after
+   same-speaker segments are joined. If the output screen rejects the chunk
+   instead, see 5;
 5. the output screen (``hallucination_filter``) judges each chunk. A rejected
    chunk is NEVER dropped silently: its text and the reason stay in the chunk's
    record (``withheld_text``, ``reason``, ``detail``), and the merge shows a timed
-   gap marker in the transcript and counts it in the header;
+   gap marker in the transcript and counts it in the header. An audible chunk
+   whose ASR returns no words at all is recorded ``empty`` and disclosed the
+   same way, as is a silent one;
 6. each chunk boundary is re-transcribed over a 28 s window and the words cut at
    the seam are replaced by the window's.
 
@@ -27,8 +32,8 @@ Whisper is injected (``asr``) so the logic is testable without a model.
 from __future__ import annotations
 
 import json
-import os
-import signal
+import math
+import re
 import subprocess
 import tempfile
 import wave
@@ -36,15 +41,17 @@ from pathlib import Path
 from typing import Callable
 
 try:
+    from scripts.guarded_process import check_guarded, run_guarded
     from scripts.hallucination_filter import DEFAULT_PLAUSIBLE_LANGUAGES, screen_transcription
     from scripts.local_whisper import detected_language_from_json, timed_segments_from_json
-    from scripts.silence_gate import DEFAULT_SILENCE_THRESHOLD_DB, measure_sustained_rms_db
-    from scripts.two_track_merge import collapse_repeats
+    from scripts.two_track_merge import clean_segments, collapse_repeats
 except ImportError:  # pragma: no cover - path-dependent import
+    from guarded_process import check_guarded, run_guarded  # type: ignore[no-redef]
     from hallucination_filter import DEFAULT_PLAUSIBLE_LANGUAGES, screen_transcription  # type: ignore[no-redef]
     from local_whisper import detected_language_from_json, timed_segments_from_json  # type: ignore[no-redef]
-    from silence_gate import DEFAULT_SILENCE_THRESHOLD_DB, measure_sustained_rms_db  # type: ignore[no-redef]
-    from two_track_merge import collapse_repeats  # type: ignore[no-redef]
+    from two_track_merge import clean_segments, collapse_repeats  # type: ignore[no-redef]
+
+__all__ = ["run_guarded", "frame_levels", "transcribe_track", "whisper_cli_asr", "has_repeat_loop"]
 
 CHUNK_SECONDS = 120
 BOUNDARY_WINDOW_SECONDS = 28
@@ -55,41 +62,25 @@ NORMALIZE_FILTER = "highpass=f=80,dynaudnorm=f=150:g=15"
 RERUN_ARGS = ["-mc", "0"]
 # One whisper call transcribes at most one chunk; far above any real need.
 WHISPER_CALL_TIMEOUT_SECONDS = 900
+FFMPEG_TIMEOUT_SECONDS = 1800
+
+# The silence gate is frame based. A 100 ms frame counts as audible above this
+# level; the old calibrated gate was -50 dB on a windowed 95th percentile, which
+# skipped a 4.8 s utterance in a 120 s chunk (p95 -81 dB). Whisper's fabrications
+# on near-silence are caught afterwards by the output screen and are disclosed
+# when withheld, so letting a quiet chunk through is the safer side of the trade.
+FRAME_SECONDS = 0.1
+FRAME_FLOOR_DB = -60.0
+MIN_LOUD_SECONDS = 0.5
+
+_LEVEL = re.compile(r"lavfi\.astats\.Overall\.RMS_level=(-?inf|-?[0-9.]+)")
 
 # asr(wav, language, extra_args) -> (segments, detected_language)
 AsrFn = Callable[[Path, str | None, list[str]], tuple[list[dict], str | None]]
 
-# Runs a command and kills it if the parent process disappears. The parent being
-# killed (Tyto's outer timeout does that) would otherwise leave a whisper-cli
-# running for minutes: a SIGKILL cannot be handled, so a watcher outside the
-# parent notices that it is gone. Watcher output is detached so it never holds
-# the caller's pipes open.
-_PARENT_GUARD = (
-    'parent=$1; shift; "$@" & child=$!; '
-    '( while kill -0 "$parent" 2>/dev/null; do sleep 1; done; kill -9 "$child" 2>/dev/null ) '
-    ">/dev/null 2>&1 & watcher=$!; "
-    'wait "$child"; status=$?; kill "$watcher" 2>/dev/null; exit "$status"'
-)
-
-
-def run_guarded(cmd: list[str], *, timeout: float) -> subprocess.CompletedProcess:
-    """Like ``subprocess.run(capture_output=True, text=True)`` but the whole process
-    group is killed on timeout and the command dies with its parent."""
-    proc = subprocess.Popen(
-        ["/bin/sh", "-c", _PARENT_GUARD, "sh", str(os.getpid()), *cmd],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
-    )
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
-        proc.communicate()
-        raise
-    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
-
 
 def has_repeat_loop(text: str) -> bool:
-    """True when ``collapse_repeats`` would remove anything (adjacent 4+ repeats)."""
+    """True when ``collapse_repeats`` would remove anything."""
     return collapse_repeats(text)[1] > 0
 
 
@@ -114,8 +105,25 @@ def whisper_cli_asr(cli: str, model: Path, *, threads: int | None = None) -> Asr
 
 
 def _ffmpeg(ffmpeg: str, args: list[str]) -> None:
-    subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", *args],
-                   check=True, capture_output=True, timeout=600)
+    check_guarded([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", *args],
+                  timeout=FFMPEG_TIMEOUT_SECONDS)
+
+
+def frame_levels(ffmpeg: str, wav: Path) -> list[float]:
+    """RMS level in dB for each ``FRAME_SECONDS`` of a 16 kHz track (``-inf`` = silent)."""
+    samples = int(16000 * FRAME_SECONDS)
+    proc = check_guarded(
+        [ffmpeg, "-hide_banner", "-nostats", "-loglevel", "error", "-nostdin", "-i", str(wav), "-af",
+         f"asetnsamples=n={samples}:p=0,astats=metadata=1:reset=1,"
+         "ametadata=mode=print:key=lavfi.astats.Overall.RMS_level:file=-",
+         "-f", "null", "-"],
+        timeout=FFMPEG_TIMEOUT_SECONDS,
+    )
+    values = []
+    for match in _LEVEL.finditer(proc.stdout):
+        raw = match.group(1)
+        values.append(-math.inf if "inf" in raw else float(raw))
+    return values
 
 
 def _normalized(ffmpeg: str, src: Path, dest: Path, *, start: float | None = None, duration: float | None = None) -> Path:
@@ -137,19 +145,35 @@ def _duration(wav: Path) -> float:
         return 0.0
 
 
+def _audible(ffmpeg: str, raw: Path, floor_db: float, stats: dict) -> bool:
+    """Whether the clip has at least ``MIN_LOUD_SECONDS`` of frames above ``floor_db``.
+
+    A failed measurement counts as audible: it must never discard real audio.
+    """
+    try:
+        levels = frame_levels(ffmpeg, raw)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        stats["level_unmeasured"] = True
+        return True
+    loud = sum(1 for v in levels if v > floor_db)
+    stats["loud_seconds"] = round(loud * FRAME_SECONDS, 1)
+    finite = [v for v in levels if math.isfinite(v)]
+    stats["peak_frame_db"] = round(max(finite), 1) if finite else None
+    return loud * FRAME_SECONDS >= MIN_LOUD_SECONDS
+
+
 def _run_clip(
     asr: AsrFn, raw: Path, norm: Path, language: str | None, ffmpeg: str,
-    offset: float, stats: dict, gate_db: float, plausible: tuple[str, ...],
+    offset: float, stats: dict, floor_db: float, plausible: tuple[str, ...],
 ) -> list[dict]:
     """Transcribe one clip: silence gate, repeat check with one re-run, screen.
 
-    Nothing is discarded without a trace: a screened clip keeps its text, reason
-    and detail in ``stats``.
+    Nothing is discarded without a trace: a silent, empty or screened clip is
+    recorded with its status, and a screened clip keeps its text, reason and
+    detail in ``stats``.
     """
     stats["end"] = round(offset + _duration(raw), 2)
-    level = measure_sustained_rms_db(raw, ffmpeg=ffmpeg)
-    stats["rms_db"] = None if level is None else round(level, 1)
-    if level is not None and level < gate_db:
+    if not _audible(ffmpeg, raw, floor_db, stats):
         stats["status"] = "silent"
         return []
     segments, detected = asr(norm, language, [])
@@ -159,11 +183,14 @@ def _run_clip(
         segments, detected = asr(norm, language, RERUN_ARGS)
         text = " ".join(s["text"] for s in segments)
         stats["loop_after_rerun"] = has_repeat_loop(text)
+    if not clean_segments(segments):
+        stats["status"] = "empty"
+        return []
     verdict = screen_transcription(
         text, expected_language=language, detected_language=detected,
         window_seconds=None, plausible_languages=plausible,
     )
-    if segments and verdict.filtered:
+    if verdict.filtered:
         stats["status"] = f"screened: {verdict.reason}"
         stats["reason"] = verdict.reason
         stats["detail"] = verdict.detail
@@ -186,7 +213,7 @@ def transcribe_track(
     language: str | None = None,
     ffmpeg: str,
     duration: float | None = None,
-    gate_db: float = DEFAULT_SILENCE_THRESHOLD_DB,
+    gate_db: float = FRAME_FLOOR_DB,
     chunk_seconds: int = CHUNK_SECONDS,
     plausible_languages: tuple[str, ...] = DEFAULT_PLAUSIBLE_LANGUAGES,
     label: str = "track",
@@ -194,8 +221,8 @@ def transcribe_track(
 ) -> dict:
     """Transcribe a 16 kHz mono track in chunks. Returns ``{"segments", "chunks"}``.
 
-    ``chunks`` holds one QA record per chunk (level, status, whether it was
-    re-run for a repeat loop, and for a screened chunk its withheld text and
+    ``chunks`` holds one QA record per chunk (status, audible seconds, whether it
+    was re-run for a repeat loop, and for a screened chunk its withheld text and
     reason) and per boundary repair, for the raw evidence.
     """
     say = progress or (lambda message: None)
@@ -244,6 +271,7 @@ def transcribe_track(
                 kept = [s for s in kept if not any(
                     min(s["end"], r["end"]) - max(s["start"], r["start"]) > 0.5 * (s["end"] - s["start"])
                     for r in replacement)]
+                info["replaced_text"] = " ".join(s["text"] for s in segments if inside(s))
                 segments = kept + replacement
                 info["replaced"] = True
             qa.append(info)

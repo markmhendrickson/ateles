@@ -334,7 +334,26 @@ def get_audio_duration(audio_path: Path) -> float | None:
     except Exception:
         pass
 
-    return None
+    # The daemon's interpreter has no pydub; Tyto's recordings are .m4a/.aac/.mp4.
+    return _ffprobe_duration(audio_path)
+
+
+def _ffprobe_duration(audio_path: Path) -> float | None:
+    """Container duration in seconds from ffprobe, or None; never raises."""
+    ffprobe_path = shutil.which("ffprobe")
+    if not ffprobe_path:
+        return None
+    try:
+        result = subprocess.run(
+            [ffprobe_path, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(audio_path)],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            return None
+        value = float((result.stdout or "").strip().splitlines()[0])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+    return value if math.isfinite(value) and value > 0 else None
 
 
 def _channel_labels() -> dict[int, str]:
@@ -1668,31 +1687,43 @@ TYTO_TIMEOUT_ENV = "TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS"
 TYTO_TIMEOUT_DEFAULT_SECONDS = 1800.0
 
 
-def _check_whisper_time_budget(duration_seconds: float) -> None:
-    """Refuse, loudly and before any work, a recording the whisper route cannot finish
-    inside Tyto's outer deadline; warn when it is close.
+# A permanent-failure code Tyto recognises (tyto.PERMANENT_STORE_ERROR_CODES): the
+# refusal is deterministic, so Tyto journals it once instead of retrying six times.
+CALL_TOO_LONG_ERROR_CODE = "ERR_CALL_TOO_LONG_FOR_LOCAL_ASR"
 
-    A transcription killed at the deadline is retried and killed again, silently
-    for hours. A refusal names the two ways out: the faster Parakeet source, or a
-    longer deadline.
+
+def _check_whisper_time_budget(duration_seconds: float | None) -> str | None:
+    """Refuse, loudly and before any work, a recording the whisper route cannot finish
+    inside Tyto's outer deadline, or whose length cannot be measured.
+
+    A transcription killed at the deadline is retried and killed again. The message
+    is short and leads with the remedy, since Tyto shows only the first 300
+    characters of stderr. Returns a one-line note when the call fits but is close
+    (above 80% of the deadline); the caller puts it in the transcript header,
+    because stderr is discarded on success.
     """
-    if not duration_seconds:
-        return
     try:
         budget = float(os.environ.get(TYTO_TIMEOUT_ENV, "") or TYTO_TIMEOUT_DEFAULT_SECONDS)
     except ValueError:
         budget = TYTO_TIMEOUT_DEFAULT_SECONDS
+    if not duration_seconds or duration_seconds <= 0:
+        raise RuntimeError(
+            f"Set {PAIRED_ASR_ENV}=parakeet or install ffprobe: call length unmeasurable, so the whisper time "
+            f"budget cannot be checked. Tracks kept. {CALL_TOO_LONG_ERROR_CODE}"
+        )
     estimate = duration_seconds / 60.0 * WHISPER_SECONDS_PER_CALL_MINUTE
     if estimate > budget:
         raise RuntimeError(
-            f"A {duration_seconds / 60:.0f}-minute call needs about {estimate / 60:.0f} minutes of local whisper, "
-            f"more than the {budget / 60:.0f}-minute transcription deadline ({TYTO_TIMEOUT_ENV}); it would be killed "
-            f"and retried without ever finishing. Both tracks are kept. Set {PAIRED_ASR_ENV}=parakeet for a faster "
-            f"transcript, or raise {TYTO_TIMEOUT_ENV}."
+            f"Set {PAIRED_ASR_ENV}=parakeet or raise {TYTO_TIMEOUT_ENV}: {duration_seconds / 60:.0f}-min call "
+            f"needs ~{estimate / 60:.0f} min of whisper, deadline {budget / 60:.0f}. Tracks kept. "
+            f"{CALL_TOO_LONG_ERROR_CODE}"
         )
     if estimate > 0.8 * budget:
-        print(f"    Warning: this call is expected to take about {estimate / 60:.0f} of the {budget / 60:.0f} "
-              f"minutes allowed ({TYTO_TIMEOUT_ENV}).", file=sys.stderr)
+        note = (f"long call: about {estimate / 60:.0f} of the {budget / 60:.0f} minutes allowed "
+                "are expected for transcription")
+        print(f"    Warning: {note} ({TYTO_TIMEOUT_ENV}).", file=sys.stderr)
+        return note
+    return None
 
 
 def _paired_model_path() -> Path:
@@ -1737,9 +1768,11 @@ def _transcribe_two_files_by_segment(
     source = _paired_asr_source()
     lang = None if not language or language == "auto" else language
     ffmpeg = resolve_ffmpeg()
+    notes: list[str] = []
 
     if source == PAIRED_ASR_WHISPER:
-        _check_whisper_time_budget(max(get_audio_duration(mic_path) or 0, get_audio_duration(remote_path) or 0))
+        lengths = [get_audio_duration(mic_path), get_audio_duration(remote_path)]
+        notes += [n for n in [_check_whisper_time_budget(None if None in lengths else max(lengths))] if n]
         model = _paired_model_path()
         asr = whisper_cli_asr(resolve_whisper_cli(), model)
         plausible = _plausible_languages(lang)
@@ -1775,7 +1808,7 @@ def _transcribe_two_files_by_segment(
 
     done = transcribe_two_tracks(
         mic_path, remote_path, track_asr=track_asr, ffmpeg=ffmpeg,
-        diarize=diarize_mono, stitch_seconds=_utterance_stitch_seconds(),
+        diarize=diarize_mono, stitch_seconds=_utterance_stitch_seconds(), notes=notes,
     )
     tracks = done["tracks"]
     aligned_words: list[dict] = []
@@ -2909,35 +2942,55 @@ def _validate_transcription_result(result: object, *, paired: bool) -> None:
             fluid_raw(raw, two_tracks=True)
         else:
             require(raw.get("aligned_words") == [], "raw_response.aligned_words")
-        # Disclosure: every chunk the output screen withheld must be a gap in the
-        # merge record, a marker in the body and a count in the header, and its
-        # text must be kept; silent and still-looping chunks must be counted.
-        from two_track_merge import GAP_MARKER, chunk_outcomes
-        withheld, silent, looping = [], 0, 0
+        # Disclosure: nothing may leave the transcript without a trace. Every chunk
+        # the output screen withheld, skipped as silent or found empty, every chunk
+        # still looping and every removed cross-talk segment must be a gap or
+        # segment in the merge record, a timed marker in the body and a track-and-span
+        # count in the header; a withheld chunk's text must be kept.
+        from two_track_merge import (KIND_CROSSTALK, KIND_EMPTY, KIND_SILENT, KIND_WITHHELD, MARKER_PREFIX,
+                                     chunk_outcomes, format_clock)
+        expected, looping = [], []
         for track in raw["tracks"]:
             outcome = chunk_outcomes(track.get("chunks"))
-            withheld += [(track["channel"], g["start"]) for g in outcome["gaps"]]
-            silent += outcome["silent"]
-            looping += outcome["looping"]
+            expected += [(track["channel"], g["start"], g["kind"], g["end"]) for g in outcome["gaps"]]
+            looping += [(track["channel"], span["start"], span["end"]) for span in outcome["looping"]]
             for chunk in track.get("chunks") or []:
                 if chunk.get("kind") == "chunk" and str(chunk.get("status", "")).startswith("screened"):
                     require(isinstance(chunk.get("withheld_text"), str) and text(chunk.get("reason")),
                             "screened chunk keeps its text and reason")
         gaps = merge.get("gaps")
         require(isinstance(gaps, list), "segment_merge.gaps")
-        require(sorted(withheld) == sorted((g.get("track"), g.get("start")) for g in gaps),
-                "every screened chunk is disclosed in segment_merge.gaps")
-        marker = GAP_MARKER.split(" — ")[0]
-        require(transcript.count(marker) == len(withheld), "every screened chunk has a marker in the transcript")
-        require(merge.get("chunks_silent", 0) == silent and merge.get("chunks_looping", 0) == looping,
-                "silent and looping chunk counts")
+        require(sorted((c, st, k) for c, st, k, _ in expected) == sorted(
+            (g.get("track"), g.get("start"), g.get("kind")) for g in gaps),
+            "every withheld, silent or empty chunk is disclosed in segment_merge.gaps")
+        bleed = merge.get("bleed_segments")
+        require(isinstance(bleed, list) and merge.get("bleed_dropped") == len(bleed)
+                and all(isinstance(d, dict) and text(d.get("text")) and text(d.get("reason")) for d in bleed),
+                "removed cross-talk segments keep their text and reason")
+        require(merge.get("chunks_looping") == len(looping), "looping chunk count")
         first = transcript.splitlines()[0] if transcript else ""
-        require(not withheld or "withheld by the output screen" in first, "header counts withheld chunks")
-        headed = bool(merge["turns"] or withheld)
-        require(not (silent and headed) or "skipped as silent" in first, "header counts silent chunks")
-        require(not (looping and headed) or "still looping" in first, "header counts looping chunks")
+        counts = {kind: sum(1 for e in expected if e[2] == kind) for kind in (KIND_WITHHELD, KIND_SILENT, KIND_EMPTY)}
+        require(merge.get("chunks_withheld") == counts[KIND_WITHHELD] and merge.get("chunks_silent") == counts[KIND_SILENT]
+                and merge.get("chunks_empty") == counts[KIND_EMPTY], "withheld, silent and empty chunk counts")
+        headed = bool(merge["turns"] or expected or bleed)
         if headed:
             require(transcript.startswith("[Speakers: "), "speaker header")
+            phrases = {KIND_WITHHELD: "withheld by the output screen", KIND_SILENT: "skipped as silent",
+                       KIND_EMPTY: "with no words recognised"}
+            for kind, phrase in phrases.items():
+                items = sorted((e for e in expected if e[2] == kind), key=lambda e: e[1])
+                if items:
+                    channel, start, _, end = items[0]
+                    require(phrase in first and f"{channel} {format_clock(start)}" in first, f"header names {kind} chunks")
+                    require(transcript.count(MARKER_PREFIX[kind]) >= 1, f"body marks {kind} chunks")
+            require(counts[KIND_WITHHELD] == transcript.count(MARKER_PREFIX[KIND_WITHHELD]),
+                    "every withheld chunk has its own marker")
+            if looping:
+                require("still looping" in first and f"{looping[0][0]} {format_clock(looping[0][1])}" in first,
+                        "header names looping chunks")
+            if bleed:
+                require("cross-talk segment" in first and transcript.count(MARKER_PREFIX[KIND_CROSSTALK]) >= 1,
+                        "header and body disclose removed cross-talk")
         else:
             require(transcript == format_events([]), "silent segment-merge transcription_text")
 

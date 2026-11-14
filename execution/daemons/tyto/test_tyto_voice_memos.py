@@ -1624,3 +1624,18 @@ def test_normal_poll_cannot_retry_same_file_alias_of_hold(tmp_path):
     ) as run:
         asyncio.run(watcher.poll_once())
         run.assert_not_called()
+
+
+def test_the_long_call_refusal_is_a_permanent_failure_not_six_retries():
+    """A call too long for the whisper route is refused deterministically; Tyto must
+    journal it once, and the code must survive the 300-character stderr cut."""
+    code = "ERR_CALL_TOO_LONG_FOR_LOCAL_ASR"
+    source = (Path(__file__).resolve().parents[2] / "scripts" / "transcribe_audio.py").read_text()
+    assert f'CALL_TOO_LONG_ERROR_CODE = "{code}"' in source        # producer and daemon agree
+    exc = RuntimeError(
+        "Error transcribing audio: Set TRANSCRIBE_PAIRED_ASR=parakeet or raise "
+        f"TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS: 130-min call needs ~33 min of whisper, deadline 30. Tracks kept. {code}"
+    )
+    assert tyto._classify_store_error(exc) == code
+    detail = tyto._subprocess_failure_detail("x" * 400 + code)
+    assert code in detail

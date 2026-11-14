@@ -16,11 +16,16 @@ mixed) only splits the REMOTE side into speakers. Each cluster is mapped to the
 track that carries its energy, so a cluster that is really the operator's voice
 leaking into the system mix is not named as a remote speaker.
 
-Cross-talk. The operator's mic also picks up the remote side. A segment is
-dropped as that leak only when its words are also found in the other track's ASR
-over the same stretch AND it is the quieter of the two there. Level alone never
-drops a segment. Dropped segments keep their text and reason in the raw evidence
-and are counted in the header.
+Cross-talk. The operator's mic also picks up the remote side. A matched PAIR of
+segments (the same words on both tracks over the same stretch) is decided once:
+the quieter copy, and only that one, is removed. Level alone never removes a
+segment, and nothing is removed without a timed marker in the body, a count and
+span in the header, and its text kept in the raw evidence.
+
+Nothing disappears silently. A chunk the output screen withheld, a chunk skipped
+as silent, an audible chunk with no recognised words and a removed cross-talk
+segment each leave a timed marker in the body and a track and time span in the
+header.
 """
 
 from __future__ import annotations
@@ -34,21 +39,27 @@ MIC = "Mic"
 
 FRAME_SECONDS = 0.1
 
-# A segment is cross-talk leakage only when its WORDS are found in the other
-# track's ASR over the same stretch (the mic hearing the remote voice, or the
-# reverse) AND it is the quieter of the two there, each track measured against
-# its own speech level. Level alone never drops a segment: the operator's mic can
-# sit 7 dB or more under the system track, and a real answer then looks "far
-# below its own track" (a 55-minute acceptance call lost 12% of the operator's
-# words to a level-only rule).
+# --- cross-talk thresholds ----------------------------------------------------
+# A copy is removed only when (a) its words are found in the other track's words
+# over the same stretch, (b) it is the quieter copy of the pair there, each track
+# measured against its own speech level, and (c) the pair really overlaps. Level
+# alone never removes a segment: the operator's mic can sit 7 dB or more under
+# the system track, and a real answer then looks "far below its own track".
 BLEED_MIN_OVERLAP = 0.5
 BLEED_MARGIN_DB = 3.0
-# Share of the segment's words found in the other track's text in that window.
+# Share of the segment's words, and of its content words, found in the other
+# track's words for the overlapping stretch.
 BLEED_TEXT_CONTAINMENT = 0.6
-# Fewer words than this prove nothing ("yeah", "okay"): never dropped on text.
+# Fewer words than this prove nothing ("yeah", "okay"): never removed on text.
 BLEED_MIN_WORDS = 3
+# Content words: five letters or more (language-independent; four would keep that, what,
+# with, have, this), and at least two.
+CONTENT_WORD_LETTERS = 5
+BLEED_MIN_CONTENT_WORDS = 2
 # ASR timestamps of one sound differ between the tracks by about a second.
 BLEED_WINDOW_PAD_SECONDS = 1.5
+# Shortest shared stretch whose level is trusted; below it the union is measured.
+BLEED_MIN_COMMON_SECONDS = 0.3
 # A cluster is assigned to a track only when one track clearly carries it.
 MAP_MARGIN_DB = 3.0
 
@@ -61,6 +72,27 @@ NO_SPEECH_TEXT = "[NO SPEECH DETECTED — local diarization and ASR returned no 
 _BRACKET_ONLY = re.compile(r"^\s*[\(\[][^\)\]]*[\)\]]\s*$")
 _HAS_LETTER = re.compile(r"[^\W\d_]")
 
+KIND_WITHHELD = "withheld"
+KIND_SILENT = "silent"
+KIND_EMPTY = "empty"
+KIND_CROSSTALK = "crosstalk"
+
+MARKERS = {
+    KIND_WITHHELD: (
+        "[SPEECH WITHHELD — the model returned text for this stretch but the output screen "
+        "rejected it ({reason}: {detail}). It is not silence; the text is kept in the stored evidence.]"
+    ),
+    KIND_SILENT: "[SKIPPED AS SILENT — this stretch measured below the speech floor and was not transcribed.]",
+    KIND_EMPTY: "[NO WORDS RECOGNISED — this stretch is audible but the model returned no words for it.]",
+    KIND_CROSSTALK: (
+        "[CROSS-TALK REMOVED — words repeated from the other track and quieter here; "
+        "the text is kept in the stored evidence.]"
+    ),
+}
+# What a marker starts with: the validator counts these in the transcript.
+MARKER_PREFIX = {kind: text.split(" — ")[0] for kind, text in MARKERS.items()}
+GAP_MARKER = MARKERS[KIND_WITHHELD]
+
 
 # --- segment hygiene ---------------------------------------------------------
 
@@ -68,30 +100,40 @@ def _key(token: str) -> str:
     return re.sub(r"\W", "", token.lower())
 
 
-def collapse_repeats(text: str, *, max_n: int = 6, min_reps: int = 4) -> tuple[str, int]:
+# Short phrases (up to SHORT_PHRASE_WORDS) loop at 4 copies; sentence-length phrases
+# (up to MAX_PHRASE_WORDS) at 3, since three back-to-back copies of a whole sentence
+# is never speech.
+SHORT_PHRASE_WORDS = 6
+MAX_PHRASE_WORDS = 40
+
+
+def collapse_repeats(text: str, *, max_n: int = MAX_PHRASE_WORDS, min_reps: int = 4) -> tuple[str, int]:
     """Collapse whisper's repetition loops: ``(text, tokens_removed)``.
 
-    A phrase of 1 to ``max_n`` words repeated back to back ``min_reps`` or more
-    times keeps its first two copies and a ``[…]`` marker. Only ADJACENT repeats count: the same phrase recurring
-    across a segment is ordinary speech, a loop is not.
+    A phrase of 1 to ``SHORT_PHRASE_WORDS`` words repeated back to back
+    ``min_reps`` or more times, or a phrase of up to ``max_n`` words repeated 3 or
+    more times, keeps its first two copies and a ``[…]`` marker. Only ADJACENT
+    repeats count: the same phrase recurring across a segment is ordinary speech,
+    a loop is not.
     """
     tokens = re.findall(r"\S+", text)
+    keys = [_key(t) for t in tokens]
     removed = 0
     out: list[str] = []
     i = 0
     while i < len(tokens):
         collapsed = False
         for n in range(1, max_n + 1):
-            gram = [_key(t) for t in tokens[i:i + n]]
-            if len(gram) < n or not all(gram):
+            if i + n >= len(tokens) or not keys[i] or keys[i] != keys[i + n]:
+                continue                       # the phrase cannot repeat straight away
+            gram = keys[i:i + n]
+            if not all(gram):
                 continue
+            needed = min_reps if n <= SHORT_PHRASE_WORDS else min(3, min_reps)
             reps = 1
-            while (
-                i + (reps + 1) * n <= len(tokens)
-                and [_key(t) for t in tokens[i + reps * n:i + (reps + 1) * n]] == gram
-            ):
+            while i + (reps + 1) * n <= len(tokens) and keys[i + reps * n:i + (reps + 1) * n] == gram:
                 reps += 1
-            if reps >= min_reps:
+            if reps >= needed:
                 out += tokens[i:i + 2 * n] + ["[…]"]
                 removed += (reps - 2) * n
                 i += reps * n
@@ -188,22 +230,24 @@ def _overlap(a_start: float, a_end: float, b_start: float, b_end: float) -> floa
     return max(0.0, min(a_end, b_end) - max(a_start, b_start))
 
 
-def _covered(start: float, end: float, spans: list[tuple[float, float]]) -> float:
-    """Seconds of [start, end] covered by the union of spans."""
-    merged: list[list[float]] = []
-    for a, b in sorted(spans):
-        if merged and a <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], b)
-        else:
-            merged.append([a, b])
-    return sum(_overlap(start, end, a, b) for a, b in merged)
+def _slice_tokens(seg: dict, lo: float, hi: float) -> list[str]:
+    """The words of ``seg`` that fall in [lo, hi], assuming an even speaking rate."""
+    tokens = seg["text"].split()
+    duration = seg["end"] - seg["start"]
+    if not tokens:
+        return []
+    if duration <= 0:
+        return tokens
+    first = max(0, int(math.floor(len(tokens) * (max(lo, seg["start"]) - seg["start"]) / duration)))
+    last = min(len(tokens), int(math.ceil(len(tokens) * (min(hi, seg["end"]) - seg["start"]) / duration)))
+    return tokens[first:max(first, last)]
 
 
-def _contained(own: str, other: str) -> float:
+def _contained(own: list[str], other: list[str]) -> float:
     """Share of ``own``'s words (multiset) that also occur in ``other``."""
-    mine = [_key(t) for t in own.split() if _key(t)]
+    mine = [k for k in (_key(t) for t in own) if k]
     theirs: dict[str, int] = {}
-    for token in (_key(t) for t in other.split()):
+    for token in (_key(t) for t in other):
         if token:
             theirs[token] = theirs.get(token, 0) + 1
     if not mine:
@@ -216,49 +260,87 @@ def _contained(own: str, other: str) -> float:
     return hit / len(mine)
 
 
+def _is_copy_of(own: dict, other: dict) -> float:
+    """How much of ``own``'s words are found in the part of ``other`` it overlaps.
+
+    Returns 0.0 unless it clears every text rule: enough words, enough content
+    words, the share of all words and the share of content words both at the
+    threshold. Narrow on purpose: only the overlapping stretch of ``other`` counts.
+    """
+    own_tokens = own["text"].split()
+    if len(own_tokens) < BLEED_MIN_WORDS:
+        return 0.0
+    window = _slice_tokens(
+        other, own["start"] - BLEED_WINDOW_PAD_SECONDS, own["end"] + BLEED_WINDOW_PAD_SECONDS
+    )
+    content = [t for t in own_tokens if len(_key(t)) >= CONTENT_WORD_LETTERS]
+    if len(content) < BLEED_MIN_CONTENT_WORDS:
+        return 0.0
+    share = _contained(own_tokens, window)
+    content_share = _contained(content, [t for t in window if len(_key(t)) >= CONTENT_WORD_LETTERS])
+    return share if share >= BLEED_TEXT_CONTAINMENT and content_share >= BLEED_TEXT_CONTAINMENT else 0.0
+
+
 def drop_crosstalk(
     tracks: dict[str, list[dict]],
     energy: dict[str, EnergyProfile] | None,
 ) -> tuple[dict[str, list[dict]], list[dict]]:
-    """Remove segments that are one track's leak of the other. Returns (kept, dropped).
+    """Remove the leaked copy of each matched pair. Returns (kept, dropped).
 
-    A segment is dropped only when (a) at least ``BLEED_MIN_WORDS`` of its words
-    are mostly (``BLEED_TEXT_CONTAINMENT``) found in the other track's text around
-    the same time, and (b) it is the quieter of the two tracks there by
-    ``BLEED_MARGIN_DB``. Without level measurements nothing says which side is the
-    leak, so nothing is dropped. Each dropped segment keeps its text, the matched
-    share and the level margin so it can be recovered from the raw evidence.
+    A pair is one System segment and one Mic segment that overlap in time. It is
+    decided ONCE: when the quieter copy's words are found in the other copy over
+    the stretch they share, and it is quieter there by ``BLEED_MARGIN_DB``, that
+    copy is removed and the other is protected, so one utterance is never lost
+    from both tracks. Without level measurements nothing says which copy is the
+    leak, so nothing is removed. Each removed segment keeps its text, the matched
+    share, the level margin and the partner's span for recovery.
     """
+    kept = {track: list(segments) for track, segments in tracks.items()}
     if not energy or any(t not in energy or not energy[t].usable for t in (SYSTEM, MIC)):
-        return tracks, []
-    dropped: list[dict] = []
-    kept: dict[str, list[dict]] = {}
-    for track, segments in tracks.items():
-        other = SYSTEM if track == MIC else MIC
-        other_segments = tracks.get(other, [])
-        kept[track] = []
-        for seg in segments:
-            span = [(seg["start"], seg["end"])]
-            duration = max(seg["end"] - seg["start"], FRAME_SECONDS)
-            lo, hi = seg["start"] - BLEED_WINDOW_PAD_SECONDS, seg["end"] + BLEED_WINDOW_PAD_SECONDS
-            near = [o for o in other_segments if _overlap(lo, hi, o["start"], o["end"]) > 0]
-            overlap = _covered(seg["start"], seg["end"], [(o["start"], o["end"]) for o in near]) / duration
-            own_db = energy[track].relative_db(span)
-            other_db = energy[other].relative_db(span)
-            share = _contained(seg["text"], " ".join(o["text"] for o in near)) if near else 0.0
-            margin = None if own_db is None or other_db is None else other_db - own_db
-            bleed = (
-                len(seg["text"].split()) >= BLEED_MIN_WORDS
-                and overlap >= BLEED_MIN_OVERLAP
-                and share >= BLEED_TEXT_CONTAINMENT
-                and margin is not None
-                and margin >= BLEED_MARGIN_DB
-            )
-            if bleed:
-                dropped.append({**seg, "track": track, "reason": "text found on the other track and quieter here",
-                                "text_match": round(share, 2), "margin_db": round(margin, 1)})
+        return kept, []
+    system, mic = tracks.get(SYSTEM, []), tracks.get(MIC, [])
+    dropped_ids: dict[int, dict] = {}
+    protected: set[int] = set()
+    for a in system:
+        for b in mic:
+            lo, hi = a["start"] - BLEED_WINDOW_PAD_SECONDS, a["end"] + BLEED_WINDOW_PAD_SECONDS
+            if _overlap(lo, hi, b["start"], b["end"]) <= 0:
+                continue
+            if id(a) in dropped_ids or id(b) in dropped_ids:
+                continue
+            start, end = max(a["start"], b["start"]), min(a["end"], b["end"])
+            if end - start < BLEED_MIN_COMMON_SECONDS:
+                start, end = min(a["start"], b["start"]), max(a["end"], b["end"])
+            span = [(start, end)]
+            system_db, mic_db = energy[SYSTEM].relative_db(span), energy[MIC].relative_db(span)
+            if system_db is None or mic_db is None:
+                continue
+            margin = system_db - mic_db          # > 0: the mic copy is the quieter one
+            if margin >= BLEED_MARGIN_DB:
+                leak, other, track, gap = b, a, MIC, margin
+            elif -margin >= BLEED_MARGIN_DB:
+                leak, other, track, gap = a, b, SYSTEM, -margin
             else:
-                kept[track].append(seg)
+                continue
+            if id(leak) in protected:
+                continue
+            duration = max(leak["end"] - leak["start"], FRAME_SECONDS)
+            if _overlap(leak["start"], leak["end"], other["start"] - BLEED_WINDOW_PAD_SECONDS,
+                        other["end"] + BLEED_WINDOW_PAD_SECONDS) / duration < BLEED_MIN_OVERLAP:
+                continue
+            share = _is_copy_of(leak, other)
+            if not share:
+                continue
+            dropped_ids[id(leak)] = {
+                **leak, "track": track, "reason": "text found on the other track and quieter here",
+                "text_match": round(share, 2), "margin_db": round(gap, 1),
+                "matched": {"track": SYSTEM if track == MIC else MIC,
+                            "start": round(other["start"], 2), "end": round(other["end"], 2)},
+            }
+            protected.add(id(other))
+    for track in kept:
+        kept[track] = [s for s in kept[track] if id(s) not in dropped_ids]
+    dropped = sorted(dropped_ids.values(), key=lambda d: (d["start"], d["track"]))
     return kept, dropped
 
 
@@ -284,42 +366,65 @@ def format_clock(seconds: float) -> str:
     return f"{total // 60}:{total % 60:02d}"
 
 
-GAP_MARKER = (
-    "[SPEECH WITHHELD — the model returned text for this stretch but the output screen "
-    "rejected it ({reason}: {detail}). It is not silence; the text is kept in the stored evidence.]"
-)
-
-
 def _plain(value: object, limit: int = 100) -> str:
     """One line with no brackets, so a marker or header cannot break its own pattern."""
     return re.sub(r"[\[\]\s]+", " ", str(value)).strip()[:limit]
 
 
 def chunk_outcomes(chunks: list[dict]) -> dict:
-    """Withheld, silent and still-looping chunks from one track's chunk records."""
-    gaps, silent, looping = [], 0, 0
+    """Withheld, silent, empty and still-looping chunks from one track's chunk records.
+
+    ``gaps`` has one entry per chunk, with its ``kind``; ``looping`` lists the
+    spans of chunks that still looped after the re-run.
+    """
+    gaps, looping = [], []
     for chunk in chunks or []:
         if chunk.get("kind") != "chunk":
             continue
+        start = float(chunk.get("start", 0.0))
+        end = float(chunk.get("end", start))
         status = str(chunk.get("status", ""))
         if status.startswith("screened"):
-            gaps.append({
-                "start": float(chunk["start"]), "end": float(chunk.get("end", chunk["start"])),
-                "reason": _plain(chunk.get("reason", "screened"), 40),
-                "detail": _plain(chunk.get("detail", ""), 100),
-            })
+            gaps.append({"kind": KIND_WITHHELD, "start": start, "end": end,
+                         "reason": _plain(chunk.get("reason", "screened"), 40),
+                         "detail": _plain(chunk.get("detail", ""), 100)})
         elif status == "silent":
-            silent += 1
+            gaps.append({"kind": KIND_SILENT, "start": start, "end": end, "reason": "silent", "detail": ""})
+        elif status == "empty":
+            gaps.append({"kind": KIND_EMPTY, "start": start, "end": end, "reason": "no words", "detail": ""})
         elif chunk.get("loop_after_rerun"):
-            looping += 1
-    return {"gaps": gaps, "silent": silent, "looping": looping}
+            looping.append({"start": start, "end": end})
+    return {"gaps": gaps, "looping": looping}
 
 
-def _header(stats: dict, diarization: dict | None) -> str:
+def _noun(count: int, singular: str, plural: str | None = None) -> str:
+    return f"{count} {singular if count == 1 else (plural or singular + 's')}"
+
+
+def _runs(items: list[dict], stitch: float) -> list[dict]:
+    """Join items of one track and kind that touch (or nearly) into spans."""
+    runs: list[dict] = []
+    for item in sorted(items, key=lambda i: (i["track"], i["start"])):
+        last = runs[-1] if runs else None
+        if last and last["track"] == item["track"] and item["start"] - last["end"] <= stitch:
+            last["end"] = max(last["end"], item["end"])
+            last["count"] += 1
+        else:
+            runs.append({"track": item["track"], "start": item["start"], "end": item["end"], "count": 1})
+    return sorted(runs, key=lambda r: (r["start"], r["track"]))
+
+
+def _span_list(items: list[dict], stitch: float, limit: int = 5) -> str:
+    runs = _runs(items, stitch)
+    shown = ", ".join(f"{r['track']} {format_clock(r['start'])}–{format_clock(r['end'])}" for r in runs[:limit])
+    return shown + (f" and {len(runs) - limit} more" if len(runs) > limit else "")
+
+
+def _header(stats: dict, diarization: dict | None, stitch: float = 4.0) -> str:
     """One line, ``[Speakers: ...]`` and no ``]`` inside, so consumers strip it.
 
     States the method, the diarization outcome and mapping, that names are not
-    established, and what was removed or withheld.
+    established, and everything removed or withheld, each with track and span.
     """
     tracks = f"2 tracks ({MIC}, {SYSTEM}) merged by segment"
     if diarization is None:
@@ -341,23 +446,37 @@ def _header(stats: dict, diarization: dict | None) -> str:
     if build:
         who += f", build {build}"
     parts = [tracks, who, "speaker names not established"]
+
     gaps = stats.get("gaps") or []
-    if gaps:
+    withheld = [g for g in gaps if g["kind"] == KIND_WITHHELD]
+    if withheld:
         spans = ", ".join(
-            f"{g['track']} {format_clock(g['start'])}\u2013{format_clock(g['end'])} {g['reason']}" for g in gaps[:5]
+            f"{g['track']} {format_clock(g['start'])}–{format_clock(g['end'])} {g['reason']}" for g in withheld[:5]
         )
-        more = f" and {len(gaps) - 5} more" if len(gaps) > 5 else ""
-        parts.append(f"{len(gaps)} chunks withheld by the output screen ({spans}{more}), text kept in the stored evidence")
-    if stats.get("chunks_looping"):
-        parts.append(f"{stats['chunks_looping']} chunks still looping after a re-run, loops collapsed")
-    if stats.get("chunks_silent"):
-        parts.append(f"{stats['chunks_silent']} chunks skipped as silent")
-    if stats.get("bleed_dropped"):
-        parts.append(f"{stats['bleed_dropped']} cross-talk segments dropped")
+        more = f" and {len(withheld) - 5} more" if len(withheld) > 5 else ""
+        parts.append(f"{_noun(len(withheld), 'chunk')} withheld by the output screen ({spans}{more}), "
+                     "text kept in the stored evidence")
+    silent = [g for g in gaps if g["kind"] == KIND_SILENT]
+    if silent:
+        parts.append(f"{_noun(len(silent), 'chunk')} skipped as silent ({_span_list(silent, stitch)})")
+    empty = [g for g in gaps if g["kind"] == KIND_EMPTY]
+    if empty:
+        parts.append(f"{_noun(len(empty), 'audible chunk')} with no words recognised ({_span_list(empty, stitch)})")
+    looping = stats.get("looping_chunks") or []
+    if looping:
+        parts.append(f"{_noun(len(looping), 'chunk')} still looping after a re-run ({_span_list(looping, stitch)}), "
+                     "loops collapsed")
+    bleed = stats.get("bleed_segments") or []
+    if bleed:
+        parts.append(f"{_noun(len(bleed), 'cross-talk segment')} removed ({_span_list(bleed, stitch)}), "
+                     "text kept in the stored evidence")
+    if stats.get("bleed_checked"):
+        parts.append("leaks not matched by text are kept, so a Mic turn may repeat a few remote words")
     elif stats.get("bleed_checked") is False:
         parts.append("cross-talk check skipped, level unmeasured")
     if stats.get("repeats_removed"):
         parts.append(f"{stats['repeats_removed']} repeated words collapsed")
+    parts += [_plain(note, 200) for note in stats.get("notes") or []]
     return "[Speakers: " + "; ".join(parts) + "]"
 
 
@@ -368,24 +487,30 @@ def merge_tracks(
     energy: dict[str, EnergyProfile] | None = None,
     stitch_seconds: float = 4.0,
     chunks: dict[str, list[dict]] | None = None,
+    notes: list[str] | None = None,
 ) -> MergeResult:
     """Merge per-track ASR segments into one time-ordered dialogue.
 
     ``tracks`` is ``{SYSTEM: [segment], MIC: [segment]}``, each segment
     ``{"start", "end", "text"}`` in seconds on the shared timeline. ``chunks`` is
-    each track's chunk QA records: a withheld chunk becomes a timed gap marker in
-    the body and a count in the header; silent and still-looping chunks are
-    counted in the header.
+    each track's chunk QA records: every withheld, silent or empty chunk becomes
+    a timed marker in the body and a track-and-span count in the header, as does
+    every removed cross-talk segment and every chunk still looping after a
+    re-run. ``notes`` are extra header clauses (for example a long-call note).
     """
-    stats: dict = {"repeats_removed": 0, "energy_measured": bool(energy)}
+    stats: dict = {"repeats_removed": 0, "energy_measured": bool(energy), "notes": list(notes or []),
+                   "stitch_seconds": stitch_seconds}
     cleaned = {track: clean_segments(tracks.get(track, [])) for track in (SYSTEM, MIC)}
-    stats["gaps"], stats["chunks_silent"], stats["chunks_looping"] = [], 0, 0
+    stats["gaps"], stats["looping_chunks"] = [], []
     for track in (SYSTEM, MIC):
         outcome = chunk_outcomes((chunks or {}).get(track, []))
         stats["gaps"] += [{**g, "track": track} for g in outcome["gaps"]]
-        stats["chunks_silent"] += outcome["silent"]
-        stats["chunks_looping"] += outcome["looping"]
+        stats["looping_chunks"] += [{**span, "track": track} for span in outcome["looping"]]
     stats["gaps"].sort(key=lambda g: (g["start"], g["track"]))
+    stats["chunks_withheld"] = sum(g["kind"] == KIND_WITHHELD for g in stats["gaps"])
+    stats["chunks_silent"] = sum(g["kind"] == KIND_SILENT for g in stats["gaps"])
+    stats["chunks_empty"] = sum(g["kind"] == KIND_EMPTY for g in stats["gaps"])
+    stats["chunks_looping"] = len(stats["looping_chunks"])
 
     clusters = _cluster_spans(diarization)
     mapping = map_clusters_to_tracks(clusters, energy) if clusters and energy else {}
@@ -402,7 +527,8 @@ def merge_tracks(
     stats["bleed_dropped"] = len(dropped)
     stats["bleed_segments"] = [
         {"track": d["track"], "start": round(d["start"], 2), "end": round(d["end"], 2), "text": d["text"],
-         "reason": d["reason"], "text_match": d["text_match"], "margin_db": d["margin_db"]}
+         "reason": d["reason"], "text_match": d["text_match"], "margin_db": d["margin_db"],
+         "matched": d["matched"]}
         for d in dropped
     ]
 
@@ -423,10 +549,13 @@ def merge_tracks(
         best = max(sorted(overlap), key=overlap.get)
         return f"{SYSTEM}/{remote_names[best]}" if overlap[best] > 0 else f"{SYSTEM}/Unassigned"
 
+    def label_of(track: str, seg: dict) -> str:
+        return remote_label(seg) if track == SYSTEM else MIC
+
     rows = []
     for track in (SYSTEM, MIC):
         for seg in kept[track]:
-            rows.append({**seg, "track": track, "label": remote_label(seg) if track == SYSTEM else MIC})
+            rows.append({**seg, "track": track, "label": label_of(track, seg)})
     rows.sort(key=lambda r: (r["start"], r["end"], r["track"]))
 
     turns: list[dict] = []
@@ -443,19 +572,29 @@ def merge_tracks(
         turn["text"], cut = collapse_repeats(turn["text"])
         stats["repeats_removed"] += cut
 
-    gap_rows = [
-        {"start": g["start"], "end": g["end"], "track": g["track"],
-         "label": remote_label(g) if g["track"] == SYSTEM else MIC,
-         "text": GAP_MARKER.format(reason=g["reason"], detail=g["detail"] or "no detail")}
-        for g in stats["gaps"]
-    ]
-    if not turns and not gap_rows:
+    # Timed markers: one per withheld chunk; runs of adjacent silent, empty or
+    # cross-talk stretches of one track become one marker each.
+    markers: list[dict] = []
+    for g in stats["gaps"]:
+        if g["kind"] == KIND_WITHHELD:
+            markers.append({"start": g["start"], "end": g["end"], "kind": g["kind"], "track": g["track"],
+                            "label": label_of(g["track"], g),
+                            "text": MARKERS[g["kind"]].format(reason=g["reason"], detail=g["detail"] or "no detail")})
+    removed = [{**g, "track": g["track"]} for g in stats["gaps"] if g["kind"] in (KIND_SILENT, KIND_EMPTY)]
+    removed += [{"kind": KIND_CROSSTALK, "start": d["start"], "end": d["end"], "track": d["track"]} for d in dropped]
+    for kind in (KIND_SILENT, KIND_EMPTY, KIND_CROSSTALK):
+        for run in _runs([r for r in removed if r["kind"] == kind], stitch_seconds):
+            markers.append({"start": run["start"], "end": run["end"], "kind": kind, "track": run["track"],
+                            "label": label_of(run["track"], run), "text": MARKERS[kind]})
+    stats["markers"] = {kind: sum(m["kind"] == kind for m in markers) for kind in MARKERS}
+
+    if not turns and not markers:
         return MergeResult([], NO_SPEECH_TEXT, stats)
     blocks = sorted(
         [(t["start"], t["end"], t["label"], t["text"]) for t in turns]
-        + [(g["start"], g["end"], g["label"], g["text"]) for g in gap_rows]
+        + [(m["start"], m["end"], m["label"], m["text"]) for m in markers]
     )
     body = "\n\n".join(
-        f"[{format_clock(a)}\u2013{format_clock(b)}] [{label}]\n{text}" for a, b, label, text in blocks
+        f"[{format_clock(a)}–{format_clock(b)}] [{label}]\n{text}" for a, b, label, text in blocks
     )
-    return MergeResult(turns, f"{_header(stats, diarization)}\n\n{body}", stats)
+    return MergeResult(turns, f"{_header(stats, diarization, stitch_seconds)}\n\n{body}", stats)
