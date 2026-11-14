@@ -76,6 +76,17 @@ page, ambiguous type or malformed declaration leaves planning coverage unknown.
 There is no fallback to type names, arbitrary registry metadata or the highest
 type encountered on one ascent. Missing, undeclared, conflicting and unreadable
 ascents remain under **Unplanned**, with their reasons and observed context.
+When the registry is complete and an ascent is known but stops short, for
+example at an existing plan with no parent, its observed, strictly rising
+declared prefix stays visible as an expandable branch beneath **Unplanned**
+(`unplanned_nodes` / `unplanned_roots`). Several tasks under the same orphan
+plan share one branch. The branch's top record is the highest record read, not
+a claim that it has no parent; no parent is invented and these tasks never
+count toward `qualified_tasks`. Unknown registry coverage, malformed, cyclic,
+ambiguous or unreadable ascents, conflicting parents and disputed duplicate
+membership stay flat, explicitly uncertain entries. The view rejects the whole
+payload if a branch is not a declared, strictly rising prefix of known
+unplanned entries.
 The read budget is a resource boundary, not a fixed number of planning levels;
 exhaustion remains explicit unknown coverage.
 

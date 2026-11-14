@@ -235,3 +235,131 @@ def test_registry_through_actual_mcp_handler_and_bundled_view(tmp_path):
         here = Path(__file__).parent
         view = subprocess.run([node, str(here / "test_workboard_bridge.cjs"), str(here / "workboard.html"), str(fixture), "planning"], capture_output=True, text=True, timeout=15)
         assert view.returncode == 0, view.stdout + view.stderr
+
+
+RANKS = {"sprint": {"level": 3, "read_only": False},
+         "plan": {"level": 10, "read_only": False},
+         "project": {"level": 20, "read_only": False},
+         "mission": {"level": 30, "read_only": True}}
+
+
+def partial(tree):
+    return {node["entity_id"]: node for node in tree.get("unplanned_nodes", [])}
+
+
+def test_orphan_plan_with_several_tasks_is_one_branch_under_unplanned():
+    marks = {"plan": RANKS["plan"], "project": RANKS["project"]}
+    rows = [task("ent_a", [parent("plan", "Orphan plan")]), task("ent_b", [parent("plan", "Orphan plan")], priority="blocked")]
+    tree = session_planning_tree(rows, marks, complete=True, gaps=[])
+    assert tree["nodes"] == [] and tree["roots"] == [] and tree["qualified_tasks"] == 0
+    assert [entry["row_index"] for entry in tree["unplanned"]] == [0, 1]
+    assert all(not entry["unknown"] and "ends before" in entry["reason"] for entry in tree["unplanned"])
+    nodes = partial(tree)
+    assert tree["unplanned_roots"] == ["ent_plan"]
+    assert nodes["ent_plan"]["parent_id"] is None and nodes["ent_plan"]["level"] == 10
+    assert nodes["ent_a"]["parent_id"] == nodes["ent_b"]["parent_id"] == "ent_plan"
+    assert nodes["ent_plan"]["counts"] == {"tasks": 2, "recorded": 1, "blocked": 1}
+    assert tree["level_coverage"][0]["complete_tasks"] == 0
+
+
+def test_partial_higher_branch_keeps_its_observed_declared_prefix():
+    aggregate = {"entity_id": "ent_parent", "entity_type": "task", "title": "Aggregate task"}
+    rows = [task("ent_a", [aggregate, parent("sprint"), parent("plan"), parent("project")]),
+            task("ent_full", [{"entity_id": "ent_s2", "entity_type": "sprint", "title": "S2"},
+                              {"entity_id": "ent_p2", "entity_type": "plan", "title": "P2"},
+                              {"entity_id": "ent_r2", "entity_type": "project", "title": "R2"},
+                              parent("mission")])]
+    tree = session_planning_tree(rows, RANKS, complete=True, gaps=[])
+    assert tree["qualified_tasks"] == 1 and tree["roots"] == ["ent_mission"]
+    nodes = partial(tree)
+    assert tree["unplanned_roots"] == ["ent_project"]
+    assert [nodes[i]["parent_id"] for i in ("ent_a", "ent_parent", "ent_sprint", "ent_plan")] == \
+        ["ent_parent", "ent_sprint", "ent_plan", "ent_project"]
+    assert nodes["ent_parent"]["level"] is None and "ent_full" not in nodes
+    assert not set(nodes) & {node["entity_id"] for node in tree["nodes"]}
+
+
+def test_identical_duplicate_membership_shares_one_task_node():
+    rows = [task("ent_a", [parent("plan")]), task("ent_a", [parent("plan")])]
+    tree = session_planning_tree(rows, RANKS, complete=True, gaps=[])
+    assert partial(tree)["ent_a"]["row_indexes"] == [0, 1]
+    assert partial(tree)["ent_plan"]["counts"] == {"tasks": 1, "recorded": 1}
+
+
+def test_uncertain_or_contradictory_partial_paths_stay_flat_and_explained():
+    cases = {
+        "incomplete registry": ([task(ascent=[parent("plan")])], False),
+        "undeclared only": ([task(ascent=[parent("initiative")])], True),
+        "malformed": ([task(ascent=[parent("plan"), None])], True),
+        "malformed list": ([task(ascent="plan")], True),
+        "cycle": ([task(ascent=[parent("plan"), parent("plan")])], True),
+        "read gap": ([task(ascent=[parent("plan")], planning_read_gaps=["Planning parent ent_x could not be read"])], True),
+        "ambiguous": ([task(ascent=[parent("plan")], planning_read_gaps=["Multiple planning parents are recorded for ent_plan; no parent was selected"])], True),
+        "conflicting partial parents": ([task("ent_a", [parent("sprint"), parent("plan")]),
+                                         task("ent_b", [parent("sprint"), {"entity_id": "ent_q", "entity_type": "plan", "title": "Q"}])], True),
+        "disputed duplicate": ([task("ent_a", [parent("plan")]), task("ent_a", [])], True),
+        "record also in qualified tree": ([task("ent_a", [parent("plan")]),
+                                           task("ent_b", [parent("plan"), parent("project"), parent("mission")])], True),
+        "no task identity": ([task(None, [parent("plan")])], True),
+    }
+    for name, (rows, complete) in cases.items():
+        tree = session_planning_tree(rows, RANKS if complete else {"plan": RANKS["plan"]}, complete=complete, gaps=[])
+        assert tree["unplanned_nodes"] == [] and tree["unplanned_roots"] == [], name
+        assert tree["unplanned"] and all(entry["reason"] for entry in tree["unplanned"]), name
+        assert len(tree["unplanned"]) + sum(len(n["row_indexes"]) for n in tree["nodes"]) == len(rows), name
+
+
+def test_orphan_plan_branch_through_actual_mcp_handler_and_bundled_view(tmp_path):
+    from mcp.types import CallToolRequest, CallToolRequestParams
+    from lib.daemon_runtime.agent_loader import AgentLoader
+
+    digest = {"entity_type": "session_digest", "entity_id": "ent_digest",
+              "snapshot": {"session_key": "synthetic:inbox", "tasks_claimed": ["ent_one", "ent_two", "ent_full"]}}
+    registry = registry_page()
+    registry["schemas"] = [
+        {"entity_type": "plan", "schema_version": "1.0", "field_count": 3, "planning": {"level": 10}},
+        {"entity_type": "project", "schema_version": "1.0", "field_count": 3, "planning": {"level": 20, "read_only": True}},
+    ]
+    records = {
+        "/schemas?summary=true&limit=5000&offset=0": registry,
+        "/entities/ent_plan": {"entity_type": "plan", "snapshot": {"title": "Display context"}},
+        "/entities/ent_one": {"entity_type": "task", "snapshot": {"title": "First orphan task", "status": "open"}},
+        "/entities/ent_two": {"entity_type": "task", "snapshot": {"title": "Second orphan task", "status": "open"}},
+        "/entities/ent_full": {"entity_type": "task", "snapshot": {"title": "Complete task", "status": "open"}},
+        "/entities/ent_orphan": {"entity_type": "plan", "snapshot": {"title": "Existing orphan plan"}},
+        "/entities/ent_planned": {"entity_type": "plan", "snapshot": {"title": "Planned plan"}},
+        "/entities/ent_project": {"entity_type": "project", "snapshot": {"title": "Registered project"}},
+    }
+    edge = lambda source, target: {"relationship_type": "PART_OF", "source_entity_id": source, "target_entity_id": target, "is_live": 1}
+    for key, edges in {"ent_one": [edge("ent_one", "ent_orphan")], "ent_two": [edge("ent_two", "ent_orphan")],
+                       "ent_full": [edge("ent_full", "ent_planned")], "ent_planned": [edge("ent_planned", "ent_project")],
+                       "ent_orphan": [], "ent_project": []}.items():
+        records[f"/entities/{key}/relationships?expand_entities=true"] = {"relationships": edges, "total": len(edges)}
+
+    async def read():
+        with patch.object(socket.socket, "connect", side_effect=AssertionError("Network denied")), \
+             patch.object(AgentLoader, "render_policy_prompt", return_value=""), \
+             patch.object(srv, "render_server_instructions", return_value="Synthetic"), \
+             patch.object(srv, "_find_session_digest", return_value=digest), \
+             patch.object(srv, "_get", side_effect=records.get), \
+             patch.object(srv, "_retrieve_page", return_value={"entities": [], "total": 0}):
+            server = srv.create_server()
+            response = await server.request_handlers[CallToolRequest](CallToolRequest(
+                method="tools/call", params=CallToolRequestParams(name="get_session_workboard",
+                    arguments={"session_key": "synthetic:inbox", "display_plan_id": "ent_plan", "include_history": True})))
+            return response.root
+
+    result = asyncio.run(read())
+    assert not result.isError
+    data = result.structuredContent["planning"]
+    assert data["roots"] == ["ent_project"] and data["qualified_tasks"] == 1 and data["unique_tasks"] == 3
+    assert data["unplanned_roots"] == ["ent_orphan"]
+    assert partial(data)["ent_orphan"]["counts"]["tasks"] == 2
+    assert "Unplanned observed branch" in result.content[0].text and "Existing orphan plan" in result.content[0].text
+    node = shutil.which("node")
+    assert node, "the bundled view must be exercised"
+    fixture = tmp_path / "orphan-result.json"
+    fixture.write_text(json.dumps(result.structuredContent))
+    here = Path(__file__).parent
+    view = subprocess.run([node, str(here / "test_workboard_bridge.cjs"), str(here / "workboard.html"), str(fixture), "orphan"], capture_output=True, text=True, timeout=15)
+    assert view.returncode == 0, view.stdout + view.stderr
