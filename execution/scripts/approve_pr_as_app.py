@@ -202,6 +202,16 @@ Env:
                                            diff-derived floor alone); --panel on
                                            the command line always overrides this
 
+Exit codes:
+    0    approved, or dry run completed with every gate passing
+    1    refused, or a gate failed
+    2    usage error (argparse)
+    75   GitHub rate limit exhausted (primary/core or secondary). One line is
+         printed naming the limit and when it resets (UTC and Europe/Madrid,
+         from `x-ratelimit-reset`, or `retry-after`); no traceback. Nothing was
+         submitted. Wait for the reset and re-run. Any other HTTP error (a plain
+         403 for permissions, a 404, a 5xx) is NOT this code and behaves as before.
+
 This script never prints, logs, or commits the App private key or any token.
 """
 
@@ -212,6 +222,7 @@ import asyncio
 import os
 import re
 import sys
+from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -428,6 +439,71 @@ class CheckOutcome:
         # NOT_RUN_NO_RUNNER); `reason` then says why it did not bind.
         self.not_run = not_run
         self.reason = reason
+
+
+# Exit code for an exhausted GitHub rate limit (sysexits EX_TEMPFAIL: retry later).
+# 0/1 are pass/refuse, 2 is argparse; 75 is unused anywhere else in this script.
+EXIT_RATE_LIMITED = 75
+
+
+class GitHubRateLimited(BaseException):
+    """A GitHub read or write was refused because a rate limit is exhausted.
+
+    Deliberately a BaseException: many call sites here catch `Exception` to
+    fail closed on an unreadable lookup, and that would swallow the signal and
+    lose the reset time. `main` is the one place that catches it.
+    """
+
+
+def rate_limit_message(
+    status: int, headers: "httpx.Headers | dict", body: str, *, now: datetime | None = None
+) -> str:
+    """One line describing a rate-limit refusal, or "" when *status* is not one.
+
+    A rate limit is a 403/429 where `x-ratelimit-remaining` is 0, or the body
+    says so. A plain 403 (permissions) is not one and returns "".
+    """
+    if status not in (403, 429):
+        return ""
+    hdr = {str(k).lower(): str(v) for k, v in dict(headers).items()}
+    low = (body or "").lower()
+    secondary = "secondary rate limit" in low or "abuse detection" in low
+    exhausted = hdr.get("x-ratelimit-remaining") == "0"
+    if not (exhausted or secondary or "rate limit" in low or (status == 429)):
+        return ""
+    clock = now or datetime.now(timezone.utc)
+    kind = "secondary" if secondary else (hdr.get("x-ratelimit-resource") or "core")
+    when = ""
+    retry_after = hdr.get("retry-after", "")
+    reset: datetime | None = None
+    if retry_after.isdigit():
+        reset = clock + timedelta(seconds=int(retry_after))
+        when = f"retry after {retry_after}s, at "
+    elif hdr.get("x-ratelimit-reset", "").isdigit():
+        reset = datetime.fromtimestamp(int(hdr["x-ratelimit-reset"]), tz=timezone.utc)
+    if reset is None:
+        return f"GitHub rate limit hit ({kind}); no reset time given, wait a few minutes and re-run."
+    local = reset.astimezone(ZoneInfo("Europe/Madrid"))
+    return (
+        f"GitHub rate limit hit ({kind}): {when}resets "
+        f"{reset:%Y-%m-%d %H:%M:%S} UTC / {local:%Y-%m-%d %H:%M:%S} Europe/Madrid. "
+        f"Nothing was submitted; re-run after the reset."
+    )
+
+
+async def _raise_on_rate_limit(response: httpx.Response) -> None:
+    """httpx response hook: turn a rate-limit refusal into GitHubRateLimited."""
+    if response.status_code not in (403, 429):
+        return
+    await response.aread()
+    msg = rate_limit_message(response.status_code, response.headers, response.text)
+    if msg:
+        raise GitHubRateLimited(msg)
+
+
+def _new_client() -> httpx.AsyncClient:
+    """The one client every GitHub read and write in this module goes through."""
+    return httpx.AsyncClient(timeout=30, event_hooks={"response": [_raise_on_rate_limit]})
 
 
 async def _fetch_pr(client: httpx.AsyncClient, repo: str, pr: int) -> dict:
@@ -2335,7 +2411,7 @@ async def run(
     carry: bool = True,
     panel_mode: str = "",
 ) -> int:
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with _new_client() as client:
         pr_data = await _fetch_pr(client, repo, pr)
         head_sha = _normalise_full_sha(str((pr_data.get("head") or {}).get("sha") or ""))
         if not head_sha:
@@ -2634,8 +2710,10 @@ def main() -> int:
             "risky path or when the file cannot be used, else one lens. Pass "
             "--panel required to use the diff-derived floor alone (where "
             "content can still appear), or set "
-            "ATELES_APPROVE_PANEL_REQUIRED_ONLY=1 to change the default."
-        )
+            "ATELES_APPROVE_PANEL_REQUIRED_ONLY=1 to change the default. "
+            "Exit codes: 0 pass, 1 refused, 2 usage, 75 GitHub rate limit "
+            "exhausted (the reset time is printed; nothing was submitted)."
+        ),
     )
     parser.add_argument("--repo", required=True, help="owner/name")
     parser.add_argument("--pr", required=True, type=int)
@@ -2692,6 +2770,14 @@ def main() -> int:
 
     extra_lenses = [x.strip() for x in args.lenses.split(",") if x.strip()]
 
+    try:
+        return _run_cli(args, extra_lenses)
+    except GitHubRateLimited as exc:
+        print(str(exc))
+        return EXIT_RATE_LIMITED
+
+
+def _run_cli(args: argparse.Namespace, extra_lenses: list[str]) -> int:
     return asyncio.run(
         run(
             args.repo,

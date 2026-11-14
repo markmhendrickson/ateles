@@ -5050,3 +5050,100 @@ class TestCarryFailsClosedOnUnreadableScope:
         _install_app_mint(monkeypatch)
         assert await target.run(REPO, PR, [], apply=True, panel_all=True) == 0
         assert "CARRIED FORWARD" in client.posted[0]["json"]["body"]
+
+
+# ── GitHub rate limits: one line with the reset time and a distinct exit code ──
+# Task ent_8ff48d1c2577b9413d9aaf10. A bare "403 Forbidden .../status" traceback
+# gave no hint that the App's hourly quota was spent or when it resets.
+
+
+def _rl_client(handler):
+    """A client wired exactly like the one `run` builds, over a mocked transport."""
+    hooks = {"response": [target._raise_on_rate_limit]}
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler), event_hooks=hooks)
+
+
+class TestGitHubRateLimit:
+    RESET = 1_800_000_000  # 2027-01-15 08:00:00 UTC
+
+    def _exhausted(self, request):
+        return httpx.Response(
+            403,
+            headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(self.RESET)},
+            json={"message": "API rate limit exceeded for installation."},
+        )
+
+    def test_core_exhaustion_reports_reset_in_utc_and_madrid(self):
+        import asyncio
+
+        async def go():
+            async with _rl_client(self._exhausted) as client:
+                await target.evaluate_checks(client, repo=REPO, head_sha="a" * 40)
+
+        with pytest.raises(target.GitHubRateLimited) as ei:
+            asyncio.run(go())
+        msg = str(ei.value)
+        assert "core" in msg
+        assert "2027-01-15 08:00:00 UTC" in msg
+        assert "2027-01-15 09:00:00 Europe/Madrid" in msg
+
+    def test_main_prints_one_line_and_exits_75_without_traceback(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["approve_pr_as_app.py", "--repo", REPO, "--pr", str(PR)])
+
+        async def _boom(*a, **k):
+            async with _rl_client(self._exhausted) as client:
+                await client.get("https://api.github.com/repos/x/y/pulls/1")
+
+        monkeypatch.setattr(target, "run", _boom)
+        assert target.main() == target.EXIT_RATE_LIMITED == 75
+        out = capsys.readouterr().out.strip().splitlines()
+        assert len(out) == 1 and "rate limit" in out[0] and "UTC" in out[0]
+
+    def test_secondary_limit_with_retry_after(self):
+        import asyncio
+
+        def handler(request):
+            return httpx.Response(
+                403,
+                headers={"retry-after": "60"},
+                json={"message": "You have exceeded a secondary rate limit."},
+            )
+
+        async def go():
+            async with _rl_client(handler) as client:
+                await target._fetch_pr(client, REPO, PR)
+
+        with pytest.raises(target.GitHubRateLimited) as ei:
+            asyncio.run(go())
+        msg = str(ei.value)
+        assert "secondary" in msg and "retry after 60s" in msg and "Europe/Madrid" in msg
+
+    def test_plain_permission_403_is_unchanged(self):
+        import asyncio
+
+        def handler(request):
+            return httpx.Response(
+                403,
+                headers={"x-ratelimit-remaining": "4321"},
+                json={"message": "Resource not accessible by integration"},
+            )
+
+        async def go():
+            async with _rl_client(handler) as client:
+                await target._fetch_pr(client, REPO, PR)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            asyncio.run(go())
+
+    def test_rate_limit_survives_a_broad_except_exception(self):
+        import asyncio
+
+        async def go():
+            async with _rl_client(self._exhausted) as client:
+                try:
+                    await client.get("https://api.github.com/x")
+                except Exception:  # fail-closed call sites do exactly this
+                    return "swallowed"
+
+        with pytest.raises(target.GitHubRateLimited):
+            asyncio.run(go())
