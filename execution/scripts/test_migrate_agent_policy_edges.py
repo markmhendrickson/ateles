@@ -79,7 +79,7 @@ def test_dry_run_classifies_rows_without_writing(monkeypatch, capsys):
         if url.endswith("/create_relationship"):
             calls["create_relationship"] += 1
             return _Resp({"relationship_key": "should-not-be-created"})
-        if url.endswith("/entities/query") and (json or {}).get("entity_type") == "agent_definition":
+        if url.endswith("/retrieve_entity_by_identifier"):
             return _Resp(definition_payload)
         return _Resp(policy_payload)
 
@@ -129,7 +129,7 @@ def test_apply_creates_and_reads_back_each_edge(monkeypatch, capsys):
                     }
                 )
             return _Resp({"relationships": []})
-        if url.endswith("/entities/query") and (json or {}).get("entity_type") == "agent_definition":
+        if url.endswith("/retrieve_entity_by_identifier"):
             return _Resp(definition_payload)
         return _Resp(policy_payload)
 
@@ -165,7 +165,7 @@ def test_apply_reports_but_does_not_crash_on_unregistered_type(monkeypatch, caps
             )
         if url.endswith("/list_relationships"):
             return _Resp({"relationships": []})
-        if url.endswith("/entities/query") and (json or {}).get("entity_type") == "agent_definition":
+        if url.endswith("/retrieve_entity_by_identifier"):
             return _Resp(definition_payload)
         return _Resp(policy_payload)
 

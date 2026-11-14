@@ -261,6 +261,67 @@ def _complete_authority_collection(data: object, key: str) -> list:
     return rows
 
 
+# Exact-identifier lookup of an `agent_definition` by name.
+#
+# The definition is read through Neotoma's identifier route, NOT the name-search
+# list route: hosted Neotoma runs `search` as a slow lexical scan, and on 2026-11-12
+# three Fly lens jobs failed "unavailable (timeout, 3 attempt(s))" while /health
+# answered in 0.15 s. The identifier route resolves the canonical name
+# (`agent_definition:<name>`) directly and answered in 0.2-0.5 s live. It is a real
+# REST route (openapi.yaml `/retrieve_entity_by_identifier`, verified live against
+# hosted 2026-11-14); unlike `retrieve_entities` it is not a tool-name-only path.
+# The per-request timeouts below are deliberately unchanged: a healthy lookup takes
+# well under a second, and a stuck one is better retried within LOAD_TOTAL_CAP_S
+# than waited on for longer.
+AGENT_DEFINITION_LOOKUP_ROUTE = "/retrieve_entity_by_identifier"
+AGENT_DEFINITION_ENTITY_TYPE = "agent_definition"
+AGENT_DEFINITION_LOOKUP_LIMIT = 10
+
+
+def _agent_definition_lookup_body(name: str) -> dict:
+    return {
+        "identifier": name,
+        "entity_type": AGENT_DEFINITION_ENTITY_TYPE,
+        "by": "name",
+        "limit": AGENT_DEFINITION_LOOKUP_LIMIT,
+    }
+
+
+def _is_other_row(ent: dict, name: str) -> bool:
+    """True for a row the identifier route returned that is not THIS live
+    `agent_definition`: an alias hit of another entity type, a row merged away into
+    another entity, or (live, 2026-11-14) a row typed `agent_definition` whose
+    canonical name is something else (e.g. `synthesis`) and whose snapshot is null.
+
+    A row that names this agent (by canonical name, or by a snapshot name) is never
+    dropped here: a matching row with a null or broken snapshot is a malformed
+    answer and the caller fails closed on it. A row with no canonical name and no
+    snapshot name at all stays visible for the same reason."""
+    etype = ent.get("entity_type")
+    if isinstance(etype, str) and etype != AGENT_DEFINITION_ENTITY_TYPE:
+        return True
+    if ent.get("merged_to_entity_id") or ent.get("merged_into"):
+        return True
+    canonical = ent.get("canonical_name")
+    if isinstance(canonical, str) and canonical.strip().lower() == f"{AGENT_DEFINITION_ENTITY_TYPE}:{name}":
+        return False
+    outer = ent.get("snapshot")
+    inner = outer.get("snapshot", outer) if isinstance(outer, dict) else None
+    snap_name = inner.get("name") if isinstance(inner, dict) else None
+    if isinstance(snap_name, str):
+        # Whether it matches is the caller's judgement (a different name among
+        # several rows is tolerated there, a missing match is not).
+        return False
+    # No matching canonical name and no readable snapshot name: it names another
+    # entity when it carries a canonical name of its own, otherwise it is unreadable.
+    return isinstance(canonical, str) and bool(canonical.strip())
+
+
+def _row_entity_id(ent: dict) -> object:
+    """The identifier route names the id `id`; the list route names it `entity_id`."""
+    return ent.get("entity_id") or ent.get("id")
+
+
 def resolve_agent_definition_id(
     agent_sub: str,
     base_url: str = "",
@@ -269,9 +330,9 @@ def resolve_agent_definition_id(
     _request: "callable | None" = None,
 ) -> str | None:
     """Resolve an agent's `agent_sub` (e.g. ``corvus@ateles-swarm``) to its
-    `agent_definition` entity id, via the SAME name-search route
-    `AgentLoader._load_by_name` already uses — `POST /entities/query` is the
-    canonical list route (`GET /entities` 404s on the hosted instance).
+    `agent_definition` entity id, via the SAME exact-identifier route
+    `AgentLoader._load_by_name` uses (never a name search, which hosted Neotoma
+    runs as a slow scan).
 
     An agent's name is the local part of its sub (`corvus@ateles-swarm` ->
     `corvus`); `aauth_sub`, when a row carries one, is matched first and
@@ -289,13 +350,8 @@ def resolve_agent_definition_id(
     name = agent_sub.split("@", 1)[0].strip().lower()
     if not name:
         return None
-    url = f"{(base_url or NEOTOMA_BASE_URL).rstrip('/')}/entities/query"
-    body = {
-        "entity_type": "agent_definition",
-        "search": name,
-        "limit": 5,
-        "include_snapshots": True,
-    }
+    url = f"{(base_url or NEOTOMA_BASE_URL).rstrip('/')}{AGENT_DEFINITION_LOOKUP_ROUTE}"
+    body = _agent_definition_lookup_body(name)
     try:
         if _request is not None:
             data = _request(url, body, timeout)
@@ -309,13 +365,13 @@ def resolve_agent_definition_id(
     entities = (data.get("entities") or []) if isinstance(data, dict) else []
     name_match: str | None = None
     for ent in entities:
-        if not isinstance(ent, dict):
+        if not isinstance(ent, dict) or _is_other_row(ent, name):
             continue
         outer = ent.get("snapshot") or {}
         snap = outer.get("snapshot", outer) if isinstance(outer, dict) else {}
         if not isinstance(snap, dict):
             continue
-        entity_id = str(ent.get("entity_id") or "")
+        entity_id = str(_row_entity_id(ent) or "")
         if not entity_id:
             continue
         if str(snap.get("aauth_sub", "")).strip().lower() == agent_sub.strip().lower():
@@ -1095,35 +1151,48 @@ class AgentLoader:
         return self._parse(entity_id, {"snapshot": self._validated_snapshot(snap)})
 
     def _load_by_name(self, deadline: float) -> AgentDefinition:
-        """Search for agent_definition by name field via POST /entities/query.
+        """Load the agent_definition whose name is this agent's, by exact identifier.
 
-        GET /entities does not exist on local Neotoma (404); /entities/query is
-        the canonical list route (same fix applied to the Anthus orchestrator in
-        PR #58). Its response nests the field dict as entity.snapshot.snapshot.
+        POST /retrieve_entity_by_identifier resolves the canonical name directly;
+        the name-search list route (POST /entities/query with ``search``) is a slow
+        lexical scan on hosted Neotoma and timed Fly lens jobs out (2026-11-12).
+        Its response nests the field dict as entity.snapshot.snapshot, and it can
+        return rows that are not this definition (an alias hit of another entity
+        type, a row merged into another); those are dropped before matching.
 
-        Absence is authoritative ONLY for a well-formed 200 whose ``entities`` list
-        is empty. A result for a different name, several results, a malformed
-        entry, an error-shaped or partial response: all ``AgentDefinitionUnavailable``.
+        Absence is authoritative ONLY for a well-formed, complete 200 that holds no
+        live agent_definition row at all. A result for a different name, several
+        results for this one, a malformed entry, a partial page, an error-shaped
+        response: all ``AgentDefinitionUnavailable``.
         """
-        url = f"{NEOTOMA_BASE_URL}/entities/query"
-        body = {
-            "entity_type": "agent_definition",
-            "search": self.agent_name,
-            "limit": 5,
-            "include_snapshots": True,
-        }
-        entities = self._validated_entities(self._neotoma("POST", url, body, deadline))
-        if not entities:
-            raise self._unavailable(NOT_FOUND)
-        # The search is fuzzy, so other agents' definitions may come back beside the
-        # one asked for. Every entry must still be well-formed, exactly one must carry
-        # THIS name, and that one's snapshot must validate. No exact match, or more
-        # than one, is not absence: it is an unreadable answer.
-        exact: list[tuple[str, dict]] = []
+        url = f"{NEOTOMA_BASE_URL}{AGENT_DEFINITION_LOOKUP_ROUTE}"
+        body = _agent_definition_lookup_body(self.agent_name)
+        data = self._neotoma("POST", url, body, deadline)
+        entities = self._validated_entities(data)
+        rows = []
         for ent in entities:
             if not isinstance(ent, dict):
                 raise self._unavailable("bad_response")
-            entity_id = ent.get("entity_id")
+            if not _is_other_row(ent, self.agent_name):
+                rows.append(ent)
+        if not rows:
+            # Absence is a positive claim: with other rows filtered out, a page
+            # that is only part of the result set (total above what came back)
+            # cannot prove no definition exists.
+            total = data.get("total")  # validated above: an int, or absent
+            if isinstance(total, int) and total > len(entities):
+                raise self._unavailable("bad_response")
+            # The route's `total` is the page length, so truncation is invisible
+            # in it: a FULL page with no live row cannot prove absence.
+            if len(entities) >= AGENT_DEFINITION_LOOKUP_LIMIT:
+                raise self._unavailable("bad_response")
+            raise self._unavailable(NOT_FOUND)
+        # Every remaining entry must be well-formed, exactly one must carry THIS
+        # name, and that one's snapshot must validate. No exact match, or more than
+        # one, is not absence: it is an unreadable answer.
+        exact: list[tuple[str, dict]] = []
+        for ent in rows:
+            entity_id = _row_entity_id(ent)
             outer = ent.get("snapshot")
             if not isinstance(entity_id, str) or not entity_id.strip() or not isinstance(outer, dict):
                 raise self._unavailable("bad_response")
