@@ -116,6 +116,15 @@ def test_real_cross_talk_is_kept_when_both_voices_are_at_speech_level():
     assert [t["label"] for t in result.turns] == [m.SYSTEM, m.MIC]
 
 
+def test_speaking_over_a_louder_remote_voice_is_not_mistaken_for_a_leak():
+    # The remote side is 9 dB louder than the operator at that moment (each
+    # against its own speech level), but the operator is only 9 dB under their own.
+    energy = {m.SYSTEM: profile([(0, 10, -15)]), m.MIC: profile([(2, 8, -29), (20, 40, -20)])}
+    tracks = {m.SYSTEM: [seg(0, 10, "a long remote explanation")], m.MIC: [seg(2, 8, "operator talks over it")]}
+    result = m.merge_tracks(tracks, energy=energy)
+    assert result.stats["bleed_dropped"] == 0 and len(result.turns) == 2
+
+
 def test_quiet_mic_is_compared_to_its_own_level_not_the_system_track():
     # The mic sits 25 dB below the system track throughout, but its own speech
     # at 4-6 s is at the mic's own speech level: real, not a leak.

@@ -41,6 +41,10 @@ BLEED_MARGIN_DB = 6.0
 # are near-duplicates, or diarization put that stretch on the other track.
 BLEED_CONFIRMED_MARGIN_DB = 3.0
 BLEED_MIN_OVERLAP = 0.5
+# And it must sit well under its own track's usual speech level: the other side
+# merely being louder at that moment (the operator speaking over the remote
+# voice) is real cross-talk, and losing the operator's words is the worse error.
+BLEED_OWN_MAX_DB = -12.0
 BLEED_TEXT_SIMILARITY = 0.5
 # A cluster is assigned to a track only when one track clearly carries it.
 MAP_MARGIN_DB = 3.0
@@ -231,7 +235,12 @@ def drop_crosstalk(
             own_db = energy[track].relative_db(span)
             other_db = energy[other].relative_db(span)
             bleed = False
-            if overlap >= BLEED_MIN_OVERLAP and own_db is not None and other_db is not None:
+            if (
+                overlap >= BLEED_MIN_OVERLAP
+                and own_db is not None
+                and other_db is not None
+                and own_db <= BLEED_OWN_MAX_DB
+            ):
                 margin = other_db - own_db
                 similar = max(
                     (_similar(seg["text"], o["text"]) for o in other_segments
