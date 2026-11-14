@@ -2670,26 +2670,78 @@ def _guessed_owner_is_low_stakes(skill: str, snapshot: dict) -> bool:
 
 
 _OWNERSHIP_SETTLE_S = 3.0
+# Tests switch the re-check off so orphan-path tests judge the snapshot they pass.
+_OWNERSHIP_RECHECK_ENABLED = True
+# Entity id -> "pending" (a re-check is in flight) or "done" (re-read once
+# already). One re-check per entity: duplicate deliveries neither wait again
+# nor re-read, and a "done" entity that is still ownerless is blocked at once.
+_ownership_rechecks: dict[str, str] = {}
+_ownership_race_counts = {"found": 0, "still_empty": 0, "unreadable": 0}
 
 
-async def _ownership_settled(entity_id: str, snapshot: dict) -> dict | None:
-    """Re-read a task that arrived carrying no ownership signal at all.
+def _ownership_signal(snapshot: dict) -> bool:
+    """Whether the snapshot carries any ownership information at all.
 
-    A task stored with an assignee, owner and tags can be dispatched before
-    those fields are visible in its snapshot, and the empty snapshot reads as
-    "no route/owner" (a session-owned task was written BLOCKED within seconds).
-    A snapshot with none of assigned_to, owner or stored tags is that race's
-    signature, so look once more after a short delay. Returns the snapshot to
-    judge: the original when it already carries a signal or the re-read still
-    shows none (a genuinely ownerless task), the fresh one when it now carries
-    one, or None when the re-read failed (not ready: write nothing).
-    """
-    if (snapshot.get("assigned_to") or snapshot.get("owner")
-            or _stored_tags(snapshot)):
-        return snapshot
+    Assignee is read in its canonical form, so the "unassigned" placeholder
+    family counts as absence, exactly as the router reads it."""
+    return bool(
+        _canonical_assignee(snapshot.get("assigned_to"))
+        or snapshot.get("owner")
+        or _stored_tags(snapshot)
+    )
+
+
+async def _ownership_sleep() -> None:
     await asyncio.sleep(_OWNERSHIP_SETTLE_S)
-    fresh = await asyncio.to_thread(fetch_task_snapshot, entity_id)
-    return fresh if isinstance(fresh, dict) else None
+
+
+async def _recheck_ownership(
+    entity_id: str, snapshot: dict, trigger: str, notifier: Notifier,
+    gate_override: bool, release_key: str,
+) -> None:
+    """Re-read a task that arrived with no ownership signal, off the stream.
+
+    A task stored with an assignee, owner and tags can be dispatched before those
+    fields are visible in its snapshot, and the empty snapshot reads as "no
+    route/owner" (a session-owned task was written BLOCKED within seconds). This
+    waits, reads once, and dispatches on what it finds. It runs as a tracked
+    background task because the SSE client awaits each handler inline: a sleep
+    in the handler would stall every other event.
+    """
+    try:
+        await _ownership_sleep()
+        fresh = await asyncio.to_thread(fetch_task_snapshot, entity_id)
+    finally:
+        _ownership_rechecks[entity_id] = "done"
+    if not isinstance(fresh, dict):
+        _ownership_race_counts["unreadable"] += 1
+        log.warning(
+            f"[{DAEMON_NAME}] task {entity_id!r}: no ownership in the snapshot and "
+            "the re-read failed — not blocking; recorded as unread and paged once "
+            "if it never becomes readable (no automatic retry)"
+        )
+        if _unroutable.note_unreadable(entity_id):
+            report = _unroutable.drain_unreadable()
+            if report:
+                notifier.send(report, priority=Priority.WARN, handler=DAEMON_NAME)
+        return
+    if _ownership_signal(fresh):
+        _ownership_race_counts["found"] += 1
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r}: ownership appeared on re-read "
+            f"— dispatching on the settled snapshot (races seen: {_ownership_race_counts})"
+        )
+    else:
+        _ownership_race_counts["still_empty"] += 1
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r}: re-read after "
+            f"{_OWNERSHIP_SETTLE_S}s still shows no owner — treating as ownerless "
+            f"(races seen: {_ownership_race_counts})"
+        )
+    await dispatch_task(
+        entity_id, fresh, trigger, notifier, gate_override=gate_override,
+        snapshot_hydrated=True, release_key=release_key,
+    )
 
 
 async def _task_status_still(entity_id: str, expected_status, step: str) -> bool:
@@ -3099,31 +3151,38 @@ async def _dispatch_task(
             return
 
         # ── Guard: a snapshot with no ownership signal may be a read that raced
-        # the task's own write. Judge a settled re-read instead of blocking.
-        settled = await _ownership_settled(entity_id, snapshot)
-        if settled is None:
-            log.warning(
-                f"[{DAEMON_NAME}] task {entity_id!r}: no ownership in the "
-                "snapshot and the re-read failed — not blocking, retrying later"
-            )
-            if _unroutable.note_unreadable(entity_id):
-                report = _unroutable.drain_unreadable()
-                if report:
-                    notifier.send(report, priority=Priority.WARN, handler=DAEMON_NAME)
-            return
-        if settled is not snapshot and (
-            settled.get("assigned_to") or settled.get("owner") or _stored_tags(settled)
-        ):
-            log.info(
-                f"[{DAEMON_NAME}] task {entity_id!r}: ownership appeared on "
-                "re-read — re-dispatching on the settled snapshot"
-            )
-            await _dispatch_task(
-                entity_id, settled, trigger, notifier, gate_override=gate_override,
-                snapshot_hydrated=True, detach_after_accept=detach_after_accept,
-                release_key=release_key,
-            )
-            return
+        # the task's own write. Re-check once, in the background, instead of
+        # blocking now; the handler returns at once.
+        if _OWNERSHIP_RECHECK_ENABLED and not _ownership_signal(snapshot):
+            state = _ownership_rechecks.get(entity_id)
+            if state == "pending":
+                log.info(
+                    f"[{DAEMON_NAME}] task {entity_id!r}: ownership re-check "
+                    "already in flight — duplicate delivery ignored"
+                )
+                return
+            if state is None:
+                _ownership_rechecks[entity_id] = "pending"
+                # Hold the in-dispatch count across the wait so the restart
+                # recovery sweep still sees the task as being dispatched.
+                _tasks_in_dispatch[entity_id] = _tasks_in_dispatch.get(entity_id, 0) + 1
+
+                async def _held() -> None:
+                    try:
+                        await _recheck_ownership(
+                            entity_id, snapshot, trigger, notifier,
+                            gate_override, release_key,
+                        )
+                    finally:
+                        left = _tasks_in_dispatch.get(entity_id, 1) - 1
+                        if left > 0:
+                            _tasks_in_dispatch[entity_id] = left
+                        else:
+                            _tasks_in_dispatch.pop(entity_id, None)
+
+                _spawn_background(_held(), f"ownership-recheck-{entity_id}")
+                return
+            # state == "done": already re-read once and still ownerless: block.
 
         # No inferable owner. Previously this was a silent log-and-skip — the task
         # fell on the floor. Then it escalated once per delivered event, which on

@@ -193,15 +193,25 @@ import pytest as _pytest_lead
 
 
 @_pytest_lead.mark.parametrize("value", [
-    "claude-theodore-lead", "codex-recordings-desk", "Claude finances lead",
-    "claude_ateles_lead",
+    "claude-theodore-lead", "Claude finances lead", "claude_ateles_lead",
+    "claude-recordings-desk", "ops codex recordings desk", "CLAUDE-ateles-LEAD",
+    "Claude finances lead (since 2026-11-12)",
+    # Accepted: a person plus a role reads as a session (quiet direction).
+    "Claude Martin lead",
 ])
-def test_harness_marker_with_lead_or_desk_names_a_session(value):
+def test_harness_marker_area_and_role_names_a_session(value):
     assert names_a_session(value)
 
 
+def test_codex_leading_names_are_sessions():
+    assert names_a_session("codex-recordings-desk")
+    assert names_a_session("Codex lead")
+
+
 @_pytest_lead.mark.parametrize("value", [
-    "Claude", "Claude Martin", "Finance lead", "desk", "Lead Claude", "Claude Leadbetter",
+    "Claude", "Claude Martin", "Finance lead", "desk", "Lead Claude",
+    "Claude Leadbetter", "Claude Desk", "Claude lead", "x claude lead",
+    "Claude Martin, Lead Engineer", "Claude Dupont, team lead",
 ])
 def test_marker_or_role_word_alone_names_no_session(value):
     assert not names_a_session(value)

@@ -223,11 +223,22 @@ _HARNESS_MARKERS = frozenset({"claude", "codex"})
 _ROLE_WORDS = frozenset({"lead", "desk"})
 
 
-def _harness_role_desk(tokens: list[str]) -> bool:
-    for i, token in enumerate(tokens):
-        if token in _HARNESS_MARKERS:
-            return any(t in _ROLE_WORDS for t in tokens[i + 1:])
-    return False
+def _harness_role_desk(first: str) -> bool:
+    """`claude-theodore-lead`: marker, at least one area word, role word LAST.
+
+    The role word must end the name (before any parenthetical) and an area
+    word must sit between, so `Claude Desk` and `x claude lead` stay words. A
+    comma means a person with a title (`Claude Martin, Lead Engineer`). A person
+    named like `Claude Martin lead` cannot be told from `claude finances lead`
+    by tokens, and is accepted as a session: the error is the quiet direction
+    (left as filed) and is pinned by a test.
+    """
+    if "," in first:
+        return False
+    head = _tokens(first.split("(", 1)[0])
+    if len(head) < 3 or head[-1] not in _ROLE_WORDS:
+        return False
+    return any(t in _HARNESS_MARKERS for t in head[:-2])
 
 
 def names_a_session(value: object) -> bool:
@@ -244,7 +255,7 @@ def names_a_session(value: object) -> bool:
     - two different markers (`Claude Code session`, `coordinator chat`);
     - a marker or `root` immediately followed by an id (`Foundation coordinator
       0a1b2c3d`, `chat0a1b2c3d`);
-    - a harness marker (`claude`, `codex`) followed later by `lead` or `desk`
+    - a harness marker (`claude`, `codex`) an area word, then `lead` or `desk` last
       (`claude-theodore-lead`, `codex-recordings-desk`);
     - a space-free identifier starting with `session` (`session-email-review`).
 
@@ -275,7 +286,7 @@ def names_a_session(value: object) -> bool:
         return True
     if _prefix_with_id(tokens):
         return True
-    if _harness_role_desk(tokens):
+    if _harness_role_desk(first):
         return True
     return tokens[0] == "session" and not any(c.isspace() for c in first)
 
