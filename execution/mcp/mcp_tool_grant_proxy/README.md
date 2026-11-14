@@ -49,9 +49,10 @@ Everything after `--` is the downstream server command.
 
 | Var | Required | Meaning |
 |-----|----------|---------|
-| `ATELES_AGENT_SUB` | yes (for enforcement) | Agent identity, e.g. `monedula@ateles-swarm`. Empty → advisory passthrough. |
+| `ATELES_AGENT_SUB` | yes (for enforcement) | Agent identity, e.g. `monedula@ateles-swarm`. Empty → every `tools/call` is denied (unless `ATELES_GRANTS_ADVISORY=1`). |
 | `ATELES_AGENT_GRANT_ID` | no | Explicit grant entity id (else looked up by sub). |
 | `NEOTOMA_BASE_URL` / `NEOTOMA_BEARER_TOKEN` | for grant lookup + audit | Neotoma API. |
+| `ATELES_GRANTS_ADVISORY` | no | Exactly `1` turns enforcement OFF (advisory; announced once at WARNING). Default off; any other value is off. |
 | `MCP_GRANT_PROXY_DEBUG` | no | `1` → verbose stderr logging. |
 
 ## Enforcement semantics
@@ -59,9 +60,11 @@ Everything after `--` is the downstream server command.
 - **Allowed** → call forwarded to downstream unchanged.
 - **Denied** → proxy returns an MCP `isError` result; downstream never sees it.
 - Every decision emits a `tool_call_observation` to Neotoma (`result: allowed | denied`).
-- **Permissive fallback:** Neotoma unreachable, or no grant declares any tool
-  capability → passthrough. Enforcement tightens per-agent as `tool:` caps are
-  added.
+- **Fail closed:** Neotoma unreachable, no token, no grants, no grant
+  declaring any tool capability, or no `ATELES_AGENT_SUB` → denied.
+  Un-migrated agents need `tool:` caps added to their grant, or an explicit
+  `ATELES_GRANTS_ADVISORY=1`.
+- JSON-RPC batch arrays and undecodable lines are refused, never forwarded.
 
 ## Tests
 

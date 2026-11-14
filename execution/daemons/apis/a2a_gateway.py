@@ -56,10 +56,10 @@ A2A_PUBLIC_URL = os.environ.get(
 def _require_auth_from_env() -> bool:
     """Auth is required unless APIS_A2A_REQUIRE_AUTH is exactly "0".
 
-    Unset, empty (a dotenv line `APIS_A2A_REQUIRE_AUTH=`), and every
-    unrecognized value enforce; only the explicit "0" opts out.
+    Unset, empty (a dotenv line `APIS_A2A_REQUIRE_AUTH=`), whitespace-padded
+    and every unrecognized value enforce; only the raw value "0" opts out.
     """
-    return os.environ.get("APIS_A2A_REQUIRE_AUTH", "").strip() != "0"
+    return os.environ.get("APIS_A2A_REQUIRE_AUTH", "") != "0"
 
 
 A2A_REQUIRE_AUTH = _require_auth_from_env()
@@ -296,6 +296,14 @@ def authorize_caller(
             return True, "grant_check_unavailable_advisory"
         log.error("grant check unavailable for %s (%s) - denying",
                   caller_sub, type(exc).__name__)
+        return False, "grant_check_unavailable"
+
+    if getattr(grant, "load_error", None):
+        from lib.daemon_runtime.grant_checker import grants_advisory
+
+        if grants_advisory():
+            return True, "grant_check_unavailable_advisory"
+        log.error("grant read failed for %s - denying", caller_sub)
         return False, "grant_check_unavailable"
 
     active = getattr(grant, "is_active", False)

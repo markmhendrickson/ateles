@@ -272,3 +272,32 @@ def _run_all() -> int:
 
 if __name__ == "__main__":
     sys.exit(_run_all())
+
+
+def test_suspended_and_revoked_fail_closed_on_degraded_read(monkeypatch):
+    monkeypatch.delenv("ATELES_GRANTS_ADVISORY", raising=False)
+    for c in _degraded_checkers():
+        assert c.is_suspended() is True
+        assert c.is_revoked() is True
+    monkeypatch.setenv("ATELES_GRANTS_ADVISORY", "1")
+    for c in _degraded_checkers():
+        assert c.is_suspended() is False
+        assert c.is_revoked() is False
+
+
+def test_suspended_and_revoked_unchanged_with_readable_grants(monkeypatch):
+    monkeypatch.delenv("ATELES_GRANTS_ADVISORY", raising=False)
+    c = _checker_with(_monedula_grant_entity())
+    assert c.is_suspended() is False and c.is_revoked() is False
+    e = _monedula_grant_entity()
+    e["snapshot"]["status"] = "revoked"
+    assert _checker_with(e).is_revoked() is True
+
+
+def test_load_error_is_exposed(monkeypatch):
+    import lib.daemon_runtime.grant_checker as gc
+
+    monkeypatch.setattr(gc, "NEOTOMA_BEARER_TOKEN", "")
+    c = GrantChecker("x@ateles-swarm").load()
+    assert c.load_error
+    assert _checker_with(_monedula_grant_entity()).load_error is None

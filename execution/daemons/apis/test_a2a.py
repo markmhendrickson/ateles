@@ -423,7 +423,7 @@ def test_require_auth_env_only_explicit_zero_disables():
     prior = os.environ.get("APIS_A2A_REQUIRE_AUTH")
     try:
         for value, expected in ((None, True), ("", True), ("  ", True), ("1", True),
-                                ("false", True), ("no", True), ("0", False)):
+                                ("false", True), ("no", True), (" 0 ", True), ("0", False)):
             if value is None:
                 os.environ.pop("APIS_A2A_REQUIRE_AUTH", None)
             else:
@@ -451,8 +451,15 @@ def test_authorize_caller_real_checker_with_unreadable_grants_denies():
         ok, reason = gw.authorize_caller(
             "ext@a", require_auth=True, grant_checker_factory=_unloaded
         )
-        assert not ok and reason == "grant_not_active"
+        assert not ok and reason == "grant_check_unavailable"
+
+        os.environ["ATELES_GRANTS_ADVISORY"] = "1"
+        ok, reason = gw.authorize_caller(
+            "ext@a", require_auth=True, grant_checker_factory=_unloaded
+        )
+        assert ok and reason == "grant_check_unavailable_advisory"
     finally:
+        os.environ.pop("ATELES_GRANTS_ADVISORY", None)
         if prior is not None:
             os.environ["ATELES_GRANTS_ADVISORY"] = prior
 

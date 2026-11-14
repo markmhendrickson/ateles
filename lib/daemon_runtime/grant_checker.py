@@ -66,7 +66,11 @@ def _deny_unless_advisory(who: str, what: str) -> bool:
     """Shared degraded-read rule: deny (ERROR, names the cause) unless advisory."""
     if grants_advisory():
         return True
-    log.error(f"[grant_checker:{who}] {what} - denying (set {ADVISORY_FLAG}=1 to run advisory)")
+    log.error(
+        f"[grant_checker:{who}] {what} - denying. Check NEOTOMA_BEARER_TOKEN, "
+        f"Neotoma reachability and that an agent_grant exists for this sub "
+        f"({ADVISORY_FLAG}=1 would turn enforcement off)"
+    )
     return False
 
 NEOTOMA_BASE_URL = os.environ.get(
@@ -210,16 +214,30 @@ class GrantChecker:
             return _deny_unless_advisory(self.aauth_sub, "no grants recorded")
         return any(g.is_active for g in self._grants)
 
+    @property
+    def load_error(self) -> Optional[str]:
+        """Why the grant read failed, or None. Never contains secret values."""
+        return self._load_error
+
+    def _degraded(self) -> bool:
+        return bool(self._load_error) or not self._loaded or not self._grants
+
     def is_suspended(self) -> bool:
-        """True if ALL grants are suspended (not just one)."""
-        if self._load_error or not self._grants:
-            return False
+        """True if ALL grants are suspended (not just one).
+
+        A degraded read (load error, not loaded, zero grants) counts as
+        suspended unless the advisory flag is on, so daemons gating on this
+        stop rather than dispatch on an unreadable grant.
+        """
+        if self._degraded():
+            return not _deny_unless_advisory(self.aauth_sub, "grant read unavailable or empty")
         return all(g.is_suspended for g in self._grants)
 
     def is_revoked(self) -> bool:
-        """True if ALL grants are revoked."""
-        if self._load_error or not self._grants:
-            return False
+        """True if ALL grants are revoked. A degraded read counts as revoked
+        unless the advisory flag is on (see is_suspended)."""
+        if self._degraded():
+            return not _deny_unless_advisory(self.aauth_sub, "grant read unavailable or empty")
         return all(g.is_revoked for g in self._grants)
 
     def check_capability(self, capability: str) -> bool:

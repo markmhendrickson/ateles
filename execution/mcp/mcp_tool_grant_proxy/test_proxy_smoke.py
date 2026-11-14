@@ -98,6 +98,47 @@ def test_no_identity_denies_by_default():
     assert "DENIED" in text
 
 
+def test_batch_and_undecodable_lines_are_refused_not_forwarded():
+    """Batch arrays and invalid UTF-8 must never reach the downstream unchecked."""
+    import asyncio
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("proxy_mod2", str(PROXY))
+    mod = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(_REPO_ROOT))
+    spec.loader.exec_module(mod)
+
+    class _W:
+        def __init__(self):
+            self.out = b""
+
+        def write(self, b):
+            self.out += b
+
+        async def drain(self):
+            pass
+
+    class _DenyAll:
+        def enforce(self, tool, arguments):
+            return False, "denied"
+
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "read_parquet", "arguments": {}}}
+    lines = [
+        (json.dumps([call, call]) + "\n").encode(),
+        b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"\xff"}}\n',
+        b"not json\n",
+        b"42\n",
+    ]
+    for line in lines:
+        w = _W()
+        forwarded = asyncio.run(
+            mod._handle_client_line(line, _DenyAll(), "parquet", "a@b", None, w)
+        )
+        assert forwarded is False, line
+        assert b"DENIED" in w.out, line
+
+
 def test_allowed_passthrough_advisory():
     """No ATELES_AGENT_SUB + explicit advisory flag → downstream reached."""
     resp = _run_case(

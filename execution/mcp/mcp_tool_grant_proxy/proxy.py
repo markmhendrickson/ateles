@@ -109,7 +109,8 @@ class GrantEnforcer:
             # No identity configured: deny unless advisory mode is explicit.
             if grants_advisory():
                 return True, ""
-            log.error("ATELES_AGENT_SUB is not set - denying tool call")
+            log.error("ATELES_AGENT_SUB is not set - denying tool call. Set it to "
+                      "this agent's sub (e.g. name@ateles-swarm)")
             return False, "no agent identity configured (ATELES_AGENT_SUB)"
         checker = self._checker_loaded()
         allowed, constraints = checker.check_tool(self.server_name, tool)
@@ -266,6 +267,15 @@ async def run_proxy(server_name: str, downstream_cmd: list[str]) -> int:
     return downstream.returncode or 0
 
 
+async def _refuse_unparseable(client_writer, reason: str) -> bool:
+    """Answer an unparseable or batch line with a JSON-RPC error; never forward."""
+    log.warning(f"[proxy] REFUSE {reason}")
+    resp = _deny_response(None, reason)
+    client_writer.write((json.dumps(resp) + "\n").encode())
+    await client_writer.drain()
+    return False
+
+
 async def _handle_client_line(
     line: bytes,
     enforcer: GrantEnforcer,
@@ -281,12 +291,20 @@ async def _handle_client_line(
     Returns True to forward the original bytes unchanged; False if the proxy
     handled it (e.g. denied a tools/call and wrote its own response).
     """
+    if not line.strip():
+        return False  # blank line: nothing to forward
     try:
         msg = json.loads(line)
-    except (ValueError, TypeError):
-        return True  # not JSON we understand — forward verbatim
+    except (ValueError, TypeError):  # includes undecodable (invalid UTF-8) bytes
+        return await _refuse_unparseable(client_writer, "undecodable or non-JSON message")
 
-    if not isinstance(msg, dict) or msg.get("method") != "tools/call":
+    if isinstance(msg, list):
+        # A JSON-RPC batch could carry tools/call elements the downstream would
+        # execute unchecked. Batches are refused outright.
+        return await _refuse_unparseable(client_writer, "JSON-RPC batches are not supported")
+    if not isinstance(msg, dict):
+        return await _refuse_unparseable(client_writer, "message is not a JSON-RPC object")
+    if msg.get("method") != "tools/call":
         return True  # only tools/call is gated
 
     params = msg.get("params") or {}

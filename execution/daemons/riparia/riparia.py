@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from email.utils import getaddresses
 import subprocess
 import sys
 import time
@@ -95,9 +96,15 @@ _BARE_ADDRESS_RE = re.compile(r"^[^\s<>@,;\"]+@[^\s<>@,;\"]+$")
 
 
 def _sender_address(sender: str) -> str:
-    """Bare lowercased address from `Name <addr@x>` (or a plain address)."""
-    found = re.findall(r"<([^<>]*)>", sender or "")
-    return (found[-1] if found else (sender or "")).strip().lower()
+    """Bare lowercased address of a From header carrying EXACTLY ONE address.
+
+    A header with several addresses, or one that does not parse, returns "" so
+    it can never equal the operator address.
+    """
+    parsed = getaddresses([sender or ""])
+    if len(parsed) != 1:
+        return ""
+    return parsed[0][1].strip().lower()
 
 
 def operator_email_valid(operator_email: str) -> bool:
@@ -116,7 +123,8 @@ def should_process(msg: dict, operator_email: str) -> bool:
     if PROCESSED_LABEL in (msg.get("labels") or []):
         return False
     if not operator_email_valid(operator_email):
-        log.error("OPERATOR_EMAIL is unset or malformed - refusing to route replies")
+        log.error("OPERATOR_EMAIL must be a single bare address such as "
+                  "name@example.com - refusing to route replies")
         return False
     if _sender_address(msg.get("sender") or "") != operator_email.strip().lower():
         return False
@@ -294,7 +302,8 @@ def main() -> None:
                   "provisioned and gws-authed before Riparia can route replies. Exiting.")
         sys.exit(1)
     if not operator_email_valid(OPERATOR_EMAIL):
-        log.error("OPERATOR_EMAIL is unset or malformed - without a configured "
+        log.error("OPERATOR_EMAIL must be set to a single bare address such as "
+                  "name@example.com (no list, no <angle brackets>); without an "
                   "operator principal no reply can be authorized. Exiting.")
         sys.exit(1)
     log.info(f"Riparia reply-router started. Polling {SWARM_EMAIL} every {POLL_INTERVAL}s "

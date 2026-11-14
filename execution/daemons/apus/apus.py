@@ -419,7 +419,8 @@ def _verify_signature(body: bytes, sig_header: str) -> bool:
     expected = (
         "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     )
-    return hmac.compare_digest(expected, sig_header)
+    # Compare as bytes: str compare_digest raises TypeError on non-ASCII input.
+    return hmac.compare_digest(expected.encode(), sig_header.encode("utf-8", "replace"))
 
 
 def _log_delivery_to_neotoma(

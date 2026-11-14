@@ -43,7 +43,7 @@ def test_should_process_matches_bare_address_by_equality():
     assert riparia.should_process(_msg(sender="Op <op@d.test>"), op) is True
     assert riparia.should_process(_msg(sender="OP@D.TEST"), op) is True
     # suffix / prefix / embedded spoofs must fail equality
-    assert riparia.should_process(_msg(sender="op@d.test.attacker.net"), op) is False
+    assert riparia.should_process(_msg(sender=op + ".attacker.invalid"), op) is False
     assert riparia.should_process(_msg(sender="xop@d.test"), op) is False
     assert riparia.should_process(_msg(sender="op@d.test <evil@x.test>"), op) is False
     assert riparia.should_process(_msg(sender="op@d.test@evil.test"), op) is False
@@ -79,3 +79,30 @@ def test_select_most_recent_when_no_run_key():
         _conv("c2", "Execution run for task ent_abc123 (agent cicada, run retry-1).", "2026-06-24T11:00:00Z"),
     ]
     assert riparia.select_run_conversation(convs, "ent_abc123") == "c2"
+
+
+def test_should_process_refuses_multi_address_headers():
+    op = "op@d.test"
+    for sender in (
+        "Other <other@x.test>, Operator <op@d.test>",
+        "Other <other@x.test> <op@d.test>",
+        "Other <other@x.test>; Operator <op@d.test>",
+        "op@d.test, other@x.test",
+        "op@d.test, op@d.test",
+    ):
+        assert riparia.should_process(_msg(sender=sender), op) is False, sender
+    assert riparia.should_process(_msg(sender='"A, B" <op@d.test>'), op) is True
+
+
+def test_should_process_malformed_operator_equal_to_sender_refused():
+    assert riparia.should_process(_msg(sender="ops"), "ops") is False
+
+
+def test_main_exits_without_valid_operator_email(monkeypatch):
+    import pytest
+
+    monkeypatch.setattr(riparia, "SWARM_EMAIL", "swarm@d.test")
+    for bad in ("", "ops", "a@b.test, c@d.test"):
+        monkeypatch.setattr(riparia, "OPERATOR_EMAIL", bad)
+        with pytest.raises(SystemExit):
+            riparia.main()

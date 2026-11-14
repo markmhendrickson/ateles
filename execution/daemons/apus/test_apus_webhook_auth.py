@@ -54,3 +54,14 @@ def test_unset_secret_refuses_unsigned_delivery(monkeypatch):
     monkeypatch.setattr(apus, "WEBHOOK_SECRET", "")
     resp = asyncio.run(apus.handle_webhook(_Req()))
     assert resp.status == 503
+
+
+def test_whitespace_only_secret_refuses_delivery(monkeypatch):
+    monkeypatch.setattr(apus, "WEBHOOK_SECRET", "   ")
+    resp = asyncio.run(apus.handle_webhook(_Req()))
+    assert resp.status == 503
+
+
+def test_non_ascii_signature_header_is_denied_not_raised(monkeypatch):
+    monkeypatch.setattr(apus, "WEBHOOK_SECRET", "s3cret")
+    assert apus._verify_signature(b"{}", "sha256=\u00e9\u4e2d") is False
