@@ -336,6 +336,28 @@ def test_any_bad_binding_stops_a_multi_provider_run_before_any_request(
     assert_no_leak(out, err, logs)
 
 
+def _fake_macaroon():
+    # Built at runtime so no literal looks like a real secret.
+    return "FlyV1 " + ",".join("fm2_" + "x" * 6 + str(i) for i in range(2))
+
+
+@pytest.mark.parametrize("token", [_fake_macaroon(), "fo1_" + "y" * 8, "fm2_" + "z" * 8])
+def test_real_token_shapes_are_accepted(env, monkeypatch, token):
+    monkeypatch.setenv("APIS_FLY_API_TOKEN", token)
+    assert fly_machine_status._load_config().api_token == token
+
+
+@pytest.mark.parametrize("suffix_token", [
+    "FlyV1 fm2_a\r\nX-Evil: 1", "FlyV1 fm2_a\nb", "FlyV1\tfm2_a", "fm2_a\tb",
+    " fm2_a", "fm2_a ", "FlyV1  fm2_a", "FlyV1 fm2_a b", "FlyV1 ", "a b c",
+    "fm2_a\x00b", "fm2_\x7fa",
+])
+def test_unsafe_token_shapes_are_refused(suffix_token):
+    # Tested on the validator itself: FlyConfig.from_env strips outer
+    # whitespace and the OS refuses NUL in an environment value.
+    assert not fly_machine_status._TOKEN_RE.fullmatch(suffix_token)
+
+
 # 4. Configuration and argument refusals before any call, with no reflection.
 
 
@@ -345,7 +367,7 @@ def test_any_bad_binding_stops_a_multi_provider_run_before_any_request(
     ("APIS_FLY_API_BASE", "http://127.0.0.1:9/v1", "invalid_configuration"),
     ("APIS_FLY_API_BASE", f"https://{SENTINEL}.example/v1", "invalid_configuration"),
     ("APIS_FLY_APP", f"app/../{SENTINEL}", "invalid_configuration"),
-    ("APIS_FLY_API_TOKEN", f"tok {SENTINEL}\n", "invalid_configuration"),
+    ("APIS_FLY_API_TOKEN", f"tok\n{SENTINEL}", "invalid_configuration"),
 ])  # fmt: skip
 def test_configuration_refusals_make_no_call(
     env, capsys, caplog, monkeypatch, name, value, code

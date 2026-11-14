@@ -214,7 +214,9 @@ Run it from the dispatcher's dedicated checkout with that process's existing
 `APIS_FLY_APP`, `APIS_FLY_API_TOKEN` and `APIS_FLY_<PROVIDER>_MACHINE_ID`
 bindings. It loads no env or key file. `--provider` takes `all`, `claude`,
 `codex` or `cursor`, and defaults to `all` when omitted; `--help` is static.
-There are no other options.
+There are no other options. The token may be a plain token or a Fly macaroon
+(`FlyV1 ` plus a token, as `fly_runner` sends it); control characters and
+stray spaces are refused.
 
 It checks every requested binding before any request: if one is missing,
 malformed or shared with another provider, it reads no machine at all and
