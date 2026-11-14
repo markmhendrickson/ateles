@@ -114,6 +114,7 @@ def transcribe_two_tracks(
         diarization=diarization,
         energy=energy,
         stitch_seconds=stitch_seconds,
+        chunks={label: results[label].get("chunks", []) for label in (SYSTEM, MIC)},
     )
     return {
         "text": merged.text,
@@ -122,8 +123,8 @@ def transcribe_two_tracks(
         "merge": {
             "method": "segment merge, clusters mapped to tracks by energy",
             "diarization": diarization,
-            "energy_measured": energy is not None,
             "turns": merged.turns,
             **merged.stats,
+            "energy_measured": energy is not None,
         },
     }

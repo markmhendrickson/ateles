@@ -1660,6 +1660,65 @@ def _paired_asr_source() -> str:
     return source
 
 
+# Measured on a synthetic 60-minute two-track call (dense generated speech on the
+# system track, sparse on the mic), whisper medium on this host, whole pipeline
+# including diarization: 590 s, about 9.8 s per call-minute. 15 s adds a 50% margin.
+WHISPER_SECONDS_PER_CALL_MINUTE = 15.0
+TYTO_TIMEOUT_ENV = "TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS"
+TYTO_TIMEOUT_DEFAULT_SECONDS = 1800.0
+
+
+def _check_whisper_time_budget(duration_seconds: float) -> None:
+    """Refuse, loudly and before any work, a recording the whisper route cannot finish
+    inside Tyto's outer deadline; warn when it is close.
+
+    A transcription killed at the deadline is retried and killed again, silently
+    for hours. A refusal names the two ways out: the faster Parakeet source, or a
+    longer deadline.
+    """
+    if not duration_seconds:
+        return
+    try:
+        budget = float(os.environ.get(TYTO_TIMEOUT_ENV, "") or TYTO_TIMEOUT_DEFAULT_SECONDS)
+    except ValueError:
+        budget = TYTO_TIMEOUT_DEFAULT_SECONDS
+    estimate = duration_seconds / 60.0 * WHISPER_SECONDS_PER_CALL_MINUTE
+    if estimate > budget:
+        raise RuntimeError(
+            f"A {duration_seconds / 60:.0f}-minute call needs about {estimate / 60:.0f} minutes of local whisper, "
+            f"more than the {budget / 60:.0f}-minute transcription deadline ({TYTO_TIMEOUT_ENV}); it would be killed "
+            f"and retried without ever finishing. Both tracks are kept. Set {PAIRED_ASR_ENV}=parakeet for a faster "
+            f"transcript, or raise {TYTO_TIMEOUT_ENV}."
+        )
+    if estimate > 0.8 * budget:
+        print(f"    Warning: this call is expected to take about {estimate / 60:.0f} of the {budget / 60:.0f} "
+              f"minutes allowed ({TYTO_TIMEOUT_ENV}).", file=sys.stderr)
+
+
+def _paired_model_path() -> Path:
+    """The whisper model the paired route loads: medium unless the operator names one."""
+    from local_whisper import resolve_model_path
+
+    model_env = {k: v for k, v in os.environ.items() if k.startswith("TRANSCRIBE_WHISPER_")}
+    if not model_env.get("TRANSCRIBE_WHISPER_MODEL") and not model_env.get("TRANSCRIBE_WHISPER_MODEL_NAME"):
+        model_env["TRANSCRIBE_WHISPER_MODEL_NAME"] = PAIRED_DEFAULT_MODEL_NAME
+    return resolve_model_path(model_env)
+
+
+def _plausible_languages(language: str | None) -> tuple[str, ...]:
+    """Languages the output screen treats as plausible, from the operator's
+    ``locale_profile`` (``session_language``); a failed lookup degrades to the
+    module's own last-good-read or seed set, and any error to the screen default."""
+    try:
+        from session_language import resolve_session_languages
+
+        return tuple(resolve_session_languages(language or "en", timeout=5.0).plausible)
+    except Exception:  # noqa: BLE001 - the screen must never block a transcript
+        from hallucination_filter import DEFAULT_PLAUSIBLE_LANGUAGES
+
+        return tuple(DEFAULT_PLAUSIBLE_LANGUAGES)
+
+
 def _transcribe_two_files_by_segment(
     mic_path: Path, remote_path: Path, *, language: str | None, verbose: bool
 ) -> dict:
@@ -1672,7 +1731,7 @@ def _transcribe_two_files_by_segment(
     """
     from chunked_whisper import transcribe_track, whisper_cli_asr
     from local_fluid import diarize_mono
-    from local_whisper import resolve_ffmpeg, resolve_model_path, resolve_whisper_cli
+    from local_whisper import resolve_ffmpeg, resolve_whisper_cli
     from two_track_transcribe import transcribe_two_tracks
 
     source = _paired_asr_source()
@@ -1680,20 +1739,22 @@ def _transcribe_two_files_by_segment(
     ffmpeg = resolve_ffmpeg()
 
     if source == PAIRED_ASR_WHISPER:
-        model_env = {k: v for k, v in os.environ.items() if k.startswith("TRANSCRIBE_WHISPER_")}
-        if not model_env.get("TRANSCRIBE_WHISPER_MODEL") and not model_env.get("TRANSCRIBE_WHISPER_MODEL_NAME"):
-            model_env["TRANSCRIBE_WHISPER_MODEL_NAME"] = PAIRED_DEFAULT_MODEL_NAME
-        model = resolve_model_path(model_env)
+        _check_whisper_time_budget(max(get_audio_duration(mic_path) or 0, get_audio_duration(remote_path) or 0))
+        model = _paired_model_path()
         asr = whisper_cli_asr(resolve_whisper_cli(), model)
+        plausible = _plausible_languages(lang)
         model_label = f"whisper.cpp {model.name} (chunked) + FluidAudio offline"
 
         def track_asr(label: str, wav16: Path, original: Path) -> dict:
             if verbose:
                 print(f"    Transcribing {label} track in 2-minute chunks ({model.name})...", file=sys.stderr)
-            found = transcribe_track(wav16, asr=asr, language=lang, ffmpeg=ffmpeg)
+            found = transcribe_track(
+                wav16, asr=asr, language=lang, ffmpeg=ffmpeg, plausible_languages=plausible, label=label,
+                progress=(lambda message: print(f"    {message}", file=sys.stderr, flush=True)) if verbose else None,
+            )
             segments = [{**seg, "text": _postprocess_transcript(seg["text"])} for seg in found["segments"]]
             return {
-                "asr": {"source": PAIRED_ASR_WHISPER, "model": model.name},
+                "asr": {"source": PAIRED_ASR_WHISPER, "model": model.name, "plausible_languages": list(plausible)},
                 "segments": segments,
                 "chunks": found["chunks"],
             }
@@ -2704,6 +2765,10 @@ def _processing_fingerprint() -> str:
         model = metadata(_resolve_local_model_path())
     except RuntimeError:
         model = {"unavailable": True}
+    try:
+        paired_model = metadata(_paired_model_path())
+    except RuntimeError:
+        paired_model = {"unavailable": True}
     binaries = {}
     for variable, default in (("TRANSCRIBE_WHISPER_CLI", "whisper-cli"),
                               ("TRANSCRIBE_FLUID_CLI", "fluidaudiocli"),
@@ -2714,7 +2779,7 @@ def _processing_fingerprint() -> str:
         "settings": {name: os.environ.get(name) for name in names},
         "vocabulary": _proper_noun_corrections(), "labels": _channel_labels(),
         "gap": _utterance_gap_seconds(), "stitch": _utterance_stitch_seconds(),
-        "model": model, "binaries": binaries,
+        "model": model, "paired_model": paired_model, "binaries": binaries,
         "source": {name: _audio_content_hash(Path(__file__).with_name(name)) for name in (
             "transcribe_audio.py", "local_whisper.py", "local_fluid.py",
             "transcript_utterances.py", "hallucination_filter.py", "silence_gate.py",
@@ -2844,7 +2909,34 @@ def _validate_transcription_result(result: object, *, paired: bool) -> None:
             fluid_raw(raw, two_tracks=True)
         else:
             require(raw.get("aligned_words") == [], "raw_response.aligned_words")
-        if merge["turns"]:
+        # Disclosure: every chunk the output screen withheld must be a gap in the
+        # merge record, a marker in the body and a count in the header, and its
+        # text must be kept; silent and still-looping chunks must be counted.
+        from two_track_merge import GAP_MARKER, chunk_outcomes
+        withheld, silent, looping = [], 0, 0
+        for track in raw["tracks"]:
+            outcome = chunk_outcomes(track.get("chunks"))
+            withheld += [(track["channel"], g["start"]) for g in outcome["gaps"]]
+            silent += outcome["silent"]
+            looping += outcome["looping"]
+            for chunk in track.get("chunks") or []:
+                if chunk.get("kind") == "chunk" and str(chunk.get("status", "")).startswith("screened"):
+                    require(isinstance(chunk.get("withheld_text"), str) and text(chunk.get("reason")),
+                            "screened chunk keeps its text and reason")
+        gaps = merge.get("gaps")
+        require(isinstance(gaps, list), "segment_merge.gaps")
+        require(sorted(withheld) == sorted((g.get("track"), g.get("start")) for g in gaps),
+                "every screened chunk is disclosed in segment_merge.gaps")
+        marker = GAP_MARKER.split(" — ")[0]
+        require(transcript.count(marker) == len(withheld), "every screened chunk has a marker in the transcript")
+        require(merge.get("chunks_silent", 0) == silent and merge.get("chunks_looping", 0) == looping,
+                "silent and looping chunk counts")
+        first = transcript.splitlines()[0] if transcript else ""
+        require(not withheld or "withheld by the output screen" in first, "header counts withheld chunks")
+        headed = bool(merge["turns"] or withheld)
+        require(not (silent and headed) or "skipped as silent" in first, "header counts silent chunks")
+        require(not (looping and headed) or "still looping" in first, "header counts looping chunks")
+        if headed:
             require(transcript.startswith("[Speakers: "), "speaker header")
         else:
             require(transcript == format_events([]), "silent segment-merge transcription_text")

@@ -43,27 +43,38 @@ the recordings desk's hand method). One automated step:
 1. each track is transcribed on its own by chunked local whisper
    (`chunked_whisper.py`): normalised (highpass + dynaudnorm, so a quiet mic is not
    suppressed), cut into 2-minute chunks with a fresh decoder each, a silent chunk
-   skipped by the calibrated silence gate, a repeat check per chunk (a phrase of 1
-   to 6 words repeated back to back 4 or more times means a collapse: the chunk is
-   re-run once without context, a surviving loop is collapsed to two copies and a
-   marker), and each chunk seam re-transcribed over a 28 s window to repair cut
-   words. The model defaults to `ggml-medium.bin`; `TRANSCRIBE_WHISPER_MODEL` or
-   `TRANSCRIBE_WHISPER_MODEL_NAME` override it;
+   skipped by the calibrated silence gate, and each chunk seam re-transcribed over
+   a 28 s window to repair cut words. A repeat check runs per chunk (a phrase of 1
+   to 6 words repeated back to back 4 or more times is a collapse): the chunk is
+   re-run once without context; a loop that survives is counted in the header and
+   collapsed after same-speaker segments are joined. The output screen judges each
+   chunk, with the plausible languages taken from the operator's `locale_profile`
+   (`session_language.py`). A chunk it rejects is never dropped silently: its text
+   and reason stay in the raw evidence, the transcript shows a timed
+   `[SPEECH WITHHELD ...]` marker at its place, and the header counts it. Silent
+   chunks are counted in the header too. The model defaults to `ggml-medium.bin`;
+   `TRANSCRIBE_WHISPER_MODEL` or `TRANSCRIBE_WHISPER_MODEL_NAME` override it. A
+   whisper-cli child is killed with its parent, so Tyto's outer timeout cannot
+   leave one running;
 2. FluidAudio offline diarizes the two tracks mixed. Each cluster is mapped to the
    track that carries its energy, each track measured against its own speech
    level. Remote lines are labelled `[System]` or, with more than one remote
    cluster, `[System/S1]`, `[System/S2]`; the operator is `[Mic]`. No name is
    inferred;
-3. a segment on one track that overlaps the other track's speech and is far
-   quieter in its own track (the mic hearing the remote side) is dropped as
-   cross-talk and counted in the header;
+3. a segment is dropped as cross-talk only when its words (at least three, mostly
+   found) also appear in the other track's ASR over the same stretch AND it is the
+   quieter of the two there. Level alone never drops a segment: the operator's mic
+   is quiet, and his real speech looks far below its own track. Each dropped
+   segment keeps its text, match share and level margin in the raw evidence, and
+   the header counts them;
 4. whole segments are ordered by start time, consecutive ones of one speaker are
    joined (`TRANSCRIBE_UTTERANCE_STITCH_SECONDS`), and each turn is
    `[m:ss–m:ss] [Label]`. The first line is the usual one-line `[Speakers: ...]`
    header: method, cluster count and mapping, that names are not established, and
-   the cross-talk and repeat counts. If diarization fails the header says so and
-   remote lines are plain `[System]`; if levels cannot be measured the cross-talk
-   check is skipped and the header says that.
+   the withheld, silent, looping, cross-talk and collapsed-repeat counts. If
+   diarization fails the header says so (or that it was not run) and remote lines
+   are plain `[System]`; if levels cannot be measured the clusters are not mapped,
+   the cross-talk check is skipped and the header says that.
 
 `TRANSCRIBE_PAIRED_ASR=parakeet` keeps FluidAudio's Parakeet words as the text
 source (their runs become segments and go through the same merge); the default is

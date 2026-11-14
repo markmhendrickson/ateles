@@ -16,14 +16,15 @@ mixed) only splits the REMOTE side into speakers. Each cluster is mapped to the
 track that carries its energy, so a cluster that is really the operator's voice
 leaking into the system mix is not named as a remote speaker.
 
-Cross-talk. The operator's mic also picks up the remote side. A segment on one
-track that overlaps a segment on the other and is clearly quieter there is that
-leak, not speech, and is dropped (and counted in the header).
+Cross-talk. The operator's mic also picks up the remote side. A segment is
+dropped as that leak only when its words are also found in the other track's ASR
+over the same stretch AND it is the quieter of the two there. Level alone never
+drops a segment. Dropped segments keep their text and reason in the raw evidence
+and are counted in the header.
 """
 
 from __future__ import annotations
 
-import difflib
 import math
 import re
 from dataclasses import dataclass
@@ -33,19 +34,21 @@ MIC = "Mic"
 
 FRAME_SECONDS = 0.1
 
-# A segment is cross-talk leakage when it overlaps the other track's speech and
-# is this much quieter (each track normalised to its own speech level, because
-# the mic track can sit 20 dB below the system track and still hold real speech).
-BLEED_MARGIN_DB = 6.0
-# Lower margin accepted when a second, independent indication agrees: the texts
-# are near-duplicates, or diarization put that stretch on the other track.
-BLEED_CONFIRMED_MARGIN_DB = 3.0
+# A segment is cross-talk leakage only when its WORDS are found in the other
+# track's ASR over the same stretch (the mic hearing the remote voice, or the
+# reverse) AND it is the quieter of the two there, each track measured against
+# its own speech level. Level alone never drops a segment: the operator's mic can
+# sit 7 dB or more under the system track, and a real answer then looks "far
+# below its own track" (a 55-minute acceptance call lost 12% of the operator's
+# words to a level-only rule).
 BLEED_MIN_OVERLAP = 0.5
-# And it must sit well under its own track's usual speech level: the other side
-# merely being louder at that moment (the operator speaking over the remote
-# voice) is real cross-talk, and losing the operator's words is the worse error.
-BLEED_OWN_MAX_DB = -12.0
-BLEED_TEXT_SIMILARITY = 0.5
+BLEED_MARGIN_DB = 3.0
+# Share of the segment's words found in the other track's text in that window.
+BLEED_TEXT_CONTAINMENT = 0.6
+# Fewer words than this prove nothing ("yeah", "okay"): never dropped on text.
+BLEED_MIN_WORDS = 3
+# ASR timestamps of one sound differ between the tracks by about a second.
+BLEED_WINDOW_PAD_SECONDS = 1.5
 # A cluster is assigned to a track only when one track clearly carries it.
 MAP_MARGIN_DB = 3.0
 
@@ -100,22 +103,19 @@ def collapse_repeats(text: str, *, max_n: int = 6, min_reps: int = 4) -> tuple[s
     return " ".join(out), removed
 
 
-def clean_segments(segments: list[dict]) -> tuple[list[dict], int]:
-    """Drop non-speech and empty segments, collapse loops. Returns (segments, removed tokens)."""
-    out, removed = [], 0
+def clean_segments(segments: list[dict]) -> list[dict]:
+    """Drop non-speech and empty segments. Loops are collapsed later, on the joined turn."""
+    out = []
     for seg in segments:
         text = re.sub(r"\s+", " ", str(seg.get("text", ""))).strip()
         if not text or _BRACKET_ONLY.match(text) or not _HAS_LETTER.search(text):
             continue
-        end = float(seg["end"])
-        start = float(seg["start"])
+        start, end = float(seg["start"]), float(seg["end"])
         if end < start:
             continue
-        text, cut = collapse_repeats(text)
-        removed += cut
-        out.append({"start": start, "end": max(end, start), "text": text})
+        out.append({"start": start, "end": end, "text": text})
     out.sort(key=lambda s: (s["start"], s["end"]))
-    return out, removed
+    return out
 
 
 # --- energy ------------------------------------------------------------------
@@ -199,23 +199,35 @@ def _covered(start: float, end: float, spans: list[tuple[float, float]]) -> floa
     return sum(_overlap(start, end, a, b) for a, b in merged)
 
 
-def _similar(a: str, b: str) -> float:
-    ta, tb = [_key(t) for t in a.split()], [_key(t) for t in b.split()]
-    if not ta or not tb:
+def _contained(own: str, other: str) -> float:
+    """Share of ``own``'s words (multiset) that also occur in ``other``."""
+    mine = [_key(t) for t in own.split() if _key(t)]
+    theirs: dict[str, int] = {}
+    for token in (_key(t) for t in other.split()):
+        if token:
+            theirs[token] = theirs.get(token, 0) + 1
+    if not mine:
         return 0.0
-    return difflib.SequenceMatcher(None, ta, tb).ratio()
+    hit = 0
+    for token in mine:
+        if theirs.get(token, 0) > 0:
+            theirs[token] -= 1
+            hit += 1
+    return hit / len(mine)
 
 
 def drop_crosstalk(
     tracks: dict[str, list[dict]],
     energy: dict[str, EnergyProfile] | None,
-    cluster_spans: dict[str, dict[str, list[tuple[float, float]]]] | None = None,
 ) -> tuple[dict[str, list[dict]], list[dict]]:
     """Remove segments that are one track's leak of the other. Returns (kept, dropped).
 
-    Needs the energy profiles: without them nothing says which side is the leak,
-    so nothing is dropped. ``cluster_spans`` is ``{track: {cluster: spans}}`` of
-    diarization clusters mapped to that track, used as a second indication.
+    A segment is dropped only when (a) at least ``BLEED_MIN_WORDS`` of its words
+    are mostly (``BLEED_TEXT_CONTAINMENT``) found in the other track's text around
+    the same time, and (b) it is the quieter of the two tracks there by
+    ``BLEED_MARGIN_DB``. Without level measurements nothing says which side is the
+    leak, so nothing is dropped. Each dropped segment keeps its text, the matched
+    share and the level margin so it can be recovered from the raw evidence.
     """
     if not energy or any(t not in energy or not energy[t].usable for t in (SYSTEM, MIC)):
         return tracks, []
@@ -224,40 +236,29 @@ def drop_crosstalk(
     for track, segments in tracks.items():
         other = SYSTEM if track == MIC else MIC
         other_segments = tracks.get(other, [])
-        other_spans = [(s["start"], s["end"]) for s in other_segments]
-        own_spans_diar = [sp for spans in (cluster_spans or {}).get(track, {}).values() for sp in spans]
-        other_spans_diar = [sp for spans in (cluster_spans or {}).get(other, {}).values() for sp in spans]
         kept[track] = []
         for seg in segments:
             span = [(seg["start"], seg["end"])]
             duration = max(seg["end"] - seg["start"], FRAME_SECONDS)
-            overlap = _covered(seg["start"], seg["end"], other_spans) / duration
+            lo, hi = seg["start"] - BLEED_WINDOW_PAD_SECONDS, seg["end"] + BLEED_WINDOW_PAD_SECONDS
+            near = [o for o in other_segments if _overlap(lo, hi, o["start"], o["end"]) > 0]
+            overlap = _covered(seg["start"], seg["end"], [(o["start"], o["end"]) for o in near]) / duration
             own_db = energy[track].relative_db(span)
             other_db = energy[other].relative_db(span)
-            bleed = False
-            if (
-                overlap >= BLEED_MIN_OVERLAP
-                and own_db is not None
-                and other_db is not None
-                and own_db <= BLEED_OWN_MAX_DB
-            ):
-                margin = other_db - own_db
-                similar = max(
-                    (_similar(seg["text"], o["text"]) for o in other_segments
-                     if _overlap(seg["start"], seg["end"], o["start"], o["end"]) > 0),
-                    default=0.0,
-                )
-                diar_other = (
-                    _covered(seg["start"], seg["end"], other_spans_diar) / duration >= 0.5
-                    and _covered(seg["start"], seg["end"], own_spans_diar) / duration < 0.5
-                )
-                if margin >= BLEED_MARGIN_DB:
-                    bleed = True
-                elif margin >= BLEED_CONFIRMED_MARGIN_DB and (similar >= BLEED_TEXT_SIMILARITY or diar_other):
-                    bleed = True
-            (dropped if bleed else kept[track]).append(
-                {**seg, "track": track} if bleed else seg
+            share = _contained(seg["text"], " ".join(o["text"] for o in near)) if near else 0.0
+            margin = None if own_db is None or other_db is None else other_db - own_db
+            bleed = (
+                len(seg["text"].split()) >= BLEED_MIN_WORDS
+                and overlap >= BLEED_MIN_OVERLAP
+                and share >= BLEED_TEXT_CONTAINMENT
+                and margin is not None
+                and margin >= BLEED_MARGIN_DB
             )
+            if bleed:
+                dropped.append({**seg, "track": track, "reason": "text found on the other track and quieter here",
+                                "text_match": round(share, 2), "margin_db": round(margin, 1)})
+            else:
+                kept[track].append(seg)
     return kept, dropped
 
 
@@ -283,27 +284,74 @@ def format_clock(seconds: float) -> str:
     return f"{total // 60}:{total % 60:02d}"
 
 
+GAP_MARKER = (
+    "[SPEECH WITHHELD — the model returned text for this stretch but the output screen "
+    "rejected it ({reason}: {detail}). It is not silence; the text is kept in the stored evidence.]"
+)
+
+
+def _plain(value: object, limit: int = 100) -> str:
+    """One line with no brackets, so a marker or header cannot break its own pattern."""
+    return re.sub(r"[\[\]\s]+", " ", str(value)).strip()[:limit]
+
+
+def chunk_outcomes(chunks: list[dict]) -> dict:
+    """Withheld, silent and still-looping chunks from one track's chunk records."""
+    gaps, silent, looping = [], 0, 0
+    for chunk in chunks or []:
+        if chunk.get("kind") != "chunk":
+            continue
+        status = str(chunk.get("status", ""))
+        if status.startswith("screened"):
+            gaps.append({
+                "start": float(chunk["start"]), "end": float(chunk.get("end", chunk["start"])),
+                "reason": _plain(chunk.get("reason", "screened"), 40),
+                "detail": _plain(chunk.get("detail", ""), 100),
+            })
+        elif status == "silent":
+            silent += 1
+        elif chunk.get("loop_after_rerun"):
+            looping += 1
+    return {"gaps": gaps, "silent": silent, "looping": looping}
+
+
 def _header(stats: dict, diarization: dict | None) -> str:
     """One line, ``[Speakers: ...]`` and no ``]`` inside, so consumers strip it.
 
     States the method, the diarization outcome and mapping, that names are not
-    established, and what was removed.
+    established, and what was removed or withheld.
     """
     tracks = f"2 tracks ({MIC}, {SYSTEM}) merged by segment"
-    if diarization is None or diarization.get("status") != "ok":
-        category = (diarization or {}).get("category", "not run")
-        who = f"remote side not split by speaker, FluidAudio offline failed ({category})"
+    if diarization is None:
+        who = "remote side not split by speaker, diarization not run"
+    elif diarization.get("status") != "ok":
+        who = (f"remote side not split by speaker, FluidAudio offline failed "
+               f"({diarization.get('category', 'unreadable output')})")
+    elif not stats.get("energy_measured"):
+        who = (f"FluidAudio offline on the mixed tracks found {diarization.get('speaker_count', 0)} clusters, "
+               "not mapped to tracks, levels unmeasured")
     else:
         mapped = stats["clusters_by_track"]
         who = (
             f"FluidAudio offline on the mixed tracks found {diarization.get('speaker_count', 0)} clusters "
-            f"(remote {mapped.get(SYSTEM, 0)}, mic {mapped.get(MIC, 0)}, unmapped {mapped.get("unmapped", 0)}) "
+            f"(remote {mapped.get(SYSTEM, 0)}, mic {mapped.get(MIC, 0)}, unmapped {mapped.get('unmapped', 0)}) "
             "mapped to tracks by energy"
         )
-        build = diarization.get("cli_build")
-        if build:
-            who += f", build {build}"
+    build = (diarization or {}).get("cli_build") if diarization and diarization.get("status") == "ok" else None
+    if build:
+        who += f", build {build}"
     parts = [tracks, who, "speaker names not established"]
+    gaps = stats.get("gaps") or []
+    if gaps:
+        spans = ", ".join(
+            f"{g['track']} {format_clock(g['start'])}\u2013{format_clock(g['end'])} {g['reason']}" for g in gaps[:5]
+        )
+        more = f" and {len(gaps) - 5} more" if len(gaps) > 5 else ""
+        parts.append(f"{len(gaps)} chunks withheld by the output screen ({spans}{more}), text kept in the stored evidence")
+    if stats.get("chunks_looping"):
+        parts.append(f"{stats['chunks_looping']} chunks still looping after a re-run, loops collapsed")
+    if stats.get("chunks_silent"):
+        parts.append(f"{stats['chunks_silent']} chunks skipped as silent")
     if stats.get("bleed_dropped"):
         parts.append(f"{stats['bleed_dropped']} cross-talk segments dropped")
     elif stats.get("bleed_checked") is False:
@@ -319,17 +367,25 @@ def merge_tracks(
     diarization: dict | None = None,
     energy: dict[str, EnergyProfile] | None = None,
     stitch_seconds: float = 4.0,
+    chunks: dict[str, list[dict]] | None = None,
 ) -> MergeResult:
     """Merge per-track ASR segments into one time-ordered dialogue.
 
     ``tracks`` is ``{SYSTEM: [segment], MIC: [segment]}``, each segment
-    ``{"start", "end", "text"}`` in seconds on the shared timeline.
+    ``{"start", "end", "text"}`` in seconds on the shared timeline. ``chunks`` is
+    each track's chunk QA records: a withheld chunk becomes a timed gap marker in
+    the body and a count in the header; silent and still-looping chunks are
+    counted in the header.
     """
-    stats: dict = {"repeats_removed": 0}
-    cleaned: dict[str, list[dict]] = {}
+    stats: dict = {"repeats_removed": 0, "energy_measured": bool(energy)}
+    cleaned = {track: clean_segments(tracks.get(track, [])) for track in (SYSTEM, MIC)}
+    stats["gaps"], stats["chunks_silent"], stats["chunks_looping"] = [], 0, 0
     for track in (SYSTEM, MIC):
-        cleaned[track], cut = clean_segments(tracks.get(track, []))
-        stats["repeats_removed"] += cut
+        outcome = chunk_outcomes((chunks or {}).get(track, []))
+        stats["gaps"] += [{**g, "track": track} for g in outcome["gaps"]]
+        stats["chunks_silent"] += outcome["silent"]
+        stats["chunks_looping"] += outcome["looping"]
+    stats["gaps"].sort(key=lambda g: (g["start"], g["track"]))
 
     clusters = _cluster_spans(diarization)
     mapping = map_clusters_to_tracks(clusters, energy) if clusters and energy else {}
@@ -339,18 +395,15 @@ def merge_tracks(
         key = info["track"] or "unmapped"
         by_track[key] = by_track.get(key, 0) + 1
     stats["clusters_by_track"] = by_track
-    cluster_spans_by_track = {
-        track: {c: clusters[c] for c, info in mapping.items() if info["track"] == track}
-        for track in (SYSTEM, MIC)
-    }
-
     stats["bleed_checked"] = bool(energy) and all(
         t in energy and energy[t].usable for t in (SYSTEM, MIC)
     )
-    kept, dropped = drop_crosstalk(cleaned, energy, cluster_spans_by_track)
+    kept, dropped = drop_crosstalk(cleaned, energy)
     stats["bleed_dropped"] = len(dropped)
     stats["bleed_segments"] = [
-        {"track": d["track"], "start": round(d["start"], 2), "end": round(d["end"], 2)} for d in dropped
+        {"track": d["track"], "start": round(d["start"], 2), "end": round(d["end"], 2), "text": d["text"],
+         "reason": d["reason"], "text_match": d["text_match"], "margin_db": d["margin_db"]}
+        for d in dropped
     ]
 
     # Remote speakers: clusters mapped to the system track, named by first appearance.
@@ -384,11 +437,25 @@ def merge_tracks(
             last["end"] = max(last["end"], row["end"])
         else:
             turns.append({k: row[k] for k in ("start", "end", "track", "label", "text")})
+    # Loops are collapsed on the joined turn: whisper emits one loop as many
+    # consecutive segments, which no per-segment pass can see.
+    for turn in turns:
+        turn["text"], cut = collapse_repeats(turn["text"])
+        stats["repeats_removed"] += cut
 
-    if not turns:
+    gap_rows = [
+        {"start": g["start"], "end": g["end"], "track": g["track"],
+         "label": remote_label(g) if g["track"] == SYSTEM else MIC,
+         "text": GAP_MARKER.format(reason=g["reason"], detail=g["detail"] or "no detail")}
+        for g in stats["gaps"]
+    ]
+    if not turns and not gap_rows:
         return MergeResult([], NO_SPEECH_TEXT, stats)
+    blocks = sorted(
+        [(t["start"], t["end"], t["label"], t["text"]) for t in turns]
+        + [(g["start"], g["end"], g["label"], g["text"]) for g in gap_rows]
+    )
     body = "\n\n".join(
-        f"[{format_clock(t['start'])}–{format_clock(t['end'])}] [{t['label']}]\n{t['text']}"
-        for t in turns
+        f"[{format_clock(a)}\u2013{format_clock(b)}] [{label}]\n{text}" for a, b, label, text in blocks
     )
     return MergeResult(turns, f"{_header(stats, diarization)}\n\n{body}", stats)

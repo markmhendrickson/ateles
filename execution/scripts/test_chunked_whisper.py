@@ -111,3 +111,87 @@ def test_words_cut_at_a_chunk_boundary_are_replaced_by_the_window_transcription(
     texts = [s["text"] for s in found["segments"]]
     assert texts == ["we should ship the release on Friday"]
     assert [c for c in found["chunks"] if c["kind"] == "seam"][0]["replaced"] is True
+
+
+@needs_ffmpeg
+def test_a_screened_chunk_keeps_its_text_reason_and_timing_in_the_record(tmp_path):
+    track = tone(tmp_path / "t.wav", 60)
+
+    def asr(wav, language, extra):
+        return [{"start": 0.0, "end": 5.0, "text": "the office of Mr Schröder"}], "en"
+
+    found = cw.transcribe_track(track, asr=asr, language="en", ffmpeg=FFMPEG)
+    info = found["chunks"][0]
+    assert found["segments"] == [] and info["status"].startswith("screened")
+    assert info["reason"] == "foreign_diacritic" and info["withheld_text"] == "the office of Mr Schröder"
+    assert info["start"] == 0.0 and 59 < info["end"] < 61
+
+
+@needs_ffmpeg
+def test_the_screen_uses_the_languages_it_is_given(tmp_path):
+    track = tone(tmp_path / "t.wav", 30)
+
+    def asr(wav, language, extra):
+        return [{"start": 0.0, "end": 5.0, "text": "the office of Mr Schröder"}], "en"
+
+    found = cw.transcribe_track(track, asr=asr, language="en", ffmpeg=FFMPEG,
+                                plausible_languages=("en", "de"))
+    assert found["chunks"][0]["status"] == "ok" and len(found["segments"]) == 1
+
+
+@needs_ffmpeg
+def test_progress_is_reported_per_chunk_and_a_failure_names_track_and_chunk(tmp_path):
+    track = tone(tmp_path / "t.wav", 150)
+    lines = []
+
+    def asr(wav, language, extra):
+        if wav.name.startswith("norm0001"):
+            raise RuntimeError("whisper-cli failed (exit 1): out of memory")
+        return [{"start": 0.0, "end": 1.0, "text": "words"}], "en"
+
+    with pytest.raises(RuntimeError, match=r"Mic track, chunk at 2:00: whisper-cli failed \(exit 1\)"):
+        cw.transcribe_track(track, asr=asr, language="en", ffmpeg=FFMPEG, label="Mic", progress=lines.append)
+    assert lines[:2] == ["Mic: chunk 1/2 (0:00)", "Mic: chunk 2/2 (2:00)"]
+
+
+def test_a_guarded_command_dies_with_its_parent(tmp_path):
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    pid_file = tmp_path / "pid"
+    program = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
+        "import chunked_whisper as cw\n"
+        f"cw.run_guarded(['/bin/sh', '-c', 'echo $$ > {pid_file}; exec sleep 60'], timeout=120)\n"
+    )
+    parent = subprocess.Popen([sys.executable, "-c", program])
+    for _ in range(100):
+        if pid_file.exists() and pid_file.read_text().strip():
+            break
+        time.sleep(0.1)
+    child = int(pid_file.read_text())
+    os.kill(child, 0)                       # running
+    parent.kill()                           # what the outer timeout's kill does
+    parent.wait()
+    for _ in range(60):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.2)
+    os.kill(child, signal.SIGKILL)
+    pytest.fail("the guarded child outlived its parent")
+
+
+def test_a_guarded_command_is_killed_with_its_group_on_timeout():
+    import subprocess
+    import time
+
+    start = time.time()
+    with pytest.raises(subprocess.TimeoutExpired):
+        cw.run_guarded(["/bin/sh", "-c", "sleep 30"], timeout=1)
+    assert time.time() - start < 10

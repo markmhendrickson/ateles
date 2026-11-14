@@ -192,3 +192,89 @@ def test_frame_profile_is_relative_to_the_tracks_own_speech_level():
     loud = profile([(0, 5, -15)])
     assert quiet.relative_db([(0, 5)]) == pytest.approx(loud.relative_db([(0, 5)]), abs=0.5)
     assert quiet.relative_db([(10, 15)]) == pytest.approx(-35.0, abs=0.5)
+
+
+def test_a_loop_spread_across_segments_is_collapsed_after_they_are_joined():
+    tracks = {m.SYSTEM: [seg(i * 2, i * 2 + 1.5, "thank you") for i in range(8)]}
+    result = m.merge_tracks(tracks)
+    assert [t["text"] for t in result.turns] == ["thank you thank you […]"]
+    assert result.stats["repeats_removed"] == 12
+    assert "12 repeated words collapsed" in result.text.splitlines()[0]
+
+
+def chunk(start, status, **extra):
+    return {"kind": "chunk", "index": int(start // 120), "start": float(start), "end": float(start) + 120.0,
+            "status": status, **extra}
+
+
+def test_a_withheld_chunk_is_a_timed_marker_in_the_body_and_a_count_in_the_header():
+    tracks = {m.SYSTEM: [seg(1, 5, "hello there")], m.MIC: []}
+    chunks = {m.SYSTEM: [chunk(0, "ok"), chunk(120, "screened: foreign_diacritic", reason="foreign_diacritic",
+                                                detail="letters outside en/es/ca: ö", withheld_text="kept")]}
+    result = m.merge_tracks(tracks, chunks=chunks)
+    header = result.text.splitlines()[0]
+    assert "1 chunks withheld by the output screen (System 2:00–4:00 foreign_diacritic)" in header
+    assert "\n\n[2:00–4:00] [System]\n[SPEECH WITHHELD" in result.text
+    assert result.text.index("hello there") < result.text.index("SPEECH WITHHELD")
+    assert header.count("]") == 1
+
+
+def test_all_chunks_withheld_is_not_reported_as_no_words():
+    chunks = {m.SYSTEM: [chunk(0, "screened: degenerate_repetition", reason="degenerate_repetition", detail="loop")]}
+    result = m.merge_tracks({m.SYSTEM: [], m.MIC: []}, chunks=chunks)
+    assert result.text != m.NO_SPEECH_TEXT and "SPEECH WITHHELD" in result.text
+
+
+def test_silent_and_still_looping_chunks_are_counted_in_the_header():
+    chunks = {m.SYSTEM: [chunk(0, "ok", loop_after_rerun=True), chunk(120, "silent")], m.MIC: [chunk(0, "silent")]}
+    header = m.merge_tracks({m.SYSTEM: [seg(1, 3, "hello there")]}, chunks=chunks).text.splitlines()[0]
+    assert "2 chunks skipped as silent" in header and "1 chunks still looping after a re-run" in header
+
+
+def test_header_does_not_claim_energy_mapping_when_levels_were_not_measured():
+    diarization = {"status": "ok", "speaker_count": 2, "segments": [{"start": 0, "end": 5, "speaker": "A"}]}
+    header = m.merge_tracks({m.SYSTEM: [seg(0, 3, "hello")]}, diarization=diarization, energy=None).text.splitlines()[0]
+    assert "not mapped to tracks, levels unmeasured" in header and "mapped to tracks by energy" not in header
+
+
+def test_diarization_that_did_not_run_is_not_called_a_failure():
+    header = m.merge_tracks({m.SYSTEM: [seg(0, 3, "hello")]}, diarization=None).text.splitlines()[0]
+    assert "diarization not run" in header and "failed" not in header
+
+
+def _crosstalk(mic_text, mic_rel_db, remote_text="we should move the meeting to Thursday afternoon"):
+    # Each track is measured against its own speech level (-20 dB reference).
+    energy = {m.SYSTEM: profile([(0, 10, -20)]), m.MIC: profile([(2, 8, -20 + mic_rel_db), (20, 40, -20)])}
+    tracks = {m.SYSTEM: [seg(0, 10, remote_text)], m.MIC: [seg(2, 8, mic_text)]}
+    return m.merge_tracks(tracks, energy=energy)
+
+
+@pytest.mark.parametrize("mic_rel_db", [-9.8, -14.5, -30.0])
+def test_a_quiet_mic_that_is_genuine_speech_is_kept_at_any_level(mic_rel_db):
+    result = _crosstalk("I can commit to sending the numbers by Friday", mic_rel_db)
+    assert result.stats["bleed_dropped"] == 0
+    assert [t["track"] for t in result.turns] == [m.SYSTEM, m.MIC]
+
+
+@pytest.mark.parametrize("mic_rel_db", [-14.5, -30.0])
+def test_a_quiet_mic_whose_text_matches_the_remote_track_is_dropped_and_recoverable(mic_rel_db):
+    result = _crosstalk("move the meeting to thursday afternoon", mic_rel_db)
+    assert result.stats["bleed_dropped"] == 1 and [t["track"] for t in result.turns] == [m.SYSTEM]
+    kept = result.stats["bleed_segments"][0]
+    assert kept["text"] == "move the meeting to thursday afternoon" and kept["track"] == m.MIC
+    assert kept["text_match"] == 1.0 and kept["margin_db"] >= m.BLEED_MARGIN_DB and kept["reason"]
+
+
+def test_a_loud_leak_with_matching_text_is_dropped():
+    # Only 4 dB under the remote side, nowhere near a "quiet" level, but the same words.
+    result = _crosstalk("we should move the meeting to Thursday", -4.0)
+    assert result.stats["bleed_dropped"] == 1
+
+
+def test_matching_text_at_equal_level_is_not_dropped_since_no_side_is_the_leak():
+    assert _crosstalk("we should move the meeting to Thursday", -1.0).stats["bleed_dropped"] == 0
+
+
+def test_a_very_short_matching_segment_is_never_dropped_on_text_alone():
+    result = _crosstalk("meeting Thursday", -30.0)
+    assert result.stats["bleed_dropped"] == 0
