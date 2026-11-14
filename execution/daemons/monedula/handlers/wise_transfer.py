@@ -789,6 +789,17 @@ def _find_task_id(profile: PaymentProfile) -> str:
 
 
 def _update_task(profile: PaymentProfile, result: dict) -> None:
+    """Never let bookkeeping crash the tick after money has moved."""
+    try:
+        _update_task_impl(profile, result)
+    except Exception as exc:  # noqa: BLE001
+        log.error(
+            f"[{profile.name}] payment itself settled, but the Neotoma task update "
+            f"raised: {exc} - task notes/due_date need updating by hand."
+        )
+
+
+def _update_task_impl(profile: PaymentProfile, result: dict) -> None:
     """Update the Neotoma payment task: add note and roll due_date.
 
     Writes go through REST ``/correct`` with read-back (handlers/task_writes.py);
@@ -797,7 +808,7 @@ def _update_task(profile: PaymentProfile, result: dict) -> None:
     """
     task_id = _find_task_id(profile)
     if not task_id:
-        log.error(f"[{profile.name}] Could not find task ID - task NOT updated")
+        log.error(f"[{profile.name}] payment settled, but no task ID found - task NOT updated")
         return
 
     connection = task_writes.make_client()
@@ -817,7 +828,10 @@ def _update_task(profile: PaymentProfile, result: dict) -> None:
         if task_writes.append_note(client, base, task_id, note):
             log.info(f"[{profile.name}] Neotoma task {task_id} notes updated (read back).")
         else:
-            log.error(f"[{profile.name}] Neotoma task {task_id} notes NOT updated")
+            log.error(
+                f"[{profile.name}] payment settled, but Neotoma task {task_id} notes NOT "
+                f"updated; re-apply by hand: {note!r}"
+            )
 
         # A one-off invoice has no "next" occurrence: close the task and archive
         # the profile so the next daily run cannot pay the same invoice twice.
@@ -834,13 +848,16 @@ def _update_task(profile: PaymentProfile, result: dict) -> None:
         next_due = _find_next_event_due_date(profile)
         if not next_due:
             log.error(
-                f"[{profile.name}] Could not find next event date - due_date NOT updated."
+                f"[{profile.name}] payment settled, but no next event date found - due_date NOT updated."
             )
             return
         if task_writes.write_field(client, base, task_id, "task", "due_date", next_due):
             log.info(f"[{profile.name}] Neotoma task due_date set to {next_due} (read back).")
         else:
-            log.error(f"[{profile.name}] Neotoma task {task_id} due_date NOT updated")
+            log.error(
+                f"[{profile.name}] payment settled, but Neotoma task {task_id} due_date "
+                f"NOT updated; set it to {next_due} by hand"
+            )
 
 
 def _close_one_off(
@@ -875,7 +892,10 @@ def _close_one_off(
             (profile.entity_id, "payment_profile", "archived", "profile status=archived"),
         ):
             if not entity_id:
-                log.warning(f"[{profile.name}] cannot set {what}: no entity id")
+                log.error(
+                    f"[{profile.name}] ONE-OFF CLEANUP FAILED ({what}): no entity id - "
+                    f"this profile may re-trigger; archive it by hand."
+                )
                 continue
             try:
                 ok = task_writes.write_field(

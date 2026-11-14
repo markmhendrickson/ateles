@@ -206,11 +206,22 @@ def _parse_payment_result(output: str) -> dict | None:
 
 
 def _update_task(profile: PaymentProfile, txid: str) -> None:
+    """Never let bookkeeping crash the tick after money has moved."""
+    try:
+        _update_task_impl(profile, txid)
+    except Exception as exc:  # noqa: BLE001
+        log.error(
+            f"[{profile.name}] payment itself settled, but the Neotoma task update "
+            f"raised: {exc} - task notes/due_date need updating by hand."
+        )
+
+
+def _update_task_impl(profile: PaymentProfile, txid: str) -> None:
     """Update Neotoma task with payment note and rolled due_date (REST + read-back)."""
     task_id = profile.neotoma_task_id
     if not task_id:
         log.error(
-            f"[{profile.name}] No neotoma_task_id configured - task NOT updated"
+            f"[{profile.name}] payment settled, but no neotoma_task_id configured - task NOT updated"
         )
         return
 
@@ -229,18 +240,24 @@ def _update_task(profile: PaymentProfile, txid: str) -> None:
         if task_writes.append_note(client, base, task_id, note):
             log.info(f"[{profile.name}] Neotoma task notes updated (read back).")
         else:
-            log.error(f"[{profile.name}] Neotoma task {task_id} notes NOT updated")
+            log.error(
+                f"[{profile.name}] payment settled, but Neotoma task {task_id} notes NOT "
+                f"updated; re-apply by hand: {note!r}"
+            )
 
         next_due = _find_next_event_due_date(profile)
         if not next_due:
             log.error(
-                f"[{profile.name}] Could not find next event date - due_date NOT updated."
+                f"[{profile.name}] payment settled, but no next event date found - due_date NOT updated."
             )
             return
         if task_writes.write_field(client, base, task_id, "task", "due_date", next_due):
             log.info(f"[{profile.name}] Neotoma task due_date set to {next_due} (read back).")
         else:
-            log.error(f"[{profile.name}] Neotoma task {task_id} due_date NOT updated")
+            log.error(
+                f"[{profile.name}] payment settled, but Neotoma task {task_id} due_date "
+                f"NOT updated; set it to {next_due} by hand"
+            )
 
 
 def _find_next_event_due_date(profile: PaymentProfile) -> str | None:

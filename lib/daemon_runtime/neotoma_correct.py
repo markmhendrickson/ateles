@@ -11,21 +11,38 @@ back with the value written. Anything else is logged at ERROR and returns False.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
 log = logging.getLogger("neotoma_correct")
 
 
-def _readback_matches(body: Any, field: str, value: Any) -> bool:
+def _describe(value: Any) -> str:
+    """Log form of a written value: long strings by length only (notes can be large)."""
+    if isinstance(value, str) and len(value) > 60:
+        return f"<str len={len(value)}>"
+    return repr(value)
+
+
+def _readback_matches(
+    body: Any, field: str, value: Any, same: Callable[[Any, Any], bool] | None = None
+) -> bool:
     if not isinstance(body, dict):
         return False
     snap = body.get("snapshot")
+    if not isinstance(snap, dict) and isinstance(body.get("entity"), dict):
+        snap = body["entity"]  # {"entity": {"snapshot": {...}}} wrapper
     if not isinstance(snap, dict):
         snap = body
     inner = snap.get("snapshot") if isinstance(snap.get("snapshot"), dict) else snap
-    return inner.get(field) == value
+    actual = inner.get(field)
+    if same is not None:
+        try:
+            return bool(same(actual, value))
+        except Exception:  # noqa: BLE001
+            return False
+    return actual == value
 
 
 def correct_field(
@@ -38,8 +55,13 @@ def correct_field(
     idempotency_key: str,
     *,
     timeout: float = 15,
+    same: Callable[[Any, Any], bool] | None = None,
 ) -> bool:
-    """POST /correct for one field, then read it back. Never raises."""
+    """POST /correct for one field, then read it back. Never raises.
+
+    ``same(actual, written)`` overrides the exact-equality read-back check (e.g.
+    to compare normalised dates).
+    """
     where = f"{entity_type} {entity_id} field={field}"
     try:
         resp = client.post(
@@ -67,10 +89,10 @@ def correct_field(
     try:
         back = client.get(f"{base_url}/entities/{entity_id}", timeout=timeout)
         back.raise_for_status()
-        ok = _readback_matches(back.json(), field, value)
+        ok = _readback_matches(back.json(), field, value, same)
     except Exception as exc:  # noqa: BLE001
         log.error("correction readback error for %s: %s", where, exc)
         return False
     if not ok:
-        log.error("correction readback MISMATCH for %s: wrote %r", where, value)
+        log.error("correction readback MISMATCH for %s: wrote %s", where, _describe(value))
     return ok

@@ -49,8 +49,52 @@ def make_client() -> tuple[httpx.Client, str] | None:
 
 
 def _idem(entity_id: str, field: str, value: Any) -> str:
+    """Deterministic per (entity, field, value).
+
+    An identical replay is a true replay. A later write of the *same* value to
+    the same field (e.g. a task reopened by the operator, then closed again with
+    the same status) dedupes to a no-op and the read-back then reports a
+    mismatch at ERROR: loud, not silent.
+    """
     digest = hashlib.sha256(repr(value).encode()).hexdigest()[:12]
     return f"monedula-{field}-{entity_id}-{digest}"
+
+
+_IDENTITY_FIELDS = ("title", "entity_type", "canonical_name", "name")
+
+
+def _has_identity(*dicts: Any) -> bool:
+    return any(
+        isinstance(d, dict) and any(d.get(k) for k in _IDENTITY_FIELDS) for d in dicts
+    )
+
+
+def _extract_snapshot(body: Any) -> dict | None:
+    """Unwrap a GET /entities response using every shape the repo accepts.
+
+    Shapes: ``{snapshot}``, ``{entity: {snapshot}}``, ``{snapshot: {snapshot}}``
+    and a flat entity. Returns None unless the unwrapped dict carries an
+    identity field (itself or its wrapper), so an empty or unrecognised
+    response is a failed read, never "no notes".
+    """
+    if not isinstance(body, dict):
+        return None
+    entity = body.get("entity") if isinstance(body.get("entity"), dict) else None
+    top = body.get("snapshot") if isinstance(body.get("snapshot"), dict) else None
+    candidates: list[tuple[dict, dict]] = []
+    if top is not None:
+        if isinstance(top.get("snapshot"), dict):
+            candidates.append((top["snapshot"], top))
+        candidates.append((top, body))
+    if entity is not None:
+        if isinstance(entity.get("snapshot"), dict):
+            candidates.append((entity["snapshot"], entity))
+        candidates.append((entity, entity))
+    candidates.append((body, body))
+    for snap, holder in candidates:
+        if snap and _has_identity(snap, holder):
+            return snap
+    return None
 
 
 def _snapshot(client: httpx.Client, base: str, entity_id: str) -> dict | None:
@@ -62,10 +106,21 @@ def _snapshot(client: httpx.Client, base: str, entity_id: str) -> dict | None:
     except Exception as exc:  # noqa: BLE001
         log.error("read of %s failed: %s", entity_id, exc)
         return None
-    snap = body.get("snapshot") if isinstance(body, dict) else None
-    if not isinstance(snap, dict):
-        snap = body if isinstance(body, dict) else {}
-    return snap.get("snapshot") if isinstance(snap.get("snapshot"), dict) else snap
+    snap = _extract_snapshot(body)
+    if snap is None:
+        log.error(
+            "read of %s returned an empty or unrecognised snapshot - treating as a "
+            "failed read so nothing is overwritten",
+            entity_id,
+        )
+    return snap
+
+
+def _same_date(actual: Any, written: Any) -> bool:
+    def day(v: Any) -> str:
+        return str(v or "").strip()[:10]
+
+    return bool(day(actual)) and day(actual) == day(written)
 
 
 def write_field(
@@ -76,9 +131,20 @@ def write_field(
     field: str,
     value: Any,
 ) -> bool:
-    """Correct one field and read it back. Logs ERROR and returns False on failure."""
+    """Correct one field and read it back. Logs ERROR and returns False on failure.
+
+    ``due_date`` is compared as a date, so a server that normalises it (adds a
+    time or timezone) does not make a good write read as a mismatch.
+    """
     return correct_field(
-        client, base, entity_id, entity_type, field, value, _idem(entity_id, field, value)
+        client,
+        base,
+        entity_id,
+        entity_type,
+        field,
+        value,
+        _idem(entity_id, field, value),
+        same=_same_date if field == "due_date" else None,
     )
 
 
@@ -92,7 +158,11 @@ def append_note(client: httpx.Client, base: str, task_id: str, note: str) -> boo
     snap = _snapshot(client, base, task_id)
     if snap is None:
         return False
-    existing = str(snap.get("notes") or "")
+    raw = snap.get("notes")
+    if raw is not None and not isinstance(raw, str):
+        log.error("notes on %s is not text - refusing to overwrite it", task_id)
+        return False
+    existing = raw or ""
     if note in existing:
         return True
     merged = f"{existing.rstrip()}\n{note}" if existing.strip() else note
