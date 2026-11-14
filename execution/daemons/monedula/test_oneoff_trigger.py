@@ -145,29 +145,19 @@ def test_preview_shows_due_date(monkeypatch) -> None:
 # ── Anti-replay: sent one-offs close task + archive profile ───────────────────
 
 
-def _ok_run(*_a, **_k):
-    class _R:
-        returncode = 0
-        stderr = ""
-        stdout = "{}"
+def _fake_close(monkeypatch, fake):
+    from handlers import task_writes
 
-    return _R()
+    monkeypatch.setattr(task_writes, "make_client", fake.connection)
 
 
 def test_close_one_off_sent_archives_profile_and_marks_task_done(monkeypatch) -> None:
     """A paid one-off must mark the task done and archive the profile."""
-    import subprocess as _sp
-
+    from fake_neotoma import FakeNeotoma
     from handlers.wise_transfer import _close_one_off, _update_task
 
-    calls: list[list[str]] = []
-
-    def fake_run(cmd, *a, **k):
-        calls.append(list(cmd))
-        return _ok_run()
-
-    monkeypatch.setattr(_sp, "run", fake_run)
-    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/neotoma")
+    fake = FakeNeotoma({"task_paid_1": {}, "prof_paid_1": {}})
+    _fake_close(monkeypatch, fake)
     monkeypatch.setattr(
         "handlers.wise_transfer._find_task_id", lambda _profile: "task_paid_1"
     )
@@ -175,60 +165,27 @@ def test_close_one_off_sent_archives_profile_and_marks_task_done(monkeypatch) ->
     profile = _oneoff(TODAY, entity_id="prof_paid_1")
     _update_task(profile, {"status": "sent", "transfer_id": "tr_1"})
 
-    status_updates = [
-        c
-        for c in calls
-        if len(c) >= 6
-        and c[1:4] == ["--api-only", "entities", "update"]
-        and "--status" in c
-    ]
-    assert any(
-        c[4] == "task_paid_1" and c[c.index("--status") + 1] == "done"
-        for c in status_updates
-    ), f"expected task done update; got {status_updates}"
-    assert any(
-        c[4] == "prof_paid_1" and c[c.index("--status") + 1] == "archived"
-        for c in status_updates
-    ), f"expected profile archived update; got {status_updates}"
+    assert fake.entities["task_paid_1"]["status"] == "done"
+    assert fake.entities["prof_paid_1"]["status"] == "archived"
+    types = {p["entity_id"]: p["entity_type"] for p in fake.writes("status")}
+    assert types == {"task_paid_1": "task", "prof_paid_1": "payment_profile"}
 
-    # Direct SUT path (same two status updates, no notes call).
-    calls.clear()
-    _close_one_off(profile, "task_paid_1", "/usr/bin/neotoma")
-    assert len(calls) == 2
-    assert calls[0] == [
-        "/usr/bin/neotoma",
-        "--api-only",
-        "entities",
-        "update",
-        "task_paid_1",
-        "--status",
-        "done",
-    ]
-    assert calls[1] == [
-        "/usr/bin/neotoma",
-        "--api-only",
-        "entities",
-        "update",
-        "prof_paid_1",
-        "--status",
-        "archived",
+    # Direct SUT path: the same two status writes, no notes call.
+    fake.posts.clear()
+    _close_one_off(profile, "task_paid_1")
+    assert [(p["entity_id"], p["field"], p["value"]) for p in fake.posts] == [
+        ("task_paid_1", "status", "done"),
+        ("prof_paid_1", "status", "archived"),
     ]
 
 
 def test_update_task_manual_required_does_not_close_one_off(monkeypatch) -> None:
     """manual_required must leave the task open and the profile active."""
-    import subprocess as _sp
-
+    from fake_neotoma import FakeNeotoma
     from handlers.wise_transfer import _update_task
 
-    calls: list[list[str]] = []
-
-    def fake_run(cmd, *a, **k):
-        calls.append(list(cmd))
-        return _ok_run()
-
-    monkeypatch.setattr(_sp, "run", fake_run)
-    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/neotoma")
+    fake = FakeNeotoma({"task_manual_1": {}, "prof_manual_1": {}})
+    _fake_close(monkeypatch, fake)
     monkeypatch.setattr(
         "handlers.wise_transfer._find_task_id", lambda _profile: "task_manual_1"
     )
@@ -236,64 +193,41 @@ def test_update_task_manual_required_does_not_close_one_off(monkeypatch) -> None
     profile = _oneoff(TODAY, entity_id="prof_manual_1")
     _update_task(profile, {"status": "manual_required"})
 
-    status_updates = [
-        c for c in calls if "--status" in c and "entities" in c and "update" in c
-    ]
-    assert status_updates == [], (
-        f"manual_required must not done/archive; got {status_updates}"
-    )
+    assert fake.writes("status") == [], "manual_required must not done/archive"
 
 
 def test_close_one_off_empty_ids_warn_without_crash(monkeypatch, caplog) -> None:
     """Empty task_id / entity_id arms skip their update without raising."""
     import logging
-    import subprocess as _sp
 
+    from fake_neotoma import FakeNeotoma
     from handlers.wise_transfer import _close_one_off
 
-    calls: list[list[str]] = []
-
-    def fake_run(cmd, *a, **k):
-        calls.append(list(cmd))
-        return _ok_run()
-
-    monkeypatch.setattr(_sp, "run", fake_run)
+    fake = FakeNeotoma()
+    _fake_close(monkeypatch, fake)
 
     profile = _oneoff(TODAY, entity_id="")
     with caplog.at_level(logging.WARNING):
-        _close_one_off(profile, "", "/usr/bin/neotoma")
+        _close_one_off(profile, "")
 
-    assert calls == [], f"empty ids must not call neotoma update; got {calls}"
+    assert fake.posts == [], "empty ids must not write"
     assert any("no entity id" in r.message for r in caplog.records)
 
 
-def test_close_one_off_subprocess_failure_logged_not_raised(
-    monkeypatch, caplog
-) -> None:
-    """Cleanup failures are logged; they must not propagate to the caller."""
+def test_close_one_off_failure_logged_not_raised(monkeypatch, caplog) -> None:
+    """Cleanup failures are logged at ERROR; they must not propagate."""
     import logging
-    import subprocess as _sp
 
+    from fake_neotoma import FakeNeotoma
     from handlers.wise_transfer import _close_one_off
 
-    responses = [
-        # task done: non-zero exit
-        type("R", (), {"returncode": 1, "stderr": "boom", "stdout": ""})(),
-        # profile archive: OSError
-        OSError("neotoma unreachable"),
-    ]
-
-    def fake_run(cmd, *a, **k):
-        next_resp = responses.pop(0)
-        if isinstance(next_resp, BaseException):
-            raise next_resp
-        return next_resp
-
-    monkeypatch.setattr(_sp, "run", fake_run)
+    fake = FakeNeotoma({"task_fail_1": {}, "prof_fail_1": {}}, fail_correct=True)
+    _fake_close(monkeypatch, fake)
 
     profile = _oneoff(TODAY, entity_id="prof_fail_1")
     with caplog.at_level(logging.ERROR):
-        _close_one_off(profile, "task_fail_1", "/usr/bin/neotoma")  # must not raise
+        _close_one_off(profile, "task_fail_1")  # must not raise
 
-    assert any("ONE-OFF CLEANUP FAILED" in r.message for r in caplog.records)
-    assert any("ONE-OFF CLEANUP ERROR" in r.message for r in caplog.records)
+    failed = [r for r in caplog.records if "ONE-OFF CLEANUP FAILED" in r.message]
+    assert len(failed) == 2
+    assert all(r.levelno == logging.ERROR for r in failed)

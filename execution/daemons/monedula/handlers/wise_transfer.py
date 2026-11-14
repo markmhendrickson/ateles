@@ -31,6 +31,7 @@ try:
     from ..handler_base import PaymentHandler
 except ImportError:
     from handler_base import PaymentHandler  # type: ignore[no-redef]
+from . import task_writes
 from .payment_profile import PaymentProfile
 
 log = logging.getLogger(__name__)
@@ -788,130 +789,114 @@ def _find_task_id(profile: PaymentProfile) -> str:
 
 
 def _update_task(profile: PaymentProfile, result: dict) -> None:
-    """Update the Neotoma payment task: add note and roll due_date."""
-    import shutil
+    """Update the Neotoma payment task: add note and roll due_date.
 
-    neotoma = shutil.which("neotoma")
-    if not neotoma:
-        log.warning(f"[{profile.name}] neotoma CLI not found — skipping task update")
-        return
-
+    Writes go through REST ``/correct`` with read-back (handlers/task_writes.py);
+    the neotoma CLI has no ``entities update`` command. Yoga/therapy tasks are
+    never marked completed here: only notes and due_date change.
+    """
     task_id = _find_task_id(profile)
     if not task_id:
-        log.warning(f"[{profile.name}] Could not find task ID — skipping task update")
+        log.error(f"[{profile.name}] Could not find task ID - task NOT updated")
         return
 
-    today = date.today()
-    transfer_id = result.get("transfer_id", "unknown")
-    amount = profile.amount_eur
-    reference = profile.wise_reference
-    note = (
-        f"Payment sent {today.isoformat()}: "
-        f"€{amount} Wise transfer_id={transfer_id} ref={reference}"
-    )
+    connection = task_writes.make_client()
+    if connection is None:
+        return
+    client, base = connection
 
-    try:
-        res = subprocess.run(
-            [neotoma, "--api-only", "entities", "update", task_id, "--notes", note],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=os.environ,
+    with client:
+        today = date.today()
+        transfer_id = result.get("transfer_id", "unknown")
+        amount = profile.amount_eur
+        reference = profile.wise_reference
+        note = (
+            f"Payment sent {today.isoformat()}: "
+            f"\u20ac{amount} Wise transfer_id={transfer_id} ref={reference}"
         )
-        if res.returncode != 0:
-            log.warning(
-                f"[{profile.name}] neotoma notes update failed: {res.stderr.strip()[:200]}"
-            )
+        if task_writes.append_note(client, base, task_id, note):
+            log.info(f"[{profile.name}] Neotoma task {task_id} notes updated (read back).")
         else:
-            log.info(f"[{profile.name}] Neotoma task {task_id} notes updated.")
-    except Exception as exc:
-        log.warning(f"[{profile.name}] neotoma update error: {exc}")
+            log.error(f"[{profile.name}] Neotoma task {task_id} notes NOT updated")
 
-    # A one-off invoice has no "next" occurrence: close the task and archive the
-    # profile so the next daily run cannot pay the same invoice twice.
-    if profile.one_off:
-        if result.get("status") != "sent":
-            log.info(
-                f"[{profile.name}] one-off payment not sent — leaving task and "
-                f"profile active for retry."
+        # A one-off invoice has no "next" occurrence: close the task and archive
+        # the profile so the next daily run cannot pay the same invoice twice.
+        if profile.one_off:
+            if result.get("status") != "sent":
+                log.info(
+                    f"[{profile.name}] one-off payment not sent - leaving task and "
+                    f"profile active for retry."
+                )
+                return
+            _close_one_off(profile, task_id, client=client, base=base)
+            return
+
+        next_due = _find_next_event_due_date(profile)
+        if not next_due:
+            log.error(
+                f"[{profile.name}] Could not find next event date - due_date NOT updated."
             )
             return
-        _close_one_off(profile, task_id, neotoma)
-        return
-
-    next_due = _find_next_event_due_date(profile)
-    if next_due:
-        try:
-            res = subprocess.run(
-                [
-                    neotoma,
-                    "--api-only",
-                    "entities",
-                    "update",
-                    task_id,
-                    "--due-date",
-                    next_due,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env=os.environ,
-            )
-            if res.returncode != 0:
-                log.warning(
-                    f"[{profile.name}] neotoma due_date update failed: {res.stderr.strip()[:200]}"
-                )
-            else:
-                log.info(f"[{profile.name}] Neotoma task due_date set to {next_due}.")
-        except Exception as exc:
-            log.warning(f"[{profile.name}] neotoma due_date update error: {exc}")
-    else:
-        log.warning(
-            f"[{profile.name}] Could not find next event date — due_date not updated."
-        )
+        if task_writes.write_field(client, base, task_id, "task", "due_date", next_due):
+            log.info(f"[{profile.name}] Neotoma task due_date set to {next_due} (read back).")
+        else:
+            log.error(f"[{profile.name}] Neotoma task {task_id} due_date NOT updated")
 
 
-def _close_one_off(profile: PaymentProfile, task_id: str, neotoma: str) -> None:
+def _close_one_off(
+    profile: PaymentProfile,
+    task_id: str,
+    *,
+    client: Any = None,
+    base: str = "",
+) -> None:
     """Mark a one-off task done and archive its profile after a paid transfer.
 
     Archiving matters: load_profiles_from_neotoma() skips non-active profiles,
     so this is what stops a paid one-off invoice from matching again tomorrow.
-    A failure here is logged loudly rather than raised — the money has already
+    A failure here is logged loudly rather than raised: the money has already
     moved, and the caller must not treat a bookkeeping failure as a payment
     failure. The risk it leaves is a duplicate preview, not a duplicate payment:
     the operator still has to approve by name at the Telegram gate.
     """
-    for args, what in (
-        (["entities", "update", task_id, "--status", "done"], "task status=done"),
-        (
-            ["entities", "update", profile.entity_id, "--status", "archived"],
-            "profile status=archived",
-        ),
-    ):
-        if args[2] in ("", None):
-            log.warning(f"[{profile.name}] cannot set {what}: no entity id")
-            continue
-        try:
-            res = subprocess.run(
-                [neotoma, "--api-only", *args],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env=os.environ,
-            )
-            if res.returncode != 0:
-                log.error(
-                    f"[{profile.name}] ONE-OFF CLEANUP FAILED ({what}): "
-                    f"{res.stderr.strip()[:200]} — this profile may re-trigger; "
-                    f"archive it by hand."
-                )
-            else:
-                log.info(f"[{profile.name}] one-off {what} set.")
-        except Exception as exc:
+    owned = None
+    if client is None:
+        owned = task_writes.make_client()
+        if owned is None:
             log.error(
-                f"[{profile.name}] ONE-OFF CLEANUP ERROR ({what}): {exc} — "
+                f"[{profile.name}] ONE-OFF CLEANUP FAILED: no Neotoma connection - "
                 f"this profile may re-trigger; archive it by hand."
             )
+            return
+        client, base = owned
+    try:
+        for entity_id, entity_type, value, what in (
+            (task_id, "task", "done", "task status=done"),
+            (profile.entity_id, "payment_profile", "archived", "profile status=archived"),
+        ):
+            if not entity_id:
+                log.warning(f"[{profile.name}] cannot set {what}: no entity id")
+                continue
+            try:
+                ok = task_writes.write_field(
+                    client, base, entity_id, entity_type, "status", value
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.error(
+                    f"[{profile.name}] ONE-OFF CLEANUP ERROR ({what}): {exc} - "
+                    f"this profile may re-trigger; archive it by hand."
+                )
+                continue
+            if ok:
+                log.info(f"[{profile.name}] one-off {what} set (read back).")
+            else:
+                log.error(
+                    f"[{profile.name}] ONE-OFF CLEANUP FAILED ({what}) - "
+                    f"this profile may re-trigger; archive it by hand."
+                )
+    finally:
+        if owned is not None:
+            client.close()
 
 
 def _find_next_event_due_date(profile: PaymentProfile) -> str | None:
