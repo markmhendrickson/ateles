@@ -53,7 +53,16 @@ A2A_PORT = int(os.environ.get("APIS_A2A_PORT", "8788"))
 A2A_PUBLIC_URL = os.environ.get(
     "APIS_A2A_PUBLIC_URL", f"http://{A2A_HOST}:{A2A_PORT}/"
 )
-A2A_REQUIRE_AUTH = os.environ.get("APIS_A2A_REQUIRE_AUTH", "1") == "1"
+def _require_auth_from_env() -> bool:
+    """Auth is required unless APIS_A2A_REQUIRE_AUTH is exactly "0".
+
+    Unset, empty (a dotenv line `APIS_A2A_REQUIRE_AUTH=`), and every
+    unrecognized value enforce; only the explicit "0" opts out.
+    """
+    return os.environ.get("APIS_A2A_REQUIRE_AUTH", "").strip() != "0"
+
+
+A2A_REQUIRE_AUTH = _require_auth_from_env()
 
 PROTOCOL_VERSION = "0.3.0"
 AGENT_VERSION = "1.0.0"
@@ -71,6 +80,10 @@ REJECTION_DETAIL: dict[str, tuple[str, str]] = {
     "grant_not_active": (
         "Your agent_grant exists but is not active.",
         "Ask the Ateles operator to activate your grant, or check its expiry.",
+    ),
+    "grant_check_unavailable": (
+        "Authorization could not be checked, so the request was refused.",
+        "This is an issue on the Ateles side. Retry later or contact the operator.",
     ),
     "missing_capability": (
         "Your grant doesn't include a2a:task:create.",
@@ -257,9 +270,9 @@ def authorize_caller(
     seam for tests: a callable ``(aauth_sub) -> object`` exposing ``.is_active``
     and ``.has_capability(cap)`` (matching lib.daemon_runtime.AgentGrant).
 
-    Grant enforcement is advisory in the current phase (mirrors grant_checker's
-    own staging): a missing/unreachable checker logs and allows, rather than
-    hard-blocking. Hard-block lands with the PS-layer AAuth integration.
+    A checker that cannot be built or raises denies ("grant_check_unavailable"),
+    unless the explicit ATELES_GRANTS_ADVISORY=1 flag is on, in which case it
+    allows with reason "grant_check_unavailable_advisory".
     """
     require = A2A_REQUIRE_AUTH if require_auth is None else require_auth
     if not require:
@@ -275,11 +288,20 @@ def authorize_caller(
         else:
             grant = grant_checker_factory(caller_sub)
     except Exception as exc:
-        log.warning("grant check unavailable for %s (%s) — allowing (advisory)",
-                    caller_sub, exc)
-        return True, "grant_check_unavailable_advisory"
+        from lib.daemon_runtime.grant_checker import grants_advisory
 
-    if not getattr(grant, "is_active", False):
+        if grants_advisory():
+            log.warning("grant check unavailable for %s (%s) - allowing (advisory flag)",
+                        caller_sub, type(exc).__name__)
+            return True, "grant_check_unavailable_advisory"
+        log.error("grant check unavailable for %s (%s) - denying",
+                  caller_sub, type(exc).__name__)
+        return False, "grant_check_unavailable"
+
+    active = getattr(grant, "is_active", False)
+    if callable(active):  # GrantChecker.is_active is a method, fakes use a bool
+        active = active()
+    if not active:
         return False, "grant_not_active"
     if not grant.has_capability(A2A_TASK_CAPABILITY):
         return False, "missing_capability"
@@ -301,6 +323,9 @@ def serve(bridge: Optional[ApisTaskBridge] = None) -> None:
         raise RuntimeError(
             "A2A gateway disabled. Set APIS_A2A_ENABLE=1 to start it."
         )
+    from lib.daemon_runtime.grant_checker import grants_advisory
+
+    grants_advisory()  # announces the opt-out once at WARNING when on
 
     try:
         import uvicorn

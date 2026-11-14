@@ -32,9 +32,22 @@ def test_should_process_skips_without_token():
     assert riparia.should_process(_msg(subject="Re: lunch?"), "op@d.test") is False
 
 
-def test_should_process_no_operator_filter_when_unset():
-    # With no OPERATOR_EMAIL configured, the sender check is skipped (token still required).
-    assert riparia.should_process(_msg(sender="anyone@x.test"), "") is True
+def test_should_process_refuses_when_operator_unset_empty_or_malformed():
+    for bad in ("", "   ", "not-an-address", "a@b@c", "op@d.test, x@y.test", "<op@d.test>"):
+        assert riparia.should_process(_msg(sender="anyone@x.test"), bad) is False, bad
+        assert riparia.should_process(_msg(sender="op@d.test"), bad) is False, bad
+
+
+def test_should_process_matches_bare_address_by_equality():
+    op = "op@d.test"
+    assert riparia.should_process(_msg(sender="Op <op@d.test>"), op) is True
+    assert riparia.should_process(_msg(sender="OP@D.TEST"), op) is True
+    # suffix / prefix / embedded spoofs must fail equality
+    assert riparia.should_process(_msg(sender="op@d.test.attacker.net"), op) is False
+    assert riparia.should_process(_msg(sender="xop@d.test"), op) is False
+    assert riparia.should_process(_msg(sender="op@d.test <evil@x.test>"), op) is False
+    assert riparia.should_process(_msg(sender="op@d.test@evil.test"), op) is False
+
 
 
 def _conv(eid, summary, ts):

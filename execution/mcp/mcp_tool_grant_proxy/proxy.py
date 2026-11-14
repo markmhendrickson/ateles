@@ -21,10 +21,9 @@ EXCEPT `tools/call`, which it intercepts:
   5. Either way, emit a `tool_call_observation` to Neotoma (result allowed |
      denied) for a unified cross-MCP audit trail.
 
-Permissive fallback: if Neotoma is unreachable, or the agent has no grant that
-declares ANY tool capabilities, calls are allowed (advisory mode) — matching
-GrantChecker.check_tool semantics. This lets un-migrated agents keep working
-while migrated agents get hard enforcement.
+Fail closed: an unset ATELES_AGENT_SUB, an unreachable Neotoma, or no grant
+declaring tool capabilities all DENY, matching GrantChecker.check_tool. The only
+way to run permissively is the explicit ATELES_GRANTS_ADVISORY=1 flag.
 
 Launch pattern (in .mcp.json or Anthus dispatch config):
 
@@ -61,6 +60,7 @@ if str(_REPO_ROOT) not in sys.path:
 from lib.daemon_runtime.grant_checker import (  # noqa: E402
     GrantChecker,
     check_param_constraints,
+    grants_advisory,
 )
 
 # Session-integrity (ateles#6 layer 2): observe-only invariant riding the same
@@ -106,8 +106,11 @@ class GrantEnforcer:
     def enforce(self, tool: str, arguments: dict) -> tuple[bool, str]:
         """Return (allowed, reason). reason is '' when allowed."""
         if not self.agent_sub:
-            # No identity configured → advisory passthrough.
-            return True, ""
+            # No identity configured: deny unless advisory mode is explicit.
+            if grants_advisory():
+                return True, ""
+            log.error("ATELES_AGENT_SUB is not set - denying tool call")
+            return False, "no agent identity configured (ATELES_AGENT_SUB)"
         checker = self._checker_loaded()
         allowed, constraints = checker.check_tool(self.server_name, tool)
         if not allowed:
@@ -186,7 +189,8 @@ async def _pump_downstream_to_client(
 
 
 async def run_proxy(server_name: str, downstream_cmd: list[str]) -> int:
-    agent_sub = os.environ.get("ATELES_AGENT_SUB", "")
+    agent_sub = os.environ.get("ATELES_AGENT_SUB", "").strip()
+    grants_advisory()  # announces the opt-out once at WARNING when on
     enforcer = GrantEnforcer(agent_sub, server_name)
     tracker = (
         SessionIntegrityTracker(agent_sub, server_name)
@@ -195,7 +199,7 @@ async def run_proxy(server_name: str, downstream_cmd: list[str]) -> int:
     )
 
     log.info(
-        f"[proxy] server={server_name} agent_sub={agent_sub or '<none/advisory>'} "
+        f"[proxy] server={server_name} agent_sub={agent_sub or '<none: denying>'} "
         f"downstream={' '.join(downstream_cmd)}"
     )
 

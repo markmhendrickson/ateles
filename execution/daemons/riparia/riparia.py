@@ -26,7 +26,7 @@ once this daemon is proven live.
 
 Environment:
   ATELES_SWARM_EMAIL        dedicated swarm mailbox (the From/To of run threads)
-  OPERATOR_EMAIL            operator address (only their replies are routed)
+  OPERATOR_EMAIL            operator address (REQUIRED; only their replies are routed; unset => daemon exits)
   NEOTOMA_BASE_URL / NEOTOMA_BEARER_TOKEN
   RIPARIA_POLL_INTERVAL     seconds between polls (default 60)
   RIPARIA_MAX_FETCH         messages per poll (default 25)
@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -90,16 +91,34 @@ PROCESSED_LABEL = "Riparia/processed"
 # ── Pure routing logic (unit-tested) ─────────────────────────────────────────
 
 
+_BARE_ADDRESS_RE = re.compile(r"^[^\s<>@,;\"]+@[^\s<>@,;\"]+$")
+
+
+def _sender_address(sender: str) -> str:
+    """Bare lowercased address from `Name <addr@x>` (or a plain address)."""
+    found = re.findall(r"<([^<>]*)>", sender or "")
+    return (found[-1] if found else (sender or "")).strip().lower()
+
+
+def operator_email_valid(operator_email: str) -> bool:
+    """True when the configured operator principal is a usable bare address."""
+    return bool(_BARE_ADDRESS_RE.match((operator_email or "").strip()))
+
+
 def should_process(msg: dict, operator_email: str) -> bool:
     """True when a polled message is an unprocessed operator reply to a run thread.
 
-    Requires: not already labelled processed; sender is the operator (when an
-    operator address is configured); and the subject carries a recoverable task id.
+    Requires: not already labelled processed; the operator address is configured
+    and well formed (absent, empty or malformed REFUSES, never skips the check);
+    the sender's bare address EQUALS the operator address; and the subject carries
+    a recoverable task id.
     """
     if PROCESSED_LABEL in (msg.get("labels") or []):
         return False
-    sender = (msg.get("sender") or "").lower()
-    if operator_email and operator_email.lower() not in sender:
+    if not operator_email_valid(operator_email):
+        log.error("OPERATOR_EMAIL is unset or malformed - refusing to route replies")
+        return False
+    if _sender_address(msg.get("sender") or "") != operator_email.strip().lower():
         return False
     return parse_task_id(msg.get("subject") or "") is not None
 
@@ -273,6 +292,10 @@ def main() -> None:
     if not SWARM_EMAIL:
         log.error("ATELES_SWARM_EMAIL not set — the dedicated swarm mailbox must be "
                   "provisioned and gws-authed before Riparia can route replies. Exiting.")
+        sys.exit(1)
+    if not operator_email_valid(OPERATOR_EMAIL):
+        log.error("OPERATOR_EMAIL is unset or malformed - without a configured "
+                  "operator principal no reply can be authorized. Exiting.")
         sys.exit(1)
     log.info(f"Riparia reply-router started. Polling {SWARM_EMAIL} every {POLL_INTERVAL}s "
              f"for operator replies to run threads.")

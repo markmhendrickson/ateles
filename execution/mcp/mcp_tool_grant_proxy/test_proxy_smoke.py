@@ -84,10 +84,24 @@ def _run_case(env_extra: dict, request: dict, timeout: float = 8.0) -> dict:
     return {}
 
 
-def test_allowed_passthrough_advisory():
-    """No ATELES_AGENT_SUB → advisory bypass → downstream reached."""
+def test_no_identity_denies_by_default():
+    """No ATELES_AGENT_SUB and no advisory flag → denied, downstream NOT reached."""
     resp = _run_case(
-        {"ATELES_AGENT_SUB": "", "NEOTOMA_BEARER_TOKEN": ""},
+        {"ATELES_AGENT_SUB": "", "NEOTOMA_BEARER_TOKEN": "", "ATELES_GRANTS_ADVISORY": ""},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+         "params": {"name": "read_parquet", "arguments": {"table": "transactions"}}},
+    )
+    assert resp, "no response"
+    text = resp["result"]["content"][0]["text"]
+    assert "DOWNSTREAM_REACHED" not in text
+    assert resp["result"].get("isError") is True
+    assert "DENIED" in text
+
+
+def test_allowed_passthrough_advisory():
+    """No ATELES_AGENT_SUB + explicit advisory flag → downstream reached."""
+    resp = _run_case(
+        {"ATELES_AGENT_SUB": "", "NEOTOMA_BEARER_TOKEN": "", "ATELES_GRANTS_ADVISORY": "1"},
         {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
          "params": {"name": "read_parquet", "arguments": {"table": "transactions"}}},
     )
