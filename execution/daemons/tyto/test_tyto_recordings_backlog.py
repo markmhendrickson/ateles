@@ -121,8 +121,10 @@ def test_pre_existing_pairs_are_marked_handled_and_not_transcribed(home, monkeyp
     assert len(guard_lines) == 1
     line = guard_lines[0]
     assert f"{len(BACKLOG) + 1} pre-existing pair(s) in {recordings}" in line
-    assert "1 pair(s) keep a .pending-store.json sidecar" in line
-    assert "does not mean the store is unfinished" in line
+    assert "1 pair(s) have a .pending-store.json file" in line
+    assert "proves neither that the store landed nor that it did not" in line
+    assert "does not mean the store is unfinished" not in line
+    assert "not that the store landed" in line
     assert "file(s)" not in line
     # Keyed per pair (system track), persisted in the same retry journal.
     journal = _journal()
@@ -359,9 +361,127 @@ def test_guard_with_no_journal_warns_through_the_notifier(home, monkeypatch, cap
             and r.levelno == logging.WARNING]
 
 
-def test_guard_start_from_existing_v2_journal_does_not_notify(home, monkeypatch):
+def test_guard_start_from_existing_v2_journal_still_warns(home, monkeypatch, caplog):
+    for stamp in BACKLOG:
+        _write_pair(tyto.RECORDINGS_DIR, stamp)
+    _write_pair(tyto.RECORDINGS_DIR, "20260301 1000", sidecars=False)
+    _v2_journal()
+    caplog.set_level(logging.INFO)
+    watcher, _calls = _watcher(monkeypatch)
+    assert watcher._notifier.send.call_count == 1
+    text = watcher._notifier.send.call_args.args[0]
+    assert watcher._notifier.send.call_args.kwargs["priority"] == tyto.Priority.WARN
+    assert "no journal present" not in text
+    assert f"{len(BACKLOG)} pair(s) marked handled, 1 pair(s) left" in text
+    assert "re-transcribed" in text
+    assert "does not prove the store landed" in text
+    # Each seeded pair is named at INFO.
+    info = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    for stamp in BACKLOG:
+        assert any(f"{stamp} system.mp4" in m and "seeded" in m for m in info)
+
+
+def test_seed_with_nothing_left_still_warns_about_sidecar_evidence(home, monkeypatch):
     for stamp in BACKLOG:
         _write_pair(tyto.RECORDINGS_DIR, stamp)
     _v2_journal()
     watcher, _calls = _watcher(monkeypatch)
-    assert watcher._notifier.send.call_count == 0
+    text = watcher._notifier.send.call_args.args[0]
+    assert f"{len(BACKLOG)} pair(s) marked handled, 0 pair(s) left" in text
+    assert "re-transcribed" not in text
+
+
+def test_symlinked_mic_track_does_not_crash_the_seed_and_is_not_seeded(home, monkeypatch, tmp_path):
+    recordings = tyto.RECORDINGS_DIR
+    system = _write_pair(recordings, "20251201 1000")
+    outside = tmp_path / "outside.mp4"
+    outside.write_bytes(b"synthetic outside")
+    mic = recordings / "20251201 1000 mic.mp4"
+    mic.unlink()
+    mic.symlink_to(outside)
+    _write_pair(recordings, BACKLOG[0])
+    _v2_journal()
+
+    watcher, calls = _watcher(monkeypatch)  # constructor must not raise
+    assert system not in watcher._transcribed
+    assert str(system) not in _journal()["handled"]
+    _poll(watcher, times=3)
+    # Normal processing quarantines it instead of transcribing.
+    assert calls == []
+    assert [h["path"] for h in _journal()["hard_failed"]] == [str(system)]
+
+
+def test_file_vanishing_during_the_seed_is_not_seeded_and_does_not_crash(home, monkeypatch):
+    recordings = tyto.RECORDINGS_DIR
+    system = _write_pair(recordings, BACKLOG[0])
+    _v2_journal()
+    original = tyto.RecordingWatcher._canonical_source
+
+    def _vanish(self, path):
+        # The mic track is listed, then disappears before it is resolved.
+        if "mic" in path.name:
+            path.unlink(missing_ok=True)
+        return original(self, path)
+
+    monkeypatch.setattr(tyto.RecordingWatcher, "_canonical_source", _vanish)
+    watcher = tyto._recording_watchers(MagicMock())[0]  # must not raise
+    assert system not in watcher._transcribed
+    assert str(system) not in _journal()["handled"]
+
+
+def test_only_a_recent_mic_track_keeps_the_pair_unseeded(home, monkeypatch):
+    recordings = tyto.RECORDINGS_DIR
+    system = _write_pair(recordings, BACKLOG[0])
+    now = time.time()
+    os.utime(recordings / f"{BACKLOG[0]} mic.mp4", (now, now))
+    _v2_journal()
+    watcher, calls = _watcher(monkeypatch)
+    _poll(watcher, times=3)
+    assert [c[0] for c in calls] == [system]
+
+
+def test_unreadable_folder_warns_once_not_every_poll(home, monkeypatch, caplog):
+    recordings = tyto.RECORDINGS_DIR
+    recordings.rmdir()
+    caplog.set_level(logging.WARNING)
+    watcher, _calls = _watcher(monkeypatch)
+    _poll(watcher, times=5)
+    warnings = [r for r in caplog.records
+                if r.levelno == logging.WARNING and "missing or unreadable" in r.getMessage()]
+    assert len(warnings) == 1
+    # A recovered folder re-arms the warning for a later outage.
+    recordings.mkdir()
+    _poll(watcher)
+    recordings.rmdir()
+    _poll(watcher, times=3)
+    warnings = [r for r in caplog.records
+                if r.levelno == logging.WARNING and "missing or unreadable" in r.getMessage()]
+    assert len(warnings) == 2
+
+
+def test_recovery_refused_when_the_seed_has_not_run(home, monkeypatch):
+    recordings = tyto.RECORDINGS_DIR
+    system = _write_pair(recordings, BACKLOG[0], sidecars=False)
+    recordings.chmod(0o000)
+    try:
+        watcher = tyto._recording_watchers(MagicMock())[0]
+        assert watcher._backlog_seeded_at is None
+        ran = []
+        monkeypatch.setattr(watcher, "_run_transcription", lambda *a, **k: ran.append(a) or "ent_x")
+        with pytest.raises(RuntimeError, match="has not seeded"):
+            watcher.process_selected_recording(system, store_only=False, recover_held=False)
+        assert ran == []
+    finally:
+        recordings.chmod(0o755)
+
+
+def test_recovery_rolls_back_handled_when_the_journal_save_fails(home, monkeypatch):
+    recordings = tyto.RECORDINGS_DIR
+    _write_pair(recordings, BACKLOG[0])
+    watcher, _calls = _watcher(monkeypatch)
+    new = _write_pair(recordings, "20260301 1000", sidecars=False)
+    monkeypatch.setattr(watcher, "_run_transcription", lambda *a, **k: "ent_synthetic")
+    monkeypatch.setattr(watcher, "_save_retry_state", lambda: False)
+    with pytest.raises(RuntimeError, match="could not be committed"):
+        watcher.process_selected_recording(new, store_only=False, recover_held=False)
+    assert new not in watcher._transcribed

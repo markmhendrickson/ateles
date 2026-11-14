@@ -66,10 +66,15 @@ Environment variables:
                             added, so no start re-transcribes an old pair. Only a
                             pair that already shows prior processing (a
                             .transcript.txt sidecar) and is older than the seed
-                            margin is seeded; any other pair is processed. The
+                            margin is seeded; any other pair is processed. A
+                            sidecar proves ASR ran, NOT that the store landed:
+                            an old transcribed-but-unstored pair is skipped, its
+                            transcript kept on disk, and every seed sends a
+                            warning with the count so the operator verifies the
+                            seeded pairs against stored transcriptions. The
                             guard runs on the first start AND again whenever
-                            the journal is absent (a warning is sent then). A
-                            pair with a journaled pending retry is still retried.
+                            the journal is absent. A pair with a journaled
+                            pending retry is still retried.
   TYTO_NATIVE_RECORDING_RETRY_STATE  Separate platform-native retry journal.
   TYTO_VOICE_MEMO_RETRY_STATE  Durable pending-retry journal (default:
                             ~/.local/state/ateles/tyto-voice-memo-retries.json).
@@ -763,6 +768,7 @@ class RecordingWatcher:
         )
         self._backlog_seeded_at: str | None = None
         self._journal_existed = False
+        self._folder_warned = False
         self._retry_state_available = True
         if self._retry_state_path is not None:
             self._load_retry_state()
@@ -963,19 +969,37 @@ class RecordingWatcher:
         return self._save_retry_state()
 
 
+    def _warn_folder_unreadable(self, exc: BaseException | None = None) -> None:
+        """Log once per outage that the call folder cannot be read."""
+        if self._folder_warned:
+            return
+        self._folder_warned = True
+        log.warning(
+            f"[{DAEMON_NAME}] Recordings dir is missing or unreadable: {self._dir}"
+            + (f" ({type(exc).__name__})" if exc is not None else "")
+            + "; nothing is processed until it can be read."
+        )
+
     # A pair modified this recently is never seeded as backlog (persistent guard).
     SEED_RECENT_SECS = 6 * 3600
 
     def _seed_has_prior_processing(self, path: Path) -> bool:
         """True when a pair is provably old work the guard may skip.
 
-        The persistent seed must make its worst case a duplicate transcription,
-        never a lost call, so it seeds only a pair that (a) carries a
-        ``.transcript.txt`` sidecar, evidence that a past run processed it, and
-        (b) has neither track modified within ``SEED_RECENT_SECS``. Everything
-        else (a call being recorded, a pair that landed while the daemon was
-        down or still settling, a pair with only a ``.pending-store.json``)
-        goes through normal settle-and-transcribe processing.
+        The persistent seed skips a pair only when it (a) carries a
+        ``.transcript.txt`` sidecar, evidence that ASR once ran on it, and (b)
+        has neither track modified within ``SEED_RECENT_SECS``. A sidecar is
+        written before the Neotoma store and also on ``--no-store`` runs, so it
+        does NOT prove the store landed: the worst case is an old
+        transcribed-but-unstored pair being skipped (its transcript stays on
+        disk), which ``_seed_existing`` surfaces with a notifier warning.
+        Everything else (a call being recorded, a pair that landed while the
+        daemon was down or still settling, a pair with only a
+        ``.pending-store.json``) goes through normal processing.
+
+        Any unsafe or vanished source (``RecordingSourceError``, ``OSError``)
+        means "not provably old": the pair is not seeded and normal processing
+        and its quarantine decide what happens.
         """
         try:
             if not path.with_name(path.name + ".transcript.txt").is_file():
@@ -985,7 +1009,7 @@ class RecordingWatcher:
             for source in (path, mic):
                 if source is not None and now - source.stat().st_mtime < self.SEED_RECENT_SECS:
                     return False
-        except OSError:
+        except (OSError, RecordingSourceError):
             return False
         return True
 
@@ -1001,13 +1025,23 @@ class RecordingWatcher:
         try:
             # Paired watchers key a recording by its remote/system track (the
             # mic is found from it), so this is one entry per pair.
-            existing = [self._canonical_source(p) for p in self._dir.iterdir() if self._is_eligible_file(p)]
-        except OSError:
+            candidates = [p for p in self._dir.iterdir() if self._is_eligible_file(p)]
+        except OSError as exc:
             # Folder missing or unreadable: leave the marker unset. poll_once
             # re-runs the seed before processing anything, so the backlog is
             # still guarded when the folder appears, and no journal is written
             # with a null marker.
+            self._warn_folder_unreadable(exc)
             return
+        self._folder_warned = False
+        existing = []
+        for candidate in candidates:
+            try:
+                existing.append(self._canonical_source(candidate))
+            except RecordingSourceError:
+                # Symlink, non-file or vanished source: never seeded; normal
+                # processing quarantines it.
+                continue
         # A journaled retry (pending) is still retried, and a journaled hold
         # keeps its own disposition; neither is backlog.
         seeded = [
@@ -1037,22 +1071,38 @@ class RecordingWatcher:
             if self._persist_backlog_guard:
                 line += (
                     f" {left} {noun} without prior processing or modified in the "
-                    "last 6 hours were left for normal processing."
+                    "last 6 hours were left for normal processing"
+                    + (" and will be transcribed." if left else ".")
+                )
+                line += (
+                    " A transcript sidecar proves transcription ran, not that "
+                    "the store landed; verify the seeded pairs against stored "
+                    "transcriptions."
                 )
             if sidecars:
                 line += (
-                    f" {sidecars} {noun} keep a .pending-store.json sidecar; "
-                    "that file stays after a store that landed, so it does not "
-                    "mean the store is unfinished. Before running "
-                    "--recording-file --store-only on one, look up its stored "
-                    "transcription by source path."
+                    f" {sidecars} {noun} have a .pending-store.json file; it "
+                    "stays after a successful store, so it proves neither that "
+                    "the store landed nor that it did not. Check each against "
+                    "its stored transcription by source path before relying on "
+                    "it or running --recording-file --store-only."
                 )
-            if self._persist_backlog_guard and not self._journal_existed:
+            if self._persist_backlog_guard:
+                for path in seeded:
+                    log.info(f"[{DAEMON_NAME}] Backlog guard seeded on sidecar evidence: {path.name}")
                 log.warning(line)
+                prefix = (
+                    "Tyto backlog guard ran with no journal present: "
+                    if not self._journal_existed else "Tyto backlog guard ran: "
+                )
                 self._notifier.send(
-                    f"Tyto backlog guard ran with no journal present: {seeded_count} "
-                    f"{noun} marked handled, {left} {noun} left for processing. Check that "
-                    "no call from the downtime is missing a transcription.",
+                    f"{prefix}{seeded_count} "
+                    f"{noun} marked handled, {left} {noun} left for processing"
+                    + (" (they will be re-transcribed)" if left else "")
+                    + ". Handled pairs were seeded on a transcript sidecar alone, "
+                    "which does not prove the store landed: verify them against "
+                    "stored transcriptions (transcripts remain on disk beside "
+                    "the recordings).",
                     priority=Priority.WARN,
                     handler=DAEMON_NAME,
                 )
@@ -1218,8 +1268,9 @@ class RecordingWatcher:
             if self._backlog_seeded_at is None or not self._retry_state_available:
                 return
         if not self._dir.exists():
-            log.debug(f"[{DAEMON_NAME}] Recordings dir does not exist: {self._dir}")
+            self._warn_folder_unreadable()
             return
+        self._folder_warned = False
 
         now = datetime.now(tz=UTC).timestamp()
 
