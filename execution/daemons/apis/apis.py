@@ -6170,7 +6170,36 @@ async def repeating_panel_sweep(dispatcher: SwarmDispatcher, interval_s: int) ->
 async def deferred_review_sweep_pass(dispatcher: SwarmDispatcher) -> None:
     """One pass of Apis's periodic review sweep (``main``'s
     ``deferred_review_sweep`` runs it every APIS_DEFERRED_REVIEW_SWEEP_SECONDS).
-    Each step is fail-open: a broken one is logged and the next still runs."""
+    Each step is fail-open: a broken one is logged and the next still runs.
+
+    The pass shares one open-PR list and parent-issue reads between its steps,
+    and stops early (one log line, with the reset time) when GitHub reports
+    fewer than APIS_SWEEP_MIN_REMAINING (default 1000) calls left, so panel
+    approvals and lens posting keep headroom on the same installation token."""
+    dispatcher.begin_sweep_pass()
+    try:
+        await _deferred_review_sweep_steps(dispatcher)
+    finally:
+        dispatcher.end_sweep_pass()
+
+
+async def _deferred_review_sweep_steps(dispatcher: SwarmDispatcher) -> None:
+    quota_logged = False
+
+    def _stop_for_quota(next_step: str) -> bool:
+        nonlocal quota_logged
+        if not dispatcher.sweep_quota_low():
+            return False
+        if not quota_logged:
+            quota_logged = True
+            log.warning(
+                f"[{DAEMON_NAME}] review sweep stopped before {next_step}: "
+                f"GitHub quota remaining {dispatcher._rate_remaining} < "
+                f"{dispatcher._sweep_min_remaining()}; resets at "
+                f"{dispatcher.sweep_quota_reset_iso()} — rest of pass skipped"
+            )
+        return True
+
     # 0. Fly reservations marked for the reaper. A run whose login
     #    machine clean-up Fly refused keeps its reservation, marked,
     #    and only a later launch's reaper would settle it, so
@@ -6192,6 +6221,8 @@ async def deferred_review_sweep_pass(dispatcher: SwarmDispatcher) -> None:
     # the bounded backup for missed deliveries. It shares the review
     # sweep cadence, so secondary invalidation lag is at most
     # APIS_DEFERRED_REVIEW_SWEEP_SECONDS (600s by default).
+    if _stop_for_quota("supersede_stale_review_verdicts"):
+        return
     try:
         await dispatcher.supersede_stale_review_verdicts(
             list(dispatcher.config.resume_repositories)
@@ -6201,6 +6232,8 @@ async def deferred_review_sweep_pass(dispatcher: SwarmDispatcher) -> None:
             f"[{DAEMON_NAME}] review-supersession sweep failed: {exc}",
             exc_info=True,
         )
+    if _stop_for_quota("resume_deferred_reviews"):
+        return
     try:
         await dispatcher.resume_deferred_reviews(
             list(dispatcher.config.resume_repositories)
@@ -6218,6 +6251,8 @@ async def deferred_review_sweep_pass(dispatcher: SwarmDispatcher) -> None:
     #    zero reviews, found by a human). Same cadence and the same
     #    fail-open discipline; runs after the deferred pass so a PR
     #    with a live deferral is never double-handled.
+    if _stop_for_quota("resume_stalled_reviews"):
+        return
     try:
         await dispatcher.resume_stalled_reviews(
             list(dispatcher.config.resume_repositories)
@@ -6237,6 +6272,8 @@ async def deferred_review_sweep_pass(dispatcher: SwarmDispatcher) -> None:
     #    Re-dispatches ONLY that lens; same cadence, same fail-open
     #    discipline, runs last so a PR the earlier passes already
     #    re-dispatched is not handled twice in one tick.
+    if _stop_for_quota("resume_missing_lens_reviews"):
+        return
     try:
         await dispatcher.resume_missing_lens_reviews(
             list(dispatcher.config.resume_repositories)
@@ -6254,6 +6291,8 @@ async def deferred_review_sweep_pass(dispatcher: SwarmDispatcher) -> None:
     #    `resume_stalled_reviews` excludes them by design (it requires
     #    ZERO reviews), so until now nothing watched this state at all.
     #    Same cadence, same fail-open discipline.
+    if _stop_for_quota("resume_unactioned_revisions"):
+        return
     try:
         await dispatcher.resume_unactioned_revisions(
             list(dispatcher.config.resume_repositories)
@@ -6268,6 +6307,8 @@ async def deferred_review_sweep_pass(dispatcher: SwarmDispatcher) -> None:
     #    watching while three of them rotted CLEAN → DIRTY over 33-53
     #    days. Runs last: it reports on the state the sweeps above have
     #    already had their chance to change this tick.
+    if _stop_for_quota("report_pr_review_queue"):
+        return
     try:
         await dispatcher.report_pr_review_queue(
             list(dispatcher.config.resume_repositories)

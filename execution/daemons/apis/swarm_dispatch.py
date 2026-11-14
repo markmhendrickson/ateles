@@ -52,6 +52,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -4886,6 +4887,24 @@ class DispatchConfig:
     require_label: str = _label_gate.required_label()
 
 
+# Gate sources that run inside the periodic review sweep. Only these may share
+# a parent-issue read across the pass; webhook sources always read fresh.
+_SWEEP_GATE_SOURCES = frozenset(
+    {
+        "resume_deferred_reviews",
+        "resume_stalled_reviews",
+        "resume_missing_lens_reviews",
+        "resume_unactioned_revisions",
+        "report_pr_review_queue",
+        "supersede_stale_review_verdicts",
+    }
+)
+
+
+class _SweepQuotaLow(Exception):
+    """A sweep step stopped before calling GitHub because the quota is low."""
+
+
 class SwarmDispatcher:
     """Routes normalized GitHub triggers into agent pipelines."""
 
@@ -5008,7 +5027,10 @@ class SwarmDispatcher:
     # ── label gate (bootstrap mode / canary lane) ───────────────────────────
 
     async def _label_gate_allows(
-        self, trigger: SwarmTrigger, *, source: str = "webhook"
+        self,
+        trigger: SwarmTrigger,
+        *,
+        source: str = "webhook",
     ) -> bool:
         """Decide whether automatic software work may run for `trigger`.
 
@@ -5077,8 +5099,8 @@ class SwarmDispatcher:
             parent = self._parent_issue_number(trigger.body, trigger.repository)
             if parent is not None:
                 try:
-                    parent_issue = await self._fetch_issue_fields(
-                        trigger.repository, parent
+                    parent_issue = await self._gate_parent_issue(
+                        trigger.repository, parent, source in _SWEEP_GATE_SOURCES
                     )
                 except Exception:  # fail closed, never crash the dispatch
                     parent_issue = None
@@ -5122,6 +5144,150 @@ class SwarmDispatcher:
             + ("the PR or its linked parent issue" if trigger.is_pr else "the issue"),
         )
         return False
+
+    # ── sweep request budget (ateles task ent_7142b689ed7a24a51dc0e796) ─────
+    #
+    # The periodic review sweep used to read every open PR's comments and
+    # reviews in every step and only then let the label gate drop the PR. The
+    # helpers below move the gate in front of those reads, share the open-PR
+    # list between back-to-back steps, and stop a pass when the installation's
+    # remaining quota is low so approvals and lens posting keep headroom.
+
+    # Class-level defaults: the pass cache exists only while a pass runs, and
+    # the rate-limit reading is whatever the latest list response reported.
+    _sweep_pass: dict | None = None
+    _rate_remaining: int | None = None
+    _rate_reset: float | None = None
+
+    def begin_sweep_pass(self) -> None:
+        """Open a per-pass cache (shared open-PR lists, parent-issue reads)."""
+        self._sweep_pass = {"lists": {}, "issues": {}}
+
+    def end_sweep_pass(self) -> None:
+        self._sweep_pass = None
+
+    async def _gate_parent_issue(
+        self, repository: str, parent: int, use_pass_cache: bool
+    ) -> dict | None:
+        """The linked parent issue for the label gate. Within one sweep pass a
+        successful read is shared by every step; webhook callers never use the
+        cache, so a label added a moment ago is always seen."""
+        cache = self._sweep_pass if use_pass_cache else None
+        key = (repository.casefold(), parent)
+        if cache is not None and key in cache["issues"]:
+            return cache["issues"][key]
+        fields = await self._fetch_issue_fields(repository, parent)
+        if cache is not None and fields is not None:
+            cache["issues"][key] = fields
+        return fields
+
+    def _note_rate_limit(self, resp) -> None:
+        """Remember `X-RateLimit-Remaining` / `-Reset` from a GitHub response."""
+        headers = getattr(resp, "headers", None)
+        if not headers:
+            return
+        try:
+            remaining = headers.get("X-RateLimit-Remaining")
+            reset = headers.get("X-RateLimit-Reset")
+            if remaining is not None:
+                self._rate_remaining = int(remaining)
+            if reset is not None:
+                self._rate_reset = float(reset)
+        except (TypeError, ValueError):
+            return
+
+    @staticmethod
+    def _sweep_min_remaining() -> int:
+        """Remaining-call floor below which a sweep pass stops (0 disables)."""
+        try:
+            return int(os.environ.get("APIS_SWEEP_MIN_REMAINING", "1000"))
+        except ValueError:
+            return 1000
+
+    def sweep_quota_low(self) -> bool:
+        """True while the last reading is below the floor and not yet reset."""
+        floor = self._sweep_min_remaining()
+        remaining = self._rate_remaining
+        if floor <= 0 or remaining is None or remaining >= floor:
+            return False
+        reset = self._rate_reset
+        return reset is None or time.time() < reset
+
+    def sweep_quota_reset_iso(self) -> str:
+        if self._rate_reset is None:
+            return "unknown"
+        return datetime.fromtimestamp(self._rate_reset, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
+    async def _list_open_prs(
+        self,
+        client: httpx.AsyncClient,
+        repository: str,
+        *,
+        source: str,
+        per_page: int = 100,
+    ) -> list[dict]:
+        """Open PRs for a sweep step, label-gated BEFORE any per-PR read.
+
+        With the gate set, a PR is kept only when it is in the lane — the label
+        on the PR itself (already in this list response, no extra call) or on
+        its linked parent issue (one read, only for a PR that names a parent,
+        shared across the pass). With the gate unset the list is returned
+        unchanged. Back-to-back steps of one pass share a single list read
+        (APIS_SWEEP_LIST_SHARE_SECONDS, default 120). Raises on an HTTP error,
+        and `_SweepQuotaLow` before any call while the quota floor is breached.
+        """
+        if self.sweep_quota_low():
+            raise _SweepQuotaLow(f"{repository}: GitHub quota low")
+        cache = self._sweep_pass
+        prs: list[dict] | None = None
+        if cache is not None:
+            hit = cache["lists"].get(repository)
+            try:
+                share = float(os.environ.get("APIS_SWEEP_LIST_SHARE_SECONDS", "120"))
+            except ValueError:
+                share = 120.0
+            if hit is not None and time.monotonic() - hit[0] <= share:
+                prs = hit[1]
+        if prs is None:
+            resp = await client.get(
+                f"https://api.github.com/repos/{repository}/pulls",
+                params={"state": "open", "per_page": 100 if cache is not None else per_page},
+                headers=self._github_headers(repository),
+            )
+            resp.raise_for_status()
+            self._note_rate_limit(resp)
+            if self.sweep_quota_low():
+                raise _SweepQuotaLow(f"{repository}: GitHub quota low")
+            prs = [p for p in (resp.json() or []) if isinstance(p, dict)]
+            if cache is not None:
+                cache["lists"][repository] = (time.monotonic(), prs)
+        # Steps annotate PR dicts, so each gets its own shallow copies.
+        return await self._lane_filter(
+            repository, [dict(p) for p in prs[:per_page]], source
+        )
+
+    async def _lane_filter(
+        self, repository: str, prs: list[dict], source: str
+    ) -> list[dict]:
+        """Keep only PRs the label gate lets through (all of them when unset)."""
+        if not self.config.require_label:
+            return prs
+        kept: list[dict] = []
+        for pr in prs:
+            if await self._label_gate_allows(
+                self._pr_trigger_from_api(repository, pr),
+                source=source,
+            ):
+                kept.append(pr)
+        skipped = len(prs) - len(kept)
+        if skipped:
+            log.debug(
+                f"[{DAEMON_NAME}] {source}: label gate skipped {skipped} of "
+                f"{len(prs)} open PRs in {repository} before any per-PR read"
+            )
+        return kept
 
     def _label_gate_log(self, source: str, ref: str, message: str) -> None:
         """WARNING for a webhook skip; WARNING once then DEBUG for a sweep skip."""
@@ -6900,16 +7066,14 @@ class SwarmDispatcher:
         fully-paged comment list (#430) — reading the oldest would resurrect a
         long-settled hold and re-dispatch a lens that has since reported.
         """
-        list_url = f"https://api.github.com/repos/{repository}/pulls"
         out: list[tuple[dict, list[str]]] = []
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                list_url,
-                params={"state": "open", "per_page": 50},
-                headers=self._github_headers(repository),
-            )
-            resp.raise_for_status()
-            for pr in resp.json():
+            for pr in await self._list_open_prs(
+                client,
+                repository,
+                source="resume_missing_lens_reviews",
+                per_page=50,
+            ):
                 if pr.get("draft"):
                     continue
                 number = int(pr.get("number"))
@@ -6978,13 +7142,9 @@ class SwarmDispatcher:
         out: list[dict] = []
         list_url = f"https://api.github.com/repos/{repository}/pulls"
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                list_url,
-                params={"state": "open", "per_page": 100},
-                headers=self._github_headers(repository),
-            )
-            resp.raise_for_status()
-            for pr in resp.json() or []:
+            for pr in await self._list_open_prs(
+                client, repository, source="resume_stalled_reviews"
+            ):
                 try:
                     updated = datetime.fromisoformat(
                         str(pr.get("updated_at", "")).replace("Z", "+00:00")
@@ -7023,15 +7183,10 @@ class SwarmDispatcher:
         its latest deferral marker's ISO time is <= now. PRs with no deferral
         marker are ignored entirely (not scanned count). Best-effort per PR."""
         result: dict = {"due": [], "scanned": 0, "not_yet": 0}
-        list_url = f"https://api.github.com/repos/{repository}/pulls"
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                list_url,
-                params={"state": "open", "per_page": 100},
-                headers=self._github_headers(repository),
-            )
-            resp.raise_for_status()
-            for pr in resp.json():
+            for pr in await self._list_open_prs(
+                client, repository, source="resume_deferred_reviews"
+            ):
                 num = pr.get("number")
                 try:
                     # Every page: on a thread past 100 comments the newest
@@ -7118,13 +7273,9 @@ class SwarmDispatcher:
         out: list[dict] = []
         list_url = f"https://api.github.com/repos/{repository}/pulls"
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                list_url,
-                params={"state": "open", "per_page": 100},
-                headers=self._github_headers(repository),
-            )
-            resp.raise_for_status()
-            for pr in resp.json() or []:
+            for pr in await self._list_open_prs(
+                client, repository, source="resume_unactioned_revisions"
+            ):
                 if pr.get("draft"):
                     continue
                 number = pr.get("number")
@@ -7266,13 +7417,9 @@ class SwarmDispatcher:
         unreviewed: list[dict] = []
         list_url = f"https://api.github.com/repos/{repository}/pulls"
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                list_url,
-                params={"state": "open", "per_page": 100},
-                headers=self._github_headers(repository),
-            )
-            resp.raise_for_status()
-            for pr in resp.json() or []:
+            for pr in await self._list_open_prs(
+                client, repository, source="report_pr_review_queue"
+            ):
                 if pr.get("draft"):
                     continue
                 number = pr.get("number")
@@ -12034,6 +12181,19 @@ class SwarmDispatcher:
             )
             return
 
+        # Label gate before the reads (quota): with auto-merge on, every outcome
+        # of the handler for a PR outside the lane is gated or a no-op (red ->
+        # route to Cicada, held panel -> re-drive, green+clear -> re-panel), so
+        # a gated PR leaves here and skips the checks and review reads. With
+        # auto-merge off the CI-green readiness signal is deliberately ungated
+        # (see the gate's notes above), so nothing may be skipped early.
+        if self.config.require_label and self.config.auto_merge:
+            if not await self._label_gate_allows(
+                self._pr_trigger_from_api(trigger.repository, pr),
+                source="ci_status_pre_read",
+            ):
+                return
+
         # The dictionary check-and-insert below contains no await, so it is an
         # atomic in-process claim on this event loop.  A plain asyncio.Lock
         # would only serialize duplicate deliveries; the waiter would still
@@ -12881,6 +13041,8 @@ class SwarmDispatcher:
             try:
                 async with httpx.AsyncClient(timeout=30) as client:
                     for page in range(1, _MAX_COMMENT_PAGES + 1):
+                        if self.sweep_quota_low():
+                            break
                         try:
                             resp = await client.get(
                                 f"https://api.github.com/repos/{repository}/pulls",
@@ -12892,7 +13054,10 @@ class SwarmDispatcher:
                                 headers=self._github_headers(repository),
                             )
                             resp.raise_for_status()
+                            self._note_rate_limit(resp)
                             batch = resp.json()
+                            if self.sweep_quota_low():
+                                break
                         except Exception as exc:
                             totals["failures"] += 1
                             log.warning(
@@ -12903,6 +13068,12 @@ class SwarmDispatcher:
                             break
                         if not batch:
                             break
+                        full_batch = len(batch)
+                        batch = await self._lane_filter(
+                            repository,
+                            [p for p in batch if isinstance(p, dict)],
+                            "supersede_stale_review_verdicts",
+                        )
                         for pr in batch:
                             head = ((pr.get("head") or {}).get("sha") or "")
                             if not _normalise_full_sha(head):
@@ -12913,7 +13084,7 @@ class SwarmDispatcher:
                             totals["prs"] += 1
                             for key in ("comments", "reviews", "failures"):
                                 totals[key] += result[key]
-                        if len(batch) < 100:
+                        if full_batch < 100:
                             break
             except Exception as exc:
                 totals["failures"] += 1
