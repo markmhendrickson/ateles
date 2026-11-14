@@ -95,6 +95,9 @@ DEFAULT_PROVIDER_ORDER = FRONTIER_PROVIDERS
 
 _current_weights: dict[str, float] = {}
 _cooldown_until: dict[str, float] = {}
+# (provider, model family) -> monotonic expiry. Process-local twin of the
+# persisted ``model_cooling`` map, for a refusal that named one model's limit.
+_model_cooldown_until: dict[tuple[str, str], float] = {}
 
 
 def configured_providers() -> list[str]:
@@ -620,13 +623,16 @@ def _write_usage_entry(
     *,
     update: Mapping[str, object] | None = None,
     clear_keys: Iterable[str] = (),
+    merge_maps: Mapping[str, Mapping[str, object]] | None = None,
 ) -> None:
     """Read-merge-write one provider's usage entry atomically.
 
     ``entry`` replaces the provider's observation (usage windows / exhaustion)
     but keeps its ``cooling`` window, which is a separate fact with its own
-    expiry; ``update`` instead merges keys into the existing entry, leaving the
-    rest as recorded.
+    expiry (and its ``model_cooling`` map, likewise); ``update`` instead merges
+    keys into the existing entry, leaving the rest as recorded.  ``merge_maps``
+    merges entries INTO a map already on the entry (one key per model) rather
+    than replacing it, so two models' windows do not erase each other.
 
     Serialized on a sibling lock file so two concurrent recorders cannot each
     read the old snapshot and drop the other's entry; the replace itself is
@@ -643,8 +649,12 @@ def _write_usage_entry(
             merged = {**current, **dict(update)}
         else:
             merged = dict(entry or {})
-            if "cooling" in current:
-                merged.setdefault("cooling", current["cooling"])
+            for kept in ("cooling", "model_cooling"):
+                if kept in current:
+                    merged.setdefault(kept, current[kept])
+        for key, additions in (merge_maps or {}).items():
+            base = merged.get(key)
+            merged[key] = {**(base if isinstance(base, dict) else {}), **dict(additions)}
         for key in clear_keys:
             merged.pop(key, None)
         existing[provider] = merged
@@ -861,6 +871,118 @@ def record_cooling(
             }
         },
     )
+
+
+def _covers(family: str, model: str) -> bool:
+    """A cooling key covers a model id when equal or a whole hyphen-delimited part."""
+    return bool(family) and (
+        family == model or (family.isalpha() and family in model.split("-"))
+    )
+
+
+def _model_family(model: str) -> str:
+    """The cooling key for a model: its lower-cased, trimmed name."""
+    return str(model or "").strip().lower()
+
+
+def record_model_cooling(
+    provider: str,
+    model: str,
+    until: float,
+    *,
+    reason: str,
+    observed_at: float | None = None,
+) -> None:
+    """Persist a MODEL-scoped cooling window: ``model`` of ``provider`` is spent.
+
+    For a refusal that names one model's limit (a Sonnet weekly cap).  Only that
+    model is held out; the provider's other models stay selectable, so it is
+    stored in a separate ``model_cooling`` map and never touches the
+    provider-wide ``cooling`` window.  ``model`` is the family the refusal named
+    (``sonnet``); ``persisted_model_cooling`` matches it against full model ids.
+    """
+    normalized = provider.strip().lower()
+    if normalized not in PROVIDERS:
+        raise ValueError(f"unsupported provider: {provider!r}")
+    family = _model_family(model)
+    if not family:
+        raise ValueError("model must be non-empty")
+    _write_usage_entry(
+        normalized,
+        update={},
+        merge_maps={
+            "model_cooling": {
+                family: {
+                    "until": _iso_from_wall(until),
+                    "reason": reason,
+                    "observed_at": _iso_from_wall(
+                        time.time() if observed_at is None else observed_at
+                    ),
+                }
+            }
+        },
+    )
+
+
+def cool_down_model(provider: str, model: str, *, now: float | None = None) -> None:
+    """Process-local model cooldown, the twin of ``cool_down`` for one model."""
+    try:
+        duration = max(
+            0.0, float(os.environ.get("APIS_HARNESS_COOLDOWN_SECONDS", "3600"))
+        )
+    except ValueError:
+        duration = 3600.0
+    _model_cooldown_until[(provider, _model_family(model))] = (
+        time.monotonic() if now is None else now
+    ) + duration
+
+
+def persisted_model_cooling(
+    provider: str, model: str, *, now_wall: float | None = None
+) -> dict[str, object] | None:
+    """The live model-scoped cooling window covering ``model``, or ``None``.
+
+    A window keyed ``sonnet`` covers every model id that contains it
+    (``claude-sonnet-5-5``).  Expired or malformed windows are no opinion.  A
+    usage file with no ``model_cooling`` (every file written before this
+    existed) therefore reads as never model-cooled.
+    """
+    moment = time.time() if now_wall is None else now_wall
+    wanted = _model_family(model)
+    if not wanted:
+        return None
+    entry = _read_json_object(_usage_path()).get(provider)
+    windows = entry.get("model_cooling") if isinstance(entry, dict) else None
+    if not isinstance(windows, dict):
+        return None
+    for key, window in windows.items():
+        family = _model_family(key)
+        if not family or not isinstance(window, dict):
+            continue
+        if not _covers(family, wanted):
+            continue
+        until = _wall_from_iso(window.get("until"))
+        if until is None or until <= moment:
+            continue
+        return {
+            "until": until,
+            "until_iso": window["until"],
+            "reason": str(window.get("reason") or "capacity"),
+            "model": family,
+        }
+    return None
+
+
+def model_cooled(
+    provider: str, model: str, *, now: float | None = None, now_wall: float | None = None
+) -> dict[str, object] | None:
+    """The cooling window holding ``model`` out (persisted or this process's)."""
+    wanted = _model_family(model)
+    moment = time.monotonic() if now is None else now
+    for (name, family), until in _model_cooldown_until.items():
+        if name == provider and until > moment and _covers(family, wanted):
+            return {"until": None, "until_iso": "", "reason": "capacity", "model": family}
+    return persisted_model_cooling(provider, model, now_wall=now_wall)
 
 
 def record_probe_failure(
@@ -1549,6 +1671,7 @@ def reset_state() -> None:
     """Clear process-local balancing/cooldown state (tests and operator reloads)."""
     _current_weights.clear()
     _cooldown_until.clear()
+    _model_cooldown_until.clear()
 
 
 def cooling_providers(
