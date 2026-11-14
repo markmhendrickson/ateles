@@ -24,6 +24,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shlex
 import sys
 import time
 import wave
@@ -1668,7 +1669,7 @@ def test_the_long_call_alert_itself_carries_the_remedy_and_the_exact_command(tmp
     assert "ERR_CALL_TOO_LONG_FOR_LOCAL_ASR" in alerts[0]
     # The recovery command is a separate process: the setting must be a prefix on the command itself.
     assert ("TRANSCRIBE_PAIRED_ASR=parakeet python3 execution/daemons/tyto/tyto.py "
-            f"--recording-file '{memo}' --recover-held") in alerts[0]
+            f"--recording-file {shlex.quote(str(memo))} --recover-held") in alerts[0]
     assert "TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS=<seconds" in alerts[0]
     assert "in Tyto's environment" not in alerts[0]
 
@@ -1702,3 +1703,24 @@ def test_other_permanent_codes_stay_unrecoverable(tmp_path, code):
         with pytest.raises(RuntimeError, match="not a recoverable"):
             watcher.process_selected_recording(memo, store_only=False, recover_held=True)
         run.assert_not_called()
+
+
+@pytest.mark.parametrize("name", [
+    "plain name.m4a",
+    "it's here.m4a",
+    "call $(touch pwned).m4a",
+    "call `touch pwned`.m4a",
+    "line\nbreak.m4a",
+    "all ' $(x) ` \n together.m4a",
+])
+def test_the_printed_recovery_command_gives_back_the_exact_path_as_one_argument(tmp_path, name):
+    """The recording path is quoted in the printed command, so pasting it runs one argument."""
+    import shlex
+    memo = tmp_path / name
+    text = tyto._permanent_failure_text(memo, "ERR_CALL_TOO_LONG_FOR_LOCAL_ASR", "(will not retry)")
+    start = text.index("TRANSCRIBE_PAIRED_ASR=parakeet python3")
+    end = text.index(" --recover-held", start) + len(" --recover-held")
+    assert shlex.split(text[start:end]) == [
+        "TRANSCRIBE_PAIRED_ASR=parakeet", "python3", "execution/daemons/tyto/tyto.py",
+        "--recording-file", str(memo), "--recover-held",
+    ]

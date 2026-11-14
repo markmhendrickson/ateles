@@ -94,6 +94,7 @@ import hashlib
 import json
 import logging
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -613,7 +614,7 @@ PERMANENT_REMEDIES = {
         "stop Tyto, then run this command (the setting is a prefix on the command itself, since it is a "
         "separate process and does not inherit Tyto's environment): "
         "TRANSCRIBE_PAIRED_ASR=parakeet python3 execution/daemons/tyto/tyto.py "
-        "--recording-file '{path}' --recover-held. To keep whisper instead, use "
+        "--recording-file {path} --recover-held. To keep whisper instead, use "
         "TYTO_TRANSCRIBE_PROCESS_TIMEOUT_SECS=<seconds above the estimate> as the prefix"
     ),
 }
@@ -628,7 +629,7 @@ def _permanent_failure_text(path: Path, code: str, suffix: str) -> str:
     """The permanent-failure alert text, with the operator remedy when the code has one."""
     text = f"Transcription permanently failed for {path.name}: {code} {suffix}"
     remedy = PERMANENT_REMEDIES.get(code)
-    return f"{text}. To fix: {remedy.format(path=path)}" if remedy else text
+    return f"{text}. To fix: {remedy.format(path=shlex.quote(str(path)))}" if remedy else text
 
 
 PERMANENT_STORE_ERROR_CODES = (
