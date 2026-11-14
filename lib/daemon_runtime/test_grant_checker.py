@@ -301,3 +301,35 @@ def test_load_error_is_exposed(monkeypatch):
     c = GrantChecker("x@ateles-swarm").load()
     assert c.load_error
     assert _checker_with(_monedula_grant_entity()).load_error is None
+
+
+def test_degraded_error_is_rate_limited(monkeypatch, caplog):
+    import logging
+
+    import lib.daemon_runtime.grant_checker as gc
+
+    monkeypatch.delenv("ATELES_GRANTS_ADVISORY", raising=False)
+    monkeypatch.setattr(gc, "_last_error_logged", {})
+    c = GrantChecker("rl@ateles-swarm")
+    c._loaded = True
+    with caplog.at_level(logging.ERROR):
+        for _ in range(5):
+            assert c.is_active() is False
+    assert len([r for r in caplog.records if "rl@ateles-swarm" in r.getMessage()]) == 1
+    # A different cause for the same sub is a change and is logged.
+    with caplog.at_level(logging.ERROR):
+        c._load_error = "boom"
+        assert c.is_active() is False
+    assert len([r for r in caplog.records if "rl@ateles-swarm" in r.getMessage()]) == 2
+
+
+def test_read_problem_names_cause_without_logging(monkeypatch):
+    monkeypatch.delenv("ATELES_GRANTS_ADVISORY", raising=False)
+    c = GrantChecker("x@ateles-swarm")
+    c._loaded = True
+    assert "no agent_grant" in c.read_problem()
+    c._load_error = "NEOTOMA_BEARER_TOKEN not set"
+    assert c.read_problem() == "NEOTOMA_BEARER_TOKEN not set"
+    assert _checker_with(_monedula_grant_entity()).read_problem() is None
+    monkeypatch.setenv("ATELES_GRANTS_ADVISORY", "1")
+    assert c.read_problem() is None

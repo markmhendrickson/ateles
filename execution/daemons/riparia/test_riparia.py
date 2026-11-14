@@ -106,3 +106,17 @@ def test_main_exits_without_valid_operator_email(monkeypatch):
         monkeypatch.setattr(riparia, "OPERATOR_EMAIL", bad)
         with pytest.raises(SystemExit):
             riparia.main()
+
+
+def test_stdlib_address_parsing_shapes_hold_on_supported_python():
+    """Pin the stdlib behaviour should_process relies on (requires-python >=3.13):
+    one address parses to one entry, multi-address headers never parse to a
+    single entry that equals the operator."""
+    from email.utils import getaddresses
+
+    assert getaddresses(["Op <op@d.test>"]) == [("Op", "op@d.test")]
+    assert getaddresses(["op@d.test"]) == [("", "op@d.test")]
+    assert len(getaddresses(["Other <o@x.test>, Op <op@d.test>"])) == 2
+    for hdr in ("Other <o@x.test> <op@d.test>", "Other <o@x.test>; Op <op@d.test>"):
+        parsed = getaddresses([hdr])
+        assert not (len(parsed) == 1 and parsed[0][1].lower() == "op@d.test"), hdr

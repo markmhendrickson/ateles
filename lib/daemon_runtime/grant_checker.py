@@ -62,10 +62,24 @@ def grants_advisory() -> bool:
     return on
 
 
+_ERROR_LOG_INTERVAL_S = 300.0
+_last_error_logged: dict = {}
+
+
 def _deny_unless_advisory(who: str, what: str) -> bool:
-    """Shared degraded-read rule: deny (ERROR, names the cause) unless advisory."""
+    """Shared degraded-read rule: deny (ERROR, names the cause) unless advisory.
+
+    The ERROR is rate-limited per (sub, cause): once, then again only after
+    _ERROR_LOG_INTERVAL_S, so a per-event dispatch loop does not flood the log.
+    """
     if grants_advisory():
         return True
+    now = time.monotonic()
+    key = (who, what)
+    last = _last_error_logged.get(key)
+    if last is not None and now - last < _ERROR_LOG_INTERVAL_S:
+        return False
+    _last_error_logged[key] = now
     log.error(
         f"[grant_checker:{who}] {what} - denying. Check NEOTOMA_BEARER_TOKEN, "
         f"Neotoma reachability and that an agent_grant exists for this sub "
@@ -218,6 +232,20 @@ class GrantChecker:
     def load_error(self) -> Optional[str]:
         """Why the grant read failed, or None. Never contains secret values."""
         return self._load_error
+
+    def read_problem(self) -> Optional[str]:
+        """Why the grant could not be read (no secret values), else None.
+
+        None when the read worked, or when the advisory flag is on. Lets a
+        daemon tell "could not read the grant" apart from "grant revoked".
+        """
+        if grants_advisory() or not self._degraded():
+            return None
+        if self._load_error:
+            return self._load_error
+        if not self._loaded:
+            return "grants not loaded"
+        return "no agent_grant recorded for this sub"
 
     def _degraded(self) -> bool:
         return bool(self._load_error) or not self._loaded or not self._grants

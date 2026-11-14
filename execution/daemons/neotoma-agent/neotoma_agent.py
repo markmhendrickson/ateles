@@ -577,6 +577,27 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChe
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
+def _enforce_grant_status(grants: GrantChecker) -> None:
+    """Exit when the grant cannot be read or is revoked; warn when suspended.
+
+    An unreadable grant is reported as such, never as a revocation, so the
+    operator is not sent to restore a grant that was never revoked.
+    """
+    problem = grants.read_problem()
+    if problem:
+        log.error(
+            f"[{DAEMON_NAME}] Agent grant could not be read ({problem}); not starting. "
+            "Check NEOTOMA_BEARER_TOKEN, Neotoma reachability and that an agent_grant "
+            "exists for this sub."
+        )
+        sys.exit(1)
+    if grants.is_revoked():
+        log.error(f"[{DAEMON_NAME}] Agent grant is revoked — daemon cannot start.")
+        sys.exit(1)
+    if grants.is_suspended():
+        log.warning(f"[{DAEMON_NAME}] Agent grant is suspended — dispatch disabled.")
+
+
 async def main() -> None:
     log.info(f"[{DAEMON_NAME}] Starting up...")
 
@@ -601,11 +622,7 @@ async def main() -> None:
 
     # 2b. Check agent_grant status
     grants = GrantChecker(agent_def.aauth_sub).load()
-    if grants.is_revoked():
-        log.error(f"[{DAEMON_NAME}] Agent grant is revoked — daemon cannot start.")
-        sys.exit(1)
-    if grants.is_suspended():
-        log.warning(f"[{DAEMON_NAME}] Agent grant is suspended — dispatch disabled.")
+    _enforce_grant_status(grants)
 
     # 3. Load notification rubric
     notifier = Notifier.from_neotoma()

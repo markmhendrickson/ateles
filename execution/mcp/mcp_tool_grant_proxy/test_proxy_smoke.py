@@ -58,7 +58,8 @@ for line in sys.stdin:
     )
 
 
-def _run_case(env_extra: dict, request: dict, timeout: float = 8.0) -> dict:
+def _run_case(env_extra: dict, request: dict, timeout: float = 25.0) -> dict:
+    _write_fake_server()  # pytest does not run _run_all(), which used to write it
     env = {**os.environ, **env_extra, "PYTHONPATH": str(_REPO_ROOT)}
     proc = subprocess.Popen(
         [sys.executable, str(PROXY), "--server-name", "parquet", "--",

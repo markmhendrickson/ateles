@@ -123,3 +123,4 @@ docs/health/
 
 # Customer-shared debug artifacts (HARs, proxy code) — kept locally + in Neotoma as reference sources, never committed to the public repo
 execution/embed-design/
+execution/mcp/mcp_tool_grant_proxy/_fake_downstream.py
