@@ -275,6 +275,7 @@ def _complete_authority_collection(data: object, key: str) -> list:
 # than waited on for longer.
 AGENT_DEFINITION_LOOKUP_ROUTE = "/retrieve_entity_by_identifier"
 AGENT_DEFINITION_ENTITY_TYPE = "agent_definition"
+AGENT_DEFINITION_LOOKUP_LIMIT = 10
 
 
 def _agent_definition_lookup_body(name: str) -> dict:
@@ -282,19 +283,38 @@ def _agent_definition_lookup_body(name: str) -> dict:
         "identifier": name,
         "entity_type": AGENT_DEFINITION_ENTITY_TYPE,
         "by": "name",
-        "limit": 10,
+        "limit": AGENT_DEFINITION_LOOKUP_LIMIT,
     }
 
 
-def _is_other_row(ent: dict) -> bool:
-    """True for a row the identifier route returned that is not a live
-    `agent_definition`: an alias hit of another entity type, or a row merged away
-    into another entity (the merge target is returned in its own right). Rows
-    that carry no `entity_type` are kept, so a malformed row stays visible."""
+def _is_other_row(ent: dict, name: str) -> bool:
+    """True for a row the identifier route returned that is not THIS live
+    `agent_definition`: an alias hit of another entity type, a row merged away into
+    another entity, or (live, 2026-11-14) a row typed `agent_definition` whose
+    canonical name is something else (e.g. `synthesis`) and whose snapshot is null.
+
+    A row that names this agent (by canonical name, or by a snapshot name) is never
+    dropped here: a matching row with a null or broken snapshot is a malformed
+    answer and the caller fails closed on it. A row with no canonical name and no
+    snapshot name at all stays visible for the same reason."""
     etype = ent.get("entity_type")
     if isinstance(etype, str) and etype != AGENT_DEFINITION_ENTITY_TYPE:
         return True
-    return bool(ent.get("merged_to_entity_id") or ent.get("merged_into"))
+    if ent.get("merged_to_entity_id") or ent.get("merged_into"):
+        return True
+    canonical = ent.get("canonical_name")
+    if isinstance(canonical, str) and canonical.strip().lower() == f"{AGENT_DEFINITION_ENTITY_TYPE}:{name}":
+        return False
+    outer = ent.get("snapshot")
+    inner = outer.get("snapshot", outer) if isinstance(outer, dict) else None
+    snap_name = inner.get("name") if isinstance(inner, dict) else None
+    if isinstance(snap_name, str):
+        # Whether it matches is the caller's judgement (a different name among
+        # several rows is tolerated there, a missing match is not).
+        return False
+    # No matching canonical name and no readable snapshot name: it names another
+    # entity when it carries a canonical name of its own, otherwise it is unreadable.
+    return isinstance(canonical, str) and bool(canonical.strip())
 
 
 def _row_entity_id(ent: dict) -> object:
@@ -345,7 +365,7 @@ def resolve_agent_definition_id(
     entities = (data.get("entities") or []) if isinstance(data, dict) else []
     name_match: str | None = None
     for ent in entities:
-        if not isinstance(ent, dict) or _is_other_row(ent):
+        if not isinstance(ent, dict) or _is_other_row(ent, name):
             continue
         outer = ent.get("snapshot") or {}
         snap = outer.get("snapshot", outer) if isinstance(outer, dict) else {}
@@ -1153,7 +1173,7 @@ class AgentLoader:
         for ent in entities:
             if not isinstance(ent, dict):
                 raise self._unavailable("bad_response")
-            if not _is_other_row(ent):
+            if not _is_other_row(ent, self.agent_name):
                 rows.append(ent)
         if not rows:
             # Absence is a positive claim: with other rows filtered out, a page
@@ -1161,6 +1181,10 @@ class AgentLoader:
             # cannot prove no definition exists.
             total = data.get("total")  # validated above: an int, or absent
             if isinstance(total, int) and total > len(entities):
+                raise self._unavailable("bad_response")
+            # The route's `total` is the page length, so truncation is invisible
+            # in it: a FULL page with no live row cannot prove absence.
+            if len(entities) >= AGENT_DEFINITION_LOOKUP_LIMIT:
                 raise self._unavailable("bad_response")
             raise self._unavailable(NOT_FOUND)
         # Every remaining entry must be well-formed, exactly one must carry THIS

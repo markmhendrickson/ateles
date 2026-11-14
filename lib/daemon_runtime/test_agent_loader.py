@@ -382,6 +382,44 @@ def test_identifier_route_ignores_other_types_and_merged_rows(monkeypatch):
     assert al.AgentLoader("waxwing").load().entity_id == "ent_waxwing"
 
 
+def test_live_shape_sibling_row_of_the_right_type_with_null_snapshot_is_dropped(monkeypatch):
+    """Live prod (2026-11-14): beside the definition comes a row typed
+    `agent_definition` with canonical_name "synthesis" and a null snapshot.
+
+    FAILS on the first revision of this change: it was treated as malformed."""
+    _no_signing(monkeypatch)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    payload = {"entities": [
+        _identifier_row("ent_pavo", "pavo"),
+        {"id": "ent_syn", "entity_type": "agent_definition", "canonical_name": "synthesis",
+         "merged_to_entity_id": None, "snapshot": None},
+    ], "total": 2, "match_mode": "direct"}
+    monkeypatch.setattr(al.httpx, "post", lambda url, **kw: _Resp(payload))
+    assert al.AgentLoader("pavo").load().entity_id == "ent_pavo"
+
+
+def test_a_matching_row_with_a_null_snapshot_still_fails_closed(monkeypatch):
+    _no_signing(monkeypatch)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    payload = {"entities": [{"id": "ent_pavo", "entity_type": "agent_definition",
+                             "canonical_name": "agent_definition:pavo", "snapshot": None}],
+               "total": 1}
+    monkeypatch.setattr(al.httpx, "post", lambda url, **kw: _Resp(payload))
+    with pytest.raises(al.AgentDefinitionUnavailable) as raised:
+        al.AgentLoader("pavo").load(allow_undefined=True)
+    assert raised.value.code == "bad_response"
+
+
+def test_a_full_page_with_no_live_row_is_unavailable_not_absent(monkeypatch):
+    _no_signing(monkeypatch)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    rows = [{"id": f"ent_{i}", "entity_type": "synthesis", "snapshot": None} for i in range(10)]
+    monkeypatch.setattr(al.httpx, "post", lambda url, **kw: _Resp({"entities": rows, "total": 10}))
+    with pytest.raises(al.AgentDefinitionUnavailable) as raised:
+        al.AgentLoader("ghost").load(allow_undefined=True)
+    assert raised.value.code == "bad_response"
+
+
 def test_identifier_route_with_no_definition_row_is_absence(monkeypatch):
     """A complete 200 holding no live definition (empty, or only other types) is
     the definite `not_found`, and still refuses by default."""
