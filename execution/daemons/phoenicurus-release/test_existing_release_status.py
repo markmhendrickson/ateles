@@ -473,7 +473,7 @@ def test_npm_reconcile_unblocks_prep_when_registry_already_shows_it_published(
     ]
     monkeypatch.setattr(prepare.urllib.request, "urlopen", _fake_urlopen_returning(rows))
     monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: None)
-    monkeypatch.setattr(prepare, "_npm_registry_version", lambda package="neotoma": "0.23.1")
+    monkeypatch.setattr(prepare, "_npm_version_published", lambda v, package="neotoma": v == "0.23.1")
 
     corrections: list[tuple] = []
 
@@ -519,7 +519,7 @@ def test_npm_reconcile_does_not_fire_when_registry_disagrees(ready_to_prepare, m
     monkeypatch.setattr(prepare.urllib.request, "urlopen", _fake_urlopen_returning(rows))
     notices: list[str] = []
     monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: notices.append(a[0] if a else ""))
-    monkeypatch.setattr(prepare, "_npm_registry_version", lambda package="neotoma": "0.23.0")
+    monkeypatch.setattr(prepare, "_npm_version_published", lambda v, package="neotoma": v == "0.23.0")
 
     rc = prepare.run_prepare(dry_run=False, force=False, on_merge=True)
 
@@ -548,8 +548,8 @@ def test_npm_reconcile_scoped_to_publishing_status_only(ready_to_prepare, monkey
     npm_calls: list[str] = []
     monkeypatch.setattr(
         prepare,
-        "_npm_registry_version",
-        lambda package="neotoma": (npm_calls.append(package), "0.23.1")[1],
+        "_npm_version_published",
+        lambda v, package="neotoma": (npm_calls.append(v), True)[1],
     )
 
     rc = prepare.run_prepare(dry_run=False, force=False, on_merge=True)
@@ -557,3 +557,379 @@ def test_npm_reconcile_scoped_to_publishing_status_only(ready_to_prepare, monkey
     assert rc == 0
     assert ready_to_prepare == [], "'approved' must still block, not auto-reconcile"
     assert not npm_calls, "npm must not even be consulted for a non-'publishing' status"
+
+
+# ── early 'publishing' reconcile (v0.28.0 duplicate, 2026-11-13) ─────────────
+
+
+def _install_fake_writer(monkeypatch):
+    corrections: list[tuple] = []
+
+    class _Res:
+        status = 200
+
+    class _Writer:
+        def __init__(self, _agent):
+            pass
+
+        def correct(self, entity_type, entity_id, field_name, value, *, idempotency_key):
+            corrections.append((entity_type, entity_id, field_name, value))
+            return _Res()
+
+    mod = type(sys)("neotoma_signed")
+    mod.NeotomaWriter = _Writer
+    monkeypatch.setitem(sys.modules, "neotoma_signed", mod)
+    return corrections
+
+
+def test_young_publishing_block_past_grace_reconciles_when_exact_version_live(
+    ready_to_prepare, monkeypatch
+):
+    """
+    The v0.28.0 incident: a stray duplicate 'publishing' row blocked prepare
+    for ~40h although npm showed the version, because the reconcile only ran
+    past the 3-day stale threshold. A block past the grace window but well
+    under 3 days must reconcile against the EXACT version, not `latest`.
+    """
+    age = (prepare.PUBLISHING_RECONCILE_GRACE_MINUTES + 60) / 1440.0
+    assert age < prepare.STALE_RELEASE_BLOCK_DAYS
+    rows = [_row("ent_v0280_dup", "v0.28.0", "publishing", age_days=age)]
+    monkeypatch.setattr(prepare.urllib.request, "urlopen", _fake_urlopen_returning(rows))
+    monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: None)
+    monkeypatch.setattr(
+        prepare, "_npm_version_published", lambda v, package="neotoma": v == "0.28.0"
+    )
+    corrections = _install_fake_writer(monkeypatch)
+
+    assert prepare.run_prepare(dry_run=False, force=False, on_merge=True) == 0
+    assert corrections == [("release_result", "ent_v0280_dup", "status", "published")]
+
+
+def test_young_publishing_block_reconciled_then_prep_proceeds(ready_to_prepare, monkeypatch):
+    """Once the correction lands (re-query shows no blocker), prep falls
+    through and spawns on the same run."""
+    age = (prepare.PUBLISHING_RECONCILE_GRACE_MINUTES + 60) / 1440.0
+    state = {"rows": [_row("ent_v0280_dup", "v0.28.0", "publishing", age_days=age)]}
+    monkeypatch.setattr(
+        prepare.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: _fake_urlopen_returning(state["rows"])(req, timeout=timeout),
+    )
+    monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: None)
+    monkeypatch.setattr(prepare, "_npm_version_published", lambda v, package="neotoma": True)
+
+    corrections: list[str] = []
+
+    class _Res:
+        status = 200
+
+    class _Writer:
+        def __init__(self, _agent):
+            pass
+
+        def correct(self, entity_type, entity_id, field_name, value, *, idempotency_key):
+            corrections.append(entity_id)
+            state["rows"] = [_row(entity_id, "v0.28.0", "published", age_days=age)]
+            return _Res()
+
+    mod = type(sys)("neotoma_signed")
+    mod.NeotomaWriter = _Writer
+    monkeypatch.setitem(sys.modules, "neotoma_signed", mod)
+
+    assert prepare.run_prepare(dry_run=False, force=False, on_merge=True) == 0
+    assert corrections == ["ent_v0280_dup"]
+    assert ready_to_prepare == ["v0.20.0"], "prep must proceed once unblocked"
+
+
+def test_publishing_block_inside_grace_makes_no_npm_call_and_blocks(
+    ready_to_prepare, monkeypatch
+):
+    age = (prepare.PUBLISHING_RECONCILE_GRACE_MINUTES / 2) / 1440.0
+    rows = [_row("ent_inflight", "v0.28.0", "publishing", age_days=age)]
+    monkeypatch.setattr(prepare.urllib.request, "urlopen", _fake_urlopen_returning(rows))
+    monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: None)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        prepare,
+        "_npm_version_published",
+        lambda v, package="neotoma": (calls.append(v), True)[1],
+    )
+
+    assert prepare.run_prepare(dry_run=False, force=False, on_merge=True) == 0
+    assert calls == [], "a publish inside the grace window must not hit npm"
+    assert ready_to_prepare == []
+
+
+def test_superseded_version_not_latest_but_on_npm_is_reconciled(ready_to_prepare, monkeypatch):
+    """Exact-version check: a stuck row for an older version npm still hosts
+    (no longer `latest`) reconciles. Drives the real _npm_version_published
+    through a fake `npm view neotoma@<v> version`."""
+    rows = [_row("ent_old", "v0.27.0", "publishing", age_days=2.0)]
+    monkeypatch.setattr(prepare.urllib.request, "urlopen", _fake_urlopen_returning(rows))
+    monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: None)
+    argvs: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = "0.27.0\n"
+
+    class _Sub(_NoopSubprocess):
+        def run(self, argv, **kw):
+            if argv[0] != "npm":
+                return None
+            argvs.append(argv)
+            return _Proc()
+
+    monkeypatch.setattr(prepare, "subprocess", _Sub())
+    corrections = _install_fake_writer(monkeypatch)
+
+    assert prepare.run_prepare(dry_run=False, force=False, on_merge=True) == 0
+    assert argvs == [["npm", "view", "neotoma@0.27.0", "version"]]
+    assert corrections == [("release_result", "ent_old", "status", "published")]
+
+
+@pytest.mark.parametrize("failure", ["timeout", "oserror", "nonzero", "empty"])
+def test_npm_error_or_timeout_does_not_reconcile_and_logs(
+    ready_to_prepare, monkeypatch, caplog, failure
+):
+    import subprocess as real_subprocess
+
+    rows = [_row("ent_v0280_dup", "v0.28.0", "publishing", age_days=0.5)]
+    monkeypatch.setattr(prepare.urllib.request, "urlopen", _fake_urlopen_returning(rows))
+    monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: None)
+
+    class _Proc:
+        returncode = 1 if failure == "nonzero" else 0
+        stdout = ""
+
+    class _Sub(_NoopSubprocess):
+        SubprocessError = real_subprocess.SubprocessError
+
+        def run(self, argv, **kw):
+            if argv[0] != "npm":
+                return None
+            if failure == "timeout":
+                raise real_subprocess.TimeoutExpired(argv, 30)
+            if failure == "oserror":
+                raise OSError("npm missing")
+            return _Proc()
+
+    monkeypatch.setattr(prepare, "subprocess", _Sub())
+    corrections = _install_fake_writer(monkeypatch)
+
+    with caplog.at_level("INFO"):
+        assert prepare.run_prepare(dry_run=False, force=False, on_merge=True) == 0
+    assert corrections == []
+    assert ready_to_prepare == [], "unconfirmed npm must keep blocking"
+    assert "could not confirm" in caplog.text, "the attempt must be logged"
+
+
+@pytest.mark.parametrize("status", ["prepared", "pending_approval", "approved"])
+@pytest.mark.parametrize("age_days", [0.5, 5.0])
+def test_non_publishing_statuses_never_reconcile_regardless_of_age(
+    ready_to_prepare, monkeypatch, status, age_days
+):
+    rows = [_row("ent_pre", "v0.28.0", status, age_days=age_days)]
+    monkeypatch.setattr(prepare.urllib.request, "urlopen", _fake_urlopen_returning(rows))
+    monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: None)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        prepare,
+        "_npm_version_published",
+        lambda v, package="neotoma": (calls.append(v), True)[1],
+    )
+    corrections = _install_fake_writer(monkeypatch)
+
+    assert prepare.run_prepare(dry_run=False, force=False, on_merge=True) == 0
+    assert calls == [] and corrections == []
+    assert ready_to_prepare == []
+
+
+# ── round 2: rebinding after reconcile, dry run, timestamp-less, npm parsing ──
+
+
+def _state_writer(monkeypatch, state, after):
+    """Writer whose correct() swaps the visible rows to ``after(entity_id)``."""
+
+    class _Res:
+        status = 200
+
+    class _Writer:
+        def __init__(self, _agent):
+            pass
+
+        def correct(self, entity_type, entity_id, field_name, value, *, idempotency_key):
+            state["rows"] = after(entity_id)
+            return _Res()
+
+    mod = type(sys)("neotoma_signed")
+    mod.NeotomaWriter = _Writer
+    monkeypatch.setitem(sys.modules, "neotoma_signed", mod)
+
+
+@pytest.mark.parametrize(
+    "second_age_days,expect_page",
+    [(prepare.STALE_RELEASE_BLOCK_DAYS + 2, True), (0.5, False)],
+)
+def test_second_blocking_row_judged_on_its_own_after_first_reconciles(
+    ready_to_prepare, monkeypatch, second_age_days, expect_page
+):
+    """#518 duplicate case: after row A is corrected, a different row B still
+    blocks. No page may name A, the marker must not be recorded against A, and
+    B is escalated only if B itself is stale."""
+    a_age = (prepare.PUBLISHING_RECONCILE_GRACE_MINUTES + 60) / 1440.0
+    row_a = _row("ent_dup_a", "v0.28.0", "publishing", age_days=a_age)
+    row_b = _row("ent_real_b", "v0.29.0", "prepared", age_days=second_age_days)
+    state = {"rows": [row_a, row_b]}
+    monkeypatch.setattr(
+        prepare.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: _fake_urlopen_returning(state["rows"])(req, timeout=timeout),
+    )
+    notices: list[str] = []
+    monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: notices.append(a[0] if a else ""))
+    monkeypatch.setattr(prepare, "_npm_version_published", lambda v, package="neotoma": True)
+    _state_writer(monkeypatch, state, lambda eid: [row_b])
+    marked: list[str] = []
+    monkeypatch.setattr(prepare, "_mark_escalated_stale_block", lambda eid: marked.append(eid))
+
+    assert prepare.run_prepare(dry_run=False, force=False, on_merge=True) == 0
+    assert ready_to_prepare == []
+    # The reconcile's own success notice ("✅ ... auto-corrected") is expected;
+    # only escalation pages ("⚠️") are forbidden.
+    pages = [n for n in notices if "⚠️" in n]
+    assert not any("ent_dup_a" in n for n in pages), "no page about the corrected row"
+    assert "ent_dup_a" not in marked
+    if expect_page:
+        assert len(pages) == 1 and "ent_real_b" in pages[0]
+        assert marked == ["ent_real_b"]
+    else:
+        assert pages == [] and marked == []
+
+
+def test_dry_run_with_reconcilable_stale_row_never_pages(ready_to_prepare, monkeypatch):
+    marked_ran: list = []
+    monkeypatch.setattr(prepare, "_mark_ran", lambda *a, **k: marked_ran.append(a))
+    rows = [
+        _row(
+            "ent_dup", "v0.28.0", "publishing",
+            age_days=prepare.STALE_RELEASE_BLOCK_DAYS + 1,
+        )
+    ]
+    monkeypatch.setattr(prepare.urllib.request, "urlopen", _fake_urlopen_returning(rows))
+    notices: list[str] = []
+    monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: notices.append(a[0] if a else ""))
+    monkeypatch.setattr(prepare, "_npm_version_published", lambda v, package="neotoma": True)
+
+    assert prepare.run_prepare(dry_run=True, force=False, on_merge=True) == 0
+    assert notices == [], "a dry run must never page or notify"
+    assert marked_ran == [], "a dry run must never mark the run"
+    assert ready_to_prepare == []
+
+
+def test_publishing_block_with_no_timestamp_is_reconciled(ready_to_prepare, monkeypatch):
+    row = {"entity_id": "ent_nots", "snapshot": {"version": "v0.28.0", "status": "publishing"}}
+    monkeypatch.setattr(prepare.urllib.request, "urlopen", _fake_urlopen_returning([row]))
+    monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: None)
+    assert prepare.existing_release_status()[3] is None, "precondition: age_days is None"
+    calls: list[str] = []
+    monkeypatch.setattr(
+        prepare, "_npm_version_published",
+        lambda v, package="neotoma": (calls.append(v), True)[1],
+    )
+    corrections = _install_fake_writer(monkeypatch)
+
+    assert prepare.run_prepare(dry_run=False, force=False, on_merge=True) == 0
+    assert calls == ["0.28.0"]
+    assert corrections == [("release_result", "ent_nots", "status", "published")]
+
+
+@pytest.mark.parametrize(
+    "returncode,stdout,expected",
+    [
+        (0, "0.28.0\n", True),
+        (0, "0.28.01\n", False),  # substring/prefix only
+        (0, "10.28.0\n", False),  # substring only
+        (0, "some other output\n", False),
+        (0, "", False),
+        (1, "0.28.0\n", False),  # non-zero exit with the version in stdout
+    ],
+)
+def test_npm_version_published_requires_zero_exit_and_exact_line(
+    monkeypatch, returncode, stdout, expected
+):
+    class _Proc:
+        pass
+
+    proc = _Proc()
+    proc.returncode, proc.stdout = returncode, stdout
+
+    class _Sub:
+        SubprocessError = Exception
+
+        def run(self, argv, **kw):
+            return proc
+
+    monkeypatch.setattr(prepare, "subprocess", _Sub())
+    assert prepare._npm_version_published("v0.28.0") is expected
+
+
+@pytest.mark.parametrize("raw", ["0", "-5", "abc", "nan", "", None])
+def test_grace_falls_back_to_default_when_invalid(raw):
+    assert prepare._parse_publishing_grace(raw) == 60.0
+
+
+def test_grace_accepts_positive_override():
+    assert prepare._parse_publishing_grace("15") == 15.0
+
+
+def test_same_row_still_visible_after_reconcile_blocks_without_paging(
+    ready_to_prepare, monkeypatch
+):
+    """Correction returns 2xx but the re-read shows the SAME stale row: block
+    quietly (as on main) -- no page, no escalation mark, one _mark_ran."""
+    rows = [
+        _row(
+            "ent_same", "v0.28.0", "publishing",
+            age_days=prepare.STALE_RELEASE_BLOCK_DAYS + 1,
+        )
+    ]
+    monkeypatch.setattr(prepare.urllib.request, "urlopen", _fake_urlopen_returning(rows))
+    notices: list[str] = []
+    monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: notices.append(a[0] if a else ""))
+    monkeypatch.setattr(prepare, "_npm_version_published", lambda v, package="neotoma": True)
+    _install_fake_writer(monkeypatch)  # 2xx, rows left unchanged
+    marked_ran: list = []
+    monkeypatch.setattr(prepare, "_mark_ran", lambda *a, **k: marked_ran.append(a))
+    escalated: list[str] = []
+    monkeypatch.setattr(prepare, "_mark_escalated_stale_block", lambda e: escalated.append(e))
+
+    assert prepare.run_prepare(dry_run=False, force=False, on_merge=True) == 0
+    assert [n for n in notices if "⚠️" in n] == [], "no page about the row"
+    assert escalated == []
+    assert len(marked_ran) == 1
+    assert ready_to_prepare == []
+
+
+@pytest.mark.parametrize("bad", ["abc", "0", "-5"])
+def test_invalid_grace_override_imports_cleanly_with_fallback(bad):
+    """A bad env override must not crash the daemon at import (the parser logs
+    a warning, so it may not run before the logger exists)."""
+    import os
+    import subprocess as sp
+    from pathlib import Path
+
+    here = Path(prepare.__file__).resolve().parent
+    env = {**os.environ, "PHOENICURUS_PUBLISHING_RECONCILE_GRACE_MINUTES": bad}
+    proc = sp.run(
+        [sys.executable, "-c",
+         "import prepare; print(prepare.PUBLISHING_RECONCILE_GRACE_MINUTES)"],
+        cwd=str(here), env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip().splitlines()[-1] == "60.0"
+
+
+@pytest.mark.parametrize("raw,expected", [("1", 5.0), ("4.9", 5.0), ("5", 5.0), ("10", 10.0)])
+def test_grace_floor_is_clamped(raw, expected):
+    assert prepare._parse_publishing_grace(raw) == expected
