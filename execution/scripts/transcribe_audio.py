@@ -24,10 +24,8 @@ Examples:
 """
 
 import argparse
-import contextlib
 import errno
 import hashlib
-import io
 import json
 import math
 import os
