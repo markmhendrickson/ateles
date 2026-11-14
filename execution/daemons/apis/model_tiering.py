@@ -27,6 +27,11 @@ daemon restart, matching ``harness_router.configured_headroom`` and
 ``vendor_binding``
     Maps a tier to the model id each provider runs it on. A tier absent from a
     provider's map is also unresolved for that provider.
+    A provider's map may also carry ``"fallback_order": ["sonnet", "opus"]``:
+    the models tried, in that order, on the same provider when one model's own
+    usage cap is spent (``configured_model_fallback_order``). Absent, a spent
+    model cools the whole provider as it always did; a listed model is only
+    substituted when it is bound at or above the dispatch's tier.
 
 Fail-closed, deliberately asymmetric from ``harness_router``/``local_provider``
 (which fail closed to "provider ineligible"): here, an unreadable policy or
@@ -264,6 +269,158 @@ def configured_vendor_binding() -> dict[str, dict[str, str]]:
         if resolved:
             out[provider_name] = resolved
     return out
+
+
+# The per-provider key, inside the same vendor_binding file, that declares the
+# order models are tried in when one model's usage cap is spent.
+FALLBACK_ORDER_KEY = "fallback_order"
+
+
+def configured_model_fallback_order(
+    provider: str, *, raw: dict | None = None
+) -> tuple[str, ...]:
+    """Return the declared same-provider model fallback order, or ``()``.
+
+    Read from the provider's ``fallback_order`` list in the vendor_binding file
+    (``{"claude": {"mid": "sonnet", "top": "opus", "fallback_order":
+    ["sonnet", "opus"]}}``): when a model in the list hits its own usage cap,
+    the next entry after it is tried on the same provider.  ``()`` means NO
+    order is declared, and the caller must behave as it did before this
+    existed (cool the whole provider); a missing, malformed or unreadable
+    declaration is never replaced by a guessed order or the ambient default,
+    and an entry that is not a valid model selector drops the whole list.
+    """
+    source = (
+        _read_json_config(
+            _VENDOR_BINDING_ENV, _VENDOR_BINDING_FILE_ENV, _DEFAULT_VENDOR_BINDING_PATH
+        )
+        if raw is None
+        else raw
+    )
+    wanted = provider.strip().lower()
+    for name, tiers in source.items():
+        if str(name).strip().lower() != wanted or not isinstance(tiers, dict):
+            continue
+        declared = tiers.get(FALLBACK_ORDER_KEY)
+        if declared is None:
+            return ()
+        if not isinstance(declared, list):
+            log.warning(
+                f"[apis] model_tiering: vendor_binding {provider!r} "
+                f"{FALLBACK_ORDER_KEY} is not a list; no fallback order"
+            )
+            return ()
+        order: list[str] = []
+        for model in declared:
+            try:
+                valid = validate_model_selector(model)
+            except ValueError:
+                valid = None
+            if not valid:
+                log.warning(
+                    f"[apis] model_tiering: vendor_binding {provider!r} "
+                    f"{FALLBACK_ORDER_KEY} has an invalid entry {model!r}; "
+                    "no fallback order"
+                )
+                return ()
+            if valid not in order:
+                order.append(valid)
+        return tuple(order)
+    return ()
+
+
+def _model_matches(entry: str, model: str) -> bool:
+    """Same model: equal ids, or a bare family word (``sonnet``) against an id
+    that carries it as a whole hyphen-delimited part (``claude-sonnet-5-5``).
+    Never a prefix or substring test, so ``gpt-6`` does not stand for
+    ``gpt-6-luna``."""
+    a, b = entry.strip().lower(), model.strip().lower()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    for bare, full in ((a, b), (b, a)):
+        if bare.isalpha() and bare in full.split("-"):
+            return True
+    return False
+
+
+def model_meets_floor(
+    provider: str,
+    model: str,
+    floor_tier: str | None,
+    *,
+    binding: dict[str, dict[str, str]] | None = None,
+) -> bool:
+    """True when ``model`` may stand in for a dispatch resolved at ``floor_tier``.
+
+    A model is only as strong as the tier the vendor_binding binds it to: one
+    bound to no tier cannot be shown to meet the floor, so it is refused rather
+    than assumed adequate.  An unknown floor (``None``) refuses every model: a
+    caller that cannot say how strong the work needs its model to be has no
+    basis for substituting a different one.
+    """
+    if floor_tier is None:
+        return False
+    floor = _tier_index(floor_tier)
+    if floor < 0:
+        return False
+    active = configured_vendor_binding() if binding is None else binding
+    for tier, bound in active.get(provider.strip().lower(), {}).items():
+        if _model_matches(bound, model) and _tier_index(tier) >= floor:
+            return True
+    return False
+
+
+def bound_tier(
+    provider: str, model: str, *, binding: dict[str, dict[str, str]] | None = None
+) -> str | None:
+    """The strongest tier ``model`` is bound to for ``provider``, or ``None``.
+
+    The floor an explicitly pinned model implies: what the operator bound it as
+    is the least strength a stand-in may have.  ``None`` when it is bound to no
+    tier (including no vendor_binding at all).
+    """
+    active = configured_vendor_binding() if binding is None else binding
+    tiers = [
+        tier
+        for tier, bound in active.get(provider.strip().lower(), {}).items()
+        if _model_matches(bound, model)
+    ]
+    return max(tiers, key=_tier_index) if tiers else None
+
+
+def next_fallback_model(
+    provider: str,
+    current_model: str,
+    *,
+    order: tuple[str, ...] | None = None,
+    floor_tier: str | None,
+    skip=lambda model: False,
+) -> str | None:
+    """The next declared model after ``current_model``, or ``None``.
+
+    Only entries AFTER the current one in the declared order are candidates
+    (never a model the operator listed earlier), a candidate the caller says is
+    unavailable (``skip``, e.g. itself cooled) or that falls below the
+    dispatch's tier floor is passed over, and a current model absent from the
+    order has no fallback: nothing outside the declaration is ever chosen.
+    ``floor_tier`` is required and ``None`` (floor unknown) yields no fallback.
+    """
+    declared = configured_model_fallback_order(provider) if order is None else order
+    position = next(
+        (i for i, entry in enumerate(declared) if _model_matches(entry, current_model)),
+        None,
+    )
+    if position is None:
+        return None
+    for candidate in declared[position + 1:]:
+        if _model_matches(candidate, current_model):
+            continue
+        if skip(candidate) or not model_meets_floor(provider, candidate, floor_tier):
+            continue
+        return candidate
+    return None
 
 
 @dataclass(frozen=True)
@@ -931,7 +1088,19 @@ def check_config_file(path: Path) -> tuple[str | None, dict, list[str], list[str
                     f"vendor_binding provider {provider!r} is not a frontier "
                     f"harness provider ({', '.join(PROVIDERS)})"
                 )
+            order = tiers.get(FALLBACK_ORDER_KEY)
+            if order is not None and not (
+                isinstance(order, list)
+                and order
+                and all(isinstance(m, str) and m.strip() for m in order)
+            ):
+                errors.append(
+                    f"vendor_binding {provider!r} {FALLBACK_ORDER_KEY} must be a "
+                    "non-empty list of model ids"
+                )
             for tier, model in tiers.items():
+                if tier == FALLBACK_ORDER_KEY:
+                    continue
                 if str(tier).strip().lower() not in TIERS:
                     errors.append(
                         f"vendor_binding {provider!r} names unknown tier {tier!r}"
@@ -940,7 +1109,9 @@ def check_config_file(path: Path) -> tuple[str | None, dict, list[str], list[str
                     errors.append(
                         f"vendor_binding {provider!r} tier {tier!r} has an empty model"
                     )
-            if DEFAULT_TIER not in {str(t).strip().lower() for t in tiers}:
+            if DEFAULT_TIER not in {
+                str(t).strip().lower() for t in tiers if t != FALLBACK_ORDER_KEY
+            }:
                 errors.append(
                     f"vendor_binding {provider!r} binds no {DEFAULT_TIER!r} "
                     "model, but every escalation and every unmapped class "

@@ -86,12 +86,15 @@ from harness_router import (  # noqa: E402
     cool_down,
     cooled_until_all,
     cooling_providers,
+    cool_down_model,
     headroom_resolution,
+    model_cooled,
     minimum_headroom,
     provider_candidates,
     provider_exclusion_reason,
     provider_exclusion_reasons,
     record_cooling,
+    record_model_cooling,
     render_wall,
     usable_provider_names,
     usage_gate,
@@ -1922,6 +1925,11 @@ class SkillResult:
     # provider loop tries the next provider, without cooling this one (it is
     # healthy; only where it was routed could not take this job).
     fly_local_fallback_refused: bool = False
+    # Nothing ran: the model this attempt would have launched (named here) is
+    # inside its own usage-cap cooling window and no declared same-provider
+    # fallback model could replace it. The provider itself is healthy, so the
+    # provider loop tries the next provider without cooling this one.
+    model_cooled: str = ""
     # A single-provider dispatch (an existing-PR correction) refused that way:
     # the other Fly candidates its caller may try next, each in a fresh
     # dispatch under its own prelaunch receipt. Empty for every other result.
@@ -2345,7 +2353,9 @@ def _diagnostic_failure_kinds(*texts: str) -> set[str]:
     return kinds
 
 
-def _cool_after_capacity_failure(provider: str, result: "SkillResult") -> None:
+def _cool_after_capacity_failure(
+    provider: str, result: "SkillResult", *, model_fallback: bool = False
+) -> str | None:
     """Cool ``provider`` until the reset its refusal states, and persist it.
 
     The in-process timer alone was invisible to the next ``dispatch_role``
@@ -2361,18 +2371,63 @@ def _cool_after_capacity_failure(provider: str, result: "SkillResult") -> None:
     to the longest window that kind of limit can have.  Anything else keeps the
     old in-process timer only.  An unreadable reset gets the conservative
     default (``APIS_HARNESS_COOLDOWN_SECONDS``, one hour) and says so.
+
+    A refusal that names ONE model's limit ("hit your Sonnet limit") cools only
+    that model, and only when ``model_fallback`` is set and the vendor_binding
+    declares a ``fallback_order`` for the provider: the family is returned and
+    the provider stays selectable, so the caller can run the next declared
+    model.  Every other refusal (provider-wide, no order declared, a caller
+    that cannot substitute a model) cools the whole provider exactly as before
+    and returns ``None``.
     """
-    cool_down(provider)
     if result.ok or result.returncode in (0, None):
-        return
+        cool_down(provider)
+        return None
     try:
         refusal = parse_refusal(result.stdout, result.stderr, provider=provider)
-        if refusal is None:
+    except Exception as exc:  # noqa: BLE001 — persistence must never break failover
+        cool_down(provider)
+        log.error(f"[apis] could not read {provider} capacity refusal: {exc}")
+        return None
+    if refusal is None:
+        cool_down(provider)
+        log.warning(
+            f"[apis] {provider} was classified as a capacity failure but its "
+            "output does not end in a limit refusal; cooled in-process only"
+        )
+        return None
+
+    scoped: str | None = None
+    if refusal.model and model_fallback:
+        ran = (result.usage.model or "") if result.usage else ""
+        order = model_tiering.configured_model_fallback_order(provider)
+        if not ran:
+            # No model was pinned (the CLI ran its ambient default), so there
+            # is no model to substitute for: retrying would relaunch the same
+            # default. Cool the provider.
             log.warning(
-                f"[apis] {provider} was classified as a capacity failure but its "
-                "output does not end in a limit refusal; cooled in-process only"
+                f"[apis] {provider} refused with a {refusal.model} limit but this "
+                "run pinned no model; cooling the whole provider"
             )
-            return
+        elif not order:
+            log.warning(
+                f"[apis] {provider} refused with a {refusal.model} limit but the "
+                f"vendor_binding declares no {model_tiering.FALLBACK_ORDER_KEY} "
+                "for it: no model fallback is configured, cooling the whole provider"
+            )
+        elif ran and not model_tiering._model_matches(refusal.model, ran):
+            log.warning(
+                f"[apis] {provider} refusal names {refusal.model} but this run "
+                f"requested {ran}; cooling the whole provider"
+            )
+        else:
+            scoped = refusal.model
+    if scoped is None:
+        cool_down(provider)
+    else:
+        cool_down_model(provider, scoped)
+    subject = f"{provider} {scoped} model" if scoped else provider
+    try:
         now = time.time()
         if refusal.until_wall is not None:
             until = refusal.until_wall
@@ -2380,7 +2435,7 @@ def _cool_after_capacity_failure(provider: str, result: "SkillResult") -> None:
                 refusal.kind, "usage_limit"
             )
             log.warning(
-                f"[apis] {provider} refused with a {refusal.kind} limit; cooled until "
+                f"[apis] {subject} refused with a {refusal.kind} limit; cooled until "
                 f"{render_wall(until)} (stated reset {refusal.matched!r} in "
                 f"{refusal.zone}{'; clamped' if refusal.clamped else ''})"
             )
@@ -2393,13 +2448,67 @@ def _cool_after_capacity_failure(provider: str, result: "SkillResult") -> None:
                 default = 3600.0
             until, reason = now + default, "capacity_unparsed_reset"
             log.warning(
-                f"[apis] {provider} refused with a capacity failure whose reset "
+                f"[apis] {subject} refused with a capacity failure whose reset "
                 f"time could not be read; cooled for the default {int(default)}s "
                 f"(until {render_wall(until)})"
             )
-        record_cooling(provider, until, reason=reason, observed_at=now)
+        if scoped:
+            record_model_cooling(provider, scoped, until, reason=reason, observed_at=now)
+        else:
+            record_cooling(provider, until, reason=reason, observed_at=now)
     except Exception as exc:  # noqa: BLE001 — persistence must never break failover
-        log.error(f"[apis] could not persist {provider} cooling window: {exc}")
+        log.error(f"[apis] could not persist {subject} cooling window: {exc}")
+    return scoped
+
+
+def _model_fallback_fields(
+    *,
+    skill: str,
+    role: str,
+    task_entity_id: str,
+    provider: str,
+    from_model: str,
+    to_model: str | None,
+    reason: str,
+) -> dict:
+    """The provider_failover row for a same-provider model substitution.
+
+    Resolved at the decision (agent subject, event time) so a row written later
+    by the paced queue still records what was true then.  ``to_model`` of None
+    records a model that could not be replaced, so a refusal is visible too.
+    """
+    try:
+        agent_sub = _load_agent_def(role).aauth_sub
+    except Exception:  # noqa: BLE001 — provenance must not block the fallback
+        agent_sub = ""
+    return dict(
+        task_entity_id=task_entity_id,
+        role=role,
+        agent_sub=agent_sub,
+        event_type="provider_failover",
+        tool_name=f"{provider}:{skill}",
+        success="false",
+        output_summary=(
+            f"provider={provider} failover_reason={reason} "
+            f"from_model={from_model} to_model={to_model or 'none'} "
+            "scope=model same_provider=true"
+        ),
+        usage=DispatchUsage(
+            provider=provider,
+            model=to_model or from_model,
+            model_source="requested",
+        ),
+        event_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+async def _record_model_fallback(**kwargs) -> None:
+    """harness_event row for each same-provider model substitution. Never raises."""
+    try:
+        fields = await asyncio.to_thread(_model_fallback_fields, **kwargs)
+        await _emit_harness_event(**fields)
+    except Exception as exc:  # noqa: BLE001
+        log.debug(f"[apis] model fallback harness_event write failed: {exc}")
 
 
 def _refresh_usage_snapshot(binaries: dict[str, str | None]) -> None:
@@ -4938,6 +5047,67 @@ async def run_skill(
     fly_bound, fly_extra = _fly_routing(runner, action_class)
 
     async def attempt(selected: str, fallback_model: str | None = None) -> SkillResult:
+        # A model whose own usage cap is spent is not launched: the next model
+        # the vendor_binding declares for this provider runs instead (never one
+        # below the dispatch's tier, never one it does not declare), or, with
+        # none, the provider is skipped without being cooled.
+        wanted_model = fallback_model or model
+        if (
+            wanted_model is None
+            and precomputed_tier is not None
+            and selected != local_provider.LOCAL_PROVIDER
+        ):
+            try:
+                wanted_model = model_tiering.model_for_tier(
+                    selected, precomputed_tier.tier
+                )
+            except model_tiering.UnboundTierError:
+                wanted_model = None  # _run_skill_once refuses this itself
+        if wanted_model and selected != local_provider.LOCAL_PROVIDER:
+            cooled = model_cooled(selected, wanted_model)
+            if cooled is not None:
+                # The floor is the tier the dispatch resolved to and/or the tier
+                # an explicitly pinned model is bound to, whichever is higher; a
+                # pinned model bound to no tier has no floor and is not replaced.
+                floors = [
+                    t for t in (
+                        precomputed_tier.tier if precomputed_tier else None,
+                        model_tiering.bound_tier(selected, wanted_model),
+                    ) if t
+                ]
+                replacement = model_tiering.next_fallback_model(
+                    selected,
+                    wanted_model,
+                    floor_tier=max(floors, key=model_tiering._tier_index) if floors else None,
+                    skip=lambda candidate: model_cooled(selected, candidate)
+                    is not None,
+                )
+                await _record_model_fallback(
+                    skill=skill,
+                    role=(role or skill).lower(),
+                    task_entity_id=task_entity_id,
+                    provider=selected,
+                    from_model=wanted_model,
+                    to_model=replacement,
+                    reason="model_capacity",
+                )
+                if replacement is None:
+                    msg = (
+                        f"{selected} model {wanted_model} is cooling after its "
+                        f"usage limit and the vendor_binding declares no "
+                        f"{model_tiering.FALLBACK_ORDER_KEY} model that can replace "
+                        "it; the provider itself is not cooled"
+                    )
+                    log.warning(f"[apis] {skill}: {msg}")
+                    return SkillResult(
+                        skill, False, None, "", "", error=msg, provider=selected,
+                        model_cooled=wanted_model,
+                    )
+                log.warning(
+                    f"[apis] {skill}: {selected} model {wanted_model} is cooling "
+                    f"after its usage limit; running declared fallback {replacement}"
+                )
+                fallback_model = replacement
         result = await _run_skill_once(
             skill,
             prompt,
@@ -5024,6 +5194,7 @@ async def run_skill(
         fly_extra=fly_extra,
         single_provider=bool(fly_delivery and "pr_number" in fly_delivery),
         exclude_providers=tuple(exclude_providers),
+        model_fallback=True,
     )
 
 
@@ -5219,8 +5390,16 @@ async def _run_provider_attempts(
     fly_bound: frozenset[str] = frozenset(), fly_extra: tuple[str, ...] = (),
     single_provider: bool = False,
     exclude_providers: tuple[str, ...] = (),
+    model_fallback: bool = False,
 ) -> SkillResult:
     """One selection/cooldown/failover mechanism for every harness entrypoint.
+
+    ``model_fallback``: the caller's ``attempt`` can substitute the model it
+    launches (``run_skill``'s, which also refuses a model that is cooling). A
+    refusal naming one model's limit then cools that model alone and the same
+    provider is tried again with the next model the vendor_binding declares.
+    Off for ``attempt`` callbacks that run one fixed, separately qualified model
+    (``run_review_prompt``): their refusals cool the whole provider as before.
 
     ``fly_bound`` / ``fly_extra``: see ``_fly_routing``. Empty for a dispatch
     that runs on the Mac, which is then gated exactly as before.
@@ -5376,6 +5555,7 @@ async def _run_provider_attempts(
 
     attempted: list[str] = []
     repairs: list[str] = []
+    model_retries: dict[str, int] = {}
     last_result: SkillResult | None = None
     # Local-first work has no silent frontier path. `fallback_models` is None
     # while claude-local is still ahead in the queue; once local has failed (or
@@ -5406,7 +5586,8 @@ async def _run_provider_attempts(
     while index < len(pending):
         selected = pending[index]
         index += 1
-        attempted.append(selected)
+        if selected not in attempted:
+            attempted.append(selected)
         pinned = (fallback_models or {}).get(selected)
         result = await (
             attempt(selected, fallback_model=pinned) if pinned else attempt(selected)
@@ -5458,6 +5639,14 @@ async def _run_provider_attempts(
                 f"({result.error}); trying {others[0]} on Fly"
             )
             pending = pending[:index] + others
+            continue
+        if result.model_cooled:
+            # Nothing launched: this model is cooling with no declared
+            # replacement. The provider is healthy, so no cooldown; the next
+            # provider may still run.
+            last_result = result
+            log.warning(f"[apis] {skill}: {selected} model {result.model_cooled} is "
+                        "cooling; trying the next provider")  # fmt: skip
             continue
         if result.fly_local_fallback_refused:
             # Same failover as a launch failure, minus the cooldown. A pinned
@@ -5600,7 +5789,26 @@ async def _run_provider_attempts(
             return result
 
         if failure_kind == "capacity":
-            _cool_after_capacity_failure(selected, result)
+            scoped_model = _cool_after_capacity_failure(
+                selected, result, model_fallback=model_fallback
+            )
+            if scoped_model:
+                # One model's cap, not the provider's: run the same provider
+                # again straight away. Its attempt substitutes the next declared
+                # model (or reports none and the loop moves on). Bounded by the
+                # models the order declares (each retry cools one more), so it
+                # cannot loop.
+                model_retries[selected] = model_retries.get(selected, 0) + 1
+                if model_retries[selected] <= len(
+                    model_tiering.configured_model_fallback_order(selected)
+                ):
+                    pending.insert(index, selected)
+                last_result = result
+                log.warning(
+                    f"[apis] {skill}: {selected} {scoped_model} model hit its usage "
+                    "limit; retrying the same provider on the next declared model"
+                )
+                continue
         else:
             cool_down(selected)
         last_result = result

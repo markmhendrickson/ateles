@@ -273,6 +273,38 @@ def limit_kind(line: str) -> str:
     return "usage"
 
 
+# Model families a refusal can name as the one that is spent. Deliberately a
+# closed list: a word next to "limit" is only read as a model when it is one of
+# these, so "your weekly limit" or "rate limit" never scopes a refusal to a
+# model. Extend it when a provider ships a new family.
+MODEL_FAMILIES = ("opus", "sonnet", "haiku", "fable")
+_FAMILY = "|".join(MODEL_FAMILIES)
+# "You've hit your Sonnet limit", "your weekly Sonnet limit", "Sonnet weekly
+# limit reached", "weekly limit for Sonnet", "limit reached for Claude Sonnet 5".
+_MODEL_LIMIT = (
+    re.compile(
+        rf"\b({_FAMILY})(?:[ -]\d+(?:[.-]\d+)*)?\s+(?:(?:weekly|session|usage|monthly|5[- ]?hour)\s+)?limit\b"
+    ),
+    re.compile(
+        rf"\blimits?\s+(?:reached\s+)?(?:for|on)\s+(?:claude\s+)?({_FAMILY})\b"
+    ),
+)
+
+
+def limit_model(line: str) -> str | None:
+    """The model family a refusal line says is spent, or ``None`` when it names none.
+
+    ``None`` means provider-wide: the caller must treat an unnamed limit as the
+    whole subscription's, exactly as before model scoping existed.
+    """
+    lowered = line.lower()
+    for pattern in _MODEL_LIMIT:
+        match = pattern.search(lowered)
+        if match:
+            return match.group(1)
+    return None
+
+
 @dataclass(frozen=True)
 class Refusal:
     """The provider's own capacity refusal, as read from the tail of its output."""
@@ -282,6 +314,7 @@ class Refusal:
     matched: str
     zone: str
     clamped: bool
+    model: str | None = None  # family the refusal names (sonnet); None: provider-wide
 
 
 def _tail_lines(text: str) -> list[str]:
@@ -307,9 +340,10 @@ def parse_refusal(
             if len(line) > MAX_REFUSAL_LINE_CHARS or not _LIMIT_PHRASE.search(line.lower()):
                 continue
             kind = limit_kind(line)
+            model = limit_model(line)
             parsed = parse_limit_reset(line, provider=provider, now_wall=moment)
             if parsed is None:
-                return Refusal(kind, None, line[:120], "", False)
+                return Refusal(kind, None, line[:120], "", False, model)
             cap = moment + KIND_CAP_SECONDS[kind]
             clamped = parsed.until_wall > cap
             if clamped:
@@ -320,6 +354,7 @@ def parse_refusal(
                     KIND_CAP_SECONDS[kind] / 3600,
                 )
             return Refusal(
-                kind, min(parsed.until_wall, cap), parsed.matched, parsed.zone, clamped
+                kind, min(parsed.until_wall, cap), parsed.matched, parsed.zone, clamped,
+                model,
             )
     return None
