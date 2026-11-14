@@ -6179,25 +6179,19 @@ async def deferred_review_sweep_pass(dispatcher: SwarmDispatcher) -> None:
     dispatcher.begin_sweep_pass()
     try:
         await _deferred_review_sweep_steps(dispatcher)
+        log.info(
+            f"[{DAEMON_NAME}] review sweep pass done: GitHub quota "
+            f"{dispatcher.sweep_quota_status()}"
+        )
     finally:
         dispatcher.end_sweep_pass()
 
 
 async def _deferred_review_sweep_steps(dispatcher: SwarmDispatcher) -> None:
-    quota_logged = False
-
     def _stop_for_quota(next_step: str) -> bool:
-        nonlocal quota_logged
         if not dispatcher.sweep_quota_low():
             return False
-        if not quota_logged:
-            quota_logged = True
-            log.warning(
-                f"[{DAEMON_NAME}] review sweep stopped before {next_step}: "
-                f"GitHub quota remaining {dispatcher._rate_remaining} < "
-                f"{dispatcher._sweep_min_remaining()}; resets at "
-                f"{dispatcher.sweep_quota_reset_iso()} — rest of pass skipped"
-            )
+        dispatcher.log_quota_stop(f"before {next_step}")
         return True
 
     # 0. Fly reservations marked for the reaper. A run whose login

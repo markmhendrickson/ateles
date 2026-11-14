@@ -4867,9 +4867,22 @@ class DispatchConfig:
     #     DIRECTLY with no gate check, deliberately;
     #   - the approval loop (pr_review, email_approve), auto-release
     #     (push_main, release_approve, and the release-branch CI retry), the
-    #     operator-gated merge-readiness signal on CI green, and housekeeping
-    #     sweeps (verdict supersession, closed-issue markers, the
-    #     approved-unmerged report) — none of those start software work;
+    #     operator-gated merge-readiness signal on CI green, and the
+    #     closed-issue-marker housekeeping sweep — none of those start
+    #     software work;
+    #   - the approved-unmerged report (`report_pr_review_queue`): it stays
+    #     UNGATED because it is the only watcher for approved-but-unmerged
+    #     session-route PRs, which carry no label. It reads the full open-PR
+    #     list;
+    #
+    # Request budget: the periodic sweep applies this same gate BEFORE any
+    # per-PR read (`_list_open_prs` / `_lane_filter`, from the labels in the
+    # open-PR list response) in exactly these steps: resume_deferred_reviews,
+    # resume_stalled_reviews, resume_missing_lens_reviews,
+    # resume_unactioned_revisions and supersede_stale_review_verdicts. Verdict
+    # supersession is gated because it loses nothing: a PR outside the lane
+    # has no swarm verdict to supersede. The approved-unmerged report is the
+    # one sweep step that is not gated.
     #   - any operational daemon (payments, email, Phoenicurus release, deploys).
     #
     # Outside this process, the Anthus workflow orchestrator
@@ -4895,7 +4908,6 @@ _SWEEP_GATE_SOURCES = frozenset(
         "resume_stalled_reviews",
         "resume_missing_lens_reviews",
         "resume_unactioned_revisions",
-        "report_pr_review_queue",
         "supersede_stale_review_verdicts",
     }
 )
@@ -5158,6 +5170,7 @@ class SwarmDispatcher:
     _sweep_pass: dict | None = None
     _rate_remaining: int | None = None
     _rate_reset: float | None = None
+    _rate_reset_is_default: bool = False
 
     def begin_sweep_pass(self) -> None:
         """Open a per-pass cache (shared open-PR lists, parent-issue reads)."""
@@ -5182,19 +5195,59 @@ class SwarmDispatcher:
         return fields
 
     def _note_rate_limit(self, resp) -> None:
-        """Remember `X-RateLimit-Remaining` / `-Reset` from a GitHub response."""
+        """Remember `X-RateLimit-Remaining` / `-Reset` from a GitHub response.
+
+        Called BEFORE `raise_for_status`, so an exhausted 403/429 response
+        records remaining=0 and its reset time. A response with no rate-limit
+        headers is an UNKNOWN reading: it changes nothing and is never reported
+        as plenty (`sweep_quota_status`). When the reading is below the floor
+        and carries no usable reset time, the pause is bounded to
+        APIS_SWEEP_QUOTA_WAIT_SECONDS (default 900) instead of lasting until
+        a restart.
+        """
         headers = getattr(resp, "headers", None)
         if not headers:
             return
+        remaining = None
+        reset = None
         try:
-            remaining = headers.get("X-RateLimit-Remaining")
-            reset = headers.get("X-RateLimit-Reset")
-            if remaining is not None:
-                self._rate_remaining = int(remaining)
-            if reset is not None:
-                self._rate_reset = float(reset)
+            raw = headers.get("X-RateLimit-Remaining")
+            if raw is not None:
+                remaining = int(raw)
         except (TypeError, ValueError):
-            return
+            remaining = None
+        try:
+            raw = headers.get("X-RateLimit-Reset")
+            if raw is not None:
+                reset = float(raw)
+        except (TypeError, ValueError):
+            reset = None
+        if remaining is None:
+            # No usable count. A 429 or a 403 carrying Retry-After still says
+            # the budget is spent, so treat that as zero remaining.
+            status = getattr(resp, "status_code", 200)
+            if status in (403, 429) and headers.get("Retry-After") is not None:
+                remaining = 0
+                if reset is None:
+                    try:
+                        reset = time.time() + float(headers.get("Retry-After"))
+                    except (TypeError, ValueError):
+                        reset = None
+            else:
+                return
+        self._rate_remaining = remaining
+        floor = self._sweep_min_remaining()
+        now = time.time()
+        if remaining < floor and floor > 0 and (reset is None or reset <= now):
+            try:
+                wait = float(os.environ.get("APIS_SWEEP_QUOTA_WAIT_SECONDS", "900"))
+            except ValueError:
+                wait = 900.0
+            reset = now + max(wait, 0.0)
+            self._rate_reset_is_default = True
+        else:
+            self._rate_reset_is_default = False
+        self._rate_reset = reset
 
     @staticmethod
     def _sweep_min_remaining() -> int:
@@ -5216,8 +5269,30 @@ class SwarmDispatcher:
     def sweep_quota_reset_iso(self) -> str:
         if self._rate_reset is None:
             return "unknown"
-        return datetime.fromtimestamp(self._rate_reset, timezone.utc).strftime(
+        text = datetime.fromtimestamp(self._rate_reset, timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
+        )
+        if getattr(self, "_rate_reset_is_default", False):
+            text += " (default wait; GitHub gave no reset time)"
+        return text
+
+    def sweep_quota_status(self) -> str:
+        """`remaining=N` or `remaining=unknown` (no rate-limit header seen)."""
+        if self._rate_remaining is None:
+            return "remaining=unknown (no rate-limit header seen)"
+        return f"remaining={self._rate_remaining}"
+
+    def log_quota_stop(self, where: str) -> None:
+        """Log a quota stop once per sweep pass, as a quota stop."""
+        cache = self._sweep_pass
+        if cache is not None:
+            if cache.get("quota_logged"):
+                return
+            cache["quota_logged"] = True
+        log.warning(
+            f"[{DAEMON_NAME}] review sweep stopped at {where}: GitHub quota "
+            f"{self.sweep_quota_status()} < {self._sweep_min_remaining()}; "
+            f"resets at {self.sweep_quota_reset_iso()} — rest of pass skipped"
         )
 
     async def _list_open_prs(
@@ -5227,14 +5302,16 @@ class SwarmDispatcher:
         *,
         source: str,
         per_page: int = 100,
+        gated: bool = True,
     ) -> list[dict]:
         """Open PRs for a sweep step, label-gated BEFORE any per-PR read.
 
         With the gate set, a PR is kept only when it is in the lane — the label
         on the PR itself (already in this list response, no extra call) or on
         its linked parent issue (one read, only for a PR that names a parent,
-        shared across the pass). With the gate unset the list is returned
-        unchanged. Back-to-back steps of one pass share a single list read
+        shared across the pass). With the gate unset, or `gated=False` (the
+        approved-unmerged report, which must see session-route PRs that carry
+        no label), the list is returned unfiltered. Back-to-back steps of one pass share a single list read
         (APIS_SWEEP_LIST_SHARE_SECONDS, default 120). Raises on an HTTP error,
         and `_SweepQuotaLow` before any call while the quota floor is breached.
         """
@@ -5256,17 +5333,18 @@ class SwarmDispatcher:
                 params={"state": "open", "per_page": 100 if cache is not None else per_page},
                 headers=self._github_headers(repository),
             )
-            resp.raise_for_status()
             self._note_rate_limit(resp)
+            resp.raise_for_status()
             if self.sweep_quota_low():
                 raise _SweepQuotaLow(f"{repository}: GitHub quota low")
             prs = [p for p in (resp.json() or []) if isinstance(p, dict)]
             if cache is not None:
                 cache["lists"][repository] = (time.monotonic(), prs)
         # Steps annotate PR dicts, so each gets its own shallow copies.
-        return await self._lane_filter(
-            repository, [dict(p) for p in prs[:per_page]], source
-        )
+        copies = [dict(p) for p in prs[:per_page]]
+        if not gated:
+            return copies
+        return await self._lane_filter(repository, copies, source)
 
     async def _lane_filter(
         self, repository: str, prs: list[dict], source: str
@@ -5788,6 +5866,9 @@ class SwarmDispatcher:
         for repository in repositories:
             try:
                 prs = await self._prs_with_matured_deferral(repository, now)
+            except _SweepQuotaLow:
+                self.log_quota_stop("deferred-review sweep")
+                break
             except Exception as exc:
                 log.warning(
                     f"[{DAEMON_NAME}] deferred-review sweep: could not scan "
@@ -6265,6 +6346,9 @@ class SwarmDispatcher:
                 candidates = await self._prs_with_stalled_review(
                     repository, now, stall_after
                 )
+            except _SweepQuotaLow:
+                self.log_quota_stop("stalled-review sweep")
+                break
             except Exception as exc:
                 log.warning(
                     f"[{DAEMON_NAME}] stalled-review sweep: could not scan "
@@ -6397,6 +6481,9 @@ class SwarmDispatcher:
                 candidates = await self._prs_with_unactioned_revisions(
                     repository, now, stale_after
                 )
+            except _SweepQuotaLow:
+                self.log_quota_stop("revision sweep")
+                break
             except Exception as exc:
                 log.warning(
                     f"[{DAEMON_NAME}] revision sweep: could not scan "
@@ -6622,6 +6709,9 @@ class SwarmDispatcher:
         for repository in repositories:
             try:
                 candidates = await self._approved_unmerged_prs(repository, now)
+            except _SweepQuotaLow:
+                self.log_quota_stop("approved-unmerged report")
+                break
             except Exception as exc:
                 log.warning(
                     f"[{DAEMON_NAME}] approved-unmerged report: could not scan "
@@ -7019,6 +7109,9 @@ class SwarmDispatcher:
         for repository in repositories:
             try:
                 candidates = await self._prs_with_missing_lens(repository)
+            except _SweepQuotaLow:
+                self.log_quota_stop("missing-lens sweep")
+                break
             except Exception as exc:
                 log.warning(
                     f"[{DAEMON_NAME}] missing-lens sweep: could not scan "
@@ -7418,7 +7511,7 @@ class SwarmDispatcher:
         list_url = f"https://api.github.com/repos/{repository}/pulls"
         async with httpx.AsyncClient(timeout=30) as client:
             for pr in await self._list_open_prs(
-                client, repository, source="report_pr_review_queue"
+                client, repository, source="report_pr_review_queue", gated=False
             ):
                 if pr.get("draft"):
                     continue
@@ -13053,8 +13146,8 @@ class SwarmDispatcher:
                                 },
                                 headers=self._github_headers(repository),
                             )
-                            resp.raise_for_status()
                             self._note_rate_limit(resp)
+                            resp.raise_for_status()
                             batch = resp.json()
                             if self.sweep_quota_low():
                                 break

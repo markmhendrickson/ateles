@@ -87,9 +87,24 @@ class FakeGitHub:
     """Records every request; serves open-PR lists, empty comments/reviews and
     parent-issue labels. `remaining` is echoed as X-RateLimit-Remaining."""
 
-    def __init__(self, prs: dict[str, list[dict]], *, remaining=None, issues=None):
+    def __init__(
+        self,
+        prs: dict[str, list[dict]],
+        *,
+        remaining=None,
+        issues=None,
+        send_reset: bool = True,
+        low_after: int = 0,
+        list_status: int = 200,
+        reviews: dict[int, list[dict]] | None = None,
+    ):
         self.prs = prs
         self.remaining = remaining
+        self.send_reset = send_reset
+        self.low_after = low_after  # list calls answered without headers first
+        self.list_status = list_status
+        self.reviews = reviews or {}
+        self.list_calls = 0
         self.issues = issues or {}
         self.paths: list[str] = []
         self.reset = int(time.time()) + 1800
@@ -98,15 +113,19 @@ class FakeGitHub:
         path = request.url.path
         self.paths.append(path)
         headers = {}
-        if self.remaining is not None:
-            headers = {
-                "X-RateLimit-Remaining": str(self.remaining),
-                "X-RateLimit-Reset": str(self.reset),
-            }
         parts = path.strip("/").split("/")  # repos/o/r/<kind>/...
         repo = "/".join(parts[1:3])
         if len(parts) == 4 and parts[3] == "pulls":
-            return httpx.Response(200, json=self.prs.get(repo, []), headers=headers)
+            self.list_calls += 1
+            if self.remaining is not None and self.list_calls > self.low_after:
+                headers = {"X-RateLimit-Remaining": str(self.remaining)}
+                if self.send_reset:
+                    headers["X-RateLimit-Reset"] = str(self.reset)
+            return httpx.Response(
+                self.list_status, json=self.prs.get(repo, []), headers=headers
+            )
+        if len(parts) == 6 and parts[5] == "reviews":
+            return httpx.Response(200, json=self.reviews.get(int(parts[4]), []))
         if len(parts) == 5 and parts[3] == "issues":
             number = int(parts[4])
             labels = self.issues.get((repo, number), [])
@@ -149,6 +168,13 @@ def wire(monkeypatch):
         async def ready(repositories):  # noqa: ANN001
             return None
 
+        async def no_report(repositories):  # noqa: ANN001
+            # The approved-unmerged report is deliberately ungated and reads
+            # every open PR; it has its own test, so the whole-pass counts
+            # below cover the gated steps only.
+            return {}
+
+        monkeypatch.setattr(d, "report_pr_review_queue", no_report)
         monkeypatch.setattr(d, "_handle_pr", handle_pr)
         monkeypatch.setattr(d, "_hold_panel_until_checks_green", not_held)
         monkeypatch.setattr(d, "_await_github_app_ready", ready)
@@ -266,6 +292,7 @@ async def test_low_quota_stops_the_pass_and_logs_the_reset(wire, monkeypatch, ca
     assert gh.list_reads() <= 1, "after the first reading the pass stops listing"
     lines = [r.getMessage() for r in caplog.records if "quota" in r.getMessage()]
     assert len(lines) == 1, f"exactly one stop line, got {lines}"
+    assert not any("could not scan" in r.getMessage() for r in caplog.records)
     reset = datetime.fromtimestamp(gh.reset, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     assert reset in lines[0], "the line must say when the quota resets"
 
@@ -346,3 +373,94 @@ async def test_ci_webhook_gate_unset_reads_checks_as_before(monkeypatch):
     await d._handle_ci_status(_ci_trigger())
 
     assert read == ["checks"]
+
+
+# ── round 1 review: the report stays ungated; the quota floor fails safe ──
+
+
+@pytest.mark.asyncio
+async def test_approved_unmerged_report_stays_ungated(wire):
+    """Session-route PRs carry no label; the report is their only watcher."""
+    gh = FakeGitHub({"o/a": [_pr(1), _pr(2)]})
+    d = _dispatcher(CANARY)
+    wire(d, gh)
+
+    await d._approved_unmerged_prs("o/a", datetime.now(timezone.utc))
+
+    assert any("/pulls/1/reviews" in p for p in gh.paths)
+    assert any("/pulls/2/reviews" in p for p in gh.paths), (
+        "an unlabelled PR must still be read by the approved-unmerged report"
+    )
+
+
+@pytest.mark.asyncio
+async def test_exhausted_403_records_zero_remaining_and_reset(wire, monkeypatch):
+    monkeypatch.setenv("APIS_SWEEP_MIN_REMAINING", "1000")
+    gh = FakeGitHub(_all_unlabelled(2), remaining=0, list_status=403)
+    d = _dispatcher(CANARY)
+    wire(d, gh)
+
+    await apis.deferred_review_sweep_pass(d)
+
+    assert d._rate_remaining == 0, "headers must be read before raise_for_status"
+    assert d._rate_reset == float(gh.reset)
+    assert d.sweep_quota_low()
+    assert gh.per_pr_reads() == 0
+
+
+@pytest.mark.asyncio
+async def test_low_with_no_reset_time_waits_a_bounded_time_then_resumes(
+    wire, monkeypatch
+):
+    monkeypatch.setenv("APIS_SWEEP_MIN_REMAINING", "1000")
+    monkeypatch.setenv("APIS_SWEEP_QUOTA_WAIT_SECONDS", "900")
+    gh = FakeGitHub(_all_unlabelled(2), remaining=10, send_reset=False)
+    d = _dispatcher(CANARY)
+    wire(d, gh)
+
+    await apis.deferred_review_sweep_pass(d)
+    assert d.sweep_quota_low(), "just after the reading the pass must be paused"
+
+    real = time.time
+    monkeypatch.setattr(sd.time, "time", lambda: real() + 901)
+    assert not d.sweep_quota_low(), "after the bounded wait the sweep resumes"
+
+
+@pytest.mark.asyncio
+async def test_reading_without_rate_limit_headers_is_unknown_not_plenty(
+    wire, caplog
+):
+    prs = _all_unlabelled(2)
+    prs["o/a"][0] = _pr(1, labels=[CANARY])
+    gh = FakeGitHub(prs)  # no rate-limit headers at all
+    d = _dispatcher(CANARY)
+    wire(d, gh)
+
+    with caplog.at_level(logging.INFO):
+        await apis.deferred_review_sweep_pass(d)
+
+    assert ("o/a", 1) in wire.handled, "an unknown reading continues as before"
+    assert not d.sweep_quota_low()
+    assert "unknown" in d.sweep_quota_status()
+    lines = [r.getMessage() for r in caplog.records if "quota" in r.getMessage()]
+    assert lines and all("unknown" in line for line in lines), lines
+
+
+@pytest.mark.asyncio
+async def test_quota_stop_inside_a_step_logs_once_as_a_quota_stop(
+    wire, monkeypatch, caplog
+):
+    monkeypatch.setenv("APIS_SWEEP_MIN_REMAINING", "1000")
+    prs = _all_unlabelled(3)
+    # The supersession step lists three repositories with no headers; the first
+    # list of the next step reports the quota spent, inside that step.
+    gh = FakeGitHub(prs, remaining=5, low_after=3)
+    d = _dispatcher(CANARY)
+    wire(d, gh)
+
+    with caplog.at_level(logging.WARNING):
+        await apis.deferred_review_sweep_pass(d)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum("quota" in m for m in messages) == 1, messages
+    assert not any("could not scan" in m for m in messages), messages
