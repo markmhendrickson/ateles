@@ -357,7 +357,10 @@ def _producer_result(monkeypatch, *, candidates, gates, attempt):
         cooled[provider] = {"until": _time.time() + 3600, "reason": "session limit"}
 
     monkeypatch.setattr(sr, "cool_down", fake_cool)
-    monkeypatch.setattr(sr, "_cool_after_capacity_failure", lambda p, r: fake_cool(p))
+    monkeypatch.setattr(
+        sr, "_cool_after_capacity_failure",
+        lambda p, r, *, model_fallback=False: fake_cool(p),
+    )  # fmt: skip
     return asyncio.run(
         sr._run_provider_attempts(
             "loxia", attempt, binaries={"claude": "/bin/claude"}, role="loxia", retry_safe=True,

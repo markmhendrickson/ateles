@@ -58,7 +58,7 @@ def loop(fly_env, seam, monkeypatch, tmp_path):  # noqa: F811 -- pytest fixtures
     monkeypatch.setattr(skill_runner, "cool_down", lambda name, *a, **k: cooled.append(name))
     monkeypatch.setattr(
         skill_runner, "_cool_after_capacity_failure",
-        lambda name, result: cooled.append(name),
+        lambda name, result, *, model_fallback=False: cooled.append(name),
     )  # fmt: skip
     seen = {"attempts": [], "spawned": spawned, "cooled": cooled, "fake": fake,
             "minted": minted}  # fmt: skip
