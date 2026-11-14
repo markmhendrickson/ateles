@@ -55,3 +55,13 @@ Merge stays gated, and two classes stay Mark's absolutely. => Merge stays gated,
 # states the swarm's unattended-rotation class and the PAT-to-installation-
 # token replacement in the bullet body rather than dropping them.
 Merge stays gated, and credential rotation stays Mark's absolutely. => Merge stays gated, and minting a credential plus anything touching a root secret stay Mark's absolutely.
+
+# Operator ruling, 2026-11-11 — Fly becomes the default runner for small,
+# self-contained changes (canonical agent_policy ent_9deb9d0f5160862342293afc,
+# mirrored in the bootstrap rule ent_d0f1a840e549b3b299f62397). The old lead
+# said all software work bypasses the swarm pipeline, which an eligible change
+# filed as a Fly delivery task through Apis no longer does. The survivor keeps
+# the bootstrap-mode scope and exit, the hold and task-exception clause, the
+# canary/operations swarm route, and the 2026-10-27 session-owned route for
+# work Fly does not take, and adds the Fly default in the bullet body.
+Software work bypasses the swarm pipeline. => Software work is routed by bootstrap mode.
