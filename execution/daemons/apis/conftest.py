@@ -324,3 +324,13 @@ def _gate_reread_sees_no_change(monkeypatch):
         return True
 
     monkeypatch.setattr(apis, "_task_status_still", _unchanged)
+
+
+@pytest.fixture(autouse=True)
+def _ownership_recheck_is_off(monkeypatch):
+    """The no-ownership re-check schedules a delayed background re-read. Dispatch
+    tests judge the snapshot they pass; the race tests switch it back on."""
+    import apis
+
+    monkeypatch.setattr(apis, "_OWNERSHIP_RECHECK_ENABLED", False)
+    monkeypatch.setattr(apis, "_ownership_rechecks", {})

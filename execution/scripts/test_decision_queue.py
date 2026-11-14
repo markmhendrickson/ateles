@@ -146,6 +146,9 @@ def klass(b, t, newer=False):
             dq.LIVE_SESSION_OWNED,
         ),
         (brief(), task(assigned_to="cicada", owner="Codex session"), dq.LIVE_LOW),
+        # An area lead session is session-owned; a bare marker is not.
+        (brief(), task(assigned_to="claude-theodore-lead"), dq.LIVE_SESSION_OWNED),
+        (brief(), task(owner="Claude finances lead"), dq.LIVE_SESSION_OWNED),
         # One marker word in a name does not make a session.
         (brief(), task(owner="Claude Martin"), dq.LIVE_LOW),
         (brief(), task(owner="Session Bank"), dq.LIVE_LOW),

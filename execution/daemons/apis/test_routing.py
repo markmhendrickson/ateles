@@ -710,3 +710,11 @@ def test_sentinel_assignees_are_the_shared_set() -> None:
     from lib.daemon_runtime.task_ownership import SENTINEL_ASSIGNEES
 
     assert routing.SENTINEL_ASSIGNEES is SENTINEL_ASSIGNEES
+
+
+def test_area_lead_session_assignee_is_session_owned() -> None:
+    from routing import SESSION_OWNED
+
+    assert resolve_skill([], assigned_to="claude-theodore-lead") == SESSION_OWNED
+    assert resolve_skill([], assigned_to="codex-recordings-desk") == SESSION_OWNED
+    assert resolve_skill([], assigned_to="Claude") != SESSION_OWNED

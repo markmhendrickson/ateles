@@ -215,6 +215,32 @@ def _prefix_with_id(tokens: list[str]) -> bool:
     return False
 
 
+# A lead or desk session is named for its area, not its id: `claude-theodore-
+# lead`, `claude finances lead`. A harness marker followed by one of these role
+# words is a session; the marker alone (`Claude`, a person's name) is not, and
+# neither is the role word alone (`Finance lead`).
+_HARNESS_MARKERS = frozenset({"claude", "codex"})
+_ROLE_WORDS = frozenset({"lead", "desk"})
+
+
+def _harness_role_desk(first: str) -> bool:
+    """`claude-theodore-lead`: marker, at least one area word, role word LAST.
+
+    The role word must end the name (before any parenthetical) and an area
+    word must sit between, so `Claude Desk` and `x claude lead` stay words. A
+    comma means a person with a title (`Claude Martin, Lead Engineer`). A person
+    named like `Claude Martin lead` cannot be told from `claude finances lead`
+    by tokens, and is accepted as a session: the error is the quiet direction
+    (left as filed) and is pinned by a test.
+    """
+    if "," in first:
+        return False
+    head = _tokens(first.split("(", 1)[0])
+    if len(head) < 3 or head[-1] not in _ROLE_WORDS:
+        return False
+    return any(t in _HARNESS_MARKERS for t in head[:-2])
+
+
 def names_a_session(value: object) -> bool:
     """True when ``value`` names an interactive session as the owner.
 
@@ -229,6 +255,8 @@ def names_a_session(value: object) -> bool:
     - two different markers (`Claude Code session`, `coordinator chat`);
     - a marker or `root` immediately followed by an id (`Foundation coordinator
       0a1b2c3d`, `chat0a1b2c3d`);
+    - a harness marker (`claude`, `codex`) an area word, then `lead` or `desk` last
+      (`claude-theodore-lead`, `codex-recordings-desk`);
     - a space-free identifier starting with `session` (`session-email-review`).
 
     This reads free text, so it can be wrong in both directions, and word order
@@ -257,6 +285,8 @@ def names_a_session(value: object) -> bool:
     if len(_SESSION_MARKERS.intersection(tokens)) >= 2:
         return True
     if _prefix_with_id(tokens):
+        return True
+    if _harness_role_desk(first):
         return True
     return tokens[0] == "session" and not any(c.isspace() for c in first)
 

@@ -612,6 +612,152 @@ def test_other_owners_still_block_and_page(_world, snapshot):
     assert _world["spawns"] == []
 
 
+@pytest.mark.parametrize(
+    "assignee",
+    ["claude-theodore-lead", "codex-recordings-desk", "Claude finances lead",
+     "Claude martin lead"],
+)
+def test_area_lead_session_assignee_is_left_as_filed(_world, assignee):
+    n = _Notifier()
+    _dispatch_with({"title": "Follow up", "assigned_to": assignee, "tags": []}, n)
+    _left_as_filed(_world, n)
+
+
+@pytest.mark.parametrize("assignee", ["Claude", "Claude Martin", "Finance lead", "desk"])
+def test_marker_or_role_word_alone_still_blocks(_world, assignee):
+    n = _Notifier()
+    _dispatch_with({"title": "Something with no domain words", "assigned_to": assignee,
+                    "tags": []}, n)
+    assert [s for s, _r in _world["statuses"]] == [apis.TaskStatus.BLOCKED]
+
+
+# ── a snapshot read that raced the task's own write is not "no owner" ────────
+
+@pytest.fixture
+def _race(monkeypatch):
+    """Switch the re-check on, with a gated sleep and a recording re-read."""
+    state = {"fresh": {"title": "T"}, "reads": [], "sleeps": 0, "gate": None}
+    monkeypatch.setattr(apis, "_OWNERSHIP_RECHECK_ENABLED", True)
+
+    async def _sleep():
+        state["sleeps"] += 1
+        if state["gate"] is not None:
+            await state["gate"].wait()
+
+    def _fetch(eid):
+        state["reads"].append(eid)
+        return state["fresh"]
+
+    monkeypatch.setattr(apis, "_ownership_sleep", _sleep)
+    monkeypatch.setattr(apis, "fetch_task_snapshot", _fetch)
+    return state
+
+
+async def _drain():
+    while apis._background_dispatch_tasks:
+        await asyncio.gather(*list(apis._background_dispatch_tasks))
+
+
+async def _dispatch_async(snapshot, n, eid="ent_s1"):
+    await apis.dispatch_task(eid, snapshot, trigger="created", notifier=n,
+                             snapshot_hydrated=True)
+
+
+def test_reread_showing_a_session_owner_leaves_the_task_as_filed(_world, _race):
+    _race["fresh"] = {"title": "T", "assigned_to": "session", "owner": "claude-x-lead"}
+    n = _Notifier()
+
+    async def go():
+        await _dispatch_async({"title": "T", "status": "pending"}, n)
+        await _drain()
+
+    asyncio.run(go())
+    _left_as_filed(_world, n)
+    assert _race["reads"] == ["ent_s1"]
+
+
+def test_failed_reread_writes_nothing_and_is_recorded_unread(_world, _race):
+    _race["fresh"] = None
+    n = _Notifier()
+
+    async def go():
+        await _dispatch_async({"title": "T", "status": "pending"}, n)
+        await _drain()
+
+    asyncio.run(go())
+    assert _world["statuses"] == [] and n.sent == []
+    assert apis._ownership_race_counts["unreadable"] >= 1
+
+
+def test_still_empty_reread_blocks_once_and_logs(_world, _race, caplog):
+    _race["fresh"] = {"title": "Something with no domain words"}
+    n = _Notifier()
+
+    async def go():
+        await _dispatch_async({"title": "Something with no domain words"}, n)
+        await _drain()
+
+    with caplog.at_level("INFO"):
+        asyncio.run(go())
+    assert [s for s, _r in _world["statuses"]] == [apis.TaskStatus.BLOCKED]
+    assert "still shows no owner" in caplog.text
+
+
+def test_handler_returns_without_waiting_and_duplicate_does_not_reread(_world, _race):
+    n = _Notifier()
+
+    async def go():
+        _race["gate"] = asyncio.Event()
+        await _dispatch_async({"title": "Something with no domain words"}, n)
+        await asyncio.sleep(0)  # let the background re-check start
+        # Returned while the re-check is still asleep: nothing read or written.
+        assert _race["sleeps"] == 1 and _race["reads"] == []
+        assert _world["statuses"] == []
+        assert apis._tasks_in_dispatch.get("ent_s1")
+        await _dispatch_async({"title": "Something with no domain words"}, n)  # duplicate
+        assert _race["sleeps"] == 1 and _race["reads"] == [] and _world["statuses"] == []
+        _race["gate"].set()
+        await _drain()
+        # A later duplicate neither waits nor re-reads, and blocks at once.
+        await _dispatch_async({"title": "Something with no domain words"}, n)
+
+    asyncio.run(go())
+    assert _race["sleeps"] == 1 and _race["reads"] == ["ent_s1"]
+    assert not apis._tasks_in_dispatch.get("ent_s1")
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        {"assigned_to": "payments"},        # assignee only
+        {"owner": "meeting: acme"},         # owner only
+        {"tags": ["bookkeeping-misc"]},     # stored tags only
+    ],
+)
+def test_snapshot_with_a_signal_dispatches_at_once_with_no_wait_or_reread(_world, _race, snapshot):
+    n = _Notifier()
+
+    async def go():
+        await _dispatch_async({"title": "Something with no domain words", **snapshot}, n)
+
+    asyncio.run(go())
+    assert _race["sleeps"] == 0 and _race["reads"] == []
+    assert not apis._background_dispatch_tasks
+    assert [s for s, _r in _world["statuses"]] == [apis.TaskStatus.BLOCKED]
+
+
+def test_placeholder_assignee_is_no_signal_and_is_rechecked(_world, _race):
+    n = _Notifier()
+
+    async def go():
+        await _dispatch_async({"title": "Something with no domain words",
+                               "assigned_to": "unassigned"}, n)
+        await _drain()
+
+    asyncio.run(go())
+    assert _race["sleeps"] == 1 and _race["reads"] == ["ent_s1"]
+
+
 def test_approved_session_task_is_not_spawned_and_sends_one_info_line(_world):
     n = _Notifier()
     _dispatch_with({"title": "Billing follow-up", "assigned_to": "Codex session billing",
