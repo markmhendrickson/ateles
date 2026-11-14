@@ -134,8 +134,17 @@ Behaviour, implemented in `lib/daemon_runtime/shared_env.py`:
   `__PLACEHOLDER__` counts as unset.
 - A missing setting stops the run naming the setting and the file looked in. There
   is no default.
-- An unreadable file or a malformed line stops the run naming the file and the
-  line number (never the line, which may hold a secret).
+- A malformed line (a name with a dash or dot, a stray note, a value spanning
+  lines) is skipped and reported once on stderr by file and line number, never by
+  text, which may hold a secret. Every other line still loads. An unreadable file
+  is reported by file and error type.
+- Syntax: `NAME=value` or `export NAME=value`; one matching pair of surrounding
+  quotes is stripped; a UTF-8 byte-order mark is tolerated; an empty or
+  whitespace-only value counts as unset.
+- `transcribe_audio.py` also reads a repo-root `.env` as a warned fallback, only
+  for names missing from the environment and the shared file; each such name is
+  reported on stderr (name and file, never the value). Move those names into the
+  shared file; the fallback is to be removed.
 - Not loaded under pytest or with `ATELES_SKIP_DOTENV=1` (ateles#1285).
 
 ## How daemons consume secrets
