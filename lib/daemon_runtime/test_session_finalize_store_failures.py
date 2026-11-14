@@ -212,3 +212,101 @@ def test_response_body_scrubbed_to_code_and_message():
     )
     text = sf.describe_store_error(httpx.HTTPStatusError("400", request=resp.request, response=resp))
     assert "ERR_X bad" in text and "10.1.1.1" not in text
+
+
+def test_second_streak_report_is_not_an_idempotency_mismatch(monkeypatch):
+    """Same logical write, same count, second streak: both reports must land."""
+    fake = _FakeNeotoma()
+    real_post = fake.post
+
+    def post(url, headers=None, json=None, timeout=None):  # noqa: A002
+        if json["entities"][0].get("entity_type") == "daemon_report":
+            return real_post(url, headers=headers, json=json, timeout=timeout)
+        return httpx.Response(503, request=httpx.Request("POST", url), content=b"{}")
+
+    monkeypatch.setattr(sf.httpx, "post", post)
+    n = getattr(sf, "ESCALATE_AFTER_CONSECUTIVE_FAILURES", 5)
+    for _ in range(2):  # two streaks; a restart/success resets between them
+        for _ in range(n):
+            sf.finalize_session(trigger_text="t", outcome_text="o", handler="apis")
+        sf._consecutive_failures.clear()
+        sf._escalated.clear()
+        import time as _t
+        _t.sleep(0.002)
+    reports = [b for b in fake.bodies if b["entities"][0].get("entity_type") == "daemon_report"]
+    assert len(reports) == 2
+    assert len({b["idempotency_key"] for b in reports}) == 2
+    # the fake rejects a reused key with different content, as Neotoma does
+    assert all(
+        k in fake.seen for k in (b["idempotency_key"] for b in reports)
+    )
+
+
+def test_replay_answering_empty_object_is_success(monkeypatch):
+    def post(url, headers=None, json=None, timeout=None):  # noqa: A002
+        return httpx.Response(200, request=httpx.Request("POST", url), content=b"{}")
+
+    monkeypatch.setattr(sf.httpx, "post", post)
+    monkeypatch.setattr(sf, "_entity_readback_matches", lambda *a, **k: True)
+    assert sf.update_run_session_status(_run(), status="completed") is True
+
+
+def test_finalize_label_without_handler(monkeypatch):
+    posts: list[dict] = []
+    monkeypatch.setattr(sf.httpx, "post", _always_fail(posts))
+    n = getattr(sf, "ESCALATE_AFTER_CONSECUTIVE_FAILURES", 5)
+    for _ in range(n):
+        sf.finalize_session(trigger_text="t", outcome_text="o", handler=None)
+    assert "None" not in _reports(posts)[0]["entities"][0]["message"]
+
+
+def _desc(content: bytes) -> str:
+    resp = httpx.Response(400, request=httpx.Request("POST", "https://x/store"), content=content)
+    return sf.describe_store_error(httpx.HTTPStatusError("400", request=resp.request, response=resp))
+
+
+def test_scrubber_never_copies_nested_message():
+    text = _desc(b'{"error":{"code":"E","message":{"secret":"s3cr3t-token"}}}')
+    assert "s3cr3t-token" not in text and "secret" not in text
+
+
+def test_scrubber_collapses_newlines_and_control_characters():
+    text = _desc(b'{"error":{"code":"E","message":"a\\nWARNING forged\\u0007line"}}')
+    tail = text.split("response body: ", 1)[1]
+    assert "\n" not in tail and "\x07" not in tail
+
+
+def test_scrubber_survives_deeply_nested_body():
+    text = _desc(b"[" * 200_000)
+    assert "response body" in text  # no RecursionError
+
+
+def test_scrubber_caps_length():
+    text = _desc(b'{"error":{"code":"E","message":"' + b"x" * 5000 + b'"}}')
+    assert len(text) < sf.RESPONSE_BODY_LOG_LIMIT + 300
+
+
+def test_finalize_success_resets_streak(monkeypatch):
+    posts: list[dict] = []
+    n = sf.ESCALATE_AFTER_CONSECUTIVE_FAILURES
+    monkeypatch.setattr(sf.httpx, "post", _always_fail(posts))
+    for _ in range(n - 1):
+        sf.finalize_session(trigger_text="t", outcome_text="o", handler="apis")
+    monkeypatch.setattr(sf.httpx, "post", _FakeNeotoma().post)
+    assert sf.finalize_session(trigger_text="t", outcome_text="o", handler="apis") is True
+    monkeypatch.setattr(sf.httpx, "post", _always_fail(posts))
+    for _ in range(n - 1):
+        sf.finalize_session(trigger_text="t", outcome_text="o", handler="apis")
+    assert _reports(posts) == []
+
+
+def test_finalize_streaks_are_isolated_per_handler(monkeypatch):
+    posts: list[dict] = []
+    monkeypatch.setattr(sf.httpx, "post", _always_fail(posts))
+    n = sf.ESCALATE_AFTER_CONSECUTIVE_FAILURES
+    for i in range(n - 1):
+        sf.finalize_session(trigger_text="t", outcome_text="o", handler="apis")
+        sf.finalize_session(trigger_text="t", outcome_text="o", handler="other")
+    assert _reports(posts) == []
+    sf.finalize_session(trigger_text="t", outcome_text="o", handler="apis")
+    assert len(_reports(posts)) == 1

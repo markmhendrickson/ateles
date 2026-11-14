@@ -79,13 +79,19 @@ def _scrub_response_body(body: str) -> str:
         parsed = json.loads(body)
         err = parsed.get("error", parsed) if isinstance(parsed, dict) else {}
         if isinstance(err, dict):
+            # only scalar string/number values: a nested object is never copied
             text = " ".join(
-                str(err[k]) for k in ("code", "message") if err.get(k)
+                str(err[k])
+                for k in ("code", "message")
+                if isinstance(err.get(k), (str, int, float))
+                and not isinstance(err.get(k), bool)
             )
-    except ValueError:
+    except (ValueError, RecursionError, MemoryError, TypeError):
         pass
+    # collapse whitespace and control characters (no forged log lines)
+    text = " ".join("".join(c if c.isprintable() else " " for c in text).split())
     if not text:
-        text = f"(non-JSON response body, {len(body)} bytes, not copied)"
+        text = f"(non-JSON or unrecognised response body, {len(body)} bytes, not copied)"
     if len(text) > RESPONSE_BODY_LOG_LIMIT:
         text = text[:RESPONSE_BODY_LOG_LIMIT] + "...[truncated]"
     return text
@@ -94,7 +100,7 @@ def _scrub_response_body(body: str) -> str:
 def describe_store_error(exc: BaseException) -> str:
     """Exception text plus the scrubbed response body of an HTTP error.
 
-    Never includes request headers or the request body.
+    Never includes request headers or the request body, and never raises.
     """
     text = str(exc)
     response = getattr(exc, "response", None)
@@ -104,7 +110,10 @@ def describe_store_error(exc: BaseException) -> str:
         except Exception:  # noqa: BLE001 - a streamed/closed body must not mask the error
             body = ""
         if body:
-            text = f"{text} | response body: {_scrub_response_body(body)}"
+            try:
+                text = f"{text} | response body: {_scrub_response_body(body)}"
+            except Exception:  # noqa: BLE001 - diagnostics must not raise in a failure handler
+                text = f"{text} | response body: (unreadable)"
     return text
 
 
@@ -115,6 +124,7 @@ def _emit_failure_report(label: str, count: int, last_error: str) -> None:
     this module is sync and shared by every daemon, so it cannot await that
     async helper.
     """
+    report_at = datetime.now(timezone.utc).isoformat()
     payload = {
         "entity_type": "daemon_report",
         "daemon_name": ESCALATION_DAEMON_NAME,
@@ -123,10 +133,12 @@ def _emit_failure_report(label: str, count: int, last_error: str) -> None:
         "message": (
             f"Apis could not record {label} after {count} consecutive attempts; "
             f"the task or session may stay unreconciled until this is fixed. "
+            f"Next step: search the Apis log for '[finalize] store failed' to see "
+            f"the Neotoma response. "
             f"Last error: {last_error[:300]}"
             + ("...[truncated]" if len(last_error) > 300 else "")
         ),
-        "report_at": datetime.now(timezone.utc).isoformat(),
+        "report_at": report_at,
         "details": json.dumps({"write": label, "consecutive_failures": count}),
     }
     digest = hashlib.sha256(label.encode()).hexdigest()[:16]
@@ -137,7 +149,9 @@ def _emit_failure_report(label: str, count: int, last_error: str) -> None:
             json={
                 "entities": [payload],
                 "observation_source": "workflow_state",
-                "idempotency_key": f"finalize-failure-{digest}-{count}",
+                # report content (report_at, last error) differs per streak, so the
+                # key must too or a second streak is a 400 idempotency mismatch
+                "idempotency_key": f"finalize-failure-{digest}-{count}-{report_at}",
             },
             timeout=20,
         )
@@ -759,7 +773,7 @@ def update_run_session_status(run: RunSession, *, status: str) -> bool:
         streak_key=f"agent_session:{run.native_session_id}:{status}",
         label=f"run {run.native_session_id} status '{status}'",
     )
-    if not data:
+    if data is None:  # an identical replay may legitimately answer {}
         return False
     return _entity_readback_matches(
         run.agent_session_id,
@@ -808,7 +822,7 @@ def finalize_session(**kwargs) -> bool:
         log.warning("[finalize] store failed: %s", detail)
         _record_store_outcome(
             f"finalize:{kwargs.get('handler')}", False, detail,
-            f"the end-of-session capture for {kwargs.get('handler')}",
+            f"the end-of-session capture for {kwargs.get('handler') or 'unknown handler'}",
         )
         return False
 
