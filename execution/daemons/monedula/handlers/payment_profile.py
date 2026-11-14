@@ -163,7 +163,9 @@ def load_profiles_from_neotoma(
         REASON_BAD_LEGAL_TYPE,
         REASON_BAD_PAYMENT_TYPE,
         REASON_BAD_RECIPIENT_ID,
+        NEOTOMA_TIMEOUT_SEC,
         REASON_FETCH_FAILED,
+        REASON_FETCH_REJECTED,
         REASON_MISSING_LABEL,
         REASON_UNREACHABLE,
         Stranding,
@@ -219,8 +221,16 @@ def load_profiles_from_neotoma(
             headers=headers,
         )
         req.add_header("User-Agent", NEOTOMA_USER_AGENT)
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
+        # Bounded retry (budget and rationale: strandings.NEOTOMA_*). Only a
+        # transport error, timeout or HTTP 5xx is retried; a 4xx is reported
+        # at once.
+        from strandings import call_with_retry
+
+        def _fetch():
+            with urllib.request.urlopen(req, timeout=NEOTOMA_TIMEOUT_SEC) as resp:
+                return json.loads(resp.read())
+
+        data = call_with_retry(_fetch, "Neotoma payment_profile fetch")
     except urllib.error.HTTPError as exc:
         # An auth/transport rejection is NOT "no profiles configured". Returning
         # [] quietly here is how every scheduled run since the hosted migration
@@ -238,27 +248,48 @@ def load_profiles_from_neotoma(
             f"Check NEOTOMA_BEARER_TOKEN (401/403) and that the request carries a "
             f"User-Agent (Cloudflare 1010 blocks urllib's default). {detail}"
         )
+        if exc.code >= 500:
+            # Still failing after the bounded retries: an outage, not a
+            # rejection. Transient by the same reasoning as a timeout.
+            _strand(
+                "",
+                "(all profiles)",
+                REASON_FETCH_FAILED,
+                "Neotoma unreachable (server error); no payments attempted; "
+                "retrying next tick. No profiles were loaded this run.",
+            )
+        else:
+            # A 4xx never clears by itself: reported at once, with its remedy.
+            _strand(
+                "",
+                "(all profiles)",
+                REASON_FETCH_REJECTED,
+                f"Neotoma rejected the payment profile fetch with HTTP {exc.code}. "
+                "Check NEOTOMA_BEARER_TOKEN and the request User-Agent.",
+            )
+        return []
+    except json.JSONDecodeError as exc:
+        log.error(f"Neotoma payment_profile fetch returned an unreadable body: {exc}")
         _strand(
             "",
             "(all profiles)",
-            REASON_FETCH_FAILED,
-            f"Neotoma rejected the payment_profile fetch with HTTP {exc.code}, so "
-            f"NO profiles were loaded and no payment can be proposed this run. "
-            f"Check NEOTOMA_BEARER_TOKEN and the request User-Agent.",
+            REASON_FETCH_REJECTED,
+            "Neotoma answered the payment profile fetch with an unreadable "
+            "response. Check the Neotoma host and any proxy in front of it.",
         )
         return []
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+    except (urllib.error.URLError, OSError) as exc:
         # A transport failure is not "no profiles configured" either. This
         # branch fired 1,753 times at WARNING and escalated nothing: during
         # those windows every profile was stranded at once, which is strictly
         # worse than the single-profile case below.
-        log.error(f"Neotoma payment_profile fetch failed: {exc}")
+        log.error(f"Neotoma payment_profile fetch failed: {type(exc).__name__}")
         _strand(
             "",
             "(all profiles)",
             REASON_FETCH_FAILED,
-            f"Could not reach Neotoma to load payment profiles ({type(exc).__name__}), "
-            f"so NO profiles were loaded and no payment can be proposed this run.",
+            "Neotoma unreachable; no payments attempted; retrying next tick. "
+            "No profiles were loaded this run.",
         )
         return []
 

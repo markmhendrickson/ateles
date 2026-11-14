@@ -62,11 +62,13 @@ that boundary wrong is what makes an alarm ignorable.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,6 +85,29 @@ NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
 REESCALATE_AFTER_HOURS = 24
 
 STATE_FILE = Path(__file__).parent / ".monedula_strandings.json"
+
+# Neotoma HTTP budget shared by the profile fetch and the escalation write.
+#
+# Both calls ran with a 15 s timeout and no retry. On 7 and 13 Nov 2026 the
+# hosted instance timed out under that budget, so one slow response read as a
+# whole-run outage. 30 s per attempt is double the old budget (the hosted
+# instance's slow responses are seconds, not minutes) and two attempts with a
+# short pause rides out a single slow or dropped response. Worst case is
+# 2 x 30 s + 2 s = 62 s per call, well inside the ~15 minute tick, and the
+# retry applies only to transport errors, timeouts and HTTP 5xx: a 4xx
+# (auth/UA rejection) is deterministic and is reported at once, not retried.
+NEOTOMA_TIMEOUT_SEC = 30
+NEOTOMA_ATTEMPTS = 2
+NEOTOMA_RETRY_PAUSE_SEC = 2
+
+# A profile fetch that fails as a whole is almost always a transient Neotoma
+# blip that clears on the next ~15 minute tick, and the run already refuses to
+# claim the day or clear consent while it lasts. Escalating on the first
+# failure produced an email pointing at a record that did not exist. It is
+# escalated only once it has persisted this many consecutive ticks (~30-45
+# minutes), long enough to ride out a blip, short enough that a real outage is
+# reported well within the same morning.
+FETCH_FAILURE_ESCALATE_AFTER_TICKS = 3
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +149,23 @@ REASON_BAD_RECIPIENT_ID = "invalid_wise_recipient_id"
 # is stranded and the daemon cannot even enumerate them. Logged 1,753 times as
 # a bare WARNING and 102 times as an ERROR, and never escalated once.
 REASON_FETCH_FAILED = "profile_fetch_failed"
+# Neotoma ANSWERED but the answer is unusable: an HTTP 4xx (expired or revoked
+# token, Cloudflare User-Agent block) or an unparseable body. Unlike an outage
+# this never clears by itself, so it escalates at once and keeps its remedy.
+REASON_FETCH_REJECTED = "profile_fetch_rejected"
+# Both mean "no profiles were loaded"; callers that must not treat that as
+# "nothing due" test membership here.
+FETCH_REASONS = (REASON_FETCH_FAILED, REASON_FETCH_REJECTED)
+
+# The daemon's wake interval, used only to turn a tick count into minutes in
+# operator-facing text.
+TICK_MINUTES = 15
+
+# Outcomes of an escalation write, each worded differently to the operator.
+OUTCOME_CONFIRMED = "confirmed"  # written and read back
+OUTCOME_NOT_STORED = "not_stored"  # Neotoma refused it / it was never sent
+OUTCOME_UNCONFIRMED = "unconfirmed"  # may have landed; read-back failed
+OUTCOME_DEFERRED = "deferred"  # not attempted this tick (budget)
 
 
 # ---------------------------------------------------------------------------
@@ -189,15 +231,54 @@ def select_new_strandings(
 # ---------------------------------------------------------------------------
 
 
-def _post_escalation(entity: dict, idempotency_key: str) -> bool:
-    """POST one escalation entity to Neotoma. Returns True on success."""
+def _neotoma_headers(bearer: str, base_url: str) -> dict:
+    is_loopback = "localhost" in base_url or "127.0.0.1" in base_url
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if bearer and not is_loopback:
+        headers["Authorization"] = f"Bearer {bearer}"
+    return headers
+
+
+def _retryable(exc: BaseException) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code >= 500
+    return isinstance(exc, (urllib.error.URLError, OSError))
+
+
+def call_with_retry(fn, label: str):
+    """Run ``fn`` with the shared Neotoma budget. Raises the last error."""
+    last: BaseException | None = None
+    for attempt in range(1, NEOTOMA_ATTEMPTS + 1):
+        try:
+            return fn()
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            last = exc
+            if not _retryable(exc) or attempt == NEOTOMA_ATTEMPTS:
+                break
+            log.warning(
+                f"{label} attempt {attempt}/{NEOTOMA_ATTEMPTS} failed "
+                f"({type(exc).__name__}); retrying"
+            )
+            time.sleep(NEOTOMA_RETRY_PAUSE_SEC)
+    assert last is not None
+    raise last
+
+
+def _post_escalation(entity: dict, idempotency_key: str) -> str:
+    """Write one escalation entity to Neotoma and READ IT BACK.
+
+    Returns one of the OUTCOME_* values. Only OUTCOME_CONFIRMED means the
+    record was read back. OUTCOME_NOT_STORED is claimed only when the write was
+    never sent or Neotoma answered it with a 4xx; a timeout, a 5xx, a response
+    with no entity id, a failed read-back or a mismatch may all follow a write
+    that landed, so those are OUTCOME_UNCONFIRMED.
+    """
     base_url = os.environ.get("NEOTOMA_BASE_URL", "").strip().rstrip("/")
     bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "").strip()
     if not base_url:
         log.error("NEOTOMA_BASE_URL unset — cannot record stranding escalation")
-        return False
+        return OUTCOME_NOT_STORED
 
-    is_loopback = "localhost" in base_url or "127.0.0.1" in base_url
     body = json.dumps(
         {
             "entities": [entity],
@@ -205,23 +286,61 @@ def _post_escalation(entity: dict, idempotency_key: str) -> bool:
             "observation_source": "workflow_state",
         }
     ).encode("utf-8")
-    headers = {"Accept": "application/json", "Content-Type": "application/json"}
-    if bearer and not is_loopback:
-        headers["Authorization"] = f"Bearer {bearer}"
+    headers = _neotoma_headers(bearer, base_url)
 
-    req = urllib.request.Request(
-        f"{base_url}/store", data=body, method="POST", headers=headers
-    )
-    req.add_header("User-Agent", NEOTOMA_USER_AGENT)
+    def _store():
+        req = urllib.request.Request(
+            f"{base_url}/store", data=body, method="POST", headers=headers
+        )
+        req.add_header("User-Agent", NEOTOMA_USER_AGENT)
+        with urllib.request.urlopen(req, timeout=NEOTOMA_TIMEOUT_SEC) as resp:
+            return json.loads(resp.read() or b"{}")
+
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            resp.read()
-        return True
+        data = call_with_retry(_store, "stranding escalation write")
+    except urllib.error.HTTPError as exc:
+        log.error(f"stranding escalation write FAILED: HTTP {exc.code}")
+        # 4xx: Neotoma answered and refused. 5xx (after retries) may have
+        # committed before failing.
+        return OUTCOME_NOT_STORED if 400 <= exc.code < 500 else OUTCOME_UNCONFIRMED
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        # The escalation write itself failing is the one case with no durable
-        # record left, so it is logged at ERROR rather than swallowed.
-        log.error(f"stranding escalation write FAILED: {exc}")
-        return False
+        log.error(f"stranding escalation write FAILED: {type(exc).__name__}")
+        return OUTCOME_UNCONFIRMED
+
+    entity_id = ""
+    if isinstance(data, dict):
+        for e in data.get("entities") or []:
+            if isinstance(e, dict) and e.get("entity_id"):
+                entity_id = str(e["entity_id"])
+                break
+    if not entity_id:
+        log.error("stranding escalation write returned no entity id — cannot read back")
+        return OUTCOME_UNCONFIRMED
+
+    def _read():
+        # The id comes from the server response: quote it so it cannot alter
+        # the path the bearer is sent to.
+        req = urllib.request.Request(
+            f"{base_url}/entities/{urllib.parse.quote(entity_id, safe='')}",
+            method="GET",
+            headers=headers,
+        )
+        req.add_header("User-Agent", NEOTOMA_USER_AGENT)
+        with urllib.request.urlopen(req, timeout=NEOTOMA_TIMEOUT_SEC) as resp:
+            return json.loads(resp.read() or b"{}")
+
+    try:
+        back = call_with_retry(_read, "stranding escalation read-back")
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        log.error(f"stranding escalation read-back FAILED: {type(exc).__name__}")
+        return OUTCOME_UNCONFIRMED
+    snap = {}
+    if isinstance(back, dict):
+        snap = back.get("snapshot") or (back.get("entity") or {}).get("snapshot") or {}
+    if not isinstance(snap, dict) or snap.get("title") != entity.get("title"):
+        log.error("stranding escalation did not read back as written")
+        return OUTCOME_UNCONFIRMED
+    return OUTCOME_CONFIRMED
 
 
 def build_escalation_entity(s: Stranding, *, observed_at: str) -> dict:
@@ -237,9 +356,15 @@ def build_escalation_entity(s: Stranding, *, observed_at: str) -> dict:
     stated in the body prose above, which is the operator-facing surface, and
     Neotoma stamps its own `observed_at` on ingest.
     """
+    if s.reason == REASON_FETCH_FAILED:
+        title = "Monedula could not load payment profiles: Neotoma unreachable"
+    elif s.reason == REASON_FETCH_REJECTED:
+        title = "Monedula could not load payment profiles: Neotoma rejected the fetch"
+    else:
+        title = f"Monedula cannot act on payment profile: {s.label}"
     return {
         "entity_type": "escalation",
-        "title": f"Monedula cannot act on payment profile: {s.label}",
+        "title": title,
         "body": (
             f"Monedula skipped an ACTIVE payment_profile it cannot act on.\n\n"
             f"Profile: {s.label}\n"
@@ -266,6 +391,86 @@ def stranded_fingerprint(strandings: list[Stranding]) -> str:
     return "|".join(keys)
 
 
+def _bump_fetch_streak(state_file: Path, failed: bool) -> int:
+    """Consecutive ticks the whole-profile fetch has failed (0 when it did not).
+
+    Kept in a sidecar beside the dedup state, like the notify-key sidecar, so
+    it survives between ticks (each tick is a fresh process). Advisory: a lost
+    file restarts the count, which only delays an escalation by a few ticks.
+    """
+    path = state_file.with_name(state_file.name + ".fetch_streak")
+    if not failed:
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass
+        return 0
+    try:
+        streak = int(json.loads(path.read_text()).get("streak", 0))
+    except (OSError, ValueError, AttributeError, TypeError):
+        streak = 0
+    streak += 1
+    try:
+        path.write_text(json.dumps({"streak": streak}))
+    except OSError as exc:
+        log.warning(f"could not persist profile-fetch streak: {exc}")
+    return streak
+
+
+def _alert_text(fresh: list[Stranding], outcomes: dict[str, str], streak: int) -> str:
+    """Operator-facing alert. States each escalation write outcome truthfully."""
+    stories: list[str] = []
+    unreachable = [s for s in fresh if s.reason == REASON_FETCH_FAILED]
+    rejected = [s for s in fresh if s.reason == REASON_FETCH_REJECTED]
+    profiles = [s for s in fresh if s.reason not in FETCH_REASONS]
+    if unreachable:
+        stories.append(
+            f"monedula: Neotoma has been unreachable for about "
+            f"{streak * TICK_MINUTES} minutes; payment profiles could not be loaded, "
+            "no payments attempted; retrying next tick. No action needed unless "
+            "this repeats; payments resume when Neotoma answers. If it persists, "
+            "check the Neotoma host."
+        )
+    for s in rejected:
+        stories.append(
+            f"monedula: payment profiles could not be loaded; {s.detail} "
+            "No payments attempted. This will not clear by itself."
+        )
+    if profiles:
+        labels = ", ".join(s.label for s in profiles)
+        stories.append(
+            f"monedula: payment_profiles_stranded — {len(profiles)} profile(s) "
+            f"STRANDED and cannot be paid — {labels}."
+        )
+    by = {k: [s for s in fresh if outcomes.get(s.key) == k] for k in (
+        OUTCOME_CONFIRMED, OUTCOME_NOT_STORED, OUTCOME_UNCONFIRMED, OUTCOME_DEFERRED)}
+    lines: list[str] = []
+    if by[OUTCOME_CONFIRMED]:
+        lines.append(
+            f"Escalation record written to Neotoma and read back "
+            f"({len(by[OUTCOME_CONFIRMED])} of {len(fresh)})."
+        )
+    if by[OUTCOME_NOT_STORED]:
+        lines.append(
+            f"Escalation write FAILED for {len(by[OUTCOME_NOT_STORED])} of "
+            f"{len(fresh)}: Neotoma refused it or it was never sent, so no record "
+            "was created and this alert is the only record. Retrying next tick."
+        )
+    if by[OUTCOME_UNCONFIRMED]:
+        lines.append(
+            f"Escalation write could not be CONFIRMED for "
+            f"{len(by[OUTCOME_UNCONFIRMED])} of {len(fresh)}: the record may or may "
+            "not exist in Neotoma. Retrying next tick."
+        )
+    if by[OUTCOME_DEFERRED]:
+        lines.append(
+            f"{len(by[OUTCOME_DEFERRED])} escalation write(s) not attempted this "
+            "tick after a failure; retrying next tick."
+        )
+    return "\n".join(stories + lines)
+
+
 def escalate(
     strandings: list[Stranding],
     *,
@@ -277,8 +482,10 @@ def escalate(
 ) -> list[Stranding]:
     """Escalate newly-observed strandings. Returns those actually escalated.
 
-    Writes a durable Neotoma ``escalation`` per stranding, then notifies
-    best-effort. Deduplicated per (profile, reason) — see module docstring.
+    Writes a durable Neotoma ``escalation`` per stranding (read back), then
+    notifies best-effort with the write outcome. Deduplicated per (profile,
+    reason) — see module docstring. A whole-profile-fetch failure is held back
+    until it persists ``FETCH_FAILURE_ESCALATE_AFTER_TICKS`` consecutive ticks.
 
     Notifier ``dedupe_key`` is ``monedula:stranded:<sorted keys fp>`` so an
     unchanged stranded set does not re-fire every tick (ateles#1178). Pass
@@ -292,6 +499,21 @@ def escalate(
         prior_notify_key = prior_key_path.read_text().strip()
     except OSError:
         prior_notify_key = ""
+
+    streak = _bump_fetch_streak(
+        state_file, any(s.reason == REASON_FETCH_FAILED for s in strandings)
+    )
+    if streak and streak < FETCH_FAILURE_ESCALATE_AFTER_TICKS:
+        log.error(
+            f"Neotoma unreachable; no payments attempted; retrying next tick "
+            f"(profile fetch failed {streak}/{FETCH_FAILURE_ESCALATE_AFTER_TICKS} "
+            f"consecutive ticks; escalating if it persists)"
+        )
+        strandings = [s for s in strandings if s.reason != REASON_FETCH_FAILED]
+        if not strandings:
+            # Nothing else to report, and an outage says nothing about the
+            # dedup state of earlier strandings: leave it untouched.
+            return []
 
     if not strandings:
         # Clear state so a condition that returns later reports as new.
@@ -334,22 +556,51 @@ def escalate(
         return []
 
     observed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now or time.time()))
+    outcomes: dict[str, str] = {}
+    failed_this_tick = False
     for s in fresh:
+        if failed_this_tick:
+            # One failed write usually means Neotoma is struggling; do not
+            # spend another ~2 minutes of timeouts per remaining stranding.
+            outcomes[s.key] = OUTCOME_DEFERRED
+            continue
         entity = build_escalation_entity(s, observed_at=observed_at)
-        # Idempotency covers the condition per day, so a retry inside one
-        # window cannot create duplicates even if the state file is lost.
+        # The key binds the condition, the day AND the content. The body
+        # carries a per-tick timestamp, and Neotoma rejects a reused key whose
+        # content differs (400), so a same-day retry of a write whose first
+        # attempt landed must not reuse the first attempt's key. A different
+        # key lands on the same entity (same title), not a duplicate.
+        digest = hashlib.sha256(
+            json.dumps(entity, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:12]
         day = observed_at[:10]
-        _post_escalation(entity, f"monedula-stranding-{s.key}-{day}")
+        result = _post_escalation(entity, f"monedula-stranding-{s.key}-{day}-{digest}")
+        # Older callers/mocks return a bool.
+        if result is True:
+            result = OUTCOME_CONFIRMED
+        elif result is False:
+            result = OUTCOME_NOT_STORED
+        outcomes[s.key] = result
+        failed_this_tick = result != OUTCOME_CONFIRMED
         log.error(
-            f"STRANDED payment profile {s.label!r}: {s.reason} — escalated. {s.detail}"
+            f"STRANDED payment profile: {s.reason} — "
+            + ("escalated" if result == OUTCOME_CONFIRMED else f"escalation {result}")
         )
 
+    # An unconfirmed or failed write must not start the 24h quiet period: with
+    # no confirmed record behind it, suppressing the retry would leave the
+    # condition unrecorded.
+    failed_keys = [k for k, r in outcomes.items() if r != OUTCOME_CONFIRMED]
+    if failed_keys:
+        for k in failed_keys:
+            next_state.pop(k, None)
+        _save_state(next_state, state_file)
+
     if notify is not None:
-        labels = ", ".join(s.label for s in fresh)
+        message = _alert_text(fresh, outcomes, streak)
         try:
             notify(
-                f"monedula: payment_profiles_stranded — {len(fresh)} profile(s) "
-                f"STRANDED and cannot be paid — {labels}. Escalations filed in Neotoma.",
+                message,
                 priority="blocker",
                 dedupe_key=dedupe_key,
                 email_eligible=True,
@@ -362,11 +613,7 @@ def escalate(
         except TypeError:
             # Older notify callables that only accept (msg, priority=).
             try:
-                notify(
-                    f"monedula: payment_profiles_stranded — {len(fresh)} profile(s) "
-                    f"STRANDED and cannot be paid — {labels}. Escalations filed in Neotoma.",
-                    priority="blocker",
-                )
+                notify(message, priority="blocker")
             except Exception as exc:  # noqa: BLE001
                 log.warning(f"stranding notification failed: {exc}")
         except Exception as exc:  # noqa: BLE001 — notification must not fail the run
