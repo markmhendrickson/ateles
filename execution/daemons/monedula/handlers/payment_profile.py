@@ -237,16 +237,11 @@ def load_profiles_from_neotoma(
         # reported success while paying nothing: Cloudflare answered 403 and the
         # daemon could not tell that apart from an empty result. Log at ERROR so
         # it is visible, and name the two causes worth checking first.
-        detail = ""
-        try:
-            detail = exc.read().decode("utf-8", "replace")[:200]
-        except Exception:
-            pass
         log.error(
             f"Neotoma payment_profile fetch REJECTED: HTTP {exc.code} — no profiles "
-            f"loaded, so NO payments will be proposed this run. "
+            f"loaded from Neotoma this run. "
             f"Check NEOTOMA_BEARER_TOKEN (401/403) and that the request carries a "
-            f"User-Agent (Cloudflare 1010 blocks urllib's default). {detail}"
+            f"User-Agent (Cloudflare 1010 blocks urllib's default)."
         )
         if exc.code >= 500:
             # Still failing after the bounded retries: an outage, not a
@@ -255,8 +250,8 @@ def load_profiles_from_neotoma(
                 "",
                 "(all profiles)",
                 REASON_FETCH_FAILED,
-                "Neotoma unreachable (server error); no payments attempted; "
-                "retrying next tick. No profiles were loaded this run.",
+                "Neotoma unreachable (server error); payment profiles not loaded "
+                "this run, so none can be proposed; retrying next tick.",
             )
         else:
             # A 4xx never clears by itself: reported at once, with its remedy.
@@ -288,8 +283,8 @@ def load_profiles_from_neotoma(
             "",
             "(all profiles)",
             REASON_FETCH_FAILED,
-            "Neotoma unreachable; no payments attempted; retrying next tick. "
-            "No profiles were loaded this run.",
+            "Neotoma unreachable; payment profiles not loaded this run, so none "
+            "can be proposed; retrying next tick.",
         )
         return []
 

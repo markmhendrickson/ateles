@@ -2205,9 +2205,9 @@ def main() -> bool:
 
 
 def _alert_ref(message: str) -> str:
-    """Log-safe reference to an alert: never its text, which can carry labels."""
-    digest = hashlib.sha256(message.encode("utf-8", "replace")).hexdigest()[:8]
-    return f"{len(message)} chars, sha256:{digest}"
+    """Log-safe reference to an alert: its length only, never its text (which
+    can carry payee labels) and no hash (unsalted, so guessable)."""
+    return f"{len(message)} chars"
 
 
 def run_entrypoint() -> int:

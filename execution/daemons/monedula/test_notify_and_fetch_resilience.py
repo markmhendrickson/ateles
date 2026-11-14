@@ -190,7 +190,7 @@ def test_fetch_failure_names_the_cause_not_a_stranded_profile(monkeypatch):
     assert load_profiles_from_neotoma(found) == []
     detail = found[0].detail
     assert "Neotoma unreachable" in detail
-    assert "no payments attempted" in detail
+    assert "payment profiles not loaded" in detail
     assert "retrying next tick" in detail
 
 
@@ -285,9 +285,10 @@ def test_a_fetch_failure_that_persists_escalates_once_and_names_the_cause(
     assert len(posted) == 1, "escalated once, then deduplicated"
     assert len(notes) == 1
     assert "Neotoma has been unreachable for about 45 minutes" in notes[0]
-    assert "no payments attempted" in notes[0]
-    assert "retrying next tick" in notes[0]
-    assert "No action needed unless this repeats" in notes[0]
+    assert "none can be proposed from Neotoma" in notes[0]
+    assert "Monedula will keep retrying" in notes[0]
+    assert "check Neotoma's status if this persists" in notes[0]
+    assert "No action needed" not in notes[0]
     assert "STRANDED" not in notes[0], "an outage is not a stranded profile"
 
 
@@ -665,3 +666,120 @@ def test_clean_run_with_an_undeliverable_alert_exits_one(monkeypatch):
 def test_unclean_run_exits_one(monkeypatch):
     _entry(monkeypatch, clean=False, undeliverable=False)
     assert monedula.run_entrypoint() == 1
+
+
+# ── Round 3 ─────────────────────────────────────────────────────────────────
+
+
+class _DedupingNotify:
+    """Mimics the Notifier: a repeated dedupe_key is suppressed until cleared."""
+
+    def __init__(self):
+        self.sent: list = []
+        self.seen: set = set()
+
+    def __call__(self, message, priority="info", dedupe_key=None, **kw):
+        if dedupe_key and dedupe_key in self.seen:
+            return
+        if dedupe_key:
+            self.seen.add(dedupe_key)
+        self.sent.append(message)
+
+    def clear(self, key):
+        self.seen.discard(key)
+
+
+def test_a_later_confirmed_write_is_reported_after_an_unconfirmed_one(
+    monkeypatch, tmp_path
+):
+    results = iter([st.OUTCOME_UNCONFIRMED, st.OUTCOME_CONFIRMED])
+    monkeypatch.setattr("strandings._post_escalation", lambda e, k: next(results))
+    notify = _DedupingNotify()
+    f = tmp_path / "s.json"
+    s = st.Stranding("ent_a", "A", st.REASON_UNREACHABLE, "d")
+    for now in (1000.0, 1900.0, 2800.0):
+        st.escalate(
+            [s], notify=notify, clear_dedupe=notify.clear, state_file=f, now=now
+        )
+    assert len(notify.sent) == 2, "tick 3 is quiet; tick 2 must NOT be suppressed"
+    assert "may or may not exist" in notify.sent[0]
+    assert "written to Neotoma and read back" in notify.sent[1]
+
+
+def test_dedupe_key_carries_the_outcome_class(monkeypatch, tmp_path):
+    keys: list = []
+    s = st.Stranding("ent_a", "A", st.REASON_UNREACHABLE, "d")
+    for outcome in (st.OUTCOME_NOT_STORED, st.OUTCOME_UNCONFIRMED, st.OUTCOME_CONFIRMED):
+        monkeypatch.setattr("strandings._post_escalation", lambda e, k, o=outcome: o)
+        st.escalate(
+            [s],
+            notify=lambda m, dedupe_key=None, **k: keys.append(dedupe_key),
+            state_file=tmp_path / f"{outcome}.json",
+            now=1000.0,
+        )
+    assert len(set(keys)) == 3
+    assert all(k.startswith("monedula:stranded:") for k in keys)
+
+
+def test_a_refused_write_does_not_starve_the_strandings_behind_it(
+    monkeypatch, tmp_path
+):
+    calls: list = []
+    outcomes = iter([st.OUTCOME_NOT_STORED, st.OUTCOME_CONFIRMED])
+    monkeypatch.setattr(
+        "strandings._post_escalation", lambda e, k: calls.append(k) or next(outcomes)
+    )
+    a = st.Stranding("ent_a", "A", st.REASON_UNREACHABLE, "d")
+    b = st.Stranding("ent_b", "B", st.REASON_UNREACHABLE, "d")
+    st.escalate([a, b], state_file=tmp_path / "s.json", now=1000.0)
+    assert len(calls) == 2
+
+
+def test_two_stories_in_one_alert_are_visibly_separate():
+    fetch = st.Stranding("", "(all profiles)", st.REASON_FETCH_REJECTED, "Neotoma rejected it.")
+    prof = st.Stranding("ent_a", "A", st.REASON_UNREACHABLE, "d")
+    text = st._alert_text(
+        [fetch, prof],
+        {fetch.key: st.OUTCOME_CONFIRMED, prof.key: st.OUTCOME_CONFIRMED},
+        0,
+    )
+    assert text.count("• monedula:") == 2
+    assert "\n\n" in text
+
+
+def test_minutes_in_the_alert_derive_from_the_interval_constant(monkeypatch):
+    monkeypatch.setattr(st, "TICK_MINUTES", 20)
+    f = st.Stranding("", "(all profiles)", st.REASON_FETCH_FAILED, "d")
+    assert "about 60 minutes" in st._alert_text([f], {f.key: st.OUTCOME_CONFIRMED}, 3)
+
+
+def test_per_stranding_log_names_the_profile_by_entity_id_not_label(
+    monkeypatch, tmp_path, caplog
+):
+    monkeypatch.setattr("strandings._post_escalation", lambda e, k: st.OUTCOME_CONFIRMED)
+    s = st.Stranding("ent_abc123", "SecretPayeeLabel", st.REASON_UNREACHABLE, "d")
+    with caplog.at_level(logging.ERROR):
+        st.escalate([s], state_file=tmp_path / "s.json", now=1000.0)
+    assert "ent_abc123" in caplog.text
+    assert "SecretPayeeLabel" not in caplog.text
+
+
+def test_alert_log_reference_is_length_only(monkeypatch, caplog):
+    monkeypatch.setattr(monedula, "_notifier", _FakeNotifier(raises=True))
+    with caplog.at_level(logging.ERROR):
+        monedula._notify("x" * 40, priority="blocker")
+    assert "40 chars" in caplog.text
+    assert "sha256" not in caplog.text
+
+
+def test_rejected_fetch_log_does_not_echo_the_response_body(monkeypatch, caplog):
+    def forbidden(req, timeout=None):
+        raise urllib.error.HTTPError(
+            HOSTED, 403, "Forbidden", {}, io.BytesIO(b"SECRET-BODY-TEXT")
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", forbidden)
+    with caplog.at_level(logging.ERROR):
+        load_profiles_from_neotoma([])
+    assert "HTTP 403" in caplog.text
+    assert "SECRET-BODY-TEXT" not in caplog.text

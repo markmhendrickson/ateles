@@ -499,7 +499,7 @@ def test_stranded_notify_passes_stable_dedupe_key(monkeypatch, tmp_path):
     assert len(notes) == 1
     msg, priority, kwargs = notes[0]
     fp = stranded_fingerprint([s])
-    assert kwargs.get("dedupe_key") == f"monedula:stranded:{fp}"
+    assert kwargs.get("dedupe_key") == f"monedula:stranded:{fp}|outcome=confirmed"
     assert kwargs.get("email_eligible") is True
     assert "payment_profiles_stranded" in msg
     assert s.label in msg

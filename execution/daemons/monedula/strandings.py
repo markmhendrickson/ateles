@@ -159,7 +159,15 @@ FETCH_REASONS = (REASON_FETCH_FAILED, REASON_FETCH_REJECTED)
 
 # The daemon's wake interval, used only to turn a tick count into minutes in
 # operator-facing text.
-TICK_MINUTES = 15
+def _tick_minutes() -> int:
+    try:
+        v = int(os.environ.get("MONEDULA_TICK_MINUTES", "").strip() or 15)
+        return v if v > 0 else 15
+    except ValueError:
+        return 15
+
+
+TICK_MINUTES = _tick_minutes()
 
 # Outcomes of an escalation write, each worded differently to the operator.
 OUTCOME_CONFIRMED = "confirmed"  # written and read back
@@ -427,15 +435,14 @@ def _alert_text(fresh: list[Stranding], outcomes: dict[str, str], streak: int) -
     if unreachable:
         stories.append(
             f"monedula: Neotoma has been unreachable for about "
-            f"{streak * TICK_MINUTES} minutes; payment profiles could not be loaded, "
-            "no payments attempted; retrying next tick. No action needed unless "
-            "this repeats; payments resume when Neotoma answers. If it persists, "
-            "check the Neotoma host."
+            f"{streak * TICK_MINUTES} minutes; payment profiles could not be "
+            "loaded, so none can be proposed from Neotoma. Monedula will keep "
+            "retrying; check Neotoma's status if this persists."
         )
     for s in rejected:
         stories.append(
             f"monedula: payment profiles could not be loaded; {s.detail} "
-            "No payments attempted. This will not clear by itself."
+            "None can be proposed from Neotoma. This will not clear by itself."
         )
     if profiles:
         labels = ", ".join(s.label for s in profiles)
@@ -468,7 +475,11 @@ def _alert_text(fresh: list[Stranding], outcomes: dict[str, str], streak: int) -
             f"{len(by[OUTCOME_DEFERRED])} escalation write(s) not attempted this "
             "tick after a failure; retrying next tick."
         )
-    return "\n".join(stories + lines)
+    if len(stories) > 1:
+        stories = [f"• {x}" for x in stories]
+    # Blank lines between stories and before the write outcomes, so two
+    # different conditions in one message do not read as one.
+    return "\n\n".join(stories + (["\n".join(lines)] if lines else []))
 
 
 def escalate(
@@ -505,8 +516,8 @@ def escalate(
     )
     if streak and streak < FETCH_FAILURE_ESCALATE_AFTER_TICKS:
         log.error(
-            f"Neotoma unreachable; no payments attempted; retrying next tick "
-            f"(profile fetch failed {streak}/{FETCH_FAILURE_ESCALATE_AFTER_TICKS} "
+            f"Neotoma unreachable; payment profiles not loaded this run; retrying "
+            f"next tick (profile fetch failed {streak}/{FETCH_FAILURE_ESCALATE_AFTER_TICKS} "
             f"consecutive ticks; escalating if it persists)"
         )
         strandings = [s for s in strandings if s.reason != REASON_FETCH_FAILED]
@@ -532,7 +543,8 @@ def escalate(
 
     fp = stranded_fingerprint(strandings)
     dedupe_key = f"monedula:stranded:{fp}"
-    if prior_notify_key and prior_notify_key != dedupe_key and clear_dedupe is not None:
+    prior_base = prior_notify_key.split("|outcome=", 1)[0]
+    if prior_notify_key and prior_base != dedupe_key and clear_dedupe is not None:
         try:
             clear_dedupe(prior_notify_key)
         except Exception as exc:  # noqa: BLE001
@@ -547,12 +559,8 @@ def escalate(
             f"{len(strandings)} stranded payment profile(s) — already escalated, "
             f"suppressed until {REESCALATE_AFTER_HOURS}h have passed"
         )
-        # Still stamp the current notify key so an unchanged set keeps the
-        # same Notifier fingerprint across ticks (Notifier suppresses repeats).
-        try:
-            prior_key_path.write_text(dedupe_key)
-        except OSError:
-            pass
+        # Nothing is sent, so the stamped key stays as last notified (it
+        # carries the outcome class of that alert).
         return []
 
     observed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now or time.time()))
@@ -581,10 +589,13 @@ def escalate(
         elif result is False:
             result = OUTCOME_NOT_STORED
         outcomes[s.key] = result
-        failed_this_tick = result != OUTCOME_CONFIRMED
+        # Defer the rest only after a TRANSIENT outcome. A refused (4xx) write
+        # is permanent for that entity and must not starve those behind it.
+        failed_this_tick = result == OUTCOME_UNCONFIRMED
         log.error(
             f"STRANDED payment profile: {s.reason} — "
             + ("escalated" if result == OUTCOME_CONFIRMED else f"escalation {result}")
+            + f" (ref {s.entity_id or s.reason})"
         )
 
     # An unconfirmed or failed write must not start the 24h quiet period: with
@@ -598,6 +609,23 @@ def escalate(
 
     if notify is not None:
         message = _alert_text(fresh, outcomes, streak)
+        # The Notifier suppresses a repeated key until cleared. The key must
+        # say what the alert SAID, not just which profiles are stranded: an
+        # alert that reported an unconfirmed write must not suppress the later
+        # alert that reports it confirmed.
+        outcome_class = "+".join(sorted(set(outcomes.values())))
+        new_key = f"{dedupe_key}|outcome={outcome_class}"
+        if (
+            prior_notify_key
+            and prior_notify_key != new_key
+            and prior_notify_key.split("|outcome=", 1)[0] == dedupe_key
+            and clear_dedupe is not None
+        ):
+            try:
+                clear_dedupe(prior_notify_key)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"clear prior stranded dedupe failed: {exc}")
+        dedupe_key = new_key
         try:
             notify(
                 message,
