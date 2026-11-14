@@ -21,8 +21,10 @@ construction (build_finalize_payload) is unit-tested; the I/O (httpx /store,
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -41,6 +43,95 @@ NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 # by id with a slug fallback so this keeps working as that lands).
 END_SKILL_ID = os.environ.get("END_SKILL_ID", "ent_af748d985b7bfa4f636eea70")
 END_SKILL_SLUG = "end"
+
+# -- Failure visibility and escalation ---------------------------------------
+# A bare ``raise_for_status`` message ("400 Bad Request") hid the cause of a
+# store rejection for weeks: Neotoma answers a rejected store with a JSON body
+# naming the error code (e.g. ERR_IDEMPOTENCY_MISMATCH).  Log that body, and
+# when the same write keeps failing escalate through the existing
+# ``daemon_report`` mechanism (Anthus surfaces error/critical reports) instead
+# of warning forever.
+
+RESPONSE_BODY_LOG_LIMIT = 500
+ESCALATE_AFTER_CONSECUTIVE_FAILURES = int(
+    os.environ.get("ATELES_FINALIZE_ESCALATE_AFTER", "5")
+)
+ESCALATION_DAEMON_NAME = "apis"
+
+_failure_lock = threading.Lock()
+_consecutive_failures: dict[str, int] = {}
+_escalated: set[str] = set()
+
+
+def describe_store_error(exc: BaseException) -> str:
+    """Exception text plus the (truncated) response body of an HTTP error.
+
+    Never includes request headers or the request body.
+    """
+    text = str(exc)
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            body = (response.text or "").strip()
+        except Exception:  # noqa: BLE001 - a streamed/closed body must not mask the error
+            body = ""
+        if body:
+            if len(body) > RESPONSE_BODY_LOG_LIMIT:
+                body = body[:RESPONSE_BODY_LOG_LIMIT] + "...[truncated]"
+            text = f"{text} | response body: {body}"
+    return text
+
+
+def _emit_failure_report(key: str, count: int, last_error: str) -> None:
+    """Write the existing ``daemon_report`` failure signal. Fail-open, one try."""
+    payload = {
+        "entity_type": "daemon_report",
+        "daemon_name": ESCALATION_DAEMON_NAME,
+        "aauth_sub": f"{ESCALATION_DAEMON_NAME}@ateles-swarm",
+        "severity": "error",
+        "message": (
+            f"[finalize] store has failed {count} consecutive times for "
+            f"{key}: {last_error[:300]}"
+        ),
+        "report_at": datetime.now(timezone.utc).isoformat(),
+        "details": json.dumps({"idempotency_key": key, "consecutive_failures": count}),
+    }
+    try:
+        resp = httpx.post(
+            f"{NEOTOMA_BASE_URL}/store",
+            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            json={
+                "entities": [payload],
+                "observation_source": "workflow_state",
+                "idempotency_key": f"finalize-failure-{key}-{count}",
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 - escalation must never crash the caller
+        log.error("[finalize] could not write failure daemon_report: %s", describe_store_error(exc))
+
+
+def _record_store_outcome(key: str | None, ok: bool, error: str = "") -> None:
+    """Count consecutive failures per write key; escalate once per streak."""
+    if not key:
+        return
+    with _failure_lock:
+        if ok:
+            _consecutive_failures.pop(key, None)
+            _escalated.discard(key)
+            return
+        count = _consecutive_failures.get(key, 0) + 1
+        _consecutive_failures[key] = count
+        escalate = count >= ESCALATE_AFTER_CONSECUTIVE_FAILURES and key not in _escalated
+        if escalate:
+            _escalated.add(key)
+    if escalate:
+        log.error(
+            "[finalize] store for %s failed %d consecutive times; escalating: %s",
+            key, count, error,
+        )
+        _emit_failure_report(key, count, error)
 
 
 def build_finalize_payload(
@@ -270,9 +361,13 @@ def _post_store(body: dict, *, retry_transient: bool = False) -> dict | None:
     try:
         if retry_transient:
             return call_with_transient_retry(_send, label="run-session store")
-        return _send()
+        result = _send()
+        _record_store_outcome(body.get("idempotency_key"), True)
+        return result
     except Exception as exc:  # noqa: BLE001 — never crash the caller
-        log.warning("[finalize] store failed: %s", exc)
+        detail = describe_store_error(exc)
+        log.warning("[finalize] store failed: %s", detail)
+        _record_store_outcome(body.get("idempotency_key"), False, detail)
         return None
 
 
@@ -585,16 +680,23 @@ def recover_run_session(
 
 def update_run_session_status(run: RunSession, *, status: str) -> bool:
     """Record and verify a run's terminal lifecycle state."""
+    # Neotoma rejects (400 ERR_IDEMPOTENCY_MISMATCH) a reused idempotency key
+    # whose content differs.  ``last_activity_at`` changes on every call, so
+    # the key must carry it: a stable key made every retry after the first
+    # write fail forever (the watchdog re-runs this each sweep).
+    last_activity_at = datetime.now(timezone.utc).isoformat()
     data = _post_store({
         "entities": [{
             "entity_type": "agent_session",
             "harness": "ateles-swarm",
             "native_session_id": run.native_session_id,
             "status": status,
-            "last_activity_at": datetime.now(timezone.utc).isoformat(),
+            "last_activity_at": last_activity_at,
         }],
         "observation_source": "workflow_state",
-        "idempotency_key": f"run-session-{run.native_session_id}-{status}",
+        "idempotency_key": (
+            f"run-session-{run.native_session_id}-{status}-{last_activity_at}"
+        ),
     })
     if not data:
         return False
@@ -638,9 +740,12 @@ def finalize_session(**kwargs) -> bool:
             timeout=20,
         )
         resp.raise_for_status()
+        _record_store_outcome(body.get("idempotency_key"), True)
         return True
     except Exception as exc:  # noqa: BLE001 — never crash the caller
-        log.warning("[finalize] store failed: %s", exc)
+        detail = describe_store_error(exc)
+        log.warning("[finalize] store failed: %s", detail)
+        _record_store_outcome(body.get("idempotency_key"), False, detail)
         return False
 
 
