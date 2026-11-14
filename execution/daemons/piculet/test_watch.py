@@ -499,6 +499,24 @@ def test_assess_memo_finds_duration_for_qta_audio(tmp_path, monkeypatch):
     assert report.metrics.get("duration_seconds") == 200.0
 
 
+def test_assess_memo_still_holds_a_short_memo_when_the_transcript_has_a_speaker_header(
+        tmp_path, monkeypatch):
+    """The transcriber's speaker header is not speech: it must not lift a
+    truncated memo over the word-count gate."""
+    monkeypatch.setattr(watch, "_audio_imports_dir", lambda: tmp_path)
+    header = "[Speakers: 1, detected locally by FluidAudio offline (build adb146b0)]\n\n"
+    transcript = _touch(
+        tmp_path / "20260905_124858_voicememo_20260905 124858-1E9512FC.txt",
+        text=header + "Remember to call the plumber tomorrow about the leak",
+    )
+    audio = _touch(tmp_path / "20260905_124858_voicememo_20260905 124858-1E9512FC.wav",
+                   text="audio")
+    monkeypatch.setattr(watch, "_audio_duration_seconds", lambda p: 60.0 if p == audio else None)
+    report, found = watch.assess_memo(Path("20260905 124858-1E9512FC.wav"))
+    assert found == transcript and report is not None and not report.clear
+    assert report.metrics["words"] == 9
+
+
 # ── Import scope: a run triggered by N new memos imports only those N ───────
 
 
