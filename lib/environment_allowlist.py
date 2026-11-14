@@ -298,6 +298,7 @@ DAEMON_CONFIG_NAMES: frozenset[str] = frozenset(
         "MONEDULA_POLICY_ID",
         "MONEDULA_PROFILES",
         "MONEDULA_SESSION_WINDOW_HOURS",
+        "MONEDULA_TICK_MINUTES",
         "NEOTOMA_AAUTH_ISS",
         "NEOTOMA_AAUTH_PRIVATE_JWK_PATH",  # path of the signing key a per-agent CLI child uses (a path, not key material)
         "NEOTOMA_AAUTH_SUB",
