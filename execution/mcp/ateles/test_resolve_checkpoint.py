@@ -25,9 +25,11 @@ from unittest import mock
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 
-_SCRIPTS = Path(__file__).resolve().parent
-_REPO_ROOT = _SCRIPTS.parents[1]
-_MCP_DIR = _REPO_ROOT / "execution" / "mcp" / "ateles"
+# Lives beside the server it drives, so CI collects it in the job that installs
+# the server's requirements (mcp); execution/scripts' own job does not.
+_MCP_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _MCP_DIR.parents[2]
+_SCRIPTS = _REPO_ROOT / "execution" / "scripts"
 for _path in (_REPO_ROOT, _MCP_DIR, _SCRIPTS):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
