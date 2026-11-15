@@ -19,8 +19,8 @@ It refuses to write when the page is already referenced anywhere in the hub.
 
 Global options (--hub) go BEFORE the subcommand.
 `add` is a dry run unless --apply is passed.
-The dry run prints only the hub id, page id, marker name, title, and proposed
-body byte length; it never prints the card, body, or token-bearing href.
+The dry run prints only the hub id, page id, marker name, and proposed body
+byte length; it never prints the card, body, or token-bearing href.
 
 After a write, `add` re-reads the stored hub body and requires exact string
 equality. It deliberately does not fetch guest/share URLs; open the new card's
@@ -43,6 +43,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -103,6 +104,13 @@ def _read_env_file(path: Path) -> dict:
 
 def _contains_non_printable_ascii(value: str) -> bool:
     return any(not 0x21 <= ord(char) <= 0x7E for char in value)
+
+
+def _contains_unsafe_free_text(value: str) -> bool:
+    return any(
+        category.startswith("C") or category in {"Zl", "Zp"}
+        for category in (unicodedata.category(char) for char in value)
+    )
 
 
 def _check_token(variable_name: str, token: str) -> str:
@@ -194,7 +202,7 @@ def build_card(url: str, title: str, desc: str, badges: list[tuple[str, str]]) -
     esc = html.escape
     for cls, _ in badges:
         if not BADGE_CLASS_RE.match(cls):
-            raise ValueError(f"badge class must match [a-z0-9-]+: {cls!r}")
+            raise ValueError("badge class must match [a-z0-9-]+")
     row = "".join(
         f'<span class="badge {cls}">{esc(text, quote=True)}</span>'
         for cls, text in badges
@@ -222,6 +230,14 @@ def insert_card(body: str, marker_name: str, card: str) -> str:
 
 def cmd_add(args, base_url, token) -> int:
     """Read-modify-write one exact card splice and verify the stored bytes."""
+    if _contains_unsafe_free_text(args.title):
+        fail("--title must not contain control or format characters")
+    if _contains_unsafe_free_text(args.desc):
+        fail("--desc must not contain control or format characters")
+    if _contains_unsafe_free_text(args.badge_text):
+        fail("--badge-text must not contain control or format characters")
+    if _contains_unsafe_free_text(args.badge2_text):
+        fail("--badge2-text must not contain control or format characters")
     if not args.title.strip():
         fail("--title must not be blank")
     if not ENTITY_ID_RE.match(args.page):
@@ -295,7 +311,7 @@ def cmd_add(args, base_url, token) -> int:
     if not args.apply:
         print(
             f"dry run: hub={args.hub} page={args.page} marker={args.marker} "
-            f"title={args.title} body_bytes={len(after_body.encode())}"
+            f"body_bytes={len(after_body.encode())}"
         )
         return EXIT_OK
 

@@ -358,9 +358,71 @@ def test_add_escapes_special_title_and_description(fake):
     assert "A&amp;B &quot;quoted&quot;" in fake.body
 
 
+@pytest.mark.parametrize(
+    ("argument_name", "field"),
+    [
+        ("--title", "title"),
+        ("--desc", "desc"),
+        ("--badge-text", "badge_text"),
+        ("--badge2-text", "badge2_text"),
+    ],
+)
+@pytest.mark.parametrize(
+    "rejected",
+    [
+        "synthetic-value-0018\x1b[2J",
+        "synthetic-value-0019\ntrailing",
+        "synthetic-value-0020\x85",
+        "synthetic-value-0021\u202e",
+    ],
+    ids=["ansi", "newline", "c1-control", "bidi-override"],
+)
+def test_unsafe_free_text_is_refused_without_echo_or_request(
+    fake, capsys, argument_name, field, rejected
+):
+    with pytest.raises(SystemExit) as exc:
+        H.cmd_add(_args(**{field: rejected}, apply=False), BASE, "bearer")
+
+    captured = capsys.readouterr()
+    assert exc.value.code == H.EXIT_ERROR
+    assert fake.snapshot_calls == []
+    assert fake.writes == []
+    assert captured.out == ""
+    assert captured.err == (
+        f"{argument_name} must not contain control or format characters\n"
+    )
+    assert rejected not in captured.out
+    assert rejected not in captured.err
+
+
+def test_ordinary_non_ascii_free_text_is_accepted_and_escaped(fake):
+    value = "Café ünïcode & more"
+
+    assert (
+        H.cmd_add(
+            _args(
+                title=value,
+                desc=value,
+                badge_text=value,
+                badge2_text=value,
+            ),
+            BASE,
+            "bearer",
+        )
+        == H.EXIT_OK
+    )
+
+    assert fake.body.count("Café ünïcode &amp; more") == 4
+
+
 def test_build_card_rejects_unsafe_badge_class():
-    with pytest.raises(ValueError):
-        H.build_card("u", "t", "d", [('b" onclick="x', "t")])
+    rejected = "synthetic-value-0010!"
+
+    with pytest.raises(ValueError) as exc:
+        H.build_card("u", "t", "d", [(rejected, "t")])
+
+    assert str(exc.value) == "badge class must match [a-z0-9-]+"
+    assert rejected not in str(exc.value)
 
 
 @pytest.mark.parametrize(
@@ -412,7 +474,7 @@ def test_add_dry_run_writes_nothing_and_prints_only_token_free_summary(
     expected_body = fake.body.replace(MARKER, expected_card + MARKER)
     assert output == (
         f"dry run: hub={HUB_ID} page={NEW_ID} marker={MARKER_NAME} "
-        f"title=New body_bytes={len(expected_body.encode())}\n"
+        f"body_bytes={len(expected_body.encode())}\n"
     )
     assert "access_token" not in output
     assert _href() not in output
