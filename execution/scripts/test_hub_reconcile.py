@@ -307,6 +307,52 @@ def test_mixed_nested_encoded_page_id_is_refused_without_write(fake, capsys):
     _assert_existing_reference_is_refused(fake, capsys)
 
 
+@pytest.mark.parametrize(
+    "browser_ignored_whitespace",
+    [
+        "\t",
+        "\n",
+        "\r",
+        "&Tab;",
+        "&NewLine;",
+        "&#9;",
+        "&#x0A;",
+        "&#13;",
+        "%09",
+        "%0A",
+        "%0D",
+        "%2509",
+        "&amp;#9;",
+    ],
+    ids=[
+        "raw-tab",
+        "raw-lf",
+        "raw-cr",
+        "named-tab",
+        "named-lf",
+        "numeric-tab",
+        "numeric-lf",
+        "numeric-cr",
+        "percent-tab",
+        "percent-lf",
+        "percent-cr",
+        "nested-percent-tab",
+        "nested-entity-tab",
+    ],
+)
+def test_browser_ignored_url_whitespace_is_refused_without_write(
+    fake, capsys, browser_ignored_whitespace
+):
+    split = len(NEW_ID) // 2
+    obscured_id = NEW_ID[:split] + browser_ignored_whitespace + NEW_ID[split:]
+    fake.body = fake.body.replace(
+        MARKER,
+        f'<a href="{BASE}/entities/{obscured_id}/html">Obscured</a>{MARKER}',
+    )
+
+    _assert_existing_reference_is_refused(fake, capsys)
+
+
 def test_readback_one_byte_difference_returns_nonzero(fake, capsys):
     fake.after_write = lambda body: body + "x"
 

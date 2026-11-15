@@ -294,7 +294,9 @@ def cmd_add(args, base_url, token) -> int:
     href = f"{base_url}/entities/{args.page}/html?access_token={quoted}"
     probe = before_body
     for _ in range(8):
-        normalized = urllib.parse.unquote(html.unescape(probe))
+        normalized = urllib.parse.unquote(html.unescape(probe)).translate(
+            {ord(char): None for char in "\t\n\r"}
+        )
         if normalized == probe:
             break
         probe = normalized
