@@ -206,6 +206,19 @@ def test_insert_card_is_the_exact_required_expression(hub):
     assert H.insert_card(hub, MARKER_NAME, card) == hub[:index] + card + hub[index:]
 
 
+def test_insert_card_rejects_newline_terminated_marker_without_echo(hub, capsys):
+    rejected = f"{MARKER_NAME}\n"
+
+    with pytest.raises(SystemExit) as exc:
+        H.insert_card(hub, rejected, "\n<card>bytes</card>")
+
+    captured = capsys.readouterr()
+    assert exc.value.code == H.EXIT_ERROR
+    assert captured.out == ""
+    assert captured.err == "marker name must match [a-z0-9-]{1,64}\n"
+    assert rejected not in captured.err
+
+
 def _assert_existing_reference_is_refused(fake, capsys):
     with pytest.raises(SystemExit) as exc:
         H.cmd_add(_args(), BASE, "bearer")
@@ -565,6 +578,25 @@ def test_bad_page_id_is_refused(fake):
     assert fake.writes == []
 
 
+def test_cmd_add_rejects_newline_terminated_hub_without_request_or_echo(
+    fake, capsys
+):
+    rejected = f"{HUB_ID}\n"
+
+    with pytest.raises(SystemExit) as exc:
+        H.cmd_add(_args(hub=rejected), BASE, "bearer")
+
+    captured = capsys.readouterr()
+    assert exc.value.code == H.EXIT_ERROR
+    assert fake.snapshot_calls == []
+    assert fake.writes == []
+    assert captured.out == ""
+    assert captured.err == (
+        "--hub must look like ent_ followed by 24 hex characters\n"
+    )
+    assert rejected not in captured.err
+
+
 def test_guest_token_flags_and_removed_section_flag_are_rejected(monkeypatch):
     argv = [
         "hub_reconcile.py",
@@ -660,6 +692,135 @@ def test_subparser_argument_errors_use_safe_message(monkeypatch, capsys):
     assert captured.out == ""
     assert captured.err == "invalid arguments; run with --help\n"
     assert "synthetic-value-0006" not in captured.err
+
+
+@pytest.mark.parametrize(
+    ("flag", "valid_value", "expected_error", "extra_args"),
+    [
+        (
+            "--hub",
+            HUB_ID,
+            "--hub must look like ent_ followed by 24 hex characters\n",
+            [],
+        ),
+        (
+            "--page",
+            NEW_ID,
+            "--page must look like ent_ followed by 24 hex characters\n",
+            [],
+        ),
+        (
+            "--marker",
+            MARKER_NAME,
+            "--marker must match [a-z0-9-]{1,64}\n",
+            [],
+        ),
+        (
+            "--badge-class",
+            "b-mark",
+            "badge class must match [a-z0-9-]+\n",
+            ["--badge-text", "Recap"],
+        ),
+        (
+            "--badge2-class",
+            "b-review",
+            "badge class must match [a-z0-9-]+\n",
+            ["--badge2-text", "Review"],
+        ),
+    ],
+)
+def test_cli_structured_values_reject_trailing_newline_before_request(
+    monkeypatch, capsys, flag, valid_value, expected_error, extra_args
+):
+    argv = [
+        "hub_reconcile.py",
+        "--hub",
+        HUB_ID,
+        "add",
+        "--page",
+        NEW_ID,
+        "--marker",
+        MARKER_NAME,
+        "--title",
+        "T",
+        "--desc",
+        "D",
+        "--badge-class",
+        "b-mark",
+        "--badge2-class",
+        "b-review",
+        *extra_args,
+    ]
+    argv[argv.index(flag) + 1] = f"{valid_value}\n"
+    calls = []
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setenv("PAGE_GUEST_TOKEN", "page-token")
+    monkeypatch.setattr(H, "_load_env", lambda _profile: (BASE, "bearer"))
+    monkeypatch.setattr(
+        H, "_fetch_snapshot", lambda *_args, **_kwargs: calls.append("snapshot")
+    )
+    monkeypatch.setattr(
+        H, "_request", lambda *_args, **_kwargs: calls.append("request")
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        H.main()
+
+    captured = capsys.readouterr()
+    assert exc.value.code == H.EXIT_ERROR
+    assert calls == []
+    assert captured.out == ""
+    assert captured.err == expected_error
+    assert valid_value not in captured.err
+    assert captured.err.count("\n") == 1
+
+
+def test_cli_profile_rejects_trailing_newline_before_request(
+    monkeypatch, capsys, tmp_path
+):
+    _clear_env(monkeypatch, tmp_path)
+    rejected = "neotoma\n"
+    calls = []
+    monkeypatch.setenv("NEOTOMA_BASE_URL", BASE)
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "bearer")
+    monkeypatch.setenv("PAGE_GUEST_TOKEN", "page-token")
+    monkeypatch.setattr(
+        H, "_fetch_snapshot", lambda *_args, **_kwargs: calls.append("snapshot")
+    )
+    monkeypatch.setattr(
+        H, "_request", lambda *_args, **_kwargs: calls.append("request")
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "hub_reconcile.py",
+            "--profile",
+            rejected,
+            "--hub",
+            HUB_ID,
+            "add",
+            "--page",
+            NEW_ID,
+            "--marker",
+            MARKER_NAME,
+            "--title",
+            "T",
+            "--desc",
+            "D",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        H.main()
+
+    captured = capsys.readouterr()
+    assert exc.value.code == H.EXIT_ERROR
+    assert calls == []
+    assert captured.out == ""
+    assert captured.err == "profile must match [A-Za-z0-9_-]+\n"
+    assert rejected not in captured.err
+    assert captured.err.count("\n") == 1
 
 
 # credentials -------------------------------------------------------------

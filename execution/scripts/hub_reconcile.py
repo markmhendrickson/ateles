@@ -55,10 +55,10 @@ USER_AGENT = "ateles-hub-reconcile/1.0"
 
 EXIT_OK, EXIT_FINDINGS, EXIT_ERROR = 0, 1, 3
 
-ENTITY_ID_RE = re.compile(r"^ent_[0-9a-f]{24}$")
-PROFILE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-BADGE_CLASS_RE = re.compile(r"^[a-z0-9-]+$")
-MARKER_NAME_RE = re.compile(r"^[a-z0-9-]{1,64}$")
+ENTITY_ID_RE = re.compile(r"ent_[0-9a-f]{24}")
+PROFILE_RE = re.compile(r"[A-Za-z0-9_-]+")
+BADGE_CLASS_RE = re.compile(r"[a-z0-9-]+")
+MARKER_NAME_RE = re.compile(r"[a-z0-9-]{1,64}")
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 BASE_URL_INPUT_ERROR = (
     "NEOTOMA_BASE_URL must not contain credentials, a query, "
@@ -149,7 +149,7 @@ def _load_env(profile: str) -> tuple:
     complete pair from a single profile file is used. Halves are never mixed,
     so a token is never sent to a host it was not issued for.
     """
-    if not PROFILE_RE.match(profile):
+    if not PROFILE_RE.fullmatch(profile):
         fail("profile must match [A-Za-z0-9_-]+")
     base_url = os.environ.get("NEOTOMA_BASE_URL", "")
     token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
@@ -201,7 +201,7 @@ def build_card(url: str, title: str, desc: str, badges: list[tuple[str, str]]) -
     """Build a card matching the hub's existing markup contract exactly."""
     esc = html.escape
     for cls, _ in badges:
-        if not BADGE_CLASS_RE.match(cls):
+        if not BADGE_CLASS_RE.fullmatch(cls):
             raise ValueError("badge class must match [a-z0-9-]+")
     row = "".join(
         f'<span class="badge {cls}">{esc(text, quote=True)}</span>'
@@ -217,6 +217,8 @@ def build_card(url: str, title: str, desc: str, badges: list[tuple[str, str]]) -
 
 def insert_card(body: str, marker_name: str, card: str) -> str:
     """Insert `card` immediately before the one exact named marker."""
+    if not MARKER_NAME_RE.fullmatch(marker_name):
+        fail("marker name must match [a-z0-9-]{1,64}")
     marker = f"<!-- hub-cards:{marker_name} -->"
     count = body.count(marker)
     if count != 1:
@@ -230,6 +232,8 @@ def insert_card(body: str, marker_name: str, card: str) -> str:
 
 def cmd_add(args, base_url, token) -> int:
     """Read-modify-write one exact card splice and verify the stored bytes."""
+    if not ENTITY_ID_RE.fullmatch(args.hub):
+        fail("--hub must look like ent_ followed by 24 hex characters")
     if _contains_unsafe_free_text(args.title):
         fail("--title must not contain control or format characters")
     if _contains_unsafe_free_text(args.desc):
@@ -240,9 +244,9 @@ def cmd_add(args, base_url, token) -> int:
         fail("--badge2-text must not contain control or format characters")
     if not args.title.strip():
         fail("--title must not be blank")
-    if not ENTITY_ID_RE.match(args.page):
+    if not ENTITY_ID_RE.fullmatch(args.page):
         fail("--page must look like ent_ followed by 24 hex characters")
-    if not MARKER_NAME_RE.match(args.marker):
+    if not MARKER_NAME_RE.fullmatch(args.marker):
         fail("--marker must match [a-z0-9-]{1,64}")
     if not args.page_token:
         fail("PAGE_GUEST_TOKEN must be non-empty")
@@ -254,7 +258,7 @@ def cmd_add(args, base_url, token) -> int:
     if args.badge2_text:
         badges.append((args.badge2_class or "b-review", args.badge2_text))
     for cls, _ in badges:
-        if not BADGE_CLASS_RE.match(cls):
+        if not BADGE_CLASS_RE.fullmatch(cls):
             fail("badge class must match [a-z0-9-]+")
 
     try:
@@ -391,7 +395,7 @@ def _run() -> int:
     args.page_token = os.environ.get("PAGE_GUEST_TOKEN", "")
     if not args.hub:
         fail("--hub or ATELES_HUB_ENTITY_ID required")
-    if not ENTITY_ID_RE.match(args.hub):
+    if not ENTITY_ID_RE.fullmatch(args.hub):
         fail("--hub must look like ent_ followed by 24 hex characters")
     base_url, token = _load_env(args.profile)
 
