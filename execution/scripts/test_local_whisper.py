@@ -15,6 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import chunked_whisper as cw  # noqa: E402
 import local_whisper as lw  # noqa: E402
 
 
@@ -243,8 +244,11 @@ def _stub_pipeline(monkeypatch, tmp_path, *, rms, model_text="."):
         return wav
 
     monkeypatch.setattr(lw, "convert_to_wav16k_mono", fake_convert)
+    monkeypatch.setattr(lw, "_wav_duration_seconds", lambda _wav: 1.0)
 
+    commands = []
     def fake_run(cmd, **_kw):
+        commands.append(cmd)
         # Emulate whisper-cli writing <output-file>.json
         out_stem = cmd[cmd.index("--output-file") + 1]
         Path(f"{out_stem}.json").write_text(
@@ -258,11 +262,22 @@ def _stub_pipeline(monkeypatch, tmp_path, *, rms, model_text="."):
         return R()
 
     monkeypatch.setattr(lw.subprocess, "run", fake_run)
+    return commands
 
 
 def test_below_threshold_audio_is_never_sent_to_the_model(monkeypatch, tmp_path):
     """The level gate: silence is marked, not transcribed — Whisper would invent."""
     _stub_pipeline(monkeypatch, tmp_path, rms=-70.0)
+    monkeypatch.setattr(
+        lw,
+        "_wav_duration_seconds",
+        lambda _wav: cw.CHUNK_SECONDS + 1.0,
+    )
+    monkeypatch.setattr(
+        cw,
+        "transcribe_track",
+        lambda *_a, **_k: pytest.fail("silent audio reached the chunker"),
+    )
     called = []
     monkeypatch.setattr(
         lw.subprocess, "run", lambda *a, **k: called.append(a) or pytest.fail("ran")
@@ -316,6 +331,166 @@ def test_real_speech_above_the_gate_is_returned_verbatim(monkeypatch, tmp_path):
     assert result["transcription_engine"] == lw.TRANSCRIPTION_ENGINE_LOCAL
     assert result["transcription_model"] == lw.DEFAULT_MODEL_NAME
     assert result["rms_db"] == -30.0
+
+
+def test_short_file_keeps_the_single_pass_route(monkeypatch, tmp_path):
+    commands = _stub_pipeline(
+        monkeypatch,
+        tmp_path,
+        rms=-30.0,
+        model_text="A short memo.",
+    )
+    monkeypatch.setattr(
+        cw,
+        "transcribe_track",
+        lambda *_a, **_k: pytest.fail("short audio used chunked transcription"),
+    )
+    audio = tmp_path / "short.m4a"
+    audio.write_bytes(b"x")
+
+    result = lw.transcribe_local(audio)
+
+    assert result["transcription_text"] == "A short memo."
+    assert len(commands) == 1
+
+
+def test_long_file_uses_chunked_route_and_preserves_result_shape(
+    monkeypatch, tmp_path
+):
+    _stub_pipeline(monkeypatch, tmp_path, rms=-30.0)
+    monkeypatch.setattr(
+        lw,
+        "_wav_duration_seconds",
+        lambda _wav: cw.CHUNK_SECONDS + 1.0,
+    )
+    calls = []
+
+    def fake_asr_factory(cli, model, **kwargs):
+        calls.append(("factory", cli, model, kwargs))
+        return lambda *_a, **_k: pytest.fail("fake chunker unexpectedly ran ASR")
+
+    def fake_transcribe(wav, **kwargs):
+        calls.append(("chunked", wav, kwargs))
+        return {
+            "segments": [
+                {"start": 0.0, "end": 2.0, "text": "First segment."},
+                {"start": 120.0, "end": 123.0, "text": "Second segment."},
+            ],
+            "chunks": [
+                {"kind": "chunk", "start": 0.0, "end": 120.0, "status": "ok"},
+                {"kind": "chunk", "start": 120.0, "end": 123.0, "status": "ok"},
+            ],
+        }
+
+    monkeypatch.setattr(cw, "whisper_cli_asr", fake_asr_factory)
+    monkeypatch.setattr(cw, "transcribe_track", fake_transcribe)
+    monkeypatch.setattr(
+        lw.subprocess,
+        "run",
+        lambda *_a, **_k: pytest.fail("long audio used the single whisper pass"),
+    )
+    audio = tmp_path / "long.m4a"
+    audio.write_bytes(b"x")
+
+    result = lw.transcribe_local(audio, language="en")
+
+    assert [call[0] for call in calls] == ["factory", "chunked"]
+    assert result["transcription_text"] == "First segment. Second segment."
+    assert set(result) == {
+        "transcription_text",
+        "language",
+        "backend",
+        "transcription_engine",
+        "transcription_model",
+        "rms_db",
+        "silence",
+    }
+
+
+def test_long_file_discloses_an_audible_chunk_with_no_words(
+    monkeypatch, tmp_path
+):
+    _stub_pipeline(monkeypatch, tmp_path, rms=-30.0)
+    monkeypatch.setattr(
+        lw,
+        "_wav_duration_seconds",
+        lambda _wav: cw.CHUNK_SECONDS + 1.0,
+    )
+    monkeypatch.setattr(
+        cw,
+        "whisper_cli_asr",
+        lambda *_a, **_k: lambda *_a, **_k: ([], None),
+    )
+    monkeypatch.setattr(
+        cw,
+        "transcribe_track",
+        lambda *_a, **_k: {
+            "segments": [],
+            "chunks": [
+                {
+                    "kind": "chunk",
+                    "start": 0.0,
+                    "end": 121.0,
+                    "status": "empty",
+                }
+            ],
+        },
+    )
+    audio = tmp_path / "empty-long.m4a"
+    audio.write_bytes(b"x")
+
+    result = lw.transcribe_local(audio)
+
+    assert result["silence"] is True
+    assert "[NO WORDS RECOGNISED" in result["transcription_text"]
+
+
+def test_runtime_prompt_reaches_short_and_chunked_whisper_commands(
+    monkeypatch, tmp_path
+):
+    commands = _stub_pipeline(
+        monkeypatch,
+        tmp_path,
+        rms=-30.0,
+        model_text="Synthetic Product.",
+    )
+    short = tmp_path / "short.m4a"
+    short.write_bytes(b"x")
+    lw.transcribe_local(short, initial_prompt="Synthetic Product")
+    assert commands[0][commands[0].index("--prompt") + 1] == "Synthetic Product"
+
+    monkeypatch.setattr(
+        lw,
+        "_wav_duration_seconds",
+        lambda _wav: cw.CHUNK_SECONDS + 1.0,
+    )
+    seen = {}
+
+    def fake_factory(_cli, _model, **kwargs):
+        seen.update(kwargs)
+        return lambda *_a, **_k: ([], None)
+
+    monkeypatch.setattr(cw, "whisper_cli_asr", fake_factory)
+    monkeypatch.setattr(
+        cw,
+        "transcribe_track",
+        lambda *_a, **_k: {
+            "segments": [{"start": 0.0, "end": 1.0, "text": "Synthetic Product."}],
+            "chunks": [
+                {"kind": "chunk", "start": 0.0, "end": 121.0, "status": "ok"}
+            ],
+        },
+    )
+    long = tmp_path / "long.m4a"
+    long.write_bytes(b"x")
+    lw.transcribe_local(long, initial_prompt="Synthetic Product")
+    assert seen["initial_prompt"] == "Synthetic Product"
+
+
+def test_prompt_can_come_from_runtime_environment(monkeypatch):
+    monkeypatch.setenv(lw.WHISPER_PROMPT_ENV_VAR, "  Synthetic Product  ")
+    assert lw._initial_prompt(None) == "Synthetic Product"
+    assert lw._initial_prompt("") is None
 
 
 def test_a_failed_rms_measurement_transcribes_anyway(monkeypatch, tmp_path):

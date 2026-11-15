@@ -40,6 +40,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import wave
 from pathlib import Path
 
 try:
@@ -81,6 +82,7 @@ MODEL_SEARCH_DIRS = (
 
 WHISPER_CLI_ENV_VAR = "TRANSCRIBE_WHISPER_CLI"
 DEFAULT_WHISPER_CLI = "whisper-cli"
+WHISPER_PROMPT_ENV_VAR = "TRANSCRIBE_WHISPER_PROMPT"
 
 # Markers stored in place of a transcript when there is no speech. Explicit
 # prose, not an empty string and not "." — the operator must be able to tell
@@ -349,6 +351,101 @@ def detected_language_from_json(data: dict) -> str | None:
     return None
 
 
+def _wav_duration_seconds(wav_path: Path) -> float:
+    """Duration of the normalized WAV used to choose the transcription route."""
+    try:
+        with wave.open(str(wav_path), "rb") as handle:
+            return handle.getnframes() / float(handle.getframerate() or 16000)
+    except (OSError, EOFError, wave.Error):
+        return 0.0
+
+
+def _initial_prompt(
+    explicit: str | None,
+    env: dict[str, str] | None = None,
+) -> str | None:
+    """Runtime-supplied whisper prompt; an explicit empty value disables env."""
+    env = os.environ if env is None else env
+    raw = explicit if explicit is not None else env.get(WHISPER_PROMPT_ENV_VAR)
+    prompt = (raw or "").strip()
+    return prompt or None
+
+
+def _chunk_marker_segments(found: dict) -> list[dict]:
+    """Timed disclosure markers for chunk outcomes that produced no segment."""
+    try:
+        from scripts.two_track_merge import (
+            KIND_EMPTY,
+            KIND_SILENT,
+            KIND_WITHHELD,
+            MARKERS,
+            chunk_outcomes,
+        )
+    except ImportError:  # pragma: no cover - path-dependent import
+        from two_track_merge import (  # type: ignore[no-redef]
+            KIND_EMPTY,
+            KIND_SILENT,
+            KIND_WITHHELD,
+            MARKERS,
+            chunk_outcomes,
+        )
+
+    markers = []
+    for gap in chunk_outcomes(found.get("chunks", []))["gaps"]:
+        kind = gap["kind"]
+        if kind == KIND_WITHHELD:
+            text = MARKERS[kind].format(
+                reason=gap["reason"],
+                detail=gap["detail"] or "no detail",
+            )
+        elif kind in (KIND_SILENT, KIND_EMPTY):
+            text = MARKERS[kind]
+        else:  # Defensive: chunk_outcomes currently emits only these kinds.
+            continue
+        markers.append(
+            {
+                "start": gap["start"],
+                "end": gap["end"],
+                "text": text,
+            }
+        )
+    return markers
+
+
+def _chunked_transcription_text(found: dict) -> str:
+    """Build one transcript from chunk segments, retaining timed gap markers."""
+    try:
+        from scripts.two_track_merge import collapse_repeats, format_clock
+    except ImportError:  # pragma: no cover - path-dependent import
+        from two_track_merge import collapse_repeats, format_clock  # type: ignore[no-redef]
+
+    segments = list(found.get("segments", []))
+    markers = _chunk_marker_segments(found)
+    if not markers:
+        text = " ".join(segment["text"].strip() for segment in segments).strip()
+        return collapse_repeats(text)[0]
+
+    blocks = sorted(
+        [
+            (
+                float(segment["start"]),
+                float(segment["end"]),
+                segment["text"].strip(),
+            )
+            for segment in segments
+            if segment.get("text", "").strip()
+        ]
+        + [
+            (float(marker["start"]), float(marker["end"]), marker["text"])
+            for marker in markers
+        ]
+    )
+    return "\n\n".join(
+        f"[{format_clock(start)}–{format_clock(end)}]\n{text}"
+        for start, end, text in blocks
+    )
+
+
 def _timed_segments(cmd: list[str], tmp_dir: Path) -> tuple[list[dict] | None, str]:
     """Re-run the identical whisper command with timestamps; (segments, reason)."""
     stem = tmp_dir / "timed.out"
@@ -380,6 +477,7 @@ def transcribe_local(
     audio_path: Path,
     *,
     language: str | None = None,
+    initial_prompt: str | None = None,
     verbose: bool = False,
     silence_threshold_db: float | None = None,
     threads: int | None = None,
@@ -397,7 +495,10 @@ def transcribe_local(
     Returns ``{"transcription_text", "language", "backend", "rms_db",
     "silence"}``. On a silence-gated file the text is an explicit no-speech
     marker and ``silence`` is True — the model is never run, so it cannot
-    fabricate.
+    fabricate. Files longer than ``chunked_whisper.CHUNK_SECONDS`` reuse the
+    meeting transcription chunker. ``initial_prompt`` (or
+    ``TRANSCRIBE_WHISPER_PROMPT``) may supply runtime proper nouns to whisper;
+    this module never fetches or hardcodes product-specific context.
 
     Raises LocalWhisperUnavailable when the binary, model, or ffmpeg is missing.
     That exception is deliberately NOT convertible into a paid fallback.
@@ -415,6 +516,7 @@ def transcribe_local(
         if silence_threshold_db is None
         else silence_threshold_db
     )
+    prompt = _initial_prompt(initial_prompt)
 
     if verbose:
         print(f"    Local whisper-cli: {cli}")
@@ -450,58 +552,137 @@ def transcribe_local(
                 "silence": True,
             }
 
-        out_stem = tmp_dir / f"{audio_path.stem}.out"
-        cmd = [
-            cli,
-            "-m", str(model),
-            "-f", str(wav_path),
-            "--output-json",
-            "--output-file", str(out_stem),
-            "--no-prints",
-            "--no-timestamps",
-            "-l", (language or "auto"),
-        ]
-        if threads and threads > 0:
-            cmd += ["-t", str(threads)]
+        duration = _wav_duration_seconds(wav_path)
+        chunked_found = None
+        cmd = None
+        if duration > 0:
+            try:
+                from scripts import chunked_whisper
+            except ImportError:  # pragma: no cover - path-dependent import
+                import chunked_whisper  # type: ignore[no-redef]
+        else:
+            chunked_whisper = None
 
-        if verbose:
-            print(f"    Running whisper-cli on {wav_path.name}...")
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
-        json_path = Path(f"{out_stem}.json")
-        if proc.returncode != 0 or not json_path.is_file():
-            raise LocalWhisperUnavailable(
-                f"whisper-cli failed on {audio_path.name} (exit "
-                f"{proc.returncode}). stderr:\n"
-                f"{(proc.stderr or '').strip()[:2000]}"
+        if chunked_whisper is not None and duration > chunked_whisper.CHUNK_SECONDS:
+            detected_languages: list[str] = []
+            real_asr = chunked_whisper.whisper_cli_asr(
+                cli,
+                model,
+                threads=threads,
+                initial_prompt=prompt,
             )
 
-        text, detected = _parse_whisper_json(json_path)
+            def asr(wav: Path, expected: str | None, extra: list[str]):
+                found_segments, found_language = real_asr(wav, expected, extra)
+                if found_language:
+                    detected_languages.append(found_language)
+                return found_segments, found_language
+
+            if verbose:
+                print(
+                    f"    Running whisper-cli in {chunked_whisper.CHUNK_SECONDS}-"
+                    f"second chunks on {wav_path.name}..."
+                )
+            try:
+                chunked_found = chunked_whisper.transcribe_track(
+                    wav_path,
+                    asr=asr,
+                    language=language,
+                    ffmpeg=ffmpeg,
+                    duration=duration,
+                    label="Memo",
+                    progress=(
+                        lambda message: print(f"    {message}", file=sys.stderr, flush=True)
+                    )
+                    if verbose
+                    else None,
+                )
+            except (RuntimeError, subprocess.SubprocessError) as exc:
+                raise LocalWhisperUnavailable(
+                    f"chunked whisper-cli failed on {audio_path.name}: {exc}"
+                ) from exc
+            text = _chunked_transcription_text(chunked_found)
+            text_for_screen = " ".join(
+                segment["text"].strip()
+                for segment in chunked_found["segments"]
+                if segment.get("text", "").strip()
+            )
+            detected = detected_languages[0] if detected_languages else None
+        else:
+            out_stem = tmp_dir / f"{audio_path.stem}.out"
+            cmd = [
+                cli,
+                "-m", str(model),
+                "-f", str(wav_path),
+                "--output-json",
+                "--output-file", str(out_stem),
+                "--no-prints",
+                "--no-timestamps",
+                "-l", (language or "auto"),
+            ]
+            if prompt:
+                cmd += ["--prompt", prompt]
+            if threads and threads > 0:
+                cmd += ["-t", str(threads)]
+
+            if verbose:
+                print(f"    Running whisper-cli on {wav_path.name}...")
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+            json_path = Path(f"{out_stem}.json")
+            if proc.returncode != 0 or not json_path.is_file():
+                raise LocalWhisperUnavailable(
+                    f"whisper-cli failed on {audio_path.name} (exit "
+                    f"{proc.returncode}). stderr:\n"
+                    f"{(proc.stderr or '').strip()[:2000]}"
+                )
+
+            text, detected = _parse_whisper_json(json_path)
+            text_for_screen = text
 
         diarization = None
         segments = None
-        if diarize and text:
+        if diarize and text_for_screen:
             try:
                 from scripts.local_fluid import diarize_mono
             except ImportError:  # pragma: no cover - path-dependent import
                 from local_fluid import diarize_mono  # type: ignore[no-redef]
             diarization = diarize_mono(wav_path)
             if diarization["status"] == "ok" and diarization["speaker_count"] > 1:
-                segments, why = _timed_segments(cmd, tmp_dir)
-                if segments is not None:
-                    # The timed text did not pass the result-side screen the
-                    # first run's text does; screen it the same way.
-                    timed_verdict = screen_transcription(
-                        " ".join(seg["text"] for seg in segments),
-                        expected_language=language,
-                        detected_language=detected,
-                        window_seconds=None,
+                if chunked_found is not None:
+                    segments = sorted(
+                        [*chunked_found["segments"], *_chunk_marker_segments(chunked_found)],
+                        key=lambda segment: (segment["start"], segment["end"]),
                     )
-                    if timed_verdict.filtered:
-                        segments, why = None, f"screened: {timed_verdict.reason}"
+                    why = ""
+                else:
+                    assert cmd is not None
+                    segments, why = _timed_segments(cmd, tmp_dir)
+                    if segments is not None:
+                        # The timed text did not pass the result-side screen the
+                        # first run's text does; screen it the same way.
+                        timed_verdict = screen_transcription(
+                            " ".join(seg["text"] for seg in segments),
+                            expected_language=language,
+                            detected_language=detected,
+                            window_seconds=None,
+                        )
+                        if timed_verdict.filtered:
+                            segments, why = None, f"screened: {timed_verdict.reason}"
                 if segments is None:
                     diarization["note"] = "speaker turns could not be attached"
                     print(f"Timed whisper pass unusable ({why}); "
                           "keeping untimed text.", file=sys.stderr)
+
+    if chunked_found is not None and not text_for_screen:
+        return {
+            "transcription_text": text,
+            "language": detected or language or "en",
+            "backend": BACKEND_LOCAL,
+            "transcription_engine": TRANSCRIPTION_ENGINE_LOCAL,
+            "transcription_model": model.name,
+            "rms_db": None if rms_db is None else round(rms_db, 1),
+            "silence": True,
+        }
 
     # --- Result-side screen, AFTER the model ------------------------------
     # The loudness gate above has a structural ceiling and this file class is
@@ -518,7 +699,7 @@ def transcribe_local(
     # `no_speech_content`. Reusing that module also means a fabricated transcript
     # in a language nobody spoke is caught on the batch path, not just streaming.
     verdict = screen_transcription(
-        text,
+        text_for_screen,
         expected_language=language,
         detected_language=detected,
         # Deliberately not passed: `too_short_for_window` is for fixed-length
@@ -536,7 +717,7 @@ def transcribe_local(
             "transcription_text": NO_SPEECH_MARKER_RESULT.format(
                 reason=verdict.reason,
                 detail=verdict.detail,
-                raw=text,
+                raw=text_for_screen,
                 rms="unmeasured" if rms_db is None else f"{rms_db:.1f} dB",
             ),
             "language": detected or language or "en",
@@ -568,6 +749,14 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Transcribe one file with local whisper-cli")
     ap.add_argument("audio_file")
     ap.add_argument("--language", default=None)
+    ap.add_argument(
+        "--prompt",
+        default=None,
+        help=(
+            "Optional runtime proper-noun prompt for whisper-cli "
+            f"(otherwise {WHISPER_PROMPT_ENV_VAR})"
+        ),
+    )
     ap.add_argument("--threads", type=int, default=None)
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
@@ -576,6 +765,7 @@ def main(argv: list[str] | None = None) -> int:
         result = transcribe_local(
             Path(args.audio_file).expanduser(),
             language=args.language,
+            initial_prompt=args.prompt,
             verbose=not args.quiet,
             threads=args.threads,
         )
