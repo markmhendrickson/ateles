@@ -278,6 +278,36 @@ def test_percent_encoded_page_id_is_refused_without_write(fake, capsys):
     _assert_existing_reference_is_refused(fake, capsys)
 
 
+def test_double_percent_encoded_page_id_is_refused_without_write(fake, capsys):
+    encoded_id = "%2565%256E%2574_" + NEW_ID.removeprefix("ent_")
+    fake.body = fake.body.replace(
+        MARKER,
+        f'<a href="{BASE}/entities/{encoded_id}/html">Encoded</a>{MARKER}',
+    )
+
+    _assert_existing_reference_is_refused(fake, capsys)
+
+
+def test_double_entity_encoded_page_id_is_refused_without_write(fake, capsys):
+    encoded_id = "&amp;#101;nt_" + NEW_ID.removeprefix("ent_")
+    fake.body = fake.body.replace(
+        MARKER,
+        f'<a href="{BASE}/entities/{encoded_id}/html">Encoded</a>{MARKER}',
+    )
+
+    _assert_existing_reference_is_refused(fake, capsys)
+
+
+def test_mixed_nested_encoded_page_id_is_refused_without_write(fake, capsys):
+    encoded_id = "%26%23101%3Bnt_" + NEW_ID.removeprefix("ent_")
+    fake.body = fake.body.replace(
+        MARKER,
+        f'<a href="{BASE}/entities/{encoded_id}/html">Encoded</a>{MARKER}',
+    )
+
+    _assert_existing_reference_is_refused(fake, capsys)
+
+
 def test_readback_one_byte_difference_returns_nonzero(fake, capsys):
     fake.after_write = lambda body: body + "x"
 
@@ -458,6 +488,26 @@ def test_empty_page_token_is_refused(fake):
     with pytest.raises(SystemExit):
         H.cmd_add(_args(page_token="  "), BASE, "bearer")
     assert fake.writes == []
+
+
+@pytest.mark.parametrize("title", ["", "   "])
+def test_blank_title_is_refused_before_any_request(
+    fake, capsys, tmp_path, title
+):
+    dry_run = tmp_path / "hub.html"
+
+    with pytest.raises(SystemExit) as exc:
+        H.cmd_add(
+            _args(title=title, apply=False, dry_run=str(dry_run)),
+            BASE,
+            "bearer",
+        )
+
+    assert exc.value.code == H.EXIT_ERROR
+    assert fake.snapshot_calls == []
+    assert fake.writes == []
+    assert not dry_run.exists()
+    assert "--title must not be blank" in capsys.readouterr().err
 
 
 def test_bad_page_id_is_refused(fake):

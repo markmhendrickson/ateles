@@ -194,6 +194,8 @@ def insert_card(body: str, marker_name: str, card: str) -> str:
 
 def cmd_add(args, base_url, token) -> int:
     """Read-modify-write one exact card splice and verify the stored bytes."""
+    if not args.title.strip():
+        fail("--title must not be blank")
     if not ENTITY_ID_RE.match(args.page):
         fail("--page must look like ent_ followed by 24 hex characters")
     if not MARKER_NAME_RE.match(args.marker):
@@ -241,7 +243,15 @@ def cmd_add(args, base_url, token) -> int:
 
     quoted = urllib.parse.quote(args.page_token.strip(), safe="")
     href = f"{base_url}/entities/{args.page}/html?access_token={quoted}"
-    probe = urllib.parse.unquote(html.unescape(before_body)).lower()
+    probe = before_body
+    for _ in range(8):
+        normalized = urllib.parse.unquote(html.unescape(probe))
+        if normalized == probe:
+            break
+        probe = normalized
+    else:
+        fail("hub body has unresolvable encoding; refusing")
+    probe = probe.lower()
     if args.page.lower() in probe:
         fail(
             f"page {args.page} is already referenced in the hub; "
