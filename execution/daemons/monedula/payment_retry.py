@@ -69,11 +69,25 @@ def _recorded_outcome(journal: dict[str, Any], original_key: str) -> str:
     entry = journal["obligations"].get(original_key)
     if not isinstance(entry, dict):
         raise RetryRefused(f"payment {original_key} is not recorded in the journal")
+    if (
+        not isinstance(entry.get("token"), str)
+        or not entry["token"]
+        or not isinstance(entry.get("generation"), int)
+        or isinstance(entry["generation"], bool)
+        or not isinstance(entry.get("intent_at"), (int, float))
+    ):
+        raise RetryRefused(
+            f"payment {original_key} has a malformed journal entry; refusing"
+        )
     state = entry.get("state")
     if state != payment_journal.STATE_DONE:
         raise RetryRefused(
             f"payment {original_key} outcome is unknown (intent-only or malformed); "
             "refusing a blind retry"
+        )
+    if not isinstance(entry.get("outcome_at"), (int, float)):
+        raise RetryRefused(
+            f"payment {original_key} has a malformed journal entry; refusing"
         )
     raw = entry.get("outcome_status")
     if not isinstance(raw, str) or not raw.strip():

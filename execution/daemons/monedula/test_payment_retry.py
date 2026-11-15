@@ -161,6 +161,26 @@ def test_retry_refuses_missing_and_unrecognised_entries(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    "missing",
+    ["token", "generation", "intent_at", "outcome_at"],
+)
+def test_retry_refuses_malformed_original_journal_entry(missing):
+    entry = {
+        "state": payment_journal.STATE_DONE,
+        "token": "original-token",
+        "generation": 1,
+        "intent_at": 1.0,
+        "outcome_status": "failed",
+        "outcome_at": 2.0,
+    }
+    entry.pop(missing)
+    journal = {"obligations": {"original": entry}}
+
+    with pytest.raises(payment_retry.RetryRefused, match="malformed"):
+        payment_retry._recorded_outcome(journal, "original")
+
+
 def test_retry_raises_one_fresh_idempotent_approval(retry_env):
     handler, journal_path, original, neo = retry_env
 
