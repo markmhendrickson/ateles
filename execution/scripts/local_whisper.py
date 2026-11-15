@@ -394,9 +394,11 @@ def _chunk_marker_segments(found: dict) -> list[dict]:
     for gap in chunk_outcomes(found.get("chunks", []))["gaps"]:
         kind = gap["kind"]
         if kind == KIND_WITHHELD:
-            text = MARKERS[kind].format(
-                reason=gap["reason"],
-                detail=gap["detail"] or "no detail",
+            text = (
+                "[SPEECH WITHHELD — the model returned text for this stretch but "
+                f"the output screen rejected it ({gap['reason']}: "
+                f"{gap['detail'] or 'no detail'}). It is not silence and was not "
+                "silently dropped.]"
             )
         elif kind in (KIND_SILENT, KIND_EMPTY):
             text = MARKERS[kind]

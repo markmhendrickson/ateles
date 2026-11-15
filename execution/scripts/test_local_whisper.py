@@ -445,6 +445,51 @@ def test_long_file_discloses_an_audible_chunk_with_no_words(
     assert "[NO WORDS RECOGNISED" in result["transcription_text"]
 
 
+def test_long_file_discloses_a_chunk_withheld_by_the_output_screen(
+    monkeypatch, tmp_path
+):
+    _stub_pipeline(monkeypatch, tmp_path, rms=-30.0)
+    monkeypatch.setattr(
+        lw,
+        "_wav_duration_seconds",
+        lambda _wav: cw.CHUNK_SECONDS + 1.0,
+    )
+    monkeypatch.setattr(
+        cw,
+        "whisper_cli_asr",
+        lambda *_a, **_k: lambda *_a, **_k: ([], None),
+    )
+    monkeypatch.setattr(
+        cw,
+        "transcribe_track",
+        lambda *_a, **_k: {
+            "segments": [
+                {"start": 0.0, "end": 2.0, "text": "Usable opening."}
+            ],
+            "chunks": [
+                {"kind": "chunk", "start": 0.0, "end": 120.0, "status": "ok"},
+                {
+                    "kind": "chunk",
+                    "start": 120.0,
+                    "end": 121.0,
+                    "status": "screened: repeated_phrase",
+                    "reason": "repeated_phrase",
+                    "detail": "synthetic loop",
+                    "withheld_text": "loop loop loop",
+                },
+            ],
+        },
+    )
+    audio = tmp_path / "screened-long.m4a"
+    audio.write_bytes(b"x")
+
+    result = lw.transcribe_local(audio)
+
+    assert result["silence"] is False
+    assert "[SPEECH WITHHELD" in result["transcription_text"]
+    assert "repeated_phrase: synthetic loop" in result["transcription_text"]
+
+
 def test_runtime_prompt_reaches_short_and_chunked_whisper_commands(
     monkeypatch, tmp_path
 ):
