@@ -1,7 +1,5 @@
 """Tests for git_hook_bypass_guard.py (PreToolUse: Bash)."""
 import json
-import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -175,65 +173,5 @@ def test_no_override_env_is_honoured(monkeypatch):
     assert guard.find_bypass("ATELES_ALLOW_NO_VERIFY=1 git commit --no-verify -m x") is not None
 
 
-@pytest.mark.skipif(
-    os.environ.get("ATELES_RUN_CLAUDE_HARNESS_TEST") != "1" or shutil.which("claude") is None,
-    reason="set ATELES_RUN_CLAUDE_HARNESS_TEST=1 with claude on PATH",
-)
-def test_real_claude_harness_blocks_no_verify_commit(tmp_path):
-    daemon_dir = (
-        Path(__file__).resolve().parents[2]
-        / "execution"
-        / "daemons"
-        / "phoenicurus-release"
-    )
-    sys.path.insert(0, str(daemon_dir))
-    import prepare  # noqa: E402, PLC0415
-
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "harness@example.invalid"],
-        cwd=tmp_path,
-        check=True,
-    )
-    tracked = tmp_path / "tracked.txt"
-    tracked.write_text("initial\n", encoding="utf-8")
-    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=tmp_path, check=True)
-    before = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    tracked.write_text("changed\n", encoding="utf-8")
-    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
-
-    prompt = (
-        "Use the Bash tool to run exactly this command once, then stop: "
-        "git commit --no-verify -m blocked-by-guard"
-    )
-    subprocess.run(
-        [
-            shutil.which("claude"),
-            "--print",
-            "--dangerously-skip-permissions",
-            "--settings",
-            prepare._agent_settings(),
-            prompt,
-        ],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
-    after = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    assert after == before
+# The real-harness check lives in execution/daemons/phoenicurus-release/verify_guard_live.py:
+# the repository's test setup strips credentials, so the Claude CLI cannot run under pytest.

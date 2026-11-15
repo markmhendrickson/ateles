@@ -1056,6 +1056,41 @@ _PREPARE_AGENT_RELEASE_ADDITIONS: dict[str, str] = {
     "CLAUDE_CONFIG_DIR": "Claude CLI subscription configuration location",
 }
 
+# GitHub token names gh reads, in its own precedence order. The agent receives
+# them so it pushes and opens the RC PR as the swarm account, never the keyring's.
+_PREPARE_AGENT_GITHUB_TOKEN_NAMES = ("GH_TOKEN", "GITHUB_TOKEN")
+# The login the RC PR must be opened as. A swarm identity, not operator data.
+RC_GITHUB_LOGIN = os.environ.get("PHOENICURUS_RC_GITHUB_LOGIN", "ateles-agent")  # config-source-ok: swarm account default, env override
+VERIFY_GH_IDENTITY = PROJECT_ROOT / "execution" / "scripts" / "verify_gh_identity.py"
+
+
+def _agent_github_identity_ok(env: dict) -> bool:
+    """True only when the child's GitHub token resolves to RC_GITHUB_LOGIN.
+
+    Runs verify_gh_identity.py with the child's own environment, so the check
+    sees exactly the token the agent will use. Prints no token; any failure,
+    including a missing script or a timeout, counts as not verified.
+    """
+    try:
+        result = subprocess.run(
+            [sys.executable, str(VERIFY_GH_IDENTITY), "--expect-login", RC_GITHUB_LOGIN],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail closed without detail
+        log.error(f"prepare agent GitHub identity check could not run: {type(exc).__name__}")
+        return False
+    if result.returncode != 0:
+        log.error(
+            f"prepare agent GitHub identity check failed (exit {result.returncode}); "
+            f"expected login {RC_GITHUB_LOGIN}"
+        )
+        return False
+    return True
+
+
 # PreToolUse guard loaded into the prepare agent: refuses --no-verify and the
 # other ways of skipping git hooks. The agent runs with cwd in the Neotoma
 # checkout, so this repository's .claude/settings.json does not apply to it;
@@ -1114,6 +1149,13 @@ def _agent_env() -> dict:
         # It is the selected harness credential, never a credential for the
         # release target, git, GitHub, Neotoma, or another vendor.
         env["ANTHROPIC_API_KEY"] = api_key
+    for name in _PREPARE_AGENT_GITHUB_TOKEN_NAMES:
+        # Credential-named exception: the agent pushes release/<TAG> and opens
+        # the RC PR, and must do so as the swarm's GitHub account. Without it gh
+        # silently falls back to the shared keyring's active account (the
+        # operator's), so spawn_prepare_agent verifies the login before spawning.
+        if os.environ.get(name):
+            env[name] = os.environ[name]
     if oauth and api_key:
         log.info(
             "prepare agent: using CLAUDE_CODE_OAUTH_TOKEN (dropped ANTHROPIC_API_KEY "
@@ -1151,12 +1193,22 @@ def spawn_prepare_agent(
         log.info(prompt)
         return True
 
+    agent_env = _agent_env()
+    if not _agent_github_identity_ok(agent_env):
+        # Fail closed: an agent without the swarm token would push and open the
+        # RC PR as whichever account the shared keyring has active.
+        notify_operator(
+            "🔴 Phoenicurus: the prepare agent's GitHub token does not resolve to "
+            f"{RC_GITHUB_LOGIN} — not preparing the release."
+        )
+        return False
+
     try:
         proc = subprocess.Popen(
             [claude, "--print", "--dangerously-skip-permissions",
              "--settings", _agent_settings(), prompt],
             cwd=str(NEOTOMA_REPO_ROOT),
-            env=_agent_env(),
+            env=agent_env,
             stdout=open(AGENT_LOG, "a"),
             stderr=subprocess.STDOUT,
             start_new_session=True,

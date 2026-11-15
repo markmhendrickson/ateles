@@ -441,6 +441,7 @@ def test_spawn_passes_settings_to_claude(monkeypatch, tmp_path):
     monkeypatch.setattr(prepare, "AGENT_LOG", tmp_path / "agent.log")
     monkeypatch.setattr(prepare, "_record_spawn_pid", lambda head, pid: None)
     monkeypatch.setenv("NEOTOMA_ENV", "production")
+    monkeypatch.setattr(prepare, "_agent_github_identity_ok", lambda env: True)
     with _patch.object(prepare.subprocess, "Popen") as mock_popen:
         assert prepare.spawn_prepare_agent("v0.18.8", 4, dry_run=False) is True
     argv = mock_popen.call_args[0][0]
@@ -459,6 +460,37 @@ def test_spawn_refuses_without_guard(monkeypatch, tmp_path):
         assert prepare.spawn_prepare_agent("v0.18.8", 4, dry_run=False) is False
     mock_popen.assert_not_called()
     notify.assert_called_once()
+
+
+def test_agent_env_passes_the_swarm_github_token(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "x" * 40)
+    monkeypatch.setenv("GH_TOKEN", "y" * 40)
+    env = prepare._agent_env()
+    assert env["GITHUB_TOKEN"] == "x" * 40 and env["GH_TOKEN"] == "y" * 40
+
+
+def test_spawn_refuses_when_github_identity_is_wrong(monkeypatch, tmp_path):
+    """Red before: the agent spawned with whatever GitHub identity gh fell back to."""
+    import shutil as _shutil
+    from unittest.mock import patch as _patch
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/local/bin/claude")
+    monkeypatch.setattr(prepare, "AGENT_LOG", tmp_path / "agent.log")
+    failed = prepare.subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
+    with _patch.object(prepare.subprocess, "run", return_value=failed) as mock_run, \
+            _patch.object(prepare, "notify_operator") as notify, \
+            _patch.object(prepare.subprocess, "Popen") as mock_popen:
+        assert prepare.spawn_prepare_agent("v0.18.8", 4, dry_run=False) is False
+    mock_popen.assert_not_called()
+    notify.assert_called_once()
+    argv = mock_run.call_args[0][0]
+    assert argv[-2:] == ["--expect-login", prepare.RC_GITHUB_LOGIN]
+
+
+def test_github_identity_check_failing_to_run_counts_as_unverified(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("no such file")
+    monkeypatch.setattr(prepare.subprocess, "run", boom)
+    assert prepare._agent_github_identity_ok({}) is False
 
 
 def test_prompt_forbids_hook_bypass_and_names_skip_tests():
