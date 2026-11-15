@@ -66,6 +66,13 @@ def fail(message: str):
     raise SystemExit(EXIT_ERROR)
 
 
+class _SafeArgumentParser(argparse.ArgumentParser):
+    """Reject invalid arguments without echoing argv or usage."""
+
+    def error(self, _message):
+        self.exit(2, "invalid arguments; run with --help\n")
+
+
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Refuse redirects: the default handler forwards Authorization to the target."""
 
@@ -147,6 +154,8 @@ def _fetch_snapshot(base_url: str, token: str, entity_id: str) -> dict:
     if isinstance(snapshot.get("snapshot"), dict):
         snapshot = snapshot["snapshot"]
     snapshot = dict(snapshot)
+    if "entity_type" in entity:
+        snapshot["entity_type"] = entity["entity_type"]
     if "entity_version" in entity:
         snapshot["entity_version"] = entity["entity_version"]
     return snapshot
@@ -202,6 +211,8 @@ def cmd_add(args, base_url, token) -> int:
             fail(f"badge class must match [a-z0-9-]+: {cls!r}")
 
     snapshot = _fetch_snapshot(base_url, token, args.hub)
+    if snapshot.get("entity_type") != "rendered_page":
+        fail(f"hub {args.hub} is not a rendered_page; refusing")
     entity_version = snapshot.get("entity_version")
     if not isinstance(entity_version, str) or not entity_version:
         fail("hub snapshot has no entity_version; refusing an unversioned write")
@@ -295,7 +306,7 @@ def cmd_add(args, base_url, token) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(
+    ap = _SafeArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Exit codes: 0 ok; 1 verification mismatch; 3 tool error.",
@@ -308,7 +319,9 @@ def main() -> int:
         help="~/.config/neotoma/<profile>.env (or set NEOTOMA_BASE_URL/_BEARER_TOKEN)",
     )
     ap.add_argument("--hub", default=os.environ.get("ATELES_HUB_ENTITY_ID", ""))
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(
+        dest="cmd", required=True, parser_class=_SafeArgumentParser
+    )
 
     add = sub.add_parser("add", help="add one card, verified")
     add.add_argument("--page", required=True)

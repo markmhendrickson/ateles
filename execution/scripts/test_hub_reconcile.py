@@ -49,6 +49,7 @@ class FakeNeotoma:
 
     def __init__(self, body, drop_writes=False):
         self.body = body
+        self.entity_type = "rendered_page"
         self.drop_writes = drop_writes
         self.conflict = False
         self.writes = []
@@ -61,7 +62,11 @@ class FakeNeotoma:
         self.reads += 1
         if self.reads == 2 and self.on_second_read:
             self.body = self.on_second_read(self.body)
-        return {"html_body": self.body, "entity_version": self.version}
+        return {
+            "entity_type": self.entity_type,
+            "html_body": self.body,
+            "entity_version": self.version,
+        }
 
     def request(self, url, token, payload=None):
         self.writes.append(payload)
@@ -125,6 +130,19 @@ def test_marker_present_twice_is_refused_without_write(fake, capsys):
     assert exc.value.code == H.EXIT_ERROR
     assert fake.writes == []
     assert "(found 2); add it by hand" in capsys.readouterr().err
+
+
+def test_non_rendered_page_hub_is_refused_without_write(fake, capsys):
+    fake.entity_type = "note"
+
+    with pytest.raises(SystemExit) as exc:
+        H.cmd_add(_args(), BASE, "bearer")
+
+    assert exc.value.code == H.EXIT_ERROR
+    assert fake.writes == []
+    assert (
+        f"hub {HUB_ID} is not a rendered_page; refusing" in capsys.readouterr().err
+    )
 
 
 def test_marker_present_once_produces_exact_splice_and_preserves_every_other_byte(
@@ -371,11 +389,13 @@ def test_fetch_snapshot_preserves_top_level_entity_version(monkeypatch):
         H,
         "_request",
         lambda *args, **kwargs: {
+            "entity_type": "rendered_page",
             "entity_version": "version-7",
             "snapshot": {"html_body": "<p>hub</p>"},
         },
     )
     assert H._fetch_snapshot(BASE, "bearer", HUB_ID) == {
+        "entity_type": "rendered_page",
         "entity_version": "version-7",
         "html_body": "<p>hub</p>",
     }
@@ -423,6 +443,70 @@ def test_sections_subcommand_is_removed(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         H.main()
     assert exc.value.code == 2
+
+
+@pytest.mark.parametrize(
+    ("rejected_args", "rejected_value"),
+    [
+        (["--page-token", "synthetic-value-0002"], "synthetic-value-0002"),
+        (["--page-token=synthetic-value-0003"], "synthetic-value-0003"),
+        (["--unknown-option", "synthetic-value-0004"], "synthetic-value-0004"),
+    ],
+)
+def test_argument_errors_do_not_echo_rejected_values(
+    monkeypatch, capsys, rejected_args, rejected_value
+):
+    argv = [
+        "hub_reconcile.py",
+        "--hub",
+        HUB_ID,
+        "add",
+        "--page",
+        NEW_ID,
+        "--marker",
+        MARKER_NAME,
+        "--title",
+        "T",
+        "--desc",
+        "D",
+        *rejected_args,
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as exc:
+        H.main()
+
+    captured = capsys.readouterr()
+    assert exc.value.code == 2
+    assert captured.out == ""
+    assert captured.err == "invalid arguments; run with --help\n"
+    assert rejected_value not in captured.out
+    assert rejected_value not in captured.err
+
+
+def test_subparser_argument_errors_use_safe_message(monkeypatch, capsys):
+    argv = [
+        "hub_reconcile.py",
+        "--hub",
+        HUB_ID,
+        "add",
+        "--page",
+        NEW_ID,
+        "--marker",
+        MARKER_NAME,
+        "--title",
+        "synthetic-value-0005",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as exc:
+        H.main()
+
+    captured = capsys.readouterr()
+    assert exc.value.code == 2
+    assert captured.out == ""
+    assert captured.err == "invalid arguments; run with --help\n"
+    assert "synthetic-value-0005" not in captured.err
 
 
 # credentials -------------------------------------------------------------
