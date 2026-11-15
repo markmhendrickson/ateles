@@ -281,7 +281,7 @@ execution/scripts/hub_reconcile.py --hub <hubId> \
       --title "…" --desc "…" --badge-text "Recap"
 ```
 
-`add` is a dry run without `--apply`. The hub needs the marker comment `<!-- hub-cards:<name> -->` placed once where that section's cards end; the tool refuses until it exists exactly once. It fetches the live body and inserts the escaped card immediately before that exact marker without interpreting the surrounding HTML. Add `--dry-run <path>` to inspect the proposed body first. The card's href carries the TARGET page's own token, because a guest token is not a session.
+`add` is a dry run without `--apply`. The hub needs the marker comment `<!-- hub-cards:<name> -->` placed once where that section's cards end; the tool refuses until it exists exactly once. It fetches the live body and inserts the escaped card immediately before that exact marker without interpreting the surrounding HTML. The card's href carries the TARGET page's own token, because a guest token is not a session.
 
 ### A success response is not a landed change
 

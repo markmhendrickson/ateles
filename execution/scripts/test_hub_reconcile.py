@@ -4,8 +4,8 @@ Safety contract for hub_reconcile.py.
 The hub body is arbitrary HTML and `correct` REPLACES the whole field. The tool
 therefore interprets none of it: it inserts one escaped card immediately before
 one exact marker and confirms the stored body equals that proposed body byte for
-byte. These tests pin the splice, refusal paths, private dry-run files, and
-token-safe output.
+byte. These tests pin the splice, refusal paths, token-free dry-run summaries,
+and token-safe output.
 
 Run with:
     uv run --extra dev python -m pytest execution/scripts/test_hub_reconcile.py -v
@@ -103,7 +103,6 @@ def _args(**over):
         badge2_class="b-review",
         badge2_text="",
         apply=True,
-        dry_run=None,
     )
     base.update(over)
     return argparse.Namespace(**base)
@@ -150,47 +149,31 @@ def test_non_rendered_page_hub_is_refused_without_write(fake, capsys):
 
     assert exc.value.code == H.EXIT_ERROR
     assert fake.writes == []
-    assert (
-        f"hub {HUB_ID} is not a rendered_page; refusing" in capsys.readouterr().err
-    )
+    assert f"hub {HUB_ID} is not a rendered_page; refusing" in capsys.readouterr().err
 
 
-def test_non_rendered_page_target_is_refused_without_write(
-    fake, capsys, tmp_path
-):
+def test_non_rendered_page_target_is_refused_without_write(fake, capsys):
     fake.page_entity_type = "note"
-    dry_run = tmp_path / "hub.html"
 
     with pytest.raises(SystemExit) as exc:
-        H.cmd_add(
-            _args(apply=False, dry_run=str(dry_run)),
-            BASE,
-            "bearer",
-        )
+        H.cmd_add(_args(apply=False), BASE, "bearer")
 
     assert exc.value.code == H.EXIT_ERROR
     assert fake.writes == []
-    assert not dry_run.exists()
     assert (
         f"page {NEW_ID} is not a readable rendered_page; refusing"
         in capsys.readouterr().err
     )
 
 
-def test_missing_page_target_is_refused_without_write(fake, capsys, tmp_path):
+def test_missing_page_target_is_refused_without_write(fake, capsys):
     fake.page_missing = True
-    dry_run = tmp_path / "hub.html"
 
     with pytest.raises(SystemExit) as exc:
-        H.cmd_add(
-            _args(apply=False, dry_run=str(dry_run)),
-            BASE,
-            "bearer",
-        )
+        H.cmd_add(_args(apply=False), BASE, "bearer")
 
     assert exc.value.code == H.EXIT_ERROR
     assert fake.writes == []
-    assert not dry_run.exists()
     assert (
         f"page {NEW_ID} is not a readable rendered_page; refusing"
         in capsys.readouterr().err
@@ -227,8 +210,7 @@ def _assert_existing_reference_is_refused(fake, capsys):
     assert fake.writes == []
     assert (
         f"page {NEW_ID} is already referenced in the hub; "
-        "check or update that card by hand"
-        in capsys.readouterr().err
+        "check or update that card by hand" in capsys.readouterr().err
     )
 
 
@@ -390,36 +372,24 @@ def test_marker_name_is_validated(fake):
     assert fake.writes == []
 
 
-def test_add_is_a_dry_run_without_apply(fake):
+def test_add_dry_run_writes_nothing_and_prints_only_token_free_summary(
+    fake, capsys, tmp_path
+):
+    before_files = list(tmp_path.iterdir())
+
     assert H.cmd_add(_args(apply=False), BASE, "bearer") == H.EXIT_OK
+
     assert fake.writes == []
-
-
-def test_dry_run_file_is_created_mode_0600(fake, tmp_path):
-    path = tmp_path / "hub.html"
-    assert H.cmd_add(_args(apply=False, dry_run=str(path)), BASE, "bearer") == H.EXIT_OK
-    assert path.stat().st_mode & 0o777 == 0o600
-
-
-def test_dry_run_file_restricts_preexisting_mode_to_0600(fake, tmp_path):
-    path = tmp_path / "hub.html"
-    path.write_text("old")
-    path.chmod(0o644)
-    assert H.cmd_add(_args(apply=False, dry_run=str(path)), BASE, "bearer") == H.EXIT_OK
-    assert path.stat().st_mode & 0o777 == 0o600
-
-
-def test_dry_run_file_refuses_symlink_without_touching_target(fake, tmp_path):
-    target = tmp_path / "target.html"
-    target.write_text("untouched")
-    link = tmp_path / "hub.html"
-    link.symlink_to(target)
-
-    with pytest.raises(SystemExit) as exc:
-        H.cmd_add(_args(apply=False, dry_run=str(link)), BASE, "bearer")
-
-    assert exc.value.code == H.EXIT_ERROR
-    assert target.read_text() == "untouched"
+    assert list(tmp_path.iterdir()) == before_files
+    output = capsys.readouterr().out
+    expected_card = H.build_card(_href(), "New", "D", [("b-mark", "Recap")])
+    expected_body = fake.body.replace(MARKER, expected_card + MARKER)
+    assert output == (
+        f"dry run: hub={HUB_ID} page={NEW_ID} marker={MARKER_NAME} "
+        f"title=New body_bytes={len(expected_body.encode())}\n"
+    )
+    assert "access_token" not in output
+    assert _href() not in output
 
 
 @pytest.mark.parametrize(
@@ -491,22 +461,13 @@ def test_empty_page_token_is_refused(fake):
 
 
 @pytest.mark.parametrize("title", ["", "   "])
-def test_blank_title_is_refused_before_any_request(
-    fake, capsys, tmp_path, title
-):
-    dry_run = tmp_path / "hub.html"
-
+def test_blank_title_is_refused_before_any_request(fake, capsys, title):
     with pytest.raises(SystemExit) as exc:
-        H.cmd_add(
-            _args(title=title, apply=False, dry_run=str(dry_run)),
-            BASE,
-            "bearer",
-        )
+        H.cmd_add(_args(title=title, apply=False), BASE, "bearer")
 
     assert exc.value.code == H.EXIT_ERROR
     assert fake.snapshot_calls == []
     assert fake.writes == []
-    assert not dry_run.exists()
     assert "--title must not be blank" in capsys.readouterr().err
 
 
@@ -554,6 +515,7 @@ def test_sections_subcommand_is_removed(monkeypatch):
         (["--page-token", "synthetic-value-0002"], "synthetic-value-0002"),
         (["--page-token=synthetic-value-0003"], "synthetic-value-0003"),
         (["--unknown-option", "synthetic-value-0004"], "synthetic-value-0004"),
+        (["--dry-run", "synthetic-value-0005"], "synthetic-value-0005"),
     ],
 )
 def test_argument_errors_do_not_echo_rejected_values(
@@ -598,7 +560,7 @@ def test_subparser_argument_errors_use_safe_message(monkeypatch, capsys):
         "--marker",
         MARKER_NAME,
         "--title",
-        "synthetic-value-0005",
+        "synthetic-value-0006",
     ]
     monkeypatch.setattr(sys, "argv", argv)
 
@@ -609,7 +571,7 @@ def test_subparser_argument_errors_use_safe_message(monkeypatch, capsys):
     assert exc.value.code == 2
     assert captured.out == ""
     assert captured.err == "invalid arguments; run with --help\n"
-    assert "synthetic-value-0005" not in captured.err
+    assert "synthetic-value-0006" not in captured.err
 
 
 # credentials -------------------------------------------------------------
@@ -680,6 +642,77 @@ def test_http_base_url_refused_except_loopback(monkeypatch, tmp_path):
         H._load_env("neotoma")
     monkeypatch.setenv("NEOTOMA_BASE_URL", "http://127.0.0.1:3080")
     assert H._load_env("neotoma")[0] == "http://127.0.0.1:3080"
+
+
+def test_base_url_with_userinfo_is_refused(capsys):
+    with pytest.raises(SystemExit) as exc:
+        H._check_base_url("https://synthetic-value-0007@example.com")
+
+    assert exc.value.code == H.EXIT_ERROR
+    assert capsys.readouterr().err == (
+        "NEOTOMA_BASE_URL must not contain credentials, a query, "
+        "a fragment or control characters\n"
+    )
+
+
+def test_base_url_with_query_is_refused(capsys):
+    with pytest.raises(SystemExit) as exc:
+        H._check_base_url("https://example.com?synthetic-value-0008")
+
+    assert exc.value.code == H.EXIT_ERROR
+    assert capsys.readouterr().err == (
+        "NEOTOMA_BASE_URL must not contain credentials, a query, "
+        "a fragment or control characters\n"
+    )
+
+
+def test_bearer_token_with_newline_is_refused_without_echo(
+    monkeypatch, capsys, tmp_path
+):
+    _clear_env(monkeypatch, tmp_path)
+    rejected = "synthetic-value-0009\n"
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.com")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", rejected)
+
+    with pytest.raises(SystemExit) as exc:
+        H._load_env("neotoma")
+
+    captured = capsys.readouterr()
+    assert exc.value.code == H.EXIT_ERROR
+    assert captured.out == ""
+    assert captured.err == (
+        "NEOTOMA_BEARER_TOKEN must not contain control characters or whitespace\n"
+    )
+    assert rejected not in captured.err
+
+
+def test_page_token_with_tab_is_refused_before_any_request(fake, capsys):
+    with pytest.raises(SystemExit) as exc:
+        H.cmd_add(
+            _args(page_token="synthetic-value-0010\t"),
+            BASE,
+            "synthetic-value-0011",
+        )
+
+    assert exc.value.code == H.EXIT_ERROR
+    assert fake.snapshot_calls == []
+    assert fake.writes == []
+    assert capsys.readouterr().err == (
+        "PAGE_GUEST_TOKEN must not contain control characters or whitespace\n"
+    )
+
+
+def test_unexpected_exception_prints_only_type_name(monkeypatch, capsys):
+    def raise_unexpected():
+        raise RuntimeError("synthetic-value-0012")
+
+    monkeypatch.setattr(H, "_run", raise_unexpected, raising=False)
+
+    assert H.main() == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "unexpected error: RuntimeError\n"
+    assert "synthetic-value-0012" not in captured.err
 
 
 def test_redirects_are_refused():

@@ -19,6 +19,8 @@ It refuses to write when the page is already referenced anywhere in the hub.
 
 Global options (--hub) go BEFORE the subcommand.
 `add` is a dry run unless --apply is passed.
+The dry run prints only the hub id, page id, marker name, title, and proposed
+body byte length; it never prints the card, body, or token-bearing href.
 
 After a write, `add` re-reads the stored hub body and requires exact string
 equality. It deliberately does not fetch guest/share URLs; open the new card's
@@ -35,7 +37,6 @@ ATELES_HUB_ENTITY_ID, PAGE_GUEST_TOKEN (`add` only).
 from __future__ import annotations
 
 import argparse
-import errno
 import hashlib
 import html
 import json
@@ -58,6 +59,10 @@ PROFILE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 BADGE_CLASS_RE = re.compile(r"^[a-z0-9-]+$")
 MARKER_NAME_RE = re.compile(r"^[a-z0-9-]{1,64}$")
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+BASE_URL_INPUT_ERROR = (
+    "NEOTOMA_BASE_URL must not contain credentials, a query, "
+    "a fragment or control characters"
+)
 
 
 def fail(message: str):
@@ -94,8 +99,27 @@ def _read_env_file(path: Path) -> dict:
     return values
 
 
+def _contains_control_or_whitespace(value: str) -> bool:
+    return any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value)
+
+
+def _check_token(variable_name: str, token: str) -> str:
+    if _contains_control_or_whitespace(token):
+        fail(f"{variable_name} must not contain control characters or whitespace")
+    return token
+
+
 def _check_base_url(base_url: str) -> str:
+    if _contains_control_or_whitespace(base_url):
+        fail(BASE_URL_INPUT_ERROR)
     parsed = urllib.parse.urlparse(base_url)
+    if (
+        parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        fail(BASE_URL_INPUT_ERROR)
     host = parsed.hostname or ""
     if not host:
         fail("base URL has no host")
@@ -120,7 +144,7 @@ def _load_env(profile: str) -> tuple:
     base_url = os.environ.get("NEOTOMA_BASE_URL", "")
     token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     if base_url and token:
-        return _check_base_url(base_url), token
+        return _check_base_url(base_url), _check_token("NEOTOMA_BEARER_TOKEN", token)
     for name in (f"{profile}.env", f"{profile}-token.env"):
         path = Path.home() / ".config" / "neotoma" / name
         if not path.exists():
@@ -129,7 +153,9 @@ def _load_env(profile: str) -> tuple:
         f_base = values.get("NEOTOMA_BASE_URL", "")
         f_token = values.get("NEOTOMA_BEARER_TOKEN", "")
         if f_base and f_token:
-            return _check_base_url(f_base), f_token
+            return _check_base_url(f_base), _check_token(
+                "NEOTOMA_BEARER_TOKEN", f_token
+            )
     fail(
         "no complete NEOTOMA_BASE_URL + NEOTOMA_BEARER_TOKEN pair found "
         "(set both in the environment, or use a profile file holding both)"
@@ -200,8 +226,9 @@ def cmd_add(args, base_url, token) -> int:
         fail("--page must look like ent_ followed by 24 hex characters")
     if not MARKER_NAME_RE.match(args.marker):
         fail("--marker must match [a-z0-9-]{1,64}")
-    if not args.page_token or not args.page_token.strip():
+    if not args.page_token:
         fail("PAGE_GUEST_TOKEN must be non-empty")
+    _check_token("PAGE_GUEST_TOKEN", args.page_token)
 
     badges = []
     if args.badge_text:
@@ -241,7 +268,7 @@ def cmd_add(args, base_url, token) -> int:
             f"(found {marker_count}); add it by hand"
         )
 
-    quoted = urllib.parse.quote(args.page_token.strip(), safe="")
+    quoted = urllib.parse.quote(args.page_token, safe="")
     href = f"{base_url}/entities/{args.page}/html?access_token={quoted}"
     probe = before_body
     for _ in range(8):
@@ -258,36 +285,19 @@ def cmd_add(args, base_url, token) -> int:
             "check or update that card by hand"
         )
 
-    print(f"hub {args.hub}; marker {args.marker}; found {marker_count}")
-
     card = build_card(href, args.title, args.desc, badges)
     # The splice introduces only this tool's escaped card, whose href always
     # carries a token; exact equality proves that every other byte is unchanged.
     after_body = insert_card(before_body, args.marker, card)
 
     if not args.apply:
-        print(f"dry run: would write {len(after_body)} chars; pass --apply to write")
-        if args.dry_run:
-            try:
-                fd = os.open(
-                    args.dry_run,
-                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
-                    0o600,
-                )
-            except OSError as exc:
-                if exc.errno in (errno.ELOOP, getattr(errno, "EMLINK", -1)):
-                    fail(f"refusing --dry-run symlink target: {args.dry_run}")
-                fail(f"could not open --dry-run path {args.dry_run}: {exc.strerror}")
-            try:
-                os.fchmod(fd, 0o600)
-                with os.fdopen(fd, "w") as handle:
-                    fd = -1
-                    handle.write(after_body)
-            finally:
-                if fd != -1:
-                    os.close(fd)
-            print(f"proposed body written to {args.dry_run}")
+        print(
+            f"dry run: hub={args.hub} page={args.page} marker={args.marker} "
+            f"title={args.title} body_bytes={len(after_body.encode())}"
+        )
         return EXIT_OK
+
+    print(f"hub {args.hub}; marker {args.marker}; found {marker_count}")
 
     # `correct` replaces the whole field, so a concurrent edit between our read
     # and this write would be lost. Re-read and refuse if the body moved.
@@ -328,7 +338,7 @@ def cmd_add(args, base_url, token) -> int:
     return EXIT_OK
 
 
-def main() -> int:
+def _run() -> int:
     ap = _SafeArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -342,9 +352,7 @@ def main() -> int:
         help="~/.config/neotoma/<profile>.env (or set NEOTOMA_BASE_URL/_BEARER_TOKEN)",
     )
     ap.add_argument("--hub", default=os.environ.get("ATELES_HUB_ENTITY_ID", ""))
-    sub = ap.add_subparsers(
-        dest="cmd", required=True, parser_class=_SafeArgumentParser
-    )
+    sub = ap.add_subparsers(dest="cmd", required=True, parser_class=_SafeArgumentParser)
 
     add = sub.add_parser("add", help="add one card, verified")
     add.add_argument("--page", required=True)
@@ -359,9 +367,6 @@ def main() -> int:
         "--apply",
         action="store_true",
         help="actually write to the live hub (default is a dry run)",
-    )
-    add.add_argument(
-        "--dry-run", metavar="PATH", help="also save the proposed body to PATH"
     )
 
     args = ap.parse_args()
@@ -383,6 +388,16 @@ def main() -> int:
                 "use a credential for the shared-graph user"
             )
         fail(f"HTTP {exc.code}")
+
+
+def main() -> int:
+    try:
+        return _run()
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"unexpected error: {type(exc).__name__}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
