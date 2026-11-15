@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import urllib.error
@@ -966,6 +967,14 @@ CRITICAL CONSTRAINTS — read carefully:
   irreversible publish step, STOP.
 - Work in an isolated git worktree off origin/main. Do NOT disturb the operator's
   main checkout or any unrelated uncommitted changes.
+- Never skip git hooks: no `--no-verify`, no `git commit -n`, no `HUSKY=0`, no
+  `core.hooksPath` override. A guard refuses them. If the pre-commit TEST stage
+  cannot pass for a reason unrelated to the release diff, commit with the hook's
+  own escape hatch, which still runs type-check, lint and format:
+  `SKIP_TESTS=1 SKIP_TESTS_REASON="<why>" git commit ...`
+  and state that reason in the Telegram and email. If any other stage fails, or
+  the hook fails for an environment reason, stop and report it; do not work
+  around it by setting NEOTOMA_ENV or pointing NEOTOMA_DATA_DIR anywhere.
 
 Your job — run the /release skill's PREPARE phase up to (and including) the
 release-candidate PR, then HALT:
@@ -1020,6 +1029,33 @@ Be precise and terse in the Telegram/email messages. No motivational filler.
 """
 
 
+# Operator-runtime variables the prepare agent must not inherit (see _agent_env).
+_AGENT_ENV_DROP = (
+    "NEOTOMA_ENV",
+    "NEOTOMA_DATA_DIR",
+    "NEOTOMA_MCP_USE_LOCAL_PORT_FILE",
+    "OPENAI_API_KEY",
+)
+
+# PreToolUse guard loaded into the prepare agent: refuses --no-verify and the
+# other ways of skipping git hooks. The agent runs with cwd in the Neotoma
+# checkout, so this repository's .claude/settings.json does not apply to it;
+# the guard reaches it only through --settings.
+HOOK_BYPASS_GUARD = PROJECT_ROOT / ".claude" / "hooks" / "git_hook_bypass_guard.py"
+
+
+def _agent_settings() -> str:
+    """--settings JSON for the prepare agent: the git-hook bypass guard on Bash."""
+    command = f"{shlex.quote(sys.executable)} {shlex.quote(str(HOOK_BYPASS_GUARD))}"
+    return json.dumps({
+        "hooks": {
+            "PreToolUse": [
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": command}]}
+            ]
+        }
+    })
+
+
 def _agent_env() -> dict:
     """Environment for the headless `claude --print` prepare agent.
 
@@ -1033,6 +1069,19 @@ def _agent_env() -> dict:
     account. If only the API key is present, we leave it untouched.
     """
     env = dict(os.environ)
+    # The daemon loads ~/.config/neotoma/.env, which describes the OPERATOR's
+    # Neotoma runtime: NEOTOMA_ENV=production and NEOTOMA_DATA_DIR pointing at
+    # real data. Inherited by the agent, they reach every test run the agent
+    # starts, including the release worktree's pre-commit hook: the test
+    # harness's default NEOTOMA_FORCE_MODE=refuse is fatal under
+    # NEOTOMA_ENV=production, and the suite tries to write the operator's
+    # database. That made the hook fail on every run for environment reasons,
+    # which is what pushed the agent to --no-verify (ent_13f7f83c89d6adcac957dd96).
+    # OPENAI_API_KEY is dropped for the same reason: tests otherwise spend the
+    # operator's key. None of these is needed by the prepare steps themselves;
+    # store_release_result.py reads its own credentials from the env file.
+    for name in _AGENT_ENV_DROP:
+        env.pop(name, None)
     if env.get("CLAUDE_CODE_OAUTH_TOKEN") and env.get("ANTHROPIC_API_KEY"):
         env.pop("ANTHROPIC_API_KEY", None)
         log.info(
@@ -1057,6 +1106,15 @@ def spawn_prepare_agent(
         return False
 
     prompt = _build_agent_prompt(last_tag, commit_count)
+    if not HOOK_BYPASS_GUARD.is_file():
+        # Fail closed: without the guard the agent can skip the release
+        # checkout's hooks, which is the failure the guard exists to stop.
+        log.error(f"git hook bypass guard missing at {HOOK_BYPASS_GUARD}")
+        notify_operator(
+            "🔴 Phoenicurus: the git-hook guard for the prepare agent is missing "
+            "from the deployment checkout — not preparing the release."
+        )
+        return False
     if dry_run:
         log.info("[dry-run] would spawn prepare agent with prompt:")
         log.info(prompt)
@@ -1064,7 +1122,8 @@ def spawn_prepare_agent(
 
     try:
         proc = subprocess.Popen(
-            [claude, "--print", "--dangerously-skip-permissions", prompt],
+            [claude, "--print", "--dangerously-skip-permissions",
+             "--settings", _agent_settings(), prompt],
             cwd=str(NEOTOMA_REPO_ROOT),
             env=_agent_env(),
             stdout=open(AGENT_LOG, "a"),

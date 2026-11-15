@@ -17,6 +17,26 @@ Operator-approved release executor for Neotoma. Two halves:
   link + advisory flags. `prepare.py` exits immediately; the agent sends its own
   Telegram. It NEVER tags, publishes, or deploys.
 
+### The prepare agent's environment and git hooks
+
+The agent never skips the release checkout's git hooks. `spawn_prepare_agent`
+passes it `--settings` with a PreToolUse guard,
+`.claude/hooks/git_hook_bypass_guard.py`, which refuses `--no-verify`,
+`git commit -n`, `HUSKY=0` and a `core.hooksPath` override. The agent's cwd is
+the Neotoma checkout, so this repository's own `.claude/settings.json` does not
+reach it; `--settings` is the only way the guard is loaded. If the guard file is
+missing, prepare refuses to spawn the agent. The sanctioned way to skip the
+test stage is the hook's own `SKIP_TESTS=1 SKIP_TESTS_REASON="<why>"`, which
+still runs type-check, lint and format.
+
+`_agent_env` also drops `NEOTOMA_ENV`, `NEOTOMA_DATA_DIR`,
+`NEOTOMA_MCP_USE_LOCAL_PORT_FILE` and `OPENAI_API_KEY` from the agent's
+environment. They describe the operator's own Neotoma runtime and come from the
+env file the daemon loads; inherited, they made every pre-commit test run fail
+(the test harness's force mode is fatal under `NEOTOMA_ENV=production`, and the
+suite tried to write the operator's database). That failure is what led the
+agent to use `--no-verify` on earlier releases.
+
 This split exists because release approval can take hours — a launchd daemon
 cannot block in-process that long (unlike Monedula's 120 s payment approval).
 Prepare runs and exits; publish fires later when the operator approves.

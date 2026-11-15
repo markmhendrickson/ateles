@@ -351,3 +351,83 @@ def test_agent_env_does_not_mutate_daemon_env(monkeypatch):
     assert _os.environ.get("ANTHROPIC_API_KEY") == "sk-ant-xxx", (
         "the daemon's own env must be untouched — only the child copy is trimmed"
     )
+
+
+# ── Prepare agent must not skip git hooks (ent_13f7f83c89d6adcac957dd96) ─────
+#
+# The prepare agent used --no-verify on at least six release runs. Two causes:
+# the daemon handed the agent the operator's NEOTOMA_ENV=production and real
+# NEOTOMA_DATA_DIR, which made the release worktree's pre-commit tests fail for
+# environment reasons; and nothing refused the flag. These pin both fixes.
+
+
+def test_agent_env_drops_operator_neotoma_runtime(monkeypatch):
+    monkeypatch.setenv("NEOTOMA_ENV", "production")
+    monkeypatch.setenv("NEOTOMA_DATA_DIR", "/operator/data")
+    monkeypatch.setenv("NEOTOMA_MCP_USE_LOCAL_PORT_FILE", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-op")
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    env = prepare._agent_env()
+    for name in ("NEOTOMA_ENV", "NEOTOMA_DATA_DIR",
+                 "NEOTOMA_MCP_USE_LOCAL_PORT_FILE", "OPENAI_API_KEY"):
+        assert name not in env, name
+    assert env.get("NEOTOMA_BASE_URL") == "https://example.invalid"
+    import os as _os
+    assert _os.environ.get("NEOTOMA_ENV") == "production", "daemon env untouched"
+
+
+def test_agent_settings_loads_the_bypass_guard():
+    import json as _json
+    settings = _json.loads(prepare._agent_settings())
+    (entry,) = settings["hooks"]["PreToolUse"]
+    assert entry["matcher"] == "Bash"
+    command = entry["hooks"][0]["command"]
+    assert str(prepare.HOOK_BYPASS_GUARD) in command
+    assert prepare.HOOK_BYPASS_GUARD.is_file()
+
+
+def test_agent_settings_guard_refuses_no_verify():
+    """The command the agent is given, run as the harness would run it."""
+    import json as _json
+    import shlex as _shlex
+    import subprocess as _sp
+    hook = _json.loads(prepare._agent_settings())["hooks"]["PreToolUse"][0]["hooks"][0]
+    payload = _json.dumps({"tool_name": "Bash",
+                           "tool_input": {"command": "git commit --no-verify -m x"}})
+    proc = _sp.run(_shlex.split(hook["command"]), input=payload,
+                   capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 2
+    assert _json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_spawn_passes_settings_to_claude(monkeypatch, tmp_path):
+    import shutil as _shutil
+    from unittest.mock import patch as _patch
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/local/bin/claude")
+    monkeypatch.setattr(prepare, "AGENT_LOG", tmp_path / "agent.log")
+    monkeypatch.setattr(prepare, "_record_spawn_pid", lambda head, pid: None)
+    monkeypatch.setenv("NEOTOMA_ENV", "production")
+    with _patch.object(prepare.subprocess, "Popen") as mock_popen:
+        assert prepare.spawn_prepare_agent("v0.18.8", 4, dry_run=False) is True
+    argv = mock_popen.call_args[0][0]
+    i = argv.index("--settings")
+    assert argv[i + 1] == prepare._agent_settings()
+    assert "NEOTOMA_ENV" not in mock_popen.call_args[1]["env"]
+
+
+def test_spawn_refuses_without_guard(monkeypatch, tmp_path):
+    import shutil as _shutil
+    from unittest.mock import patch as _patch
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/local/bin/claude")
+    monkeypatch.setattr(prepare, "HOOK_BYPASS_GUARD", tmp_path / "missing.py")
+    with _patch.object(prepare, "notify_operator") as notify, \
+            _patch.object(prepare.subprocess, "Popen") as mock_popen:
+        assert prepare.spawn_prepare_agent("v0.18.8", 4, dry_run=False) is False
+    mock_popen.assert_not_called()
+    notify.assert_called_once()
+
+
+def test_prompt_forbids_hook_bypass_and_names_skip_tests():
+    p = prepare._build_agent_prompt("v0.19.0", 3)
+    assert "--no-verify" in p and "Never skip git hooks" in p
+    assert 'SKIP_TESTS=1 SKIP_TESTS_REASON="<why>"' in p
