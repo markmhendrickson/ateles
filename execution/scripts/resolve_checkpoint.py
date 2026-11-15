@@ -224,10 +224,10 @@ def load_checkpoint(checkpoint_id: str) -> tuple[dict, dict, str, str]:
         raise ResolveError(
             f"checkpoint {checkpoint_id} not found or Neotoma unreachable"
         )
-    if (
-        ateles_server._entity_type_of(data) != "checkpoint_brief"
-    ):  # vocab-ok: the stored entity type is still checkpoint_brief; the server checks the same literal
-        raise ResolveError(f"entity {checkpoint_id} is not a checkpoint_brief")
+    # The stored entity type is still the retired literal; the server checks the same one.
+    stored_type = "checkpoint_brief"  # vocab-ok: stored Neotoma entity type
+    if ateles_server._entity_type_of(data) != stored_type:
+        raise ResolveError(f"entity {checkpoint_id} is not a {stored_type}")
 
     snap = ateles_server._snapshot_of(data)
     status = str(snap.get("status", "")).strip().lower()
