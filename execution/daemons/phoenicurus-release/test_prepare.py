@@ -320,7 +320,7 @@ def test_notify_operator_email_failure_does_not_block_telegram(monkeypatch):
     assert "tg" in order  # Telegram fired first, regardless of email outcome
 
 
-# ── _agent_env: prefer Max OAuth over pay-per-token API key ──────────────────
+# ── _agent_env: allowlist + prefer Max OAuth over pay-per-token API key ──────
 #
 # The first live prepare run (2026-07-27) died on "Credit balance is too low":
 # the headless agent inherited both credentials and `claude --print` used the
@@ -355,25 +355,59 @@ def test_agent_env_does_not_mutate_daemon_env(monkeypatch):
 
 # ── Prepare agent must not skip git hooks (ent_13f7f83c89d6adcac957dd96) ─────
 #
-# The prepare agent used --no-verify on at least six release runs. Two causes:
-# the daemon handed the agent the operator's NEOTOMA_ENV=production and real
-# NEOTOMA_DATA_DIR, which made the release worktree's pre-commit tests fail for
-# environment reasons; and nothing refused the flag. These pin both fixes.
+# The prepare agent used --no-verify on at least six release runs. The daemon
+# handed it the operator's storage selectors and arbitrary ambient variables,
+# which made release-worktree tests fail for environment reasons. The child now
+# starts from the shared runner allowlist, not a denylist.
+
+_PREPARE_CHILD_FORBIDDEN = (
+    "NEOTOMA_ENV",
+    "NEOTOMA_DATA_DIR",
+    "NEOTOMA_SQLITE_PATH",
+    "NEOTOMA_RAW_STORAGE_DIR",
+    "NEOTOMA_DB_BACKEND",
+    "NEOTOMA_DB_URL",
+    "NEOTOMA_EVENT_LOG_PATH",
+    "NEOTOMA_EVENT_LOG_DIR",
+    "NEOTOMA_LOGS_DIR",
+    "NEOTOMA_MCP_USE_LOCAL_PORT_FILE",
+    "NEOTOMA_BASE_URL",
+    "NEOTOMA_PROJECT_ROOT",
+    "NEOTOMA_REPO_ROOT",
+    "HUSKY",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_KEY_0",
+    "GIT_CONFIG_VALUE_0",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "OPENAI_API_KEY",
+    "TOTALLY_UNKNOWN_AMBIENT_VARIABLE",
+)
 
 
-def test_agent_env_drops_operator_neotoma_runtime(monkeypatch):
-    monkeypatch.setenv("NEOTOMA_ENV", "production")
-    monkeypatch.setenv("NEOTOMA_DATA_DIR", "/operator/data")
-    monkeypatch.setenv("NEOTOMA_MCP_USE_LOCAL_PORT_FILE", "1")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-op")
-    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+@pytest.mark.parametrize("name", _PREPARE_CHILD_FORBIDDEN)
+def test_agent_env_drops_storage_git_and_unknown_ambient_names(monkeypatch, name):
+    monkeypatch.setenv(name, "canary")
     env = prepare._agent_env()
-    for name in ("NEOTOMA_ENV", "NEOTOMA_DATA_DIR",
-                 "NEOTOMA_MCP_USE_LOCAL_PORT_FILE", "OPENAI_API_KEY"):
-        assert name not in env, name
-    assert env.get("NEOTOMA_BASE_URL") == "https://example.invalid"
+    assert name not in env
     import os as _os
-    assert _os.environ.get("NEOTOMA_ENV") == "production", "daemon env untouched"
+    assert _os.environ.get(name) == "canary", "daemon env untouched"
+
+
+def test_agent_env_keeps_only_needed_release_additions(monkeypatch):
+    monkeypatch.setenv("PATH", "/synthetic/bin")
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", "/synthetic/gws")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/synthetic/claude")
+    env = prepare._agent_env()
+    assert env["PATH"] == "/synthetic/bin"
+    assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == "/synthetic/gws"
+    assert env["CLAUDE_CONFIG_DIR"] == "/synthetic/claude"
 
 
 def test_agent_settings_loads_the_bypass_guard():

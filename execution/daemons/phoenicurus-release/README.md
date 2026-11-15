@@ -22,20 +22,26 @@ Operator-approved release executor for Neotoma. Two halves:
 The agent never skips the release checkout's git hooks. `spawn_prepare_agent`
 passes it `--settings` with a PreToolUse guard,
 `.claude/hooks/git_hook_bypass_guard.py`, which refuses `--no-verify`,
-`git commit -n`, `HUSKY=0` and a `core.hooksPath` override. The agent's cwd is
-the Neotoma checkout, so this repository's own `.claude/settings.json` does not
-reach it; `--settings` is the only way the guard is loaded. If the guard file is
-missing, prepare refuses to spawn the agent. The sanctioned way to skip the
-test stage is the hook's own `SKIP_TESTS=1 SKIP_TESTS_REASON="<why>"`, which
-still runs type-check, lint and format.
+`git commit -n`, git-config/Husky environment overrides and a
+`core.hooksPath` override, including the shell and inline-program forms it can
+inspect. The agent's cwd is the Neotoma checkout, so this repository's own
+`.claude/settings.json` does not reach it; `--settings` is the only way the
+guard is loaded. If the guard file is missing, prepare refuses to spawn the
+agent. The sanctioned way to skip the test stage is the hook's own
+`SKIP_TESTS=1 SKIP_TESTS_REASON="<why>"`, which still runs type-check, lint and
+format.
 
-`_agent_env` also drops `NEOTOMA_ENV`, `NEOTOMA_DATA_DIR`,
-`NEOTOMA_MCP_USE_LOCAL_PORT_FILE` and `OPENAI_API_KEY` from the agent's
-environment. They describe the operator's own Neotoma runtime and come from the
-env file the daemon loads; inherited, they made every pre-commit test run fail
-(the test harness's force mode is fatal under `NEOTOMA_ENV=production`, and the
-suite tried to write the operator's database). That failure is what led the
-agent to use `--no-verify` on earlier releases.
+`_agent_env` starts from the shared runner environment allowlist and then adds
+only the Claude authentication/configuration and gws configuration the prepare
+child needs. Unknown ambient variables, Neotoma storage/target selectors, git
+configuration overrides and unrelated vendor credentials never pass by
+inheritance. `store_release_result.py` loads its own Neotoma target and signing
+inputs when it runs.
+
+The Bash guard is an accidental-bypass tripwire, not a security boundary: a
+written script or an indirection it cannot inspect can still skip hooks. The
+binding controls are the allowlisted child environment plus the release checks
+that run after the agent.
 
 This split exists because release approval can take hours — a launchd daemon
 cannot block in-process that long (unlike Monedula's 120 s payment approval).

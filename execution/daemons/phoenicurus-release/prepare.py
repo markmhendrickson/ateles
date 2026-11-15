@@ -224,6 +224,11 @@ if str(_REPO_ROOT) not in sys.path:
 
 from lib.daemon_runtime.logging_setup import configure_daemon_logging
 from lib import github_app_token  # noqa: E402
+from lib.environment_allowlist import (  # noqa: E402
+    ALLOWED_ENVIRONMENT_NAMES,
+    RUNNER_ENVIRONMENT_NAMES,
+    is_allowed_environment_name,
+)
 
 # Rotating + repeat-suppressing (lib/daemon_runtime/logging_setup.py):
 # unbounded retry logging filled a 926 GB disk on 2026-08-18.
@@ -1029,13 +1034,27 @@ Be precise and terse in the Telegram/email messages. No motivational filler.
 """
 
 
-# Operator-runtime variables the prepare agent must not inherit (see _agent_env).
-_AGENT_ENV_DROP = (
-    "NEOTOMA_ENV",
-    "NEOTOMA_DATA_DIR",
-    "NEOTOMA_MCP_USE_LOCAL_PORT_FILE",
-    "OPENAI_API_KEY",
+# The prepare child starts from the shared runner subset, not the daemon's
+# environment. Neotoma names are excluded even when shared code allows one:
+# store_release_result.py deliberately loads its own target and signing inputs
+# from the release runtime, so the agent itself never receives a storage/target
+# selector.
+_PREPARE_AGENT_SHARED_ENV = frozenset(
+    name
+    for name in RUNNER_ENVIRONMENT_NAMES
+    if (
+        name in ALLOWED_ENVIRONMENT_NAMES
+        and is_allowed_environment_name(name)
+        and not name.startswith("NEOTOMA_")
+        and name != "CODEX_HOME"
+    )
 )
+_PREPARE_AGENT_RELEASE_ADDITIONS: dict[str, str] = {
+    # The release prompt sends its prepared-RC notification through gws.
+    "GOOGLE_WORKSPACE_CLI_CONFIG_DIR": "gws account/config selection for the RC email",
+    # Some installations keep Claude's subscription login outside HOME.
+    "CLAUDE_CONFIG_DIR": "Claude CLI subscription configuration location",
+}
 
 # PreToolUse guard loaded into the prepare agent: refuses --no-verify and the
 # other ways of skipping git hooks. The agent runs with cwd in the Neotoma
@@ -1047,6 +1066,9 @@ HOOK_BYPASS_GUARD = PROJECT_ROOT / ".claude" / "hooks" / "git_hook_bypass_guard.
 def _agent_settings() -> str:
     """--settings JSON for the prepare agent: the git-hook bypass guard on Bash."""
     command = f"{shlex.quote(sys.executable)} {shlex.quote(str(HOOK_BYPASS_GUARD))}"
+    # local_provider renders the repo's complete validated guard set; prepare
+    # intentionally injects this one release-only guard, so sharing that
+    # renderer would change local_provider's guard set or the prepare child's.
     return json.dumps({
         "hooks": {
             "PreToolUse": [
@@ -1059,6 +1081,10 @@ def _agent_settings() -> str:
 def _agent_env() -> dict:
     """Environment for the headless `claude --print` prepare agent.
 
+    Build from the shared runner allowlist, then add only the two
+    release-specific non-secret configuration paths above and one Claude
+    authentication method. Unknown ambient names never pass.
+
     Prefer the Claude Code Max-subscription OAuth token over a pay-per-token
     API key: when BOTH CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are set,
     `claude --print` uses the API key — and if that account has no credits the
@@ -1068,22 +1094,27 @@ def _agent_env() -> dict:
     agent through the subscription, so releases don't depend on a funded API
     account. If only the API key is present, we leave it untouched.
     """
-    env = dict(os.environ)
-    # The daemon loads ~/.config/neotoma/.env, which describes the OPERATOR's
-    # Neotoma runtime: NEOTOMA_ENV=production and NEOTOMA_DATA_DIR pointing at
-    # real data. Inherited by the agent, they reach every test run the agent
-    # starts, including the release worktree's pre-commit hook: the test
-    # harness's default NEOTOMA_FORCE_MODE=refuse is fatal under
-    # NEOTOMA_ENV=production, and the suite tries to write the operator's
-    # database. That made the hook fail on every run for environment reasons,
-    # which is what pushed the agent to --no-verify (ent_13f7f83c89d6adcac957dd96).
-    # OPENAI_API_KEY is dropped for the same reason: tests otherwise spend the
-    # operator's key. None of these is needed by the prepare steps themselves;
-    # store_release_result.py reads its own credentials from the env file.
-    for name in _AGENT_ENV_DROP:
-        env.pop(name, None)
-    if env.get("CLAUDE_CODE_OAUTH_TOKEN") and env.get("ANTHROPIC_API_KEY"):
-        env.pop("ANTHROPIC_API_KEY", None)
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name in _PREPARE_AGENT_SHARED_ENV
+    }
+    for name in _PREPARE_AGENT_RELEASE_ADDITIONS:
+        if name in os.environ:
+            env[name] = os.environ[name]
+
+    oauth = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if oauth:
+        # Credential-named exception: the child is the Claude CLI, so this is
+        # the subscription credential it genuinely needs to authenticate.
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth
+    elif api_key:
+        # Credential-named fallback retained for installations without OAuth.
+        # It is the selected harness credential, never a credential for the
+        # release target, git, GitHub, Neotoma, or another vendor.
+        env["ANTHROPIC_API_KEY"] = api_key
+    if oauth and api_key:
         log.info(
             "prepare agent: using CLAUDE_CODE_OAUTH_TOKEN (dropped ANTHROPIC_API_KEY "
             "from the child env so the agent bills the Max subscription, not the "
