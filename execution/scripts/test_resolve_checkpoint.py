@@ -17,7 +17,6 @@ What each looked like red (before the change):
 from __future__ import annotations
 
 import base64
-import io
 import json
 import sys
 from pathlib import Path
@@ -81,7 +80,7 @@ def _checkpoint_entity(
 ) -> dict:
     return {
         "entity_id": checkpoint_id,
-        "entity_type": "checkpoint_brief",
+        "entity_type": "checkpoint_brief",  # vocab-ok: the stored entity type is still checkpoint_brief; the server checks the same literal
         "snapshot": {
             "status": status,
             "title": title,
