@@ -20,6 +20,11 @@ from pathlib import Path
 
 from transcript_utterances import group_utterances
 
+try:
+    from scripts.two_track_merge import collapse_item_repeats
+except ImportError:  # pragma: no cover - path-dependent import
+    from two_track_merge import collapse_item_repeats  # type: ignore[no-redef]
+
 log = logging.getLogger("local_fluid")
 
 BACKEND_FLUID = "fluid"
@@ -306,6 +311,7 @@ def attribute_segments(segments: list[dict], diarization: dict) -> list[dict]:
             turns[-1]["text"] += " " + segment["text"]
         else:
             turns.append({**segment, "speaker": speaker})
+    collapse_item_repeats(turns)
     return turns
 
 

@@ -390,6 +390,15 @@ def _chunk_marker_segments(found: dict) -> list[dict]:
             chunk_outcomes,
         )
 
+    withheld_text = {
+        (
+            float(chunk.get("start", 0.0)),
+            float(chunk.get("end", chunk.get("start", 0.0))),
+        ): str(chunk.get("withheld_text", ""))
+        for chunk in found.get("chunks", [])
+        if chunk.get("kind") == "chunk"
+        and str(chunk.get("status", "")).startswith("screened")
+    }
     markers = []
     for gap in chunk_outcomes(found.get("chunks", []))["gaps"]:
         kind = gap["kind"]
@@ -409,43 +418,96 @@ def _chunk_marker_segments(found: dict) -> list[dict]:
                 "start": gap["start"],
                 "end": gap["end"],
                 "text": text,
+                **(
+                    {
+                        "withheld_text": withheld_text.get(
+                            (float(gap["start"]), float(gap["end"])),
+                            "",
+                        )
+                    }
+                    if kind == KIND_WITHHELD
+                    else {}
+                ),
             }
         )
     return markers
 
 
+def _chunked_speech_blocks(found: dict) -> list[dict]:
+    """Join chunk segments around disclosure markers, then collapse repeat loops."""
+    try:
+        from scripts.two_track_merge import collapse_item_repeats
+    except ImportError:  # pragma: no cover - path-dependent import
+        from two_track_merge import collapse_item_repeats  # type: ignore[no-redef]
+
+    events = [
+        {
+            "start": float(segment["start"]),
+            "end": float(segment["end"]),
+            "text": segment["text"].strip(),
+            "marker": False,
+        }
+        for segment in found.get("segments", [])
+        if segment.get("text", "").strip()
+    ]
+    events += [{**marker, "marker": True} for marker in _chunk_marker_segments(found)]
+    events.sort(key=lambda item: (item["start"], item["end"], item["marker"]))
+
+    blocks: list[dict] = []
+    current = None
+    for event in events:
+        if event["marker"]:
+            if current is not None:
+                blocks.append(current)
+                current = None
+            blocks.append(event)
+        elif current is None:
+            current = dict(event)
+        else:
+            current["end"] = max(current["end"], event["end"])
+            current["text"] += " " + event["text"]
+    if current is not None:
+        blocks.append(current)
+
+    collapse_item_repeats([block for block in blocks if not block["marker"]])
+    return blocks
+
+
 def _chunked_transcription_text(found: dict) -> str:
     """Build one transcript from chunk segments, retaining timed gap markers."""
     try:
-        from scripts.two_track_merge import collapse_repeats, format_clock
+        from scripts.two_track_merge import format_clock
     except ImportError:  # pragma: no cover - path-dependent import
-        from two_track_merge import collapse_repeats, format_clock  # type: ignore[no-redef]
+        from two_track_merge import format_clock  # type: ignore[no-redef]
 
-    segments = list(found.get("segments", []))
-    markers = _chunk_marker_segments(found)
-    if not markers:
-        text = " ".join(segment["text"].strip() for segment in segments).strip()
-        return collapse_repeats(text)[0]
+    blocks = _chunked_speech_blocks(found)
+    if not any(block["marker"] for block in blocks):
+        return " ".join(block["text"] for block in blocks).strip()
 
-    blocks = sorted(
-        [
-            (
-                float(segment["start"]),
-                float(segment["end"]),
-                segment["text"].strip(),
-            )
-            for segment in segments
-            if segment.get("text", "").strip()
-        ]
-        + [
-            (float(marker["start"]), float(marker["end"]), marker["text"])
-            for marker in markers
-        ]
-    )
     return "\n\n".join(
-        f"[{format_clock(start)}–{format_clock(end)}]\n{text}"
-        for start, end, text in blocks
+        f"[{format_clock(block['start'])}–{format_clock(block['end'])}]\n"
+        f"{block['text']}"
+        for block in blocks
     )
+
+
+def _chunked_speech_text(found: dict) -> str:
+    """Collapsed usable speech only, excluding disclosure markers."""
+    return " ".join(
+        block["text"]
+        for block in _chunked_speech_blocks(found)
+        if not block["marker"]
+    ).strip()
+
+
+def _chunked_is_silence(found: dict) -> bool:
+    """True only when every source chunk was positively judged silent."""
+    chunks = [
+        chunk
+        for chunk in found.get("chunks", [])
+        if chunk.get("kind") == "chunk"
+    ]
+    return bool(chunks) and all(chunk.get("status") == "silent" for chunk in chunks)
 
 
 def _timed_segments(cmd: list[str], tmp_dir: Path) -> tuple[list[dict] | None, str]:
@@ -599,16 +661,19 @@ def transcribe_local(
                     if verbose
                     else None,
                 )
-            except (RuntimeError, subprocess.SubprocessError) as exc:
+            except (
+                RuntimeError,
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+                subprocess.SubprocessError,
+            ) as exc:
                 raise LocalWhisperUnavailable(
                     f"chunked whisper-cli failed on {audio_path.name}: {exc}"
                 ) from exc
             text = _chunked_transcription_text(chunked_found)
-            text_for_screen = " ".join(
-                segment["text"].strip()
-                for segment in chunked_found["segments"]
-                if segment.get("text", "").strip()
-            )
+            text_for_screen = _chunked_speech_text(chunked_found)
             detected = detected_languages[0] if detected_languages else None
         else:
             out_stem = tmp_dir / f"{audio_path.stem}.out"
@@ -643,7 +708,15 @@ def transcribe_local(
 
         diarization = None
         segments = None
-        if diarize and text_for_screen:
+        chunked_silence = (
+            _chunked_is_silence(chunked_found)
+            if chunked_found is not None
+            else False
+        )
+        if diarize and (
+            text_for_screen
+            or (chunked_found is not None and not chunked_silence)
+        ):
             try:
                 from scripts.local_fluid import diarize_mono
             except ImportError:  # pragma: no cover - path-dependent import
@@ -683,7 +756,9 @@ def transcribe_local(
             "transcription_engine": TRANSCRIPTION_ENGINE_LOCAL,
             "transcription_model": model.name,
             "rms_db": None if rms_db is None else round(rms_db, 1),
-            "silence": True,
+            "silence": chunked_silence,
+            **({"diarization": diarization} if diarization is not None else {}),
+            **({"segments": segments} if segments else {}),
         }
 
     # --- Result-side screen, AFTER the model ------------------------------

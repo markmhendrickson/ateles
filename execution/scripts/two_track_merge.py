@@ -150,6 +150,15 @@ def collapse_repeats(text: str, *, max_n: int = MAX_PHRASE_WORDS, min_reps: int 
     return " ".join(out), removed
 
 
+def collapse_item_repeats(items: list[dict]) -> int:
+    """Collapse repeat loops in already-merged text items, in place."""
+    removed = 0
+    for item in items:
+        item["text"], cut = collapse_repeats(item["text"])
+        removed += cut
+    return removed
+
+
 def clean_segments(segments: list[dict]) -> tuple[list[dict], list[dict]]:
     """Split segments into ``(kept, discarded)``. Loops are collapsed later, on the joined turn.
 
@@ -597,9 +606,7 @@ def merge_tracks(
             turns.append({k: row[k] for k in ("start", "end", "track", "label", "text")})
     # Loops are collapsed on the joined turn: whisper emits one loop as many
     # consecutive segments, which no per-segment pass can see.
-    for turn in turns:
-        turn["text"], cut = collapse_repeats(turn["text"])
-        stats["repeats_removed"] += cut
+    stats["repeats_removed"] += collapse_item_repeats(turns)
 
     # Timed markers: one per withheld chunk; runs of adjacent silent, empty or
     # cross-talk stretches of one track become one marker each.
