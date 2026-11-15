@@ -310,6 +310,28 @@ thumbprint to match on read-back. A merely non-empty or otherwise trusted key
 does not qualify. The resolver key remains outside both Apis and the MCP
 server.
 
+### Approving checkpoints from the command line
+
+`execution/scripts/resolve_checkpoint.py` is the operator-run caller: it reads
+each `checkpoint_brief`, signs with the checkpoint's own required subject and
+JKT, and submits through the server's `_resolve_checkpoint` path. Pass the
+resolver private JWK with `--key` or `ATELES_CHECKPOINT_RESOLVER_JWK` (no
+default path). The script never prints the key or the signed headers.
+
+```bash
+# Single checkpoint
+python3 execution/scripts/resolve_checkpoint.py \
+  ent_<checkpoint_id> approve --key /path/to/resolver.jwk.json
+
+# Batch (one id per line; blank lines and # comments ignored)
+python3 execution/scripts/resolve_checkpoint.py \
+  --batch /path/to/checkpoint-ids.txt approve --key /path/to/resolver.jwk.json
+```
+
+Use `reject` instead of `approve` when declining. `--dry-run` prints id, title,
+task, and blast radius without signing. Batch mode confirms interactively unless
+`--yes` (TTY required) or `--dry-run`; `--keep-going` continues after a failure.
+
 ## Tests
 
 ```bash
