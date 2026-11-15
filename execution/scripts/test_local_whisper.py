@@ -405,7 +405,24 @@ def test_long_file_uses_chunked_route_and_preserves_result_shape(
         "transcription_model",
         "rms_db",
         "silence",
+        "raw_response",
     }
+    assert result["raw_response"]["chunks"] == [
+        {
+            "kind": "chunk",
+            "index": None,
+            "start": 0.0,
+            "end": 120.0,
+            "status": "kept",
+        },
+        {
+            "kind": "chunk",
+            "index": None,
+            "start": 120.0,
+            "end": 123.0,
+            "status": "kept",
+        },
+    ]
 
 
 def test_long_file_discloses_an_audible_chunk_with_no_words(
@@ -489,6 +506,10 @@ def test_long_file_discloses_a_chunk_withheld_by_the_output_screen(
     assert result["silence"] is False
     assert "[SPEECH WITHHELD" in result["transcription_text"]
     assert "repeated_phrase: synthetic loop" in result["transcription_text"]
+    withheld = result["raw_response"]["chunks"][1]
+    assert withheld["status"] == "withheld"
+    assert withheld["withheld_text"] == "loop loop loop"
+    assert withheld["reason"] == "repeated_phrase"
 
 
 def test_chunked_text_collapses_a_loop_even_when_a_gap_marker_is_present():
@@ -665,6 +686,19 @@ def test_all_withheld_chunks_are_audible_evidence_not_silence(
     assert result["diarization"] == diarization
     assert result["segments"][0]["withheld_text"] == "rejected words"
     assert "[SPEECH WITHHELD" in result["transcription_text"]
+    assert result["raw_response"]["chunks"][0]["withheld_text"] == "rejected words"
+    assert result["raw_response"]["chunks"][0]["status"] == "withheld"
+
+
+def test_malformed_whisper_segment_raises_local_unavailable_with_source():
+    with pytest.raises(lw.LocalWhisperUnavailable) as exc:
+        lw.timed_segments_from_json(
+            {"transcription": ["not-an-object"]},
+            source="/tmp/broken-memo.json",
+        )
+
+    assert "broken-memo.json" in str(exc.value)
+    assert "not object" in str(exc.value)
 
 
 def test_chunked_failure_is_wrapped_with_source_and_cause(

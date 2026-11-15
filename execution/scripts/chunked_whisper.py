@@ -107,7 +107,10 @@ def whisper_cli_asr(
             tail = ((proc.stderr or "").strip().splitlines() or [""])[-1][:200]
             raise RuntimeError(f"whisper-cli failed (exit {proc.returncode}): {tail}")
         data = json.loads(out.read_text(encoding="utf-8"))
-        return timed_segments_from_json(data), detected_language_from_json(data)
+        return (
+            timed_segments_from_json(data, source=out),
+            detected_language_from_json(data),
+        )
 
     return run
 

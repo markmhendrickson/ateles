@@ -1998,9 +1998,14 @@ def transcribe_audio_file(
                 )
                 text = format_turns(turns)
             text = f"{diarization_header(diarization)}\n\n{text}"
+        # Carry chunk evidence in the same raw_response field the two-track
+        # path uses, so withheld text survives storage and the .stt_raw.json
+        # sidecar — markers alone must not be the only remaining record.
+        raw_response = local.get("raw_response")
         return {
             "transcription_text": text,
             **({"diarization": diarization} if diarization is not None else {}),
+            **({"raw_response": raw_response} if raw_response is not None else {}),
             "language": local["language"],
             "audio_duration_seconds": get_audio_duration(audio_path),
             "file_size_bytes": audio_path.stat().st_size,
@@ -3046,6 +3051,26 @@ def _validate_transcription_result(result: object, *, paired: bool) -> None:
             require(isinstance(diar, dict) and diar.get("status") in ("ok", "failed")
                     and text(diar.get("method")), "diarization")
             require(diar["status"] != "failed" or text(diar.get("category")), "diarization.category")
+        # Optional chunk evidence (long memos): every withheld chunk must keep
+        # its rejected text and reason, same disclosure bar as two-track.
+        if "raw_response" in result:
+            raw = result["raw_response"]
+            require(isinstance(raw, dict), "raw_response")
+            chunks = raw.get("chunks")
+            require(isinstance(chunks, list), "raw_response.chunks")
+            for chunk in chunks:
+                require(isinstance(chunk, dict), "raw_response.chunks[]")
+                require(number(chunk.get("start")) and number(chunk.get("end"))
+                        and chunk["end"] >= chunk["start"], "raw_response.chunk timing")
+                require(text(chunk.get("status")), "raw_response.chunk status")
+                if chunk.get("status") == "withheld" or str(
+                    chunk.get("status", "")
+                ).startswith("screened"):
+                    require(
+                        isinstance(chunk.get("withheld_text"), str)
+                        and text(chunk.get("reason")),
+                        "withheld chunk keeps its text and reason",
+                    )
     elif backend == BACKEND_FLUID and paired and isinstance(result.get("raw_response"), dict) \
             and "segment_merge" in result["raw_response"]:
         segment_merge_raw(result["raw_response"], result["transcription_text"])

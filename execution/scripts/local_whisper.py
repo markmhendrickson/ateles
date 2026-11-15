@@ -325,19 +325,78 @@ def _parse_whisper_json(json_path: Path) -> tuple[str, str | None]:
     return text, language
 
 
-def timed_segments_from_json(data: dict) -> list[dict]:
-    """Timed ``{"start", "end", "text"}`` segments (seconds) from whisper-cli JSON."""
+def timed_segments_from_json(
+    data: dict, *, source: str | Path | None = None
+) -> list[dict]:
+    """Timed ``{"start", "end", "text"}`` segments (seconds) from whisper-cli JSON.
+
+    A non-object transcription entry (or other malformed segment shape) raises
+    ``LocalWhisperUnavailable`` naming the source file and cause, matching other
+    whisper JSON failures — never a bare ``AttributeError``.
+    """
+    label = Path(source).name if source else "whisper JSON"
     segments = []
-    for seg in data.get("transcription") or []:
-        chunk = (seg.get("text") or "").strip()
-        offsets = seg.get("offsets") or {}
-        if chunk:
-            segments.append({
-                "start": float(offsets["from"]) / 1000.0,
-                "end": float(offsets["to"]) / 1000.0,
-                "text": chunk,
-            })
+    try:
+        for seg in data.get("transcription") or []:
+            if not isinstance(seg, dict):
+                raise TypeError(
+                    f"transcription segment is {type(seg).__name__}, not object"
+                )
+            chunk = (seg.get("text") or "").strip()
+            offsets = seg.get("offsets") or {}
+            if chunk:
+                segments.append({
+                    "start": float(offsets["from"]) / 1000.0,
+                    "end": float(offsets["to"]) / 1000.0,
+                    "text": chunk,
+                })
+    except (TypeError, AttributeError, KeyError, ValueError) as exc:
+        raise LocalWhisperUnavailable(
+            f"malformed whisper JSON in {label}: {exc}"
+        ) from exc
     return segments
+
+
+def _chunk_evidence(found: dict) -> list[dict]:
+    """Per-chunk storage evidence, independent of diarization outcome.
+
+    One record per source chunk: index, time range, status (``kept`` /
+    ``withheld`` / ``silent`` / ``empty``), and — when withheld — reason plus
+    the rejected text. Same ``raw_response.chunks`` field the two-track path
+    uses under each track.
+    """
+    evidence = []
+    for chunk in found.get("chunks") or []:
+        if chunk.get("kind") != "chunk":
+            continue
+        raw_status = str(chunk.get("status") or "")
+        withheld = raw_status.startswith("screened")
+        if withheld:
+            status = "withheld"
+        elif raw_status == "ok":
+            status = "kept"
+        else:
+            status = raw_status or "empty"
+        entry: dict = {
+            "kind": "chunk",
+            "index": chunk.get("index"),
+            "start": float(chunk.get("start", 0.0)),
+            "end": float(chunk.get("end", chunk.get("start", 0.0))),
+            "status": status,
+        }
+        if chunk.get("reason") is not None:
+            entry["reason"] = chunk["reason"]
+        if chunk.get("detail") is not None:
+            entry["detail"] = chunk["detail"]
+        if withheld:
+            entry["withheld_text"] = str(chunk.get("withheld_text", ""))
+        evidence.append(entry)
+    return evidence
+
+
+def _chunk_raw_response(found: dict) -> dict:
+    """``raw_response`` body carrying chunk evidence for stored transcriptions."""
+    return {"chunks": _chunk_evidence(found)}
 
 
 def detected_language_from_json(data: dict) -> str | None:
@@ -531,9 +590,19 @@ def _timed_segments(cmd: list[str], tmp_dir: Path) -> tuple[list[dict] | None, s
         json_path = Path(f"{stem}.json")
         if proc.returncode != 0 or not json_path.is_file():
             return None, f"timed whisper run failed (exit {proc.returncode})"
-        segments = timed_segments_from_json(json.loads(json_path.read_text(encoding="utf-8")))
+        segments = timed_segments_from_json(
+            json.loads(json_path.read_text(encoding="utf-8")),
+            source=json_path,
+        )
         return (segments or None), ("no timed segments" if not segments else "")
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        LocalWhisperUnavailable,
+        subprocess.SubprocessError,
+    ) as exc:
         return None, f"{type(exc).__name__}"
 
 
@@ -748,6 +817,10 @@ def transcribe_local(
                     print(f"Timed whisper pass unusable ({why}); "
                           "keeping untimed text.", file=sys.stderr)
 
+    chunk_raw = (
+        _chunk_raw_response(chunked_found) if chunked_found is not None else None
+    )
+
     if chunked_found is not None and not text_for_screen:
         return {
             "transcription_text": text,
@@ -757,6 +830,7 @@ def transcribe_local(
             "transcription_model": model.name,
             "rms_db": None if rms_db is None else round(rms_db, 1),
             "silence": chunked_silence,
+            "raw_response": chunk_raw,
             **({"diarization": diarization} if diarization is not None else {}),
             **({"segments": segments} if segments else {}),
         }
@@ -804,6 +878,7 @@ def transcribe_local(
             "rms_db": None if rms_db is None else round(rms_db, 1),
             "silence": True,
             "filtered_reason": verdict.reason,
+            **({"raw_response": chunk_raw} if chunk_raw is not None else {}),
         }
 
     return {
@@ -814,6 +889,7 @@ def transcribe_local(
         "transcription_model": model.name,
         "rms_db": None if rms_db is None else round(rms_db, 1),
         "silence": False,
+        **({"raw_response": chunk_raw} if chunk_raw is not None else {}),
         **({"diarization": diarization} if diarization is not None else {}),
         **({"segments": segments} if segments else {}),
     }
