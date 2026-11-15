@@ -242,6 +242,9 @@ def cmd_add(args, base_url, token) -> int:
         fail("--badge-text must not contain control or format characters")
     if _contains_unsafe_free_text(args.badge2_text):
         fail("--badge2-text must not contain control or format characters")
+    for cls in (args.badge_class, args.badge2_class):
+        if cls and not BADGE_CLASS_RE.fullmatch(cls):
+            fail("badge class must match [a-z0-9-]+")
     if not args.title.strip():
         fail("--title must not be blank")
     if not ENTITY_ID_RE.fullmatch(args.page):
@@ -257,9 +260,6 @@ def cmd_add(args, base_url, token) -> int:
         badges.append((args.badge_class or "b-mark", args.badge_text))
     if args.badge2_text:
         badges.append((args.badge2_class or "b-review", args.badge2_text))
-    for cls, _ in badges:
-        if not BADGE_CLASS_RE.fullmatch(cls):
-            fail("badge class must match [a-z0-9-]+")
 
     try:
         page_snapshot = _fetch_snapshot(base_url, token, args.page)

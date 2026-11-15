@@ -466,6 +466,29 @@ def test_unsafe_badge_classes_are_refused_without_echo_or_request(
     assert rejected not in captured.err
 
 
+@pytest.mark.parametrize("class_field", ["badge_class", "badge2_class"])
+def test_unused_newline_terminated_badge_classes_are_refused_without_echo_or_request(
+    fake, capsys, class_field
+):
+    rejected = "synthetic-value-0022\n"
+
+    with pytest.raises(SystemExit) as exc:
+        H.cmd_add(
+            _args(**{class_field: rejected}, badge_text="", badge2_text=""),
+            BASE,
+            "bearer",
+        )
+
+    captured = capsys.readouterr()
+    assert exc.value.code == H.EXIT_ERROR
+    assert fake.snapshot_calls == []
+    assert fake.writes == []
+    assert captured.out == ""
+    assert captured.err == "badge class must match [a-z0-9-]+\n"
+    assert rejected not in captured.out
+    assert rejected not in captured.err
+
+
 def test_marker_name_is_validated(fake):
     for marker in ("UPPER", "a_b", "a.b", "", "a" * 65):
         with pytest.raises(SystemExit):
@@ -578,9 +601,7 @@ def test_bad_page_id_is_refused(fake):
     assert fake.writes == []
 
 
-def test_cmd_add_rejects_newline_terminated_hub_without_request_or_echo(
-    fake, capsys
-):
+def test_cmd_add_rejects_newline_terminated_hub_without_request_or_echo(fake, capsys):
     rejected = f"{HUB_ID}\n"
 
     with pytest.raises(SystemExit) as exc:
@@ -591,9 +612,7 @@ def test_cmd_add_rejects_newline_terminated_hub_without_request_or_echo(
     assert fake.snapshot_calls == []
     assert fake.writes == []
     assert captured.out == ""
-    assert captured.err == (
-        "--hub must look like ent_ followed by 24 hex characters\n"
-    )
+    assert captured.err == ("--hub must look like ent_ followed by 24 hex characters\n")
     assert rejected not in captured.err
 
 
