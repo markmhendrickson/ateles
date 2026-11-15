@@ -210,6 +210,19 @@ def cmd_add(args, base_url, token) -> int:
         if not BADGE_CLASS_RE.match(cls):
             fail(f"badge class must match [a-z0-9-]+: {cls!r}")
 
+    try:
+        page_snapshot = _fetch_snapshot(base_url, token, args.page)
+    except (
+        urllib.error.URLError,
+        json.JSONDecodeError,
+        UnicodeError,
+        TypeError,
+        ValueError,
+    ):
+        fail(f"page {args.page} is not a readable rendered_page; refusing")
+    if page_snapshot.get("entity_type") != "rendered_page":
+        fail(f"page {args.page} is not a readable rendered_page; refusing")
+
     snapshot = _fetch_snapshot(base_url, token, args.hub)
     if snapshot.get("entity_type") != "rendered_page":
         fail(f"hub {args.hub} is not a rendered_page; refusing")

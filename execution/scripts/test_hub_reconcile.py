@@ -50,15 +50,25 @@ class FakeNeotoma:
     def __init__(self, body, drop_writes=False):
         self.body = body
         self.entity_type = "rendered_page"
+        self.page_entity_type = "rendered_page"
+        self.page_missing = False
         self.drop_writes = drop_writes
         self.conflict = False
         self.writes = []
         self.on_second_read = None
         self.after_write = None
         self.reads = 0
+        self.snapshot_calls = []
         self.version = "version-1"
 
     def snapshot(self, base_url, token, entity_id):
+        self.snapshot_calls.append((token, entity_id))
+        if entity_id == NEW_ID:
+            if self.page_missing:
+                raise urllib.error.HTTPError(
+                    f"{base_url}/entities/{entity_id}", 404, "Not Found", {}, None
+                )
+            return {"entity_type": self.page_entity_type}
         self.reads += 1
         if self.reads == 2 and self.on_second_read:
             self.body = self.on_second_read(self.body)
@@ -145,6 +155,48 @@ def test_non_rendered_page_hub_is_refused_without_write(fake, capsys):
     )
 
 
+def test_non_rendered_page_target_is_refused_without_write(
+    fake, capsys, tmp_path
+):
+    fake.page_entity_type = "note"
+    dry_run = tmp_path / "hub.html"
+
+    with pytest.raises(SystemExit) as exc:
+        H.cmd_add(
+            _args(apply=False, dry_run=str(dry_run)),
+            BASE,
+            "bearer",
+        )
+
+    assert exc.value.code == H.EXIT_ERROR
+    assert fake.writes == []
+    assert not dry_run.exists()
+    assert (
+        f"page {NEW_ID} is not a readable rendered_page; refusing"
+        in capsys.readouterr().err
+    )
+
+
+def test_missing_page_target_is_refused_without_write(fake, capsys, tmp_path):
+    fake.page_missing = True
+    dry_run = tmp_path / "hub.html"
+
+    with pytest.raises(SystemExit) as exc:
+        H.cmd_add(
+            _args(apply=False, dry_run=str(dry_run)),
+            BASE,
+            "bearer",
+        )
+
+    assert exc.value.code == H.EXIT_ERROR
+    assert fake.writes == []
+    assert not dry_run.exists()
+    assert (
+        f"page {NEW_ID} is not a readable rendered_page; refusing"
+        in capsys.readouterr().err
+    )
+
+
 def test_marker_present_once_produces_exact_splice_and_preserves_every_other_byte(
     fake, hub
 ):
@@ -158,6 +210,7 @@ def test_marker_present_once_produces_exact_splice_and_preserves_every_other_byt
     assert fake.writes[0]["value"] == expected
     assert fake.writes[0]["expected_version"] == "version-1"
     assert fake.writes[0]["idempotency_key"].startswith(f"hub-add-card-{NEW_ID}-")
+    assert fake.snapshot_calls[0] == ("bearer", NEW_ID)
 
 
 def test_insert_card_is_the_exact_required_expression(hub):
