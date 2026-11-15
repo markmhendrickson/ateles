@@ -268,42 +268,28 @@ Three corollaries that settle the usual arguments:
 2. **A record with no parent gets a card.** The rule routes evidence through its interpreter; it does not let evidence disappear. If a transcript has no recap and no analysis to hang off, it is itself the only destination for that material, so it takes a card until a parent exists — at which point the card moves to the parent.
 3. **Reachability is the invariant, a card is the mechanism.** Every published page in the set must be reachable from the hub in at most two clicks. A page with no card must be linked from a page that has one; verify that link exists rather than assuming it.
 
-Record the decision either way. A page deliberately left uncarded is passed to the reconciler as `--exempt`, so the next audit does not re-raise it and no one has to reconstruct the reasoning.
-
 ### Adding a card without destroying the hub
 
 `correct` REPLACES the entire `html_body`. A hub body runs to tens of kilobytes and dozens of cards, so rewriting it from memory to add one card is how a session silently drops the other twenty-five. Never author a hub body from context. Use the read-modify-write path:
 
 ```bash
-execution/scripts/hub_reconcile.py --hub <hubId> --hub-token <hubGuestToken> \
-  add --page <pageId> --page-token <pageGuestToken> \
-      --section "The materials (living best versions)" \
+# PAGE_GUEST_TOKEN comes from a private (mode 0600) env file
+# loaded into this shell; never type a token inline, since it lands in shell history.
+execution/scripts/hub_reconcile.py --hub <hubId> \
+  add --page <pageId> --apply \
+      --marker <name> \
       --title "…" --desc "…" --badge-text "Recap"
 ```
 
-It fetches the live body, splices the card into the named section, and refuses to write unless the card count went up by exactly one and no previously-linked entity disappeared. Add `--dry-run <path>` to inspect the proposed body first. The card's href carries the TARGET page's own token, because a guest token is not a session.
+`add` is a dry run without `--apply`. The hub needs the marker comment `<!-- hub-cards:<name> -->` placed once where that section's cards end; the tool refuses until it exists exactly once. It fetches the live body and inserts the escaped card immediately before that exact marker without interpreting the surrounding HTML. Add `--dry-run <path>` to inspect the proposed body first. The card's href carries the TARGET page's own token, because a guest token is not a session.
 
 ### A success response is not a landed change
 
 Neotoma has a confirmed defect where a write returns `success: true` without taking effect (issue `ent_e06cca90cb82d6f1f9d485e4`; reported for schema writes, and `publish_rendered_page` separately returns success while continuing to serve the old bytes). Both failures are invisible in the response, so never conclude from a success code that the hub changed.
 
-Verify by re-reading, and prefer the SERVED page over the stored entity — what a reader gets is the only thing that matters:
-
-```bash
-execution/scripts/hub_reconcile.py --hub <hubId> --hub-token <tok> verify --page <pageId>
-```
+`add` re-reads the stored hub body after writing, but does not fetch the served page, so open the new card's link as a guest before sharing.
 
 A byte count is a weak signal, since an equal-length edit leaves it unchanged; assert the card and the entity id are actually present. If verification fails, treat the write as not having happened regardless of what it reported.
-
-### Periodic reconciliation catches what the skill path misses
-
-The in-turn rule only binds pages published through this skill. Pages published any other way still drift, so audit the whole set periodically:
-
-```bash
-execution/scripts/hub_reconcile.py --hub <hubId> check --exempt <deliberately-uncarded ids>
-```
-
-It enumerates `rendered_page` entities, diffs them against what the hub links, and exits non-zero on orphans. It exits 2 and reports INCONCLUSIVE when it cannot enumerate pages at all — an access-scope failure must never read as a clean bill of health.
 
 Note on credentials: a hub on a client instance is usually owned by that instance's shared-graph user. A token scoped to a different user gets `RESOURCE_NOT_FOUND` on an entity that renders perfectly at its guest URL — that is a scope problem, not a missing entity, and writes require the owning identity.
 
