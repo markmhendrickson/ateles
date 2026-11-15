@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import base64
-import json
-
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 
@@ -40,20 +38,18 @@ def _resolver_jwk() -> dict:
     }
 
 
-def _key_file(tmp_path):
+def _key_material():
     jwk = _resolver_jwk()
-    path = tmp_path / "resolver.jwk.json"
-    path.write_text(json.dumps(jwk))
-    return path, jwk_thumbprint(public_part_of(jwk))
+    return jwk, jwk_thumbprint(public_part_of(jwk))
 
 
-def test_sign_checkpoint_resolution_uses_exact_canonical_body(tmp_path) -> None:
-    path, jkt = _key_file(tmp_path)
+def test_sign_checkpoint_resolution_uses_exact_canonical_body() -> None:
+    jwk, jkt = _key_material()
 
     headers = sign_checkpoint_resolution(
         "ent_cp1",
         "approve",
-        private_jwk_path=path,
+        private_jwk=jwk,
         expected_sub="resolver@ateles-swarm",
         expected_jkt=jkt,
         issuer="https://issuer.example",
@@ -81,11 +77,11 @@ def test_sign_checkpoint_resolution_uses_exact_canonical_body(tmp_path) -> None:
     ],
 )
 def test_sign_checkpoint_resolution_rejects_wrong_identity_or_lifetime(
-    tmp_path, override, match
+    override, match
 ) -> None:
-    path, jkt = _key_file(tmp_path)
+    jwk, jkt = _key_material()
     kwargs = {
-        "private_jwk_path": path,
+        "private_jwk": jwk,
         "expected_sub": "resolver@ateles-swarm",
         "expected_jkt": jkt,
         "issuer": "https://issuer.example",

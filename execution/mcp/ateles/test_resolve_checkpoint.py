@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Tests for resolve_checkpoint.py — operator CLI for checkpoint approve/reject.
 
-Each case is designed to fail before the CLI exists (ImportError / missing
-module) and to pass after. Live Neotoma and real resolver keys are never used:
-tests generate a throwaway JWK in tmp and monkeypatch ``_get``,
+Live Neotoma, 1Password, and real resolver keys are never used: tests generate
+a throwaway JWK in memory and monkeypatch ``subprocess.run``, ``_get``,
 ``_checkpoint_resolver_authority``, and ``_resolve_checkpoint``.
 
 What each looked like red (before the change):
-  - ImportError: no module named resolve_checkpoint
-  - After a stub existed without the effect checks: approve reported done on
+  - Before the 1Password change: ``--key-ref`` was unknown, file paths were
+    accepted, and no ``op read`` call existed.
+  - Before the effect checks: approve reported done on
     awaiting_operator read-back; wrong-status checkpoints still signed;
     wrong-thumbprint output leaked JWK member values; batch kept going by
     default; dry-run still called the signer; --yes on a non-TTY was accepted.
@@ -54,6 +54,7 @@ def _operator_at_terminal():
 
 OWNER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 SUB = "resolver@example.test"
+KEY_REF = "op://Resolver/Checkpoint key/private JWK"
 
 
 def _resolver_jwk(*, sub: str = SUB) -> dict:
@@ -77,11 +78,18 @@ def _resolver_jwk(*, sub: str = SUB) -> dict:
     }
 
 
-def _write_key(tmp_path: Path, jwk: dict | None = None) -> tuple[Path, dict, str]:
+def _key_material(jwk: dict | None = None) -> tuple[str, dict, str]:
     material = jwk if jwk is not None else _resolver_jwk()
-    path = tmp_path / "resolver.jwk.json"
-    path.write_text(json.dumps(material))
-    return path, material, jwk_thumbprint(public_part_of(material))
+    return json.dumps(material), material, jwk_thumbprint(public_part_of(material))
+
+
+def _op_result(
+    stdout: str = "",
+    *,
+    returncode: int = 0,
+    stderr: str = "",
+) -> mock.Mock:
+    return mock.Mock(stdout=stdout, stderr=stderr, returncode=returncode)
 
 
 def _checkpoint_entity(
@@ -110,10 +118,10 @@ def _no_batch_delay(monkeypatch):
 
 
 def test_approve_signs_with_checkpoint_authority_and_requires_approved_readback(
-    tmp_path, capsys
+    capsys,
 ):
-    """Red before: ImportError / no CLI; or done without approved read-back."""
-    key_path, _jwk, jkt = _write_key(tmp_path)
+    """Red before: --key-ref was unknown; or done without approved read-back."""
+    key_text, jwk, jkt = _key_material()
     checkpoint_id = "ent_cp_ok"
     entity = _checkpoint_entity(checkpoint_id)
     signed_headers = {
@@ -156,7 +164,11 @@ def test_approve_signs_with_checkpoint_authority_and_requires_approved_readback(
             "action_taken": "approved — task release not confirmed by read-back",
         }
 
-    with mock.patch.object(rc.ateles_server, "_get", side_effect=fake_get), mock.patch.object(
+    with mock.patch.object(
+        rc.subprocess, "run", return_value=_op_result(key_text)
+    ) as op_read, mock.patch.object(
+        rc.ateles_server, "_get", side_effect=fake_get
+    ), mock.patch.object(
         rc.ateles_server,
         "_checkpoint_resolver_authority",
         return_value=(SUB, jkt, OWNER),
@@ -165,17 +177,21 @@ def test_approve_signs_with_checkpoint_authority_and_requires_approved_readback(
     ), mock.patch.object(
         rc.ateles_server, "_resolve_checkpoint", side_effect=fake_resolve
     ):
-        code = rc.main(
-            [checkpoint_id, "approve", "--key", str(key_path)]
-        )
+        code = rc.main([checkpoint_id, "approve", "--key-ref", KEY_REF])
 
     assert code == 0
+    op_read.assert_called_once_with(
+        ["op", "read", "--no-newline", KEY_REF],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     assert len(sign_calls) == 1
     assert sign_calls[0]["checkpoint_id"] == checkpoint_id
     assert sign_calls[0]["action"] == "approve"
     assert sign_calls[0]["expected_sub"] == SUB
     assert sign_calls[0]["expected_jkt"] == jkt
-    assert sign_calls[0]["private_jwk_path"] == key_path
+    assert sign_calls[0]["private_jwk"] == jwk
     assert len(resolve_calls) == 1
     assert resolve_calls[0][0] == checkpoint_id
     assert resolve_calls[0][1] == "approve"
@@ -184,9 +200,9 @@ def test_approve_signs_with_checkpoint_authority_and_requires_approved_readback(
     assert f"{checkpoint_id} Hold for approval -> approved" in out
 
 
-def test_readback_still_awaiting_prints_failed_and_exits_1(tmp_path, capsys):
+def test_readback_still_awaiting_prints_failed_and_exits_1(capsys):
     """Red before: success reported when status never left awaiting_operator."""
-    key_path, _jwk, jkt = _write_key(tmp_path)
+    key_text, _jwk, jkt = _key_material()
     checkpoint_id = "ent_cp_stuck"
     entity = _checkpoint_entity(checkpoint_id)
 
@@ -198,6 +214,8 @@ def test_readback_still_awaiting_prints_failed_and_exits_1(tmp_path, capsys):
         }
 
     with mock.patch.object(
+        rc.subprocess, "run", return_value=_op_result(key_text)
+    ), mock.patch.object(
         rc.ateles_server, "_get", return_value=entity
     ), mock.patch.object(
         rc.ateles_server,
@@ -216,9 +234,7 @@ def test_readback_still_awaiting_prints_failed_and_exits_1(tmp_path, capsys):
     ), mock.patch.object(
         rc.ateles_server, "_resolve_checkpoint", side_effect=fake_resolve
     ):
-        code = rc.main(
-            [checkpoint_id, "approve", "--key", str(key_path)]
-        )
+        code = rc.main([checkpoint_id, "approve", "--key-ref", KEY_REF])
 
     captured = capsys.readouterr()
     assert code == 1
@@ -226,14 +242,16 @@ def test_readback_still_awaiting_prints_failed_and_exits_1(tmp_path, capsys):
     assert "awaiting_operator" in captured.out
 
 
-def test_not_awaiting_operator_refuses_without_signing(tmp_path, capsys):
+def test_not_awaiting_operator_refuses_without_signing(capsys):
     """Red before: already-resolved checkpoints were still signed."""
-    key_path, _jwk, jkt = _write_key(tmp_path)
+    key_text, _jwk, jkt = _key_material()
     checkpoint_id = "ent_cp_done"
     entity = _checkpoint_entity(checkpoint_id, status="approved")
     sign = mock.Mock()
 
     with mock.patch.object(
+        rc.subprocess, "run", return_value=_op_result(key_text)
+    ), mock.patch.object(
         rc.ateles_server, "_get", return_value=entity
     ), mock.patch.object(
         rc.ateles_server,
@@ -242,9 +260,7 @@ def test_not_awaiting_operator_refuses_without_signing(tmp_path, capsys):
     ), mock.patch.object(rc, "sign_checkpoint_resolution", sign), mock.patch.object(
         rc.ateles_server, "_resolve_checkpoint", mock.AsyncMock()
     ) as resolve:
-        code = rc.main(
-            [checkpoint_id, "approve", "--key", str(key_path)]
-        )
+        code = rc.main([checkpoint_id, "approve", "--key-ref", KEY_REF])
 
     assert code == 1
     sign.assert_not_called()
@@ -254,14 +270,16 @@ def test_not_awaiting_operator_refuses_without_signing(tmp_path, capsys):
     assert "awaiting_operator" in out
 
 
-def test_wrong_thumbprint_refused_without_key_material(tmp_path, capsys):
-    """Red before: refusal text included JWK member values from the file."""
-    key_path, jwk, _jkt = _write_key(tmp_path)
+def test_wrong_thumbprint_refused_without_key_material(capsys):
+    """Red before: refusal text included JWK member values."""
+    key_text, jwk, _jkt = _key_material()
     wrong_jkt = "B" * 43
     checkpoint_id = "ent_cp_jkt"
     entity = _checkpoint_entity(checkpoint_id)
 
     with mock.patch.object(
+        rc.subprocess, "run", return_value=_op_result(key_text)
+    ), mock.patch.object(
         rc.ateles_server, "_get", return_value=entity
     ), mock.patch.object(
         rc.ateles_server,
@@ -269,9 +287,7 @@ def test_wrong_thumbprint_refused_without_key_material(tmp_path, capsys):
         return_value=(SUB, wrong_jkt, OWNER),
     ):
         # Real signer: wrong expected_jkt must refuse before headers exist.
-        code = rc.main(
-            [checkpoint_id, "approve", "--key", str(key_path)]
-        )
+        code = rc.main([checkpoint_id, "approve", "--key-ref", KEY_REF])
 
     captured = capsys.readouterr()
     combined = captured.out + captured.err
@@ -282,9 +298,215 @@ def test_wrong_thumbprint_refused_without_key_material(tmp_path, capsys):
     assert json.dumps(jwk) not in combined
 
 
+def test_malformed_jwk_is_normalized_without_key_material(capsys):
+    """Malformed in-memory key errors expose no JWK member."""
+    marker = "PRIVATE_JWK_SENTINEL"
+    jwk = {
+        "kty": "EC",
+        "crv": "P-256",
+        "d": marker,
+        "x": "invalid",
+        "y": "invalid",
+        "sub": SUB,
+    }
+    checkpoint_id = "ent_cp_malformed_key"
+    entity = _checkpoint_entity(checkpoint_id)
+    resolve = mock.AsyncMock()
+
+    with mock.patch.object(
+        rc.subprocess, "run", return_value=_op_result(json.dumps(jwk))
+    ), mock.patch.object(
+        rc.ateles_server, "_get", return_value=entity
+    ), mock.patch.object(
+        rc.ateles_server,
+        "_checkpoint_resolver_authority",
+        return_value=(SUB, "A" * 43, OWNER),
+    ), mock.patch.object(
+        rc.ateles_server, "_resolve_checkpoint", resolve
+    ):
+        code = rc.main([checkpoint_id, "approve", "--key-ref", KEY_REF])
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert code == rc.EXIT_FAILURE
+    resolve.assert_not_called()
+    assert "could not load resolver JWK" in combined
+    assert marker not in combined
+    assert json.dumps(jwk) not in combined
+
+
+def test_key_file_option_is_not_supported(capsys):
+    """Red before: --key accepted a host-readable resolver key path."""
+    with mock.patch.object(rc.subprocess, "run") as op_read:
+        code = rc.main(
+            ["ent_cp_path", "approve", "--key", "/tmp/resolver.jwk.json"]
+        )
+
+    assert code == rc.EXIT_USAGE
+    op_read.assert_not_called()
+    assert "unrecognized arguments: --key" in capsys.readouterr().err
+
+
+def test_non_op_reference_is_refused_before_read_or_sign(capsys):
+    """Red before: --key-ref did not exist or references were not validated."""
+    sign = mock.Mock()
+    with mock.patch.object(rc.subprocess, "run") as op_read, mock.patch.object(
+        rc, "sign_checkpoint_resolution", sign
+    ):
+        code = rc.main(
+            ["ent_cp_bad_ref", "approve", "--key-ref", "/tmp/resolver.jwk.json"]
+        )
+
+    assert code == rc.EXIT_FAILURE
+    op_read.assert_not_called()
+    sign.assert_not_called()
+    assert "must be an op:// reference" in capsys.readouterr().err
+
+
+def test_non_op_reference_is_refused_even_in_dry_run(capsys):
+    """A dry run skips key access but does not accept a key-file replacement."""
+    with mock.patch.object(rc.subprocess, "run") as op_read:
+        code = rc.main(
+            [
+                "ent_cp_bad_ref",
+                "approve",
+                "--dry-run",
+                "--key-ref",
+                "/tmp/resolver.jwk.json",
+            ]
+        )
+
+    assert code == rc.EXIT_FAILURE
+    op_read.assert_not_called()
+    assert "must be an op:// reference" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stderr"),
+    [
+        (1, "Touch ID prompt cancelled"),
+        (7, "1Password account unavailable"),
+    ],
+)
+def test_op_failure_or_cancellation_signs_nothing(
+    returncode, stderr, capsys
+):
+    """Red before: no Touch ID-gated op read existed."""
+    checkpoint_id = "ent_cp_op_failed"
+    _key_text, _jwk, jkt = _key_material()
+    entity = _checkpoint_entity(checkpoint_id)
+    sign = mock.Mock()
+    resolve = mock.AsyncMock()
+
+    with mock.patch.object(
+        rc.subprocess,
+        "run",
+        return_value=_op_result(
+            "PRIVATE_KEY_MUST_NOT_APPEAR",
+            returncode=returncode,
+            stderr=stderr,
+        ),
+    ), mock.patch.object(
+        rc.ateles_server, "_get", return_value=entity
+    ), mock.patch.object(
+        rc.ateles_server,
+        "_checkpoint_resolver_authority",
+        return_value=(SUB, jkt, OWNER),
+    ), mock.patch.object(
+        rc, "sign_checkpoint_resolution", sign
+    ), mock.patch.object(
+        rc.ateles_server, "_resolve_checkpoint", resolve
+    ):
+        code = rc.main([checkpoint_id, "approve", "--key-ref", KEY_REF])
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert code == rc.EXIT_FAILURE
+    sign.assert_not_called()
+    resolve.assert_not_called()
+    assert f"op exit code {returncode}" in combined
+    assert "PRIVATE_KEY_MUST_NOT_APPEAR" not in combined
+    assert stderr not in combined
+
+
+def test_op_output_never_appears_in_exception():
+    """Red before: the in-memory 1Password reader did not exist."""
+    marker = "PRIVATE_JWK_SENTINEL"
+    with mock.patch.object(
+        rc.subprocess,
+        "run",
+        return_value=_op_result(marker, returncode=9, stderr=f"failed: {marker}"),
+    ), pytest.raises(rc.ResolveError) as caught:
+        rc._read_key_from_1password(KEY_REF)
+
+    message = str(caught.value)
+    assert marker not in message
+    assert message == "could not read resolver key from 1Password (op exit code 9)"
+
+
+def test_missing_op_refuses_without_leaking_os_error():
+    """A missing CLI is a closed failure with no path or OS detail."""
+    with mock.patch.object(
+        rc.subprocess, "run", side_effect=FileNotFoundError("sensitive path")
+    ), pytest.raises(rc.ResolveError) as caught:
+        rc._read_key_from_1password(KEY_REF)
+
+    assert str(caught.value) == (
+        "could not read resolver key from 1Password "
+        "(op exit code unavailable)"
+    )
+    assert caught.value.__cause__ is None
+
+
+def test_op_read_happens_only_after_confirmation(capsys):
+    """Red before: no ordering existed between confirmation and key access."""
+    key_text, _jwk, jkt = _key_material()
+    checkpoint_id = "ent_cp_order"
+    reads = {f"/entities/{checkpoint_id}": _checkpoint_entity(checkpoint_id)}
+    confirmed = False
+
+    def fake_input(_prompt: str) -> str:
+        nonlocal confirmed
+        confirmed = True
+        return "y"
+
+    def fake_op(*args, **kwargs):
+        assert confirmed
+        return _op_result(key_text)
+
+    def fake_sign(checkpoint_id_arg, action, **kwargs):
+        reads[f"/entities/{checkpoint_id}"] = _checkpoint_entity(
+            checkpoint_id, status="approved"
+        )
+        return {"signature": "s"}
+
+    async def fake_resolve(checkpoint_id_arg, action, resolver_aauth_headers=None):
+        return {"new_status": "approved"}
+
+    with mock.patch("builtins.input", side_effect=fake_input), mock.patch.object(
+        rc.subprocess, "run", side_effect=fake_op
+    ) as op_read, mock.patch.object(
+        rc.ateles_server, "_get", side_effect=lambda path, params=None: reads.get(path)
+    ), mock.patch.object(
+        rc.ateles_server,
+        "_checkpoint_resolver_authority",
+        return_value=(SUB, jkt, OWNER),
+    ), mock.patch.object(
+        rc, "sign_checkpoint_resolution", side_effect=fake_sign
+    ), mock.patch.object(
+        rc.ateles_server, "_resolve_checkpoint", side_effect=fake_resolve
+    ):
+        code = rc.main([checkpoint_id, "approve", "--key-ref", KEY_REF])
+
+    assert code == rc.EXIT_OK
+    assert confirmed
+    op_read.assert_called_once()
+    assert "-> approved" in capsys.readouterr().out
+
+
 def test_batch_stops_at_first_failure_unless_keep_going(tmp_path, capsys):
     """Red before: batch always continued / counts were wrong."""
-    key_path, _jwk, jkt = _write_key(tmp_path)
+    key_text, _jwk, jkt = _key_material()
     batch = tmp_path / "batch.txt"
     batch.write_text("# comment\n\nent_a\nent_b\nent_c\n")
 
@@ -331,6 +553,8 @@ def test_batch_stops_at_first_failure_unless_keep_going(tmp_path, capsys):
 
     def run_batch(*extra: str) -> int:
         with mock.patch.object(
+            rc.subprocess, "run", return_value=_op_result(key_text)
+        ) as op_read, mock.patch.object(
             rc.ateles_server, "_get", side_effect=fake_get
         ), mock.patch.object(
             rc.ateles_server,
@@ -343,17 +567,19 @@ def test_batch_stops_at_first_failure_unless_keep_going(tmp_path, capsys):
         ), mock.patch.object(sys.stdin, "isatty", return_value=True), mock.patch.object(
             rc, "_confirm"
         ):
-            return rc.main(
+            code = rc.main(
                 [
                     "--batch",
                     str(batch),
                     "approve",
-                    "--key",
-                    str(key_path),
+                    "--key-ref",
+                    KEY_REF,
                     "--yes",
                     *extra,
                 ]
             )
+        op_read.assert_called_once()
+        return code
 
     store.clear()
     store.update(entities)
@@ -373,13 +599,13 @@ def test_batch_stops_at_first_failure_unless_keep_going(tmp_path, capsys):
 
 
 def test_dry_run_never_calls_signer(tmp_path, capsys):
-    """Red before: dry-run still invoked sign_checkpoint_resolution."""
+    """Dry-run never invokes 1Password, the signer, or the server mutation."""
     checkpoint_id = "ent_cp_dry"
     entity = _checkpoint_entity(checkpoint_id)
     sign = mock.Mock()
     resolve = mock.AsyncMock()
 
-    with mock.patch.object(
+    with mock.patch.object(rc.subprocess, "run") as op_read, mock.patch.object(
         rc.ateles_server, "_get", return_value=entity
     ), mock.patch.object(
         rc.ateles_server,
@@ -391,6 +617,7 @@ def test_dry_run_never_calls_signer(tmp_path, capsys):
         code = rc.main([checkpoint_id, "approve", "--dry-run"])
 
     assert code == 0
+    op_read.assert_not_called()
     sign.assert_not_called()
     resolve.assert_not_called()
     out = capsys.readouterr().out
@@ -399,29 +626,34 @@ def test_dry_run_never_calls_signer(tmp_path, capsys):
     assert "high" in out
 
 
-def test_yes_without_tty_refused_unless_dry_run(tmp_path, capsys):
+def test_yes_without_tty_refused_unless_dry_run(capsys):
     """Red before: --yes was accepted on a non-interactive stdin."""
-    key_path, _jwk, jkt = _write_key(tmp_path)
+    key_text, _jwk, jkt = _key_material()
     checkpoint_id = "ent_cp_tty"
     entity = _checkpoint_entity(checkpoint_id)
 
-    with mock.patch.object(sys.stdin, "isatty", return_value=False), mock.patch.object(
+    with mock.patch.object(
+        rc.subprocess, "run", return_value=_op_result(key_text)
+    ) as op_read, mock.patch.object(
+        sys.stdin, "isatty", return_value=False
+    ), mock.patch.object(
         rc.ateles_server, "_get", return_value=entity
     ), mock.patch.object(
         rc.ateles_server,
         "_checkpoint_resolver_authority",
         return_value=(SUB, jkt, OWNER),
     ), mock.patch.object(rc, "sign_checkpoint_resolution") as sign:
-        code = rc.main(
-            [checkpoint_id, "approve", "--key", str(key_path), "--yes"]
-        )
+        code = rc.main([checkpoint_id, "approve", "--key-ref", KEY_REF, "--yes"])
 
     assert code == 1
+    op_read.assert_not_called()
     sign.assert_not_called()
     err = capsys.readouterr().err
     assert "--yes requires a TTY" in err
 
-    with mock.patch.object(sys.stdin, "isatty", return_value=False), mock.patch.object(
+    with mock.patch.object(rc.subprocess, "run") as op_dry, mock.patch.object(
+        sys.stdin, "isatty", return_value=False
+    ), mock.patch.object(
         rc.ateles_server, "_get", return_value=entity
     ), mock.patch.object(
         rc.ateles_server,
@@ -433,17 +665,22 @@ def test_yes_without_tty_refused_unless_dry_run(tmp_path, capsys):
         )
 
     assert code_dry == 0
+    op_dry.assert_not_called()
     sign_dry.assert_not_called()
 
 
-def test_single_id_without_tty_refused_without_signing(tmp_path, capsys):
+def test_single_id_without_tty_refused_without_signing(capsys):
     """Red before (Pavo, PR #1768): one id skipped both the TTY gate and the
     confirmation, so a non-interactive process holding the key could resolve."""
-    key_path, _jwk, jkt = _write_key(tmp_path)
+    key_text, _jwk, jkt = _key_material()
     checkpoint_id = "ent_cp_unattended"
     entity = _checkpoint_entity(checkpoint_id)
 
-    with mock.patch.object(sys.stdin, "isatty", return_value=False), mock.patch.object(
+    with mock.patch.object(
+        rc.subprocess, "run", return_value=_op_result(key_text)
+    ) as op_read, mock.patch.object(
+        sys.stdin, "isatty", return_value=False
+    ), mock.patch.object(
         rc.ateles_server, "_get", return_value=entity
     ), mock.patch.object(
         rc.ateles_server,
@@ -452,21 +689,26 @@ def test_single_id_without_tty_refused_without_signing(tmp_path, capsys):
     ), mock.patch.object(rc, "sign_checkpoint_resolution") as sign, mock.patch.object(
         rc.ateles_server, "_resolve_checkpoint"
     ) as resolve:
-        code = rc.main([checkpoint_id, "approve", "--key", str(key_path)])
+        code = rc.main([checkpoint_id, "approve", "--key-ref", KEY_REF])
 
     assert code == 1
+    op_read.assert_not_called()
     sign.assert_not_called()
     resolve.assert_not_called()
     assert "requires a TTY" in capsys.readouterr().err
 
 
-def test_single_id_declined_confirmation_never_signs(tmp_path, capsys):
+def test_single_id_declined_confirmation_never_signs(capsys):
     """Red before: one id resolved with no confirmation prompt at all."""
-    key_path, _jwk, jkt = _write_key(tmp_path)
+    key_text, _jwk, jkt = _key_material()
     checkpoint_id = "ent_cp_declined"
     entity = _checkpoint_entity(checkpoint_id)
 
-    with mock.patch("builtins.input", return_value="n") as ask, mock.patch.object(
+    with mock.patch.object(
+        rc.subprocess, "run", return_value=_op_result(key_text)
+    ) as op_read, mock.patch(
+        "builtins.input", return_value="n"
+    ) as ask, mock.patch.object(
         rc.ateles_server, "_get", return_value=entity
     ), mock.patch.object(
         rc.ateles_server,
@@ -475,9 +717,10 @@ def test_single_id_declined_confirmation_never_signs(tmp_path, capsys):
     ), mock.patch.object(rc, "sign_checkpoint_resolution") as sign, mock.patch.object(
         rc.ateles_server, "_resolve_checkpoint"
     ) as resolve:
-        code = rc.main([checkpoint_id, "approve", "--key", str(key_path)])
+        code = rc.main([checkpoint_id, "approve", "--key-ref", KEY_REF])
 
     assert code == 1
+    op_read.assert_not_called()
     ask.assert_called_once()
     assert checkpoint_id in ask.call_args.args[0]
     sign.assert_not_called()
@@ -485,10 +728,10 @@ def test_single_id_declined_confirmation_never_signs(tmp_path, capsys):
     assert "confirmation declined" in capsys.readouterr().err
 
 
-def test_selection_listed_before_confirmation_and_release_result_shown(tmp_path, capsys):
+def test_selection_listed_before_confirmation_and_release_result_shown(capsys):
     """Red before (Falco, Accipiter advisories): the prompt showed only a count,
     and success output dropped the server's action_taken."""
-    key_path, _jwk, jkt = _write_key(tmp_path)
+    key_text, _jwk, jkt = _key_material()
     checkpoint_id = "ent_cp_listed"
     reads = {f"/entities/{checkpoint_id}": _checkpoint_entity(checkpoint_id)}
     seen_before_prompt: list[str] = []
@@ -506,7 +749,11 @@ def test_selection_listed_before_confirmation_and_release_result_shown(tmp_path,
     async def fake_resolve(checkpoint_id_arg, action, resolver_aauth_headers=None):
         return {"new_status": "approved", "action_taken": "approved and task released"}
 
-    with mock.patch("builtins.input", side_effect=fake_input), mock.patch.object(
+    with mock.patch.object(
+        rc.subprocess, "run", return_value=_op_result(key_text)
+    ) as op_read, mock.patch(
+        "builtins.input", side_effect=fake_input
+    ), mock.patch.object(
         rc.ateles_server, "_get", side_effect=lambda path, params=None: reads.get(path)
     ), mock.patch.object(
         rc.ateles_server,
@@ -517,9 +764,10 @@ def test_selection_listed_before_confirmation_and_release_result_shown(tmp_path,
     ), mock.patch.object(
         rc.ateles_server, "_resolve_checkpoint", side_effect=fake_resolve
     ):
-        code = rc.main([checkpoint_id, "approve", "--key", str(key_path)])
+        code = rc.main([checkpoint_id, "approve", "--key-ref", KEY_REF])
 
     assert code == 0
+    op_read.assert_called_once()
     assert seen_before_prompt and f"{checkpoint_id} title=" in seen_before_prompt[0]
     assert "approved and task released" in capsys.readouterr().out
 

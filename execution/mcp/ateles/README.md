@@ -284,7 +284,7 @@ The `mcp<2` pin is deliberate: 2.0 renamed `Tool.inputSchema` and removed
 `resolve_checkpoint` does not possess the resolver's private key. A separate
 trusted caller uses
 `lib.daemon_runtime.checkpoint_resolution.sign_checkpoint_resolution` with the
-existing resolver JWK path, expected subject, issuer, and the JKT derived from
+resolver JWK held in memory, expected subject, issuer, and the JKT derived from
 that key's public companion. The helper signs the exact compact, sorted
 `POST <NEOTOMA_BASE_URL>/correct` body in memory and returns the five
 `resolver_aauth_headers`; it never prints or forwards the private JWK. The body
@@ -314,18 +314,31 @@ server.
 
 `execution/scripts/resolve_checkpoint.py` is the operator-run caller: it reads
 each `checkpoint_brief`, signs with the checkpoint's own required subject and
-JKT, and submits through the server's `_resolve_checkpoint` path. Pass the
-resolver private JWK with `--key` or `ATELES_CHECKPOINT_RESOLVER_JWK` (no
-default path). The script never prints the key or the signed headers.
+JKT, and submits through the server's `_resolve_checkpoint` path.
+
+Store the complete resolver private JWK in a concealed 1Password item field.
+Enable the 1Password desktop app's CLI integration, then use 1Password's
+**Copy Secret Reference** action for that field. Pass the resulting `op://`
+reference with `--key-ref`, or set `ATELES_CHECKPOINT_RESOLVER_OP_REF` to the
+reference. The environment variable contains only the reference, not the key.
+No key file or default key path is supported.
+
+For every real run, the command lists the selected checkpoints and obtains
+confirmation before it calls `op read --no-newline <reference>`. The desktop
+integration can therefore require Touch ID at the signing boundary. The
+command captures the JWK in memory, reads it only once per run, and never
+prints the key, 1Password's raw output, or the signed headers.
 
 ```bash
 # Single checkpoint
 python3 execution/scripts/resolve_checkpoint.py \
-  ent_<checkpoint_id> approve --key /path/to/resolver.jwk.json
+  ent_<checkpoint_id> approve \
+  --key-ref 'op://<vault>/<item>/<field>'
 
 # Batch (one id per line; blank lines and # comments ignored)
 python3 execution/scripts/resolve_checkpoint.py \
-  --batch /path/to/checkpoint-ids.txt approve --key /path/to/resolver.jwk.json
+  --batch /path/to/checkpoint-ids.txt approve \
+  --key-ref 'op://<vault>/<item>/<field>'
 ```
 
 Use `reject` instead of `approve` when declining. `--dry-run` prints id, title,

@@ -3,24 +3,35 @@
 
 Signs the exact RFC 9421 headers with the resolver private JWK, then submits
 them through the MCP server's ``_resolve_checkpoint`` verification path. The
-private key never leaves this process and is never printed.
+private JWK stays in a 1Password item field. Each real run calls
+``op read --no-newline`` after confirmation, allowing the 1Password desktop
+app's CLI integration to require Touch ID. The key exists only in this
+process's memory while signing and is never printed, logged, or written.
+
+In 1Password, store the complete resolver private JWK in a concealed field,
+enable the desktop app's CLI integration, and copy that field's ``op://``
+secret reference. Pass only the reference:
 
 Usage:
     python3 execution/scripts/resolve_checkpoint.py \\
-        <checkpoint_id> approve|reject --key <path-to-resolver-private-jwk>
+        <checkpoint_id> approve|reject --key-ref 'op://<vault>/<item>/<field>'
 
     python3 execution/scripts/resolve_checkpoint.py \\
-        --batch <file> approve|reject --key <path-to-resolver-private-jwk>
+        --batch <file> approve|reject \\
+        --key-ref 'op://<vault>/<item>/<field>'
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MCP_DIR = _REPO_ROOT / "execution" / "mcp" / "ateles"
@@ -35,7 +46,7 @@ from lib.daemon_runtime.checkpoint_resolution import (  # noqa: E402
 
 import server as ateles_server  # noqa: E402
 
-ENV_KEY_PATH = "ATELES_CHECKPOINT_RESOLVER_JWK"
+ENV_KEY_REF = "ATELES_CHECKPOINT_RESOLVER_OP_REF"
 TITLE_MAX = 60
 BATCH_ITEM_DELAY_SECONDS = 2.0
 
@@ -55,16 +66,56 @@ def _truncate_title(title: object) -> str:
     return text[: TITLE_MAX - 1] + "…"
 
 
-def _resolve_key_path(explicit: str | None) -> Path:
-    raw = (explicit or os.environ.get(ENV_KEY_PATH) or "").strip()
+def _resolve_key_ref(explicit: str | None) -> str:
+    raw = (explicit or os.environ.get(ENV_KEY_REF) or "").strip()
     if not raw:
         raise ResolveError(
-            f"resolver key path required via --key or {ENV_KEY_PATH}"
+            f"resolver key reference required via --key-ref or {ENV_KEY_REF}"
         )
-    path = Path(raw).expanduser()
-    if not path.is_file():
-        raise ResolveError("resolver key path is not a readable file")
-    return path
+    if not raw.startswith("op://") or raw == "op://":
+        raise ResolveError("resolver key reference must be an op:// reference")
+    return raw
+
+
+def _read_key_from_1password(key_ref: str) -> dict[str, Any]:
+    """Read and parse the resolver JWK without exposing 1Password output."""
+    try:
+        completed = subprocess.run(
+            ["op", "read", "--no-newline", key_ref],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        raise ResolveError(
+            "could not read resolver key from 1Password "
+            "(op exit code unavailable)"
+        ) from None
+
+    try:
+        exit_code = completed.returncode
+        if exit_code != 0:
+            raise ResolveError(
+                "could not read resolver key from 1Password "
+                f"(op exit code {exit_code})"
+            )
+        try:
+            key = json.loads(completed.stdout)
+        except (json.JSONDecodeError, TypeError):
+            raise ResolveError(
+                "could not read resolver key from 1Password "
+                f"(op exit code {exit_code})"
+            ) from None
+    finally:
+        completed.stdout = ""
+        completed.stderr = ""
+
+    if not isinstance(key, dict):
+        raise ResolveError(
+            "could not read resolver key from 1Password "
+            f"(op exit code {exit_code})"
+        )
+    return key
 
 
 def _read_batch_ids(path: Path) -> list[str]:
@@ -117,7 +168,7 @@ def _sign_headers(
     checkpoint_id: str,
     action: str,
     *,
-    key_path: Path,
+    private_jwk: dict[str, Any],
     required_sub: str,
     required_jkt: str,
 ) -> dict[str, str]:
@@ -125,7 +176,7 @@ def _sign_headers(
         return sign_checkpoint_resolution(
             checkpoint_id,
             action,
-            private_jwk_path=key_path,
+            private_jwk=private_jwk,
             expected_sub=required_sub,
             expected_jkt=required_jkt,
             issuer=ateles_server.CHECKPOINT_RESOLVER_ISSUER,
@@ -194,7 +245,7 @@ def resolve_one(
     checkpoint_id: str,
     action: str,
     *,
-    key_path: Path,
+    private_jwk: dict[str, Any],
 ) -> None:
     """Resolve one checkpoint. Raises ResolveError on refusal or failed effect."""
     try:
@@ -212,7 +263,7 @@ def resolve_one(
         headers = _sign_headers(
             checkpoint_id,
             action,
-            key_path=key_path,
+            private_jwk=private_jwk,
             required_sub=required_sub,
             required_jkt=required_jkt,
         )
@@ -266,6 +317,7 @@ def _require_yes_tty(*, dry_run: bool, yes: bool) -> None:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
+        allow_abbrev=False,
         description=(
             "Approve or reject swarm checkpoint_briefs using the operator "
             "resolver JWK. Never prints key material or signed headers."
@@ -287,11 +339,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="file of checkpoint ids (one per line; # comments and blanks ok)",
     )
     parser.add_argument(
-        "--key",
-        metavar="PATH",
+        "--key-ref",
+        metavar="OP_REFERENCE",
         help=(
-            f"path to resolver private JWK "
-            f"(or set {ENV_KEY_PATH}; no default path)"
+            f"1Password op:// reference to the resolver private JWK "
+            f"(or set {ENV_KEY_REF}; no default)"
         ),
     )
     parser.add_argument(
@@ -334,9 +386,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             ids = [args.checkpoint_id]
 
-        key_path: Path | None = None
-        if not args.dry_run:
-            key_path = _resolve_key_path(args.key)
+        key_ref: str | None = None
+        if args.key_ref is not None or not args.dry_run:
+            key_ref = _resolve_key_ref(args.key_ref)
 
         # Every real resolution, single or batch, is the operator's at a
         # terminal: a non-interactive process holding the key is refused.
@@ -357,33 +409,43 @@ def main(argv: list[str] | None = None) -> int:
             if not args.yes:
                 _confirm(ids, args.action)
 
-        done = 0
-        skipped = 0
-        failed = 0
+        private_jwk: dict[str, Any] | None = None
+        if not args.dry_run:
+            assert key_ref is not None
+            private_jwk = _read_key_from_1password(key_ref)
 
-        for index, checkpoint_id in enumerate(ids):
-            if index > 0 and not args.dry_run:
-                time.sleep(BATCH_ITEM_DELAY_SECONDS)
-            try:
-                if args.dry_run:
-                    dry_run_one(checkpoint_id)
-                    skipped += 1
-                else:
-                    assert key_path is not None
-                    resolve_one(checkpoint_id, args.action, key_path=key_path)
-                    done += 1
-            except ResolveError as exc:
-                failed += 1
-                if not isinstance(exc, ReportedResolveError):
-                    _print_result_line(
-                        checkpoint_id,
-                        "",
-                        "",
-                        failed=True,
-                        detail=str(exc),
-                    )
-                if args.batch and not args.keep_going:
-                    break
+        done = skipped = failed = 0
+
+        try:
+            for index, checkpoint_id in enumerate(ids):
+                if index > 0 and not args.dry_run:
+                    time.sleep(BATCH_ITEM_DELAY_SECONDS)
+                try:
+                    if args.dry_run:
+                        dry_run_one(checkpoint_id)
+                        skipped += 1
+                    else:
+                        assert private_jwk is not None
+                        resolve_one(
+                            checkpoint_id,
+                            args.action,
+                            private_jwk=private_jwk,
+                        )
+                        done += 1
+                except ResolveError as exc:
+                    failed += 1
+                    if not isinstance(exc, ReportedResolveError):
+                        _print_result_line(
+                            checkpoint_id,
+                            "",
+                            "",
+                            failed=True,
+                            detail=str(exc),
+                        )
+                    if args.batch and not args.keep_going:
+                        break
+        finally:
+            private_jwk = None
 
         if args.batch or len(ids) > 1:
             print(f"done={done} skipped={skipped} failed={failed}")
