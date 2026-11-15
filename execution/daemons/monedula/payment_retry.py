@@ -18,11 +18,17 @@ from pathlib import Path
 from typing import Any, Sequence
 from zoneinfo import ZoneInfo
 
-import payment_approval
-import payment_journal
-from attendance import parse_reply
-from consent_email import PendingItem, journal_path as default_journal_path
-from consent_email import obligation_key
+# Direct script execution puts only this daemon directory on ``sys.path``.
+# Add the repository root before importing consent_email, which uses ``lib``.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import payment_approval  # noqa: E402
+import payment_journal  # noqa: E402
+from attendance import parse_reply  # noqa: E402
+from consent_email import PendingItem, journal_path as default_journal_path  # noqa: E402
+from consent_email import obligation_key  # noqa: E402
 
 DEFINITE_FAILURE_OUTCOME = "failed"
 KNOWN_REFUSED_OUTCOMES = frozenset(

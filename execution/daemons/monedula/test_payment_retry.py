@@ -7,6 +7,8 @@ network, or the production journal.
 from __future__ import annotations
 
 import copy
+import os
+import subprocess
 import sys
 import types
 from datetime import datetime, timezone
@@ -330,3 +332,21 @@ def test_retry_uses_handler_execute_without_memo_or_op_return(retry_env):
     (match,) = handler.execute_calls
     assert "memo" not in match
     assert "op_return" not in match
+
+
+def test_documented_script_runs_from_repository_root(tmp_path):
+    script = Path(payment_retry.__file__).resolve()
+    repo_root = script.parents[3]
+    env = dict(os.environ, HOME=str(tmp_path))
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "original obligation key or handler:event-id" in result.stdout
