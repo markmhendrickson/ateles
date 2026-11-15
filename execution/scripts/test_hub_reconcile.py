@@ -14,8 +14,12 @@ Run with:
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import socket
 import sys
+import threading
 import urllib.error
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -499,14 +503,14 @@ def test_guest_token_flags_and_removed_section_flag_are_rejected(monkeypatch):
     monkeypatch.setattr(sys, "argv", argv)
     with pytest.raises(SystemExit) as exc:
         H.main()
-    assert exc.value.code == 2
+    assert exc.value.code == H.EXIT_ERROR
 
 
 def test_sections_subcommand_is_removed(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["hub_reconcile.py", "--hub", HUB_ID, "sections"])
     with pytest.raises(SystemExit) as exc:
         H.main()
-    assert exc.value.code == 2
+    assert exc.value.code == H.EXIT_ERROR
 
 
 @pytest.mark.parametrize(
@@ -542,7 +546,7 @@ def test_argument_errors_do_not_echo_rejected_values(
         H.main()
 
     captured = capsys.readouterr()
-    assert exc.value.code == 2
+    assert exc.value.code == H.EXIT_ERROR
     assert captured.out == ""
     assert captured.err == "invalid arguments; run with --help\n"
     assert rejected_value not in captured.out
@@ -568,7 +572,7 @@ def test_subparser_argument_errors_use_safe_message(monkeypatch, capsys):
         H.main()
 
     captured = capsys.readouterr()
-    assert exc.value.code == 2
+    assert exc.value.code == H.EXIT_ERROR
     assert captured.out == ""
     assert captured.err == "invalid arguments; run with --help\n"
     assert "synthetic-value-0006" not in captured.err
@@ -666,6 +670,43 @@ def test_base_url_with_query_is_refused(capsys):
     )
 
 
+@pytest.mark.parametrize(
+    "rejected_character", ["\x85", "é"], ids=["c1-control", "non-ascii"]
+)
+def test_base_url_requires_printable_ascii(capsys, rejected_character):
+    rejected = f"https://example.com/synthetic-value-0013{rejected_character}"
+
+    with pytest.raises(SystemExit) as exc:
+        H._check_base_url(rejected)
+
+    captured = capsys.readouterr()
+    assert exc.value.code == H.EXIT_ERROR
+    assert captured.out == ""
+    assert captured.err == (
+        "NEOTOMA_BASE_URL must not contain credentials, a query, "
+        "a fragment or control characters\n"
+    )
+    assert rejected not in captured.err
+
+
+@pytest.mark.parametrize(
+    "rejected_character", ["\x85", "é"], ids=["c1-control", "non-ascii"]
+)
+def test_bearer_token_requires_printable_ascii(capsys, rejected_character):
+    rejected = f"synthetic-value-0014{rejected_character}"
+
+    with pytest.raises(SystemExit) as exc:
+        H._check_token("NEOTOMA_BEARER_TOKEN", rejected)
+
+    captured = capsys.readouterr()
+    assert exc.value.code == H.EXIT_ERROR
+    assert captured.out == ""
+    assert captured.err == (
+        "NEOTOMA_BEARER_TOKEN must not contain control characters or whitespace\n"
+    )
+    assert rejected not in captured.err
+
+
 def test_bearer_token_with_newline_is_refused_without_echo(
     monkeypatch, capsys, tmp_path
 ):
@@ -702,13 +743,37 @@ def test_page_token_with_tab_is_refused_before_any_request(fake, capsys):
     )
 
 
+@pytest.mark.parametrize(
+    "rejected_character", ["\x85", "é"], ids=["c1-control", "non-ascii"]
+)
+def test_page_token_requires_printable_ascii(fake, capsys, rejected_character):
+    rejected = f"synthetic-value-0015{rejected_character}"
+
+    with pytest.raises(SystemExit) as exc:
+        H.cmd_add(
+            _args(page_token=rejected),
+            BASE,
+            "synthetic-value-0016",
+        )
+
+    captured = capsys.readouterr()
+    assert exc.value.code == H.EXIT_ERROR
+    assert fake.snapshot_calls == []
+    assert fake.writes == []
+    assert captured.out == ""
+    assert captured.err == (
+        "PAGE_GUEST_TOKEN must not contain control characters or whitespace\n"
+    )
+    assert rejected not in captured.err
+
+
 def test_unexpected_exception_prints_only_type_name(monkeypatch, capsys):
     def raise_unexpected():
         raise RuntimeError("synthetic-value-0012")
 
     monkeypatch.setattr(H, "_run", raise_unexpected, raising=False)
 
-    assert H.main() == 1
+    assert H.main() == H.EXIT_ERROR
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == "unexpected error: RuntimeError\n"
@@ -722,3 +787,63 @@ def test_redirects_are_refused():
         handler.redirect_request(req, None, 302, "Found", {}, "https://evil.example/")
         is None
     )
+
+
+def test_request_ignores_ambient_proxies_and_reaches_local_server_directly(
+    monkeypatch,
+):
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append((self.path, self.headers.get("Authorization")))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok": true}')
+
+        def log_message(self, _format, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    proxy_url = "http://synthetic-proxy.invalid:9"
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        monkeypatch.setenv(name, proxy_url)
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(name, "")
+
+    original_getaddrinfo = socket.getaddrinfo
+    resolved_hosts = []
+
+    def resolve_synthetic_hosts(host, port, *args, **kwargs):
+        resolved_hosts.append(host)
+        if host in {"synthetic-target.invalid", "synthetic-proxy.invalid"}:
+            return original_getaddrinfo("127.0.0.1", port, *args, **kwargs)
+        return original_getaddrinfo(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve_synthetic_hosts)
+    module_path = Path(H.__file__)
+    spec = importlib.util.spec_from_file_location(
+        "hub_reconcile_proxy_test", module_path
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    isolated = importlib.util.module_from_spec(spec)
+
+    try:
+        spec.loader.exec_module(isolated)
+        result = isolated._request(
+            f"http://synthetic-target.invalid:{server.server_port}/probe",
+            "synthetic-value-0017",
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert result == {"ok": True}
+    assert requests == [("/probe", "Bearer synthetic-value-0017")]
+    assert "synthetic-target.invalid" in resolved_hosts
+    assert "synthetic-proxy.invalid" not in resolved_hosts

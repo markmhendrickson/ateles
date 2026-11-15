@@ -75,7 +75,7 @@ class _SafeArgumentParser(argparse.ArgumentParser):
     """Reject invalid arguments without echoing argv or usage."""
 
     def error(self, _message):
-        self.exit(2, "invalid arguments; run with --help\n")
+        self.exit(EXIT_ERROR, "invalid arguments; run with --help\n")
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -85,7 +85,9 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_OPENER = urllib.request.build_opener(_NoRedirectHandler)
+_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}), _NoRedirectHandler
+)
 
 
 def _read_env_file(path: Path) -> dict:
@@ -99,18 +101,18 @@ def _read_env_file(path: Path) -> dict:
     return values
 
 
-def _contains_control_or_whitespace(value: str) -> bool:
-    return any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value)
+def _contains_non_printable_ascii(value: str) -> bool:
+    return any(not 0x21 <= ord(char) <= 0x7E for char in value)
 
 
 def _check_token(variable_name: str, token: str) -> str:
-    if _contains_control_or_whitespace(token):
+    if _contains_non_printable_ascii(token):
         fail(f"{variable_name} must not contain control characters or whitespace")
     return token
 
 
 def _check_base_url(base_url: str) -> str:
-    if _contains_control_or_whitespace(base_url):
+    if _contains_non_printable_ascii(base_url):
         fail(BASE_URL_INPUT_ERROR)
     parsed = urllib.parse.urlparse(base_url)
     if (
@@ -397,7 +399,7 @@ def main() -> int:
         raise
     except Exception as exc:
         print(f"unexpected error: {type(exc).__name__}", file=sys.stderr)
-        return 1
+        return EXIT_ERROR
 
 
 if __name__ == "__main__":
