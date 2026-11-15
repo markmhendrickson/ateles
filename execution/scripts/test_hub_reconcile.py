@@ -363,10 +363,32 @@ def test_build_card_rejects_unsafe_badge_class():
         H.build_card("u", "t", "d", [('b" onclick="x', "t")])
 
 
-def test_unsafe_badge_class_is_refused_by_add(fake):
-    with pytest.raises(SystemExit):
-        H.cmd_add(_args(badge_class='b" onclick="x'), BASE, "bearer")
+@pytest.mark.parametrize(
+    ("class_field", "text_field"),
+    [
+        ("badge_class", "badge_text"),
+        ("badge2_class", "badge2_text"),
+    ],
+)
+def test_unsafe_badge_classes_are_refused_without_echo_or_request(
+    fake, capsys, class_field, text_field
+):
+    rejected = "synthetic-value-0009!"
+    with pytest.raises(SystemExit) as exc:
+        H.cmd_add(
+            _args(**{class_field: rejected, text_field: "Badge"}),
+            BASE,
+            "bearer",
+        )
+
+    captured = capsys.readouterr()
+    assert exc.value.code == H.EXIT_ERROR
+    assert fake.snapshot_calls == []
     assert fake.writes == []
+    assert captured.out == ""
+    assert captured.err == "badge class must match [a-z0-9-]+\n"
+    assert rejected not in captured.out
+    assert rejected not in captured.err
 
 
 def test_marker_name_is_validated(fake):

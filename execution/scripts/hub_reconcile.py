@@ -239,7 +239,7 @@ def cmd_add(args, base_url, token) -> int:
         badges.append((args.badge2_class or "b-review", args.badge2_text))
     for cls, _ in badges:
         if not BADGE_CLASS_RE.match(cls):
-            fail(f"badge class must match [a-z0-9-]+: {cls!r}")
+            fail("badge class must match [a-z0-9-]+")
 
     try:
         page_snapshot = _fetch_snapshot(base_url, token, args.page)
