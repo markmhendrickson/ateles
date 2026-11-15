@@ -30,17 +30,21 @@ treat the journal as empty.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 JOURNAL_NAME = ".monedula_payment_journal.json"
 
 STATE_INTENT = "intent"
 STATE_DONE = "done"
+FAILURE_PRE_SUBMISSION = "pre_submission"
+FAILURE_UNKNOWN = "unknown"
 
 
 class JournalError(Exception):
@@ -57,7 +61,50 @@ def _empty() -> dict[str, Any]:
     }
 
 
-def load(path: Path) -> dict[str, Any]:
+def _lock_path(path: Path) -> Path:
+    return path.with_name(f"{path.name}.lock")
+
+
+@contextmanager
+def _locked(path: Path, *, exclusive: bool) -> Iterator[None]:
+    """Lock the journal across processes.
+
+    The lock is a sibling file because the journal itself is atomically
+    replaced. Locking the replaced inode would not serialize later openers.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(_lock_path(path), os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        raise JournalError(
+            f"payment journal lock failed: {type(exc).__name__}"
+        ) from exc
+    try:
+        with os.fdopen(fd, "a+") as lock_file:
+            try:
+                fcntl.flock(
+                    lock_file.fileno(),
+                    fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH,
+                )
+                yield
+            except OSError as exc:
+                raise JournalError(
+                    f"payment journal lock failed: {type(exc).__name__}"
+                ) from exc
+            finally:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+    except JournalError:
+        raise
+    except OSError as exc:
+        raise JournalError(
+            f"payment journal lock failed: {type(exc).__name__}"
+        ) from exc
+
+
+def _load_unlocked(path: Path) -> dict[str, Any]:
     """Return the journal. A missing file is an empty journal; anything
     unreadable or structurally wrong raises :class:`JournalError`."""
     if not path.exists():
@@ -82,7 +129,13 @@ def load(path: Path) -> dict[str, Any]:
     return data
 
 
-def _write(path: Path, data: dict[str, Any]) -> None:
+def load(path: Path) -> dict[str, Any]:
+    """Read one coherent journal snapshot under a shared lock."""
+    with _locked(path, exclusive=False):
+        return _load_unlocked(path)
+
+
+def _write_unlocked(path: Path, data: dict[str, Any]) -> None:
     """Atomic, fsynced replace. Any failure raises :class:`JournalError`."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,12 +169,13 @@ def current_generation(path: Path) -> int:
 
 def next_generation(path: Path) -> int:
     """Issue a never-before-used request generation, durably."""
-    data = load(path)
-    data["generation"] = int(data["generation"]) + 1
-    _write(path, data)
-    if current_generation(path) != data["generation"]:
-        raise JournalError("payment journal generation did not persist")
-    return int(data["generation"])
+    with _locked(path, exclusive=True):
+        data = _load_unlocked(path)
+        data["generation"] = int(data["generation"]) + 1
+        _write_unlocked(path, data)
+        if _load_unlocked(path)["generation"] != data["generation"]:
+            raise JournalError("payment journal generation did not persist")
+        return int(data["generation"])
 
 
 def obligation_state(data: dict[str, Any], obligation: str) -> str | None:
@@ -145,38 +199,158 @@ def record_intent(path: Path, obligation: str, token: str, *, generation: int) -
     Refuses (``JournalError``) if the obligation already has an entry or the
     token was already consumed — the caller must not execute in that case.
     """
-    data = load(path)
-    if obligation in data["obligations"]:
-        raise JournalError("obligation already recorded — refusing a second attempt")
-    if token in data["consumed_tokens"]:
-        raise JournalError("approval token already consumed")
-    data["obligations"][obligation] = {
-        "state": STATE_INTENT,
-        "token": token,
-        "generation": int(generation),
-        "intent_at": time.time(),
-    }
-    data["consumed_tokens"][token] = obligation
-    _write(path, data)
-    back = load(path)
-    if obligation_state(back, obligation) != STATE_INTENT or not token_consumed(
-        back, token
-    ):
-        raise JournalError("payment intent did not persist")
+    with _locked(path, exclusive=True):
+        data = _load_unlocked(path)
+        if obligation in data["obligations"]:
+            raise JournalError("obligation already recorded — refusing a second attempt")
+        if token in data["consumed_tokens"]:
+            raise JournalError("approval token already consumed")
+        data["obligations"][obligation] = {
+            "state": STATE_INTENT,
+            "token": token,
+            "generation": int(generation),
+            "intent_at": time.time(),
+        }
+        data["consumed_tokens"][token] = obligation
+        _write_unlocked(path, data)
+        back = _load_unlocked(path)
+        if obligation_state(back, obligation) != STATE_INTENT or not token_consumed(
+            back, token
+        ):
+            raise JournalError("payment intent did not persist")
 
 
-def record_outcome(path: Path, obligation: str, status: str) -> None:
-    """Record the transfer's outcome after it returns, and read it back."""
-    data = load(path)
-    entry = data["obligations"].get(obligation)
-    if not isinstance(entry, dict):
-        raise JournalError("outcome for an obligation with no recorded intent")
-    entry["state"] = STATE_DONE
-    entry["outcome_status"] = str(status)[:64]
-    entry["outcome_at"] = time.time()
-    _write(path, data)
-    if obligation_state(load(path), obligation) != STATE_DONE:
-        raise JournalError("payment outcome did not persist")
+def _outcome_fields(result: str | dict[str, Any]) -> tuple[str, str | None]:
+    if isinstance(result, dict):
+        status = str(result.get("status") or "unreported")[:64]
+        claimed_class = str(result.get("failure_class") or "")
+    else:
+        status = str(result)[:64]
+        claimed_class = ""
+    if status.strip().lower() in {"sent", "succeeded", "success", "completed"}:
+        return status, None
+    failure_class = (
+        FAILURE_PRE_SUBMISSION
+        if claimed_class == FAILURE_PRE_SUBMISSION
+        else FAILURE_UNKNOWN
+    )
+    return status, failure_class
+
+
+def record_outcome(
+    path: Path, obligation: str, result: str | dict[str, Any]
+) -> None:
+    """Record the transfer outcome and its conservative failure class."""
+    with _locked(path, exclusive=True):
+        data = _load_unlocked(path)
+        entry = data["obligations"].get(obligation)
+        if not isinstance(entry, dict):
+            raise JournalError("outcome for an obligation with no recorded intent")
+        status, failure_class = _outcome_fields(result)
+        entry["state"] = STATE_DONE
+        entry["outcome_status"] = status
+        entry["outcome_at"] = time.time()
+        if failure_class is not None:
+            entry["failure_class"] = failure_class
+        _write_unlocked(path, data)
+        if obligation_state(_load_unlocked(path), obligation) != STATE_DONE:
+            raise JournalError("payment outcome did not persist")
+
+
+def retry_state(data: dict[str, Any], obligation: str) -> str | None:
+    """State of the one retry nested under an original obligation."""
+    original = data["obligations"].get(obligation)
+    if not isinstance(original, dict):
+        return None
+    retry = original.get("retry")
+    if not isinstance(retry, dict):
+        return None
+    return STATE_DONE if retry.get("state") == STATE_DONE else STATE_INTENT
+
+
+def reserve_retry(
+    path: Path,
+    obligation: str,
+    session: str,
+    token: str,
+    *,
+    generation: int,
+    expected_intent_at: float,
+    expected_outcome_at: float,
+    expected_failure_class: str,
+    not_paid_confirmed: bool,
+) -> None:
+    """Atomically reserve the sole retry under the original obligation.
+
+    The original failure and source session are revalidated while holding the
+    same exclusive lock that writes the retry intent. Unknown or historical
+    unclassified failures additionally require the operator's authenticated
+    rail check.
+    """
+    with _locked(path, exclusive=True):
+        data = _load_unlocked(path)
+        original = data["obligations"].get(obligation)
+        source = data["sessions"].get(session)
+        if not isinstance(original, dict):
+            raise JournalError("retry source obligation is missing")
+        if not isinstance(source, dict):
+            raise JournalError("retry source session is missing")
+        if source.get("state") not in SESSION_TERMINAL:
+            raise JournalError("retry source session is not terminal")
+        if source.get("obligation") != obligation:
+            raise JournalError("retry source session does not name this obligation")
+        if original.get("state") != STATE_DONE:
+            raise JournalError("retry source outcome is not terminal")
+        if str(original.get("outcome_status") or "").strip().lower() != "failed":
+            raise JournalError("retry source outcome is no longer failed")
+        if original.get("intent_at") != expected_intent_at:
+            raise JournalError("retry source intent changed before reservation")
+        if original.get("outcome_at") != expected_outcome_at:
+            raise JournalError("retry source outcome changed before reservation")
+        actual_class = str(original.get("failure_class") or "unclassified")
+        if actual_class != expected_failure_class:
+            raise JournalError("retry source failure class changed before reservation")
+        if actual_class != FAILURE_PRE_SUBMISSION and not not_paid_confirmed:
+            raise JournalError(
+                "retry source outcome is unconfirmed and lacks an authenticated "
+                "'not paid' rail check"
+            )
+        if isinstance(original.get("retry"), dict):
+            raise JournalError("retry already reserved for this obligation")
+        if token in data["consumed_tokens"]:
+            raise JournalError("retry approval token already consumed")
+        original["retry"] = {
+            "state": STATE_INTENT,
+            "token": token,
+            "generation": int(generation),
+            "intent_at": time.time(),
+        }
+        data["consumed_tokens"][token] = obligation
+        _write_unlocked(path, data)
+        back = _load_unlocked(path)
+        if retry_state(back, obligation) != STATE_INTENT:
+            raise JournalError("retry intent did not persist")
+
+
+def record_retry_outcome(
+    path: Path, obligation: str, result: str | dict[str, Any]
+) -> None:
+    """Record the sole retry outcome without replacing the original attempt."""
+    with _locked(path, exclusive=True):
+        data = _load_unlocked(path)
+        original = data["obligations"].get(obligation)
+        retry = original.get("retry") if isinstance(original, dict) else None
+        if not isinstance(retry, dict) or retry.get("state") != STATE_INTENT:
+            raise JournalError("retry outcome has no reserved retry intent")
+        status, failure_class = _outcome_fields(result)
+        retry["state"] = STATE_DONE
+        retry["outcome_status"] = status
+        retry["outcome_at"] = time.time()
+        if failure_class is not None:
+            retry["failure_class"] = failure_class
+        _write_unlocked(path, data)
+        if retry_state(_load_unlocked(path), obligation) != STATE_DONE:
+            raise JournalError("retry outcome did not persist")
 
 
 # ---------------------------------------------------------------------------
@@ -217,31 +391,68 @@ def pending_sessions(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
-def note_pending(path: Path, key: str, *, ended_at: float | None = None) -> None:
+def note_pending(
+    path: Path,
+    key: str,
+    *,
+    ended_at: float | None = None,
+    started_on: str | None = None,
+    obligation: str | None = None,
+) -> None:
     """Record a session as raised-and-unresolved. Idempotent; never reopens a
-    terminal session. Read back after writing."""
-    data = load(path)
-    if isinstance(data["sessions"].get(key), dict):
-        return  # already pending or terminal: raise-once
-    data["sessions"][key] = {
-        "state": SESSION_PENDING,
-        "first_seen": time.time(),
-        "ended_at": ended_at,
-    }
-    _write(path, data)
-    if session_state(load(path), key) != SESSION_PENDING:
-        raise JournalError("pending session did not persist")
+    terminal session. Missing source metadata is filled from a later calendar
+    read, but conflicting metadata fails closed."""
+    with _locked(path, exclusive=True):
+        data = _load_unlocked(path)
+        existing = data["sessions"].get(key)
+        if isinstance(existing, dict):
+            changed = False
+            for name, value in (
+                ("started_on", started_on),
+                ("obligation", obligation),
+            ):
+                if value is None:
+                    continue
+                if existing.get(name) not in (None, value):
+                    if existing.get("state") in SESSION_TERMINAL:
+                        # Terminal source metadata is immutable. A later
+                        # profile/calendar edit cannot rewrite its history.
+                        continue
+                    if name == "obligation" and existing.get("state") == SESSION_PENDING:
+                        # Terms can legitimately change before any payment is
+                        # attempted; the next approval binds the new key.
+                        existing[name] = value
+                        changed = True
+                        continue
+                    raise JournalError(f"session {name} changed")
+                if existing.get(name) is None:
+                    existing[name] = value
+                    changed = True
+            if changed:
+                _write_unlocked(path, data)
+            return
+        data["sessions"][key] = {
+            "state": SESSION_PENDING,
+            "first_seen": time.time(),
+            "ended_at": ended_at,
+            "started_on": started_on,
+            "obligation": obligation,
+        }
+        _write_unlocked(path, data)
+        if session_state(_load_unlocked(path), key) != SESSION_PENDING:
+            raise JournalError("pending session did not persist")
 
 
 def set_session_state(path: Path, key: str, state: str) -> None:
     """Move a session to a new state and read it back."""
-    data = load(path)
-    entry = data["sessions"].get(key)
-    if not isinstance(entry, dict):
-        entry = {"first_seen": time.time(), "ended_at": None}
-    entry["state"] = state
-    entry["resolved_at"] = time.time()
-    data["sessions"][key] = entry
-    _write(path, data)
-    if session_state(load(path), key) != state:
-        raise JournalError("session state did not persist")
+    with _locked(path, exclusive=True):
+        data = _load_unlocked(path)
+        entry = data["sessions"].get(key)
+        if not isinstance(entry, dict):
+            entry = {"first_seen": time.time(), "ended_at": None}
+        entry["state"] = state
+        entry["resolved_at"] = time.time()
+        data["sessions"][key] = entry
+        _write_unlocked(path, data)
+        if session_state(_load_unlocked(path), key) != state:
+            raise JournalError("session state did not persist")

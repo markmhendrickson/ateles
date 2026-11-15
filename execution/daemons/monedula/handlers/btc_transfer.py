@@ -72,6 +72,7 @@ class BtcTransferHandler(PaymentHandler):
         if not self.profile.btc_address:
             return {
                 "status": "failed",
+                "failure_class": "pre_submission",
                 "handler": self.name,
                 "error": f"{self.profile.prefix}_BTC_ADDRESS not set",
             }
@@ -81,6 +82,7 @@ class BtcTransferHandler(PaymentHandler):
         if not claude_path:
             return {
                 "status": "failed",
+                "failure_class": "pre_submission",
                 "handler": self.name,
                 "error": "claude CLI not found in PATH",
             }
@@ -96,12 +98,14 @@ class BtcTransferHandler(PaymentHandler):
         except subprocess.TimeoutExpired:
             return {
                 "status": "failed",
+                "failure_class": "unknown",
                 "handler": self.name,
                 "error": "claude subprocess timed out after 300s",
             }
         except Exception as exc:
             return {
                 "status": "failed",
+                "failure_class": "unknown",
                 "handler": self.name,
                 "error": f"claude subprocess error: {exc}",
             }
@@ -118,12 +122,17 @@ class BtcTransferHandler(PaymentHandler):
             )
             return {
                 "status": "failed",
+                "failure_class": "unknown",
                 "handler": self.name,
                 "error": "No PAYMENT_RESULT line in claude output",
                 "raw_output": output[:500],
             }
 
         payment_result["handler"] = self.name
+        if payment_result.get("status") != "sent":
+            # The subprocess may have reached the wallet before emitting its
+            # result. Its own claim cannot prove that submission never began.
+            payment_result["failure_class"] = "unknown"
 
         if payment_result.get("status") == "sent":
             txid = payment_result.get("txid", "")

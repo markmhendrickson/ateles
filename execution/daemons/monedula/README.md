@@ -288,10 +288,18 @@ chmod +x install.sh
 ## Retry one definitely failed payment
 
 The supported retry command accepts one original obligation key or journaled
-session key (`<handler>:<event-id>`). It never lists payments. It refuses every
-state except a completed journal entry whose literal outcome is `failed`;
-intent-only/unknown, pending, skipped, successful, manual-required and
-unrecognised outcomes cannot be retried.
+session key (`<handler>:<event-id>`). It never lists payments. The source
+session must be terminal, and its only attempt must be complete with the
+literal outcome `failed`. Intent-only, pending-session, skipped, successful,
+manual-required and unrecognised outcomes cannot be retried.
+
+A `failed` label alone does not prove that no money moved. Handler outcomes
+therefore carry `failure_class`: only `pre_submission` is admitted
+automatically. `unknown` and historical unclassified failures raise an
+approval that says the first outcome is unconfirmed and requires the
+authenticated operator answer to include both the attendance approval and the
+literal words `not paid` after checking the rail. A bare yes never approves.
+The command itself does not query a wallet, bank, or chain.
 
 From the repository root, preview the one targeted action without writing an
 approval or journal entry:
@@ -307,11 +315,23 @@ python3 execution/daemons/monedula/payment_retry.py <obligation-or-session-key>
 ```
 
 After the coordinator records the operator's authenticated answer on that new
-`payment_approval`, run the same command once more. Only an authenticated
-attendance answer executes the payment. The retry records its own intent before
-calling the existing handler and its own outcome afterward; a crash after
-intent is held as unknown and can never execute a second time. The original
-attempt remains unchanged in the journal.
+`payment_approval`, the default command only reports that approval is valid.
+Payment requires an explicit interactive execution:
+
+```bash
+python3 execution/daemons/monedula/payment_retry.py <obligation-or-session-key> --execute
+```
+
+`--execute` refuses non-TTY stdin and requires the operator to type the exact
+amount and payee shown at the prompt. Immediately before reserving the retry,
+the command re-fetches and re-authenticates the approval, so a rejection,
+overwrite, or withdrawal stops execution. Under one inter-process journal
+lock it then revalidates the terminal failed source, verifies that no retry
+exists, and records the retry intent as a second attempt under the **original
+obligation key**. A crash after intent is unknown and can never execute a
+second time. The original attempt remains intact. Every daemon execution
+entrance, including Telegram break-glass, takes the same journal reservation
+before calling a handler.
 
 ## Troubleshooting — reason codes
 

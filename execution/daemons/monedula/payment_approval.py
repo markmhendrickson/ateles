@@ -250,6 +250,20 @@ def _snapshot(entity: dict) -> dict:
 
 
 def _title(item: Any) -> str:
+    match = item.match if isinstance(item.match, dict) else {}
+    retry = match.get("retry_context")
+    if isinstance(retry, dict):
+        admission = str(retry.get("admission") or "unclassified")
+        return (
+            f"Retry of failed payment: {item.label} {item.payment_date} "
+            f"[{str(item.obligation)[:12]}]; original_obligation="
+            f"{retry.get('original_obligation')}; original_intent_at="
+            f"{retry.get('original_intent_at')}; original_outcome_at="
+            f"{retry.get('original_outcome_at')}; failure_class="
+            f"{retry.get('failure_class')}; admission={admission}; "
+            f"payee={payee_display_name(item.handler)}; amount="
+            f"{item.amount_eur} {_currency()}; {retry.get('operator_notice')}"
+        )
     return (
         f"Payment approval: {item.label} {item.payment_date} "
         f"[{str(item.obligation)[:12]}]"
@@ -374,6 +388,7 @@ def raise_request(item: Any) -> dict:
     record reads back with every bound field and ``awaiting_operator`` status.
     """
     fields = expected_fields(item)
+    raised_at = _now().isoformat()
     entity = {
         "entity_type": ENTITY_TYPE,
         "payment_key": str(item.obligation),
@@ -381,7 +396,7 @@ def raise_request(item: Any) -> dict:
         "status": STATUS_AWAITING,
         "blocking": True,
         "confidence_threshold": 1.0,
-        RAISED_AT_FIELD: _now().isoformat(),
+        RAISED_AT_FIELD: raised_at,
         **fields,
     }
     assert not (FORBIDDEN_FIELD_NAMES & set(entity)), "payment_approval leaks a payee detail"
@@ -410,6 +425,17 @@ def raise_request(item: Any) -> dict:
     for name, want in fields.items():
         if back.get(name) != want:
             raise ApprovalError(f"payment_approval field {name!r} did not persist")
+    for name, want in (
+        ("title", entity["title"]),
+        ("blocking", True),
+        ("confidence_threshold", 1.0),
+    ):
+        if back.get(name) != want:
+            raise ApprovalError(f"payment_approval field {name!r} did not persist")
+    if not isinstance(back.get(RAISED_AT_FIELD), str) or not back[RAISED_AT_FIELD]:
+        raise ApprovalError(
+            f"payment_approval field {RAISED_AT_FIELD!r} did not persist"
+        )
     if back.get("status") != STATUS_AWAITING:
         raise ApprovalError("payment_approval did not read back as awaiting_operator")
     return back
