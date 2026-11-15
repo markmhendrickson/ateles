@@ -31,81 +31,21 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-
-log() { echo "[ateles-mcp] $*" >&2; }
+# Resolved from this script's absolute directory.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/ateles_mcp_bootstrap.sh"
 
 # ── 1. Environment ───────────────────────────────────────────────────────────
 # Same file and precedence the daemons use. Existing environment wins, so an
 # explicit override in the MCP registration's `env` block still takes effect.
-NEOTOMA_ENV_FILE="${NEOTOMA_ENV_FILE:-$HOME/.config/neotoma/.env}"
-if [ -f "$NEOTOMA_ENV_FILE" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-        line="${line#"${line%%[![:space:]]*}"}"
-        case "$line" in ''|'#'*) continue ;; *'='*) ;; *) continue ;; esac
-        key="${line%%=*}"
-        value="${line#*=}"
-        key="${key%"${key##*[![:space:]]}"}"
-        key="${key#"${key%%[![:space:]]*}"}"
-        case "$key" in *[!A-Za-z0-9_]*|'') continue ;; esac
-        value="${value#"${value%%[![:space:]]*}"}"
-        value="${value%"${value##*[![:space:]]}"}"
-        # Strip an inline ` # comment` from UNQUOTED values only; a quoted value
-        # keeps any '#' verbatim since it may be part of a token.
-        case "$value" in
-            '"'*|"'"*) ;;
-            *" #"*) value="${value%% #*}"; value="${value%"${value##*[![:space:]]}"}" ;;
-        esac
-        case "$value" in
-            '"'*'"') value="${value:1:${#value}-2}" ;;
-            "'"*"'") value="${value:1:${#value}-2}" ;;
-        esac
-        [ -z "${!key-}" ] && export "$key=$value"
-    done < "$NEOTOMA_ENV_FILE"
-fi
+ateles_load_neotoma_environment
 
 # ── 2. Token scope ───────────────────────────────────────────────────────────
 # Mirrors the classification in execution/daemons/apis/apis.py. Anything local,
 # loopback, link-local, *.local, unparseable, or empty counts as local, so the
 # failure mode is "don't promote" rather than "promote a prod token at the
-# wrong instance".
-looks_local() {
-    local host
-    host="$(printf '%s' "${1:-}" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#^[^@/]*@##; s#[/?].*$##; s#:[0-9]+$##' | tr '[:upper:]' '[:lower:]')"
-    [ -z "$host" ] && return 0
-    case "$host" in
-        localhost|127.0.0.1|0.0.0.0|::1|*.local|*.localhost) return 0 ;;
-        10.*|192.168.*|169.254.*) return 0 ;;
-        172.*)
-            local second="${host#172.}"; second="${second%%.*}"
-            case "$second" in ''|*[!0-9]*) return 1 ;; esac
-            [ "$second" -ge 16 ] && [ "$second" -le 31 ] && return 0
-            return 1 ;;
-    esac
-    return 1
-}
-
-# Keep this default in step with NEOTOMA_BASE_URL in server.py.
-BASE_URL="${NEOTOMA_BASE_URL:-https://neotoma.markmhendrickson.com}"
-if ! looks_local "$BASE_URL"; then
-    if [ -n "${NEOTOMA_BEARER_TOKEN_PROD:-}" ]; then
-        # Assigned via unquoted parameter-expansion indirection rather than
-        # `BEARER_TOKEN="$..."`. The repo's gitleaks `protected-patterns` rule
-        # matches a credential-ish name followed by an assignment to a quoted
-        # 8+ character string, and cannot tell a $VAR reference from a
-        # literal, so the direct shell form trips a secrets gate on a public
-        # repo. Keeping the code out of that shape is better than allowlisting
-        # the file, which would blind the gate to a real hardcoded token added
-        # here later. (apis.py does not hit this because Python's
-        # os.environ[...] assignment is a different shape.)
-        _promoted=${NEOTOMA_BEARER_TOKEN_PROD}
-        export NEOTOMA_BEARER_TOKEN=${_promoted}
-        unset _promoted
-    else
-        log "WARNING: NEOTOMA_BASE_URL=$BASE_URL is remote but NEOTOMA_BEARER_TOKEN_PROD is unset — using local-scoped token, which will likely 401 against prod entity reads"
-    fi
-fi
-[ -z "${NEOTOMA_BEARER_TOKEN:-}" ] && log "WARNING: NEOTOMA_BEARER_TOKEN is unset — tool calls will fail to authenticate"
+# wrong instance". The implementation is shared with the checkpoint launcher.
+ateles_promote_neotoma_token
 
 # ── 3. Interpreter ───────────────────────────────────────────────────────────
 # .mcp-venv first: it is what CI builds for this server. The repo-root .venv is
@@ -119,32 +59,6 @@ fi
 APIS_CHECKPOINT_DENIAL_DIR="${APIS_CHECKPOINT_DENIAL_DIR:-/var/tmp/ateles/checkpoint-denials}"
 export APIS_CHECKPOINT_DENIAL_DIR
 
-MCP_VENV="${ATELES_MCP_VENV:-$REPO_ROOT/.mcp-venv}"
-has_deps() { [ -x "$1" ] && "$1" -c 'import mcp, httpx, cryptography, jwt' >/dev/null 2>&1; }
-
-PYTHON=""
-if has_deps "$MCP_VENV/bin/python3"; then
-    PYTHON="$MCP_VENV/bin/python3"
-elif has_deps "$(command -v python3 || true)"; then
-    PYTHON="$(command -v python3)"
-else
-    # Fresh clone (or a half-built venv): build it with CI's recipe. The <2 pin
-    # matches ateles-tests.yml — mcp 2.0 renamed Tool.inputSchema and dropped
-    # Server.list_tools, which this server still uses.
-    log "no interpreter with MCP and approval-signing dependencies found; bootstrapping $MCP_VENV"
-    if command -v uv >/dev/null 2>&1; then
-        uv venv "$MCP_VENV" >&2 && VIRTUAL_ENV="$MCP_VENV" uv pip install -r "$SCRIPT_DIR/requirements.txt" >&2
-    elif command -v python3 >/dev/null 2>&1; then
-        python3 -m venv "$MCP_VENV" >&2 && "$MCP_VENV/bin/python3" -m pip install --quiet --upgrade pip >&2 \
-            && "$MCP_VENV/bin/python3" -m pip install --quiet -r "$SCRIPT_DIR/requirements.txt" >&2
-    fi
-    if has_deps "$MCP_VENV/bin/python3"; then
-        PYTHON="$MCP_VENV/bin/python3"
-    else
-        log "ERROR: could not provision an interpreter with MCP and approval-signing dependencies."
-        log "Fix: uv venv $MCP_VENV && VIRTUAL_ENV=$MCP_VENV uv pip install -r $SCRIPT_DIR/requirements.txt"
-        exit 1
-    fi
-fi
+PYTHON="$(ateles_select_mcp_python)"
 
 exec "$PYTHON" "$SCRIPT_DIR/server.py"

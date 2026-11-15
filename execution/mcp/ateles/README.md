@@ -312,9 +312,11 @@ server.
 
 ### Approving checkpoints from the command line
 
-`execution/scripts/resolve_checkpoint.py` is the operator-run caller: it reads
+`execution/scripts/resolve_checkpoint.sh` is the operator-run caller: it reads
 each `checkpoint_brief`, signs with the checkpoint's own required subject and
-JKT, and submits through the server's `_resolve_checkpoint` path.
+JKT, and submits through the server's `_resolve_checkpoint` path. The launcher
+shares the MCP server's dependency, Neotoma environment, and remote-token
+bootstrap. Its `--help` path deliberately skips credential-file loading.
 
 Store the complete resolver private JWK in a concealed 1Password item field.
 Enable the 1Password desktop app's CLI integration, then use 1Password's
@@ -323,27 +325,42 @@ reference with `--key-ref`, or set `ATELES_CHECKPOINT_RESOLVER_OP_REF` to the
 reference. The environment variable contains only the reference, not the key.
 No key file or default key path is supported.
 
-For every real run, the command lists the selected checkpoints and obtains
-confirmation before it calls `op read --no-newline <reference>`. The desktop
-integration can therefore require Touch ID at the signing boundary. The
-command captures the JWK in memory, reads it only once per run, and never
-prints the key, 1Password's raw output, or the signed headers.
+For every real run, the command lists the selected checkpoints and requires a
+typed `y` or `yes` confirmation. There is no non-interactive confirmation
+flag. After confirmation it runs `op signout --all`, then calls
+`op read --no-newline <reference>` once. Both children receive only
+`HOME`, `PATH`, `USER`, `LOGNAME`, `TMPDIR`, `LANG`, and `TERM` when those
+names exist; the rest of the caller environment is not inherited. A real run
+refuses before any checkpoint read when the caller environment contains
+`OP_SERVICE_ACCOUNT_TOKEN`, any `OP_CONNECT_*`, or any `OP_SESSION_*` name.
+
+This guarantees that the command does not reuse a cached CLI session or one of
+1Password's non-biometric environment credential modes. When 1Password desktop
+app integration is enabled and configured to authorize CLI access with Touch
+ID, the post-signout read requires fresh desktop authorization. The command
+cannot inspect or strengthen the desktop app's own authentication policy: if
+that installation permits a different system authentication method, the CLI
+inherits that policy. A TTY or typed confirmation alone is not treated as proof
+of a human; a pseudo-TTY can supply text, but cannot replace the fresh
+1Password authorization. Failure to sign out, authorize, or read refuses the
+resolution. The command captures the JWK in memory, reads it only once per run,
+and never prints the key, 1Password's raw output, or the signed headers.
 
 ```bash
 # Single checkpoint
-python3 execution/scripts/resolve_checkpoint.py \
+execution/scripts/resolve_checkpoint.sh \
   ent_<checkpoint_id> approve \
   --key-ref 'op://<vault>/<item>/<field>'
 
 # Batch (one id per line; blank lines and # comments ignored)
-python3 execution/scripts/resolve_checkpoint.py \
+execution/scripts/resolve_checkpoint.sh \
   --batch /path/to/checkpoint-ids.txt approve \
   --key-ref 'op://<vault>/<item>/<field>'
 ```
 
 Use `reject` instead of `approve` when declining. `--dry-run` prints id, title,
 task, and blast radius without signing. Every real resolution, single or batch, needs a
-terminal (a non-interactive run is refused) and asks for confirmation unless `--yes`;
+terminal (a non-interactive run is refused) and always asks for confirmation;
 `--dry-run` signs nothing; `--keep-going` continues after a failure.
 
 ## Tests
