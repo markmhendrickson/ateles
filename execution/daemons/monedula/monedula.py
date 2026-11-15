@@ -1284,63 +1284,10 @@ def _pending_summaries(triggered: list) -> list[str]:
 
 
 def _parse_reply(reply: str | None, handler_names: list[str]) -> set[str]:
-    """
-    Parse the operator's Telegram reply and return the set of handler names
-    to execute.
+    """Compatibility wrapper around the one shared attendance parser."""
+    from attendance import parse_reply
 
-    Payments are ATTENDANCE-GATED: every recurring payment (yoga, therapy)
-    pays for a session the operator was meant to attend. A calendar event is
-    NOT proof of attendance — sessions get skipped. So approval requires an
-    affirmative that names attendance, and a bare "yes" no longer blanket-
-    approves. Accepted forms:
-
-    "attended all"      / "paid all"        → all handlers
-    "attended yoga"     / "yes yoga"        → {"yoga"}
-    "attended therapy"  / "yes therapy"     → {"therapy"}
-    "no" / "skipped"    / None/timeout      → empty set (skip all)
-
-    Per-handler "yes <name>" / "y <name>" / "<name>" still work as an
-    affirmation that the named session was attended. A naked "yes"/"yes all"
-    with no session named is REJECTED (returns empty set) so the operator
-    can't reflexively approve a skipped session.
-    """
-    if not reply:
-        return set()
-
-    low = reply.lower().strip()
-
-    if low in ("no", "no all", "skip", "skip all", "skipped", "n", "didn't go", "did not attend"):
-        return set()
-
-    # Blanket approval requires an explicit "attended"/"paid"/"all" token —
-    # a naked "yes"/"yes all" is intentionally NOT enough.
-    if low in ("attended all", "paid all", "yes attended", "attended", "all attended"):
-        return set(handler_names)
-
-    # Per-handler attendance confirmation.
-    approved: set[str] = set()
-    for name in handler_names:
-        if low in (
-            f"attended {name}",
-            f"paid {name}",
-            f"yes {name}",
-            f"y {name}",
-            f"{name} attended",
-            name,
-        ):
-            approved.add(name)
-    if approved:
-        return approved
-
-    if low in ("yes", "yes all", "y", "y all"):
-        log.warning(
-            "Bare 'yes' received but payments are attendance-gated — "
-            "need 'attended all' or 'attended <session>'. Treating as skip."
-        )
-        return set()
-
-    log.warning(f"Unrecognised reply: {reply!r} — treating as skip all")
-    return set()
+    return parse_reply(reply, handler_names)
 
 
 def _build_preview_message(

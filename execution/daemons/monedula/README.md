@@ -285,6 +285,34 @@ chmod +x install.sh
 ./install.sh
 ```
 
+## Retry one definitely failed payment
+
+The supported retry command accepts one original obligation key or journaled
+session key (`<handler>:<event-id>`). It never lists payments. It refuses every
+state except a completed journal entry whose literal outcome is `failed`;
+intent-only/unknown, pending, skipped, successful, manual-required and
+unrecognised outcomes cannot be retried.
+
+From the repository root, preview the one targeted action without writing an
+approval or journal entry:
+
+```bash
+python3 execution/daemons/monedula/payment_retry.py <obligation-or-session-key> --dry-run
+```
+
+Raise the deterministic retry approval:
+
+```bash
+python3 execution/daemons/monedula/payment_retry.py <obligation-or-session-key>
+```
+
+After the coordinator records the operator's authenticated answer on that new
+`payment_approval`, run the same command once more. Only an authenticated
+attendance answer executes the payment. The retry records its own intent before
+calling the existing handler and its own outcome afterward; a crash after
+intent is held as unknown and can never execute a second time. The original
+attempt remains unchanged in the journal.
+
 ## Troubleshooting — reason codes
 
 | Reason code | Check / remediation |
