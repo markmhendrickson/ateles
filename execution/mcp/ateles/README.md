@@ -329,8 +329,9 @@ python3 execution/scripts/resolve_checkpoint.py \
 ```
 
 Use `reject` instead of `approve` when declining. `--dry-run` prints id, title,
-task, and blast radius without signing. Batch mode confirms interactively unless
-`--yes` (TTY required) or `--dry-run`; `--keep-going` continues after a failure.
+task, and blast radius without signing. Every real resolution, single or batch, needs a
+terminal (a non-interactive run is refused) and asks for confirmation unless `--yes`;
+`--dry-run` signs nothing; `--keep-going` continues after a failure.
 
 ## Tests
 

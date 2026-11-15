@@ -40,6 +40,18 @@ from lib.daemon_runtime.aauth_httpsig import (  # noqa: E402
     public_part_of,
 )
 
+@pytest.fixture(autouse=True)
+def _operator_at_terminal():
+    """Default every test to an operator at a terminal who answers yes.
+
+    Tests about the non-interactive or declined paths patch these again inside.
+    """
+    with mock.patch.object(sys.stdin, "isatty", return_value=True), mock.patch(
+        "builtins.input", return_value="y"
+    ):
+        yield
+
+
 OWNER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 SUB = "resolver@example.test"
 
@@ -329,7 +341,7 @@ def test_batch_stops_at_first_failure_unless_keep_going(tmp_path, capsys):
         ), mock.patch.object(
             rc.ateles_server, "_resolve_checkpoint", side_effect=fake_resolve
         ), mock.patch.object(sys.stdin, "isatty", return_value=True), mock.patch.object(
-            rc, "_confirm_batch"
+            rc, "_confirm"
         ):
             return rc.main(
                 [
@@ -422,3 +434,53 @@ def test_yes_without_tty_refused_unless_dry_run(tmp_path, capsys):
 
     assert code_dry == 0
     sign_dry.assert_not_called()
+
+
+def test_single_id_without_tty_refused_without_signing(tmp_path, capsys):
+    """Red before (Pavo, PR #1768): one id skipped both the TTY gate and the
+    confirmation, so a non-interactive process holding the key could resolve."""
+    key_path, _jwk, jkt = _write_key(tmp_path)
+    checkpoint_id = "ent_cp_unattended"
+    entity = _checkpoint_entity(checkpoint_id)
+
+    with mock.patch.object(sys.stdin, "isatty", return_value=False), mock.patch.object(
+        rc.ateles_server, "_get", return_value=entity
+    ), mock.patch.object(
+        rc.ateles_server,
+        "_checkpoint_resolver_authority",
+        return_value=(SUB, jkt, OWNER),
+    ), mock.patch.object(rc, "sign_checkpoint_resolution") as sign, mock.patch.object(
+        rc.ateles_server, "_resolve_checkpoint"
+    ) as resolve:
+        code = rc.main([checkpoint_id, "approve", "--key", str(key_path)])
+
+    assert code == 1
+    sign.assert_not_called()
+    resolve.assert_not_called()
+    assert "requires a TTY" in capsys.readouterr().err
+
+
+def test_single_id_declined_confirmation_never_signs(tmp_path, capsys):
+    """Red before: one id resolved with no confirmation prompt at all."""
+    key_path, _jwk, jkt = _write_key(tmp_path)
+    checkpoint_id = "ent_cp_declined"
+    entity = _checkpoint_entity(checkpoint_id)
+
+    with mock.patch("builtins.input", return_value="n") as ask, mock.patch.object(
+        rc.ateles_server, "_get", return_value=entity
+    ), mock.patch.object(
+        rc.ateles_server,
+        "_checkpoint_resolver_authority",
+        return_value=(SUB, jkt, OWNER),
+    ), mock.patch.object(rc, "sign_checkpoint_resolution") as sign, mock.patch.object(
+        rc.ateles_server, "_resolve_checkpoint"
+    ) as resolve:
+        code = rc.main([checkpoint_id, "approve", "--key", str(key_path)])
+
+    assert code == 1
+    ask.assert_called_once()
+    assert checkpoint_id in ask.call_args.args[0]
+    sign.assert_not_called()
+    resolve.assert_not_called()
+    assert "confirmation declined" in capsys.readouterr().err
+

@@ -241,14 +241,15 @@ def resolve_one(
     _print_result_line(checkpoint_id, title, status)
 
 
-def _confirm_batch(count: int, action: str) -> None:
-    prompt = f"Resolve {count} checkpoint(s) with action '{action}'? [y/N] "
+def _confirm(ids: list[str], action: str) -> None:
+    what = ids[0] if len(ids) == 1 else f"{len(ids)} checkpoint(s)"
+    prompt = f"Resolve {what} with action '{action}'? [y/N] "
     try:
         answer = input(prompt)
     except EOFError as exc:
-        raise ResolveError("batch confirmation required") from exc
+        raise ResolveError("confirmation required") from exc
     if answer.strip().lower() not in {"y", "yes"}:
-        raise ResolveError("batch confirmation declined")
+        raise ResolveError("confirmation declined")
 
 
 def _require_yes_tty(*, dry_run: bool, yes: bool) -> None:
@@ -289,7 +290,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--yes",
         action="store_true",
-        help="skip interactive batch confirmation (requires a TTY)",
+        help="skip the interactive confirmation (still requires a TTY)",
     )
     parser.add_argument(
         "--keep-going",
@@ -330,13 +331,16 @@ def main(argv: list[str] | None = None) -> int:
         if not args.dry_run:
             key_path = _resolve_key_path(args.key)
 
-        if args.batch and not args.dry_run and not args.yes:
+        # Every real resolution, single or batch, is the operator's at a
+        # terminal: a non-interactive process holding the key is refused.
+        if not args.dry_run:
             if not sys.stdin.isatty():
                 raise ResolveError(
-                    "batch confirmation requires a TTY "
-                    "(use --yes on a TTY, or --dry-run)"
+                    "resolving a checkpoint requires a TTY "
+                    "(run it yourself at a terminal, or use --dry-run)"
                 )
-            _confirm_batch(len(ids), args.action)
+            if not args.yes:
+                _confirm(ids, args.action)
 
         done = 0
         skipped = 0
