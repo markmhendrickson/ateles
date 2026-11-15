@@ -361,7 +361,7 @@ def test_batch_stops_at_first_failure_unless_keep_going(tmp_path, capsys):
     out_stop = capsys.readouterr().out
     assert code_stop == 1
     assert "done=1 skipped=0 failed=1" in out_stop
-    assert "Third" not in out_stop
+    assert "ent_c Third -> " not in out_stop  # listed for consent, never resolved
 
     store.clear()
     store.update(entities)
@@ -483,4 +483,43 @@ def test_single_id_declined_confirmation_never_signs(tmp_path, capsys):
     sign.assert_not_called()
     resolve.assert_not_called()
     assert "confirmation declined" in capsys.readouterr().err
+
+
+def test_selection_listed_before_confirmation_and_release_result_shown(tmp_path, capsys):
+    """Red before (Falco, Accipiter advisories): the prompt showed only a count,
+    and success output dropped the server's action_taken."""
+    key_path, _jwk, jkt = _write_key(tmp_path)
+    checkpoint_id = "ent_cp_listed"
+    reads = {f"/entities/{checkpoint_id}": _checkpoint_entity(checkpoint_id)}
+    seen_before_prompt: list[str] = []
+
+    def fake_input(prompt: str) -> str:
+        seen_before_prompt.append(capsys.readouterr().out)
+        return "y"
+
+    def fake_sign(checkpoint_id_arg, action, **kwargs):
+        reads[f"/entities/{checkpoint_id}"] = _checkpoint_entity(
+            checkpoint_id, status="approved"
+        )
+        return {"signature": "s"}
+
+    async def fake_resolve(checkpoint_id_arg, action, resolver_aauth_headers=None):
+        return {"new_status": "approved", "action_taken": "approved and task released"}
+
+    with mock.patch("builtins.input", side_effect=fake_input), mock.patch.object(
+        rc.ateles_server, "_get", side_effect=lambda path, params=None: reads.get(path)
+    ), mock.patch.object(
+        rc.ateles_server,
+        "_checkpoint_resolver_authority",
+        return_value=(SUB, jkt, OWNER),
+    ), mock.patch.object(
+        rc, "sign_checkpoint_resolution", side_effect=fake_sign
+    ), mock.patch.object(
+        rc.ateles_server, "_resolve_checkpoint", side_effect=fake_resolve
+    ):
+        code = rc.main([checkpoint_id, "approve", "--key", str(key_path)])
+
+    assert code == 0
+    assert seen_before_prompt and f"{checkpoint_id} title=" in seen_before_prompt[0]
+    assert "approved and task released" in capsys.readouterr().out
 

@@ -170,6 +170,8 @@ def _print_result_line(
     if failed:
         reason = detail or "resolution failed"
         print(f"{checkpoint_id} {label} -> FAILED ({reason})")
+    elif detail:
+        print(f"{checkpoint_id} {label} -> {status} ({detail})")
     else:
         print(f"{checkpoint_id} {label} -> {status}")
 
@@ -238,7 +240,12 @@ def resolve_one(
         )
         raise ReportedResolveError(detail)
 
-    _print_result_line(checkpoint_id, title, status)
+    # The server says separately whether the held task was released; an
+    # approved checkpoint is not proof that the work resumed.
+    action_taken = result.get("action_taken") if isinstance(result, dict) else None
+    _print_result_line(
+        checkpoint_id, title, status, detail=str(action_taken) if action_taken else None
+    )
 
 
 def _confirm(ids: list[str], action: str) -> None:
@@ -339,6 +346,14 @@ def main(argv: list[str] | None = None) -> int:
                     "resolving a checkpoint requires a TTY "
                     "(run it yourself at a terminal, or use --dry-run)"
                 )
+            # Consent is bound to the exact selection: list every item read
+            # from the record before asking.
+            print(f"About to {args.action}:")
+            for checkpoint_id in ids:
+                try:
+                    dry_run_one(checkpoint_id)
+                except ResolveError as exc:
+                    print(f"{checkpoint_id} (cannot be read: {exc})")
             if not args.yes:
                 _confirm(ids, args.action)
 
