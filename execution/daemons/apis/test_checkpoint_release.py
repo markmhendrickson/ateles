@@ -1725,6 +1725,36 @@ def test_denial_marker_rejects_non_regular_existing_entry(
     assert apis._checkpoint_denial_persisted("ent_cp") is False
 
 
+def test_apis_denial_marker_matches_shared_store(monkeypatch, tmp_path):
+    """The daemon and the resolver CLI share one marker rule; pin agreement."""
+    import checkpoint_denial_store
+
+    root = tmp_path / "denials"
+    monkeypatch.setenv("APIS_CHECKPOINT_DENIAL_DIR", str(root))
+    marker = apis._checkpoint_denial_marker("ent_cp")
+    assert marker == checkpoint_denial_store.checkpoint_denial_marker("ent_cp")
+    marker.parent.mkdir(parents=True)
+    marker.write_text("denied\n")
+    assert apis._checkpoint_denial_persisted("ent_cp") is True
+    assert checkpoint_denial_store.checkpoint_denial_persisted("ent_cp") is True
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected_reason"),
+    [("", "is not configured"), ("relative/denials", "must be an absolute")],
+)
+def test_apis_denial_marker_logs_critical_when_unbound(
+    configured, expected_reason, monkeypatch, caplog
+):
+    monkeypatch.setenv("APIS_CHECKPOINT_DENIAL_DIR", configured)
+    with caplog.at_level("CRITICAL"):
+        assert apis._checkpoint_denial_marker("ent_cp") is None
+    assert any(
+        record.levelname == "CRITICAL" and expected_reason in record.getMessage()
+        for record in caplog.records
+    )
+
+
 @pytest.mark.asyncio
 async def test_already_approved_unstamped_checkpoint_releases_task(
     monkeypatch, release_store

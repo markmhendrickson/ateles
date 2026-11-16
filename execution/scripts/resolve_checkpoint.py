@@ -41,7 +41,11 @@ from typing import Any, Mapping
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MCP_DIR = _REPO_ROOT / "execution" / "mcp" / "ateles"
-for _path in (_REPO_ROOT, _MCP_DIR):
+# The replay-denial store lives in a standard-library-only module beside the
+# Apis daemon; importing the daemon itself would pull in aiohttp, which this
+# operator CLI neither needs nor installs.
+_APIS_DIR = _REPO_ROOT / "execution" / "daemons" / "apis"
+for _path in (_REPO_ROOT, _MCP_DIR, _APIS_DIR):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
@@ -50,6 +54,7 @@ from lib.daemon_runtime.checkpoint_resolution import (  # noqa: E402
     sign_checkpoint_resolution,
 )
 
+import checkpoint_denial_store  # noqa: E402
 import server as ateles_server  # noqa: E402
 
 ENV_KEY_REF = "ATELES_CHECKPOINT_RESOLVER_OP_REF"
@@ -115,16 +120,19 @@ def _require_denial_store() -> None:
     durable denial marker as absent, so a denied checkpoint could be replayed.
     """
     try:
-        ateles_server._require_checkpoint_release_state()
+        checkpoint_denial_store.require_checkpoint_denial_store()
     except RuntimeError as exc:
         # The store's messages name the variable and an exception class only.
         raise ResolveError(f"checkpoint replay-denial store unavailable: {exc}") from None
 
 
 def _denial_marker_present(checkpoint_id: str) -> bool:
-    """Read the durable denial marker with the Apis consumer's own check."""
-    apis_daemon = ateles_server._load_apis_daemon()
-    return bool(apis_daemon._checkpoint_denial_persisted(checkpoint_id))
+    """Read the durable denial marker with the Apis consumer's own check.
+
+    The Apis daemon delegates to the same shared function, so the CLI and the
+    consumer cannot disagree about the marker's name or validity.
+    """
+    return checkpoint_denial_store.checkpoint_denial_persisted(checkpoint_id)
 
 
 def _resolve_key_ref(explicit: str | None) -> str:

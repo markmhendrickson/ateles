@@ -1057,10 +1057,9 @@ def test_launcher_help_works_in_clean_shell_without_credentials(tmp_path):
 
 
 def _denial_marker_path(store: Path, checkpoint_id: str) -> Path:
-    # The Apis consumer's marker naming; the test reads it from the consumer
-    # module rather than restating it, so a rename breaks here too.
-    apis_daemon = rc.ateles_server._load_apis_daemon()
-    marker = apis_daemon._checkpoint_denial_marker(checkpoint_id)
+    # The shared marker naming the Apis consumer delegates to; the test reads
+    # it from that module rather than restating it, so a rename breaks here too.
+    marker = rc.checkpoint_denial_store.checkpoint_denial_marker(checkpoint_id)
     assert marker is not None and marker.parent == store
     return marker
 
@@ -1281,3 +1280,50 @@ def test_preview_marks_missing_reason_and_confidence(capsys):
 
     output = capsys.readouterr().out
     assert "confidence=(none) threshold=(none) reason=(none)" in output
+
+
+_NO_AIOHTTP_PROBE = r"""
+import sys
+from pathlib import Path
+
+sys.modules["aiohttp"] = None  # any `import aiohttp` now raises ImportError
+sys.path.insert(0, sys.argv[1])
+import resolve_checkpoint as rc
+
+store = Path(sys.argv[2])
+rc._require_denial_store()
+absent = rc._denial_marker_present("ent_cp_probe")
+marker = rc.checkpoint_denial_store.checkpoint_denial_marker("ent_cp_probe")
+marker.write_text("denied\n")
+present = rc._denial_marker_present("ent_cp_probe")
+assert marker.parent == store, marker
+assert absent is False, absent
+assert present is True, present
+assert "apis" not in sys.modules, "resolver loaded the Apis daemon"
+print("ok")
+"""
+
+
+def test_resolver_denial_check_runs_without_aiohttp(tmp_path):
+    """Red on 7e2d3eb6: the marker check loaded the Apis daemon, whose import
+    of aiohttp failed in the MCP CI job and in an operator shell without it."""
+    store = tmp_path / "checkpoint-denials"
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"APIS_CHECKPOINT_DENIAL_DIR", "PYTHONPATH"}
+    }
+    env["APIS_CHECKPOINT_DENIAL_DIR"] = str(store)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", _NO_AIOHTTP_PROBE, str(_SCRIPTS), str(store)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip().endswith("ok")
