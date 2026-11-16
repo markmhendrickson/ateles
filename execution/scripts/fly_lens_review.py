@@ -120,10 +120,17 @@ def resolve_head(repo: str, pr: int) -> str:
 
 
 def resolve_changed_files(repo: str, pr: int) -> list[str]:
-    """The PR's changed file paths, or raise RuntimeError."""
+    """Every path the PR touches, or raise RuntimeError.
+
+    A rename counts BOTH its new and its old path (``previous_filename``), the
+    rule ``review_scope.fetch_pr_files`` applies for the approval tool: a rename
+    out of a legal-relevant path must still select the lenses that path needs.
+    A list that cannot be read, or that comes back empty (a PR always touches at
+    least one file), raises, so the caller falls back to every lens.
+    """
     proc = subprocess.run(
         ["gh", "api", "--paginate", f"repos/{repo}/pulls/{pr}/files",
-         "--jq", ".[].filename"],
+         "--jq", ".[] | {filename, previous_filename}"],
         capture_output=True, text=True, timeout=120,
     )
     if proc.returncode != 0:
@@ -131,7 +138,27 @@ def resolve_changed_files(repo: str, pr: int) -> list[str]:
             f"could not list the changed files of {repo}#{pr} "
             f"(rc={proc.returncode}): {(proc.stderr or '').strip()[:200]}"
         )
-    return [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+    paths: list[str] = []
+    for line in (proc.stdout or "").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            raise RuntimeError(
+                f"could not read the changed files of {repo}#{pr}: a row was not JSON"
+            ) from None
+        if not isinstance(row, dict) or not isinstance(row.get("filename"), str):
+            raise RuntimeError(
+                f"could not read the changed files of {repo}#{pr}: a row had no filename"
+            )
+        for key in ("filename", "previous_filename"):
+            value = row.get(key)
+            if isinstance(value, str) and value.strip() and value.strip() not in paths:
+                paths.append(value.strip())
+    if not paths:
+        raise RuntimeError(f"the changed-file list of {repo}#{pr} came back empty")
+    return paths
 
 
 def lenses_for_all(changed_files: list[str] | None) -> list[str]:

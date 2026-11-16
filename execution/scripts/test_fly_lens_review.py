@@ -298,3 +298,55 @@ def test_all_unreadable_file_list_runs_legal_too(tmp_path):
                 poster=lambda **kw: (True, ""), files_resolver=broken)
     assert rc == 0
     assert [c["lens"] for c in d.calls] == [*f.LENS_ORDER, "legal"]
+
+
+# --- resolve_changed_files: renames and empty lists (security review, PR #1787) ---
+class _Proc:
+    def __init__(self, stdout="", returncode=0, stderr=""):
+        self.stdout, self.returncode, self.stderr = stdout, returncode, stderr
+
+
+def _fake_gh(monkeypatch, stdout, returncode=0):
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return _Proc(stdout=stdout, returncode=returncode)
+
+    monkeypatch.setattr(f.subprocess, "run", fake_run)
+    return calls
+
+
+def test_rename_out_of_a_legal_path_keeps_the_old_path_and_selects_legal(monkeypatch):
+    rows = [{"filename": "src/deps.json", "previous_filename": "package.json"},
+            {"filename": "README.md", "previous_filename": None}]
+    _fake_gh(monkeypatch, "\n".join(json.dumps(r) for r in rows) + "\n")
+    paths = f.resolve_changed_files("o/r", 7)
+    assert paths == ["src/deps.json", "package.json", "README.md"]
+    assert "legal" in f.lenses_for_all(paths)
+    assert "legal" not in f.lenses_for_all(["src/deps.json", "README.md"])
+
+
+def test_file_list_query_asks_for_previous_filename(monkeypatch):
+    calls = _fake_gh(monkeypatch, json.dumps({"filename": "a.py"}) + "\n")
+    f.resolve_changed_files("o/r", 7)
+    assert "previous_filename" in " ".join(calls[0])
+
+
+def test_empty_file_list_is_unreadable_and_runs_every_lens(monkeypatch):
+    _fake_gh(monkeypatch, "\n")
+    with pytest.raises(RuntimeError, match="empty"):
+        f.resolve_changed_files("o/r", 7)
+
+
+def test_non_json_or_nameless_row_is_unreadable(monkeypatch):
+    for out in ("package.json\n", json.dumps({"previous_filename": "x"}) + "\n", "[1]\n"):
+        _fake_gh(monkeypatch, out)
+        with pytest.raises(RuntimeError, match="could not read"):
+            f.resolve_changed_files("o/r", 7)
+
+
+def test_failed_gh_call_still_raises(monkeypatch):
+    _fake_gh(monkeypatch, "", returncode=1)
+    with pytest.raises(RuntimeError, match="could not list"):
+        f.resolve_changed_files("o/r", 7)
