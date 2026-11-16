@@ -62,11 +62,12 @@ USER_AGENT = "ateles-hub-reconcile/1.0"
 EXIT_OK, EXIT_FINDINGS, EXIT_INCONCLUSIVE, EXIT_ERROR = 0, 1, 2, 3
 
 ENTITY_ID_RE = re.compile(r"ent_[0-9a-f]{24}")
-ENTITY_ID_IN_HREF_RE = re.compile(r"ent_[0-9a-f]{24}(?![0-9a-f])")
+RENDERED_PAGE_PATH_RE = re.compile(r"/entities/(ent_[0-9a-f]{24})/html/?")
 PROFILE_RE = re.compile(r"[A-Za-z0-9_-]+")
 BADGE_CLASS_RE = re.compile(r"[a-z0-9-]+")
 MARKER_NAME_RE = re.compile(r"[a-z0-9-]{1,64}")
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+MAX_LIST_PAGES = 100
 BASE_URL_INPUT_ERROR = (
     "NEOTOMA_BASE_URL must not contain credentials, a query, "
     "a fragment or control characters"
@@ -193,7 +194,11 @@ def _request(url: str, token: str, payload: dict | None = None) -> dict:
 
 def _fetch_snapshot(base_url: str, token: str, entity_id: str) -> dict:
     entity = _request(f"{base_url}/entities/{entity_id}", token)
+    if not isinstance(entity, dict):
+        raise ValueError("unreadable snapshot")
     snapshot = entity.get("snapshot", entity)
+    if not isinstance(snapshot, dict):
+        raise ValueError("unreadable snapshot")
     if isinstance(snapshot.get("snapshot"), dict):
         snapshot = snapshot["snapshot"]
     snapshot = dict(snapshot)
@@ -218,13 +223,18 @@ def _decode_probe(value: str) -> str | None:
 
 
 class _PageLinks(HTMLParser):
-    def __init__(self):
+    def __init__(self, base_url: str):
         super().__init__(convert_charrefs=True)
+        self.base_url = urllib.parse.urlsplit(base_url)
         self.links: set[str] = set()
         self.cards: set[str] = set()
+        self.template_depth = 0
 
     def handle_starttag(self, tag, attrs):
-        if tag != "a":
+        if tag == "template":
+            self.template_depth += 1
+            return
+        if tag != "a" or self.template_depth:
             return
         attributes = dict(attrs)
         href = attributes.get("href")
@@ -233,14 +243,31 @@ class _PageLinks(HTMLParser):
         probe = _decode_probe(href)
         if probe is None:
             raise ValueError("unresolvable encoding")
-        ids = set(ENTITY_ID_IN_HREF_RE.findall(probe))
-        self.links.update(ids)
+        try:
+            target = urllib.parse.urlsplit(probe)
+        except ValueError:
+            return
+        if target.scheme or target.netloc:
+            if (
+                target.scheme != self.base_url.scheme
+                or target.netloc != self.base_url.netloc.lower()
+            ):
+                return
+        match = RENDERED_PAGE_PATH_RE.fullmatch(target.path)
+        if not match:
+            return
+        entity_id = match.group(1)
+        self.links.add(entity_id)
         if "card" in (attributes.get("class") or "").split():
-            self.cards.update(ids)
+            self.cards.add(entity_id)
+
+    def handle_endtag(self, tag):
+        if tag == "template" and self.template_depth:
+            self.template_depth -= 1
 
 
-def _page_links(body: str) -> _PageLinks:
-    links = _PageLinks()
+def _page_links(body: str, base_url: str) -> _PageLinks:
+    links = _PageLinks(base_url)
     links.feed(body)
     return links
 
@@ -251,7 +278,7 @@ def _list_rendered_pages(base_url: str, token: str) -> tuple[set[str], bool]:
     visited_cursors: set[str] = set()
     cursor = ""
     expected_total = None
-    while True:
+    for _ in range(MAX_LIST_PAGES):
         url = f"{base_url}/entities?entity_type=rendered_page&limit=200"
         if cursor:
             url += f"&cursor={urllib.parse.quote(cursor, safe='')}"
@@ -260,6 +287,8 @@ def _list_rendered_pages(base_url: str, token: str) -> tuple[set[str], bool]:
         except (urllib.error.URLError, json.JSONDecodeError, UnicodeError, ValueError):
             return found, False
         if not isinstance(data, dict):
+            return found, False
+        if data.get("truncated") is True:
             return found, False
         entities = data.get("entities")
         total = data.get("total")
@@ -277,6 +306,7 @@ def _list_rendered_pages(base_url: str, token: str) -> tuple[set[str], bool]:
             expected_total = total
         elif total != expected_total:
             return found, False
+        previous_count = len(found)
         for entity in entities:
             if not isinstance(entity, dict):
                 return found, False
@@ -286,12 +316,15 @@ def _list_rendered_pages(base_url: str, token: str) -> tuple[set[str], bool]:
             found.add(entity_id)
         if len(found) > total:
             return found, False
+        if len(found) == previous_count:
+            return found, False
         if not next_cursor:
             return found, len(found) == total
         if next_cursor in visited_cursors or next_cursor == cursor or not entities:
             return found, False
         visited_cursors.add(next_cursor)
         cursor = next_cursor
+    return found, False
 
 
 def cmd_check(args, base_url, token) -> int:
@@ -310,19 +343,23 @@ def cmd_check(args, base_url, token) -> int:
 
     try:
         hub = _fetch_snapshot(base_url, token, args.hub)
-        if hub.get("entity_type") != "rendered_page" or not isinstance(
-            hub.get("html_body"), str
-        ):
+        if not isinstance(hub, dict):
+            raise ValueError("unreadable page")
+        if hub.get("entity_type") != "rendered_page":
             fail("hub is not a readable rendered_page; refusing")
-        carded = _page_links(hub["html_body"]).cards & pages
+        if not isinstance(hub.get("html_body"), str):
+            raise ValueError("unreadable page")
+        carded = _page_links(hub["html_body"], base_url).cards & pages
         reachable = {args.hub} | carded
         for entity_id in sorted(carded):
             snapshot = _fetch_snapshot(base_url, token, entity_id)
+            if not isinstance(snapshot, dict):
+                raise ValueError("unreadable page")
             if snapshot.get("entity_type") != "rendered_page" or not isinstance(
                 snapshot.get("html_body"), str
             ):
                 raise ValueError("unreadable page")
-            reachable.update(_page_links(snapshot["html_body"]).links & pages)
+            reachable.update(_page_links(snapshot["html_body"], base_url).links & pages)
     except (
         urllib.error.URLError,
         json.JSONDecodeError,
