@@ -3153,34 +3153,56 @@ PR_BODY_ONLY_CHECKS = frozenset({"design basis line"})
 CI_STATE_PR_BODY_ONLY = "failing_pr_body_only"
 
 
+_SUPERSEDING_CONCLUSIONS = frozenset(
+    {"success", "neutral", "skipped", *_FAILING_CHECK_CONCLUSIONS}
+)
+
+
 def _latest_check_runs(runs: list[dict]) -> list[dict]:
-    """Keep only the newest run of each check (same name and app).
+    """Drop superseded re-runs of the PR-body checks only; keep every other run.
 
-    GitHub keeps every run on a commit, so a re-run (e.g. after a PR-body edit)
-    leaves the superseded run beside it. The newest run is the highest id
-    (GitHub ids increase), falling back to `completed_at`. A run with no name
-    cannot be matched to a re-run and is always kept.
+    Editing the PR body re-runs a check that reads it (PR_BODY_ONLY_CHECKS) and
+    leaves the superseded run beside it on the commit. Only those checks are
+    collapsed to their newest run, keyed by name and app. Every other check run
+    is kept as it stands: two workflows can each carry a job of the same name
+    (this repository has two `pytest` jobs), and a check-run carries no workflow
+    identity here, so collapsing by name could hide one workflow's failure
+    behind the other's success.
+
+    Fail closed: a body-check run with no readable id is never superseded and
+    never supersedes, and when the newest run of a body check is not completed
+    with a known conclusion, every run of that check is kept.
     """
-    latest: dict[tuple[str, str], dict] = {}
-    unnamed: list[dict] = []
+    groups: dict[tuple[str, str], list[dict]] = {}
+    kept: list[dict] = []
 
-    def _rank(run: dict) -> tuple[int, str]:
+    def _run_id(run: dict) -> int:
+        value = run.get("id")
+        if isinstance(value, bool):
+            return 0
         try:
-            run_id = int(run.get("id") or 0)
+            return int(value or 0)
         except (TypeError, ValueError):
-            run_id = 0
-        return run_id, str(run.get("completed_at") or "")
+            return 0
 
     for run in runs:
         name = (run.get("name") or "").strip()
-        if not name:
-            unnamed.append(run)
+        if name not in PR_BODY_ONLY_CHECKS or _run_id(run) <= 0:
+            kept.append(run)
             continue
         app = str((run.get("app") or {}).get("id") or "")
-        key = (name, app)
-        if key not in latest or _rank(run) > _rank(latest[key]):
-            latest[key] = run
-    return list(latest.values()) + unnamed
+        groups.setdefault((name, app), []).append(run)
+
+    for group in groups.values():
+        newest = max(group, key=_run_id)
+        if (
+            newest.get("status") == "completed"
+            and newest.get("conclusion") in _SUPERSEDING_CONCLUSIONS
+        ):
+            kept.append(newest)
+        else:
+            kept.extend(group)
+    return kept
 
 
 def _normalise_github_review_id(value: object) -> str:

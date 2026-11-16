@@ -280,3 +280,54 @@ def test_snapshot_fetch_applies_the_latest_run_filter(monkeypatch):
 
 def _pr_trigger():
     return SwarmDispatcher._pr_trigger_from_api("owner/repo", _pr())
+
+
+# ── security/arch review on 09289d26: workflow identity and the single source ──
+
+
+def test_same_named_code_checks_from_two_workflows_keep_the_failure(monkeypatch):
+    """Two workflows each run a `pytest` job: a newer success in one must not
+    hide a failure in the other, so the head still routes a fix round."""
+    runs = [
+        _run("pytest", "failure", 11),
+        _run("pytest", "success", 12),
+        _run(BODY_CHECK, "failure", 13),
+    ]
+    assert [r["id"] for r in _latest_check_runs(runs)] == [11, 12, 13]
+    d, rec = _dispatcher(monkeypatch, runs)
+    assert asyncio.run(d._required_ci_state(_pr_trigger())) == "failing"
+    _ci_completed(d)
+    assert rec["routed"] == [87]
+
+
+def test_body_check_with_unknown_newest_conclusion_keeps_every_run():
+    runs = [_run(BODY_CHECK, "failure", 11), _run(BODY_CHECK, "stale", 12)]
+    assert [r["id"] for r in _latest_check_runs(runs)] == [11, 12]
+    pending = {**_run(BODY_CHECK, None, 14), "status": "in_progress"}
+    assert [r["id"] for r in _latest_check_runs([_run(BODY_CHECK, "failure", 11), pending])] == [11, 14]
+
+
+def test_body_check_run_without_a_readable_id_is_never_superseded():
+    no_id = {**_run(BODY_CHECK, "failure", 0), "id": None}
+    bad_id = {**_run(BODY_CHECK, "failure", 0), "id": "x"}
+    kept = _latest_check_runs([no_id, bad_id, _run(BODY_CHECK, "success", 20)])
+    assert no_id in kept and bad_id in kept
+    assert any(r.get("id") == 20 for r in kept)
+
+
+def test_pr_body_only_checks_match_exactly_one_workflow_job_name():
+    """PR_BODY_ONLY_CHECKS copies job `name:` values from .github/workflows; each
+    must name exactly one job there, so a rename or a duplicate fails here."""
+    import pathlib
+
+    import yaml
+
+    root = pathlib.Path(__file__).resolve().parents[3] / ".github" / "workflows"
+    names: list[str] = []
+    for path in sorted(root.glob("*.y*ml")):
+        doc = yaml.safe_load(path.read_text()) or {}
+        for job_id, job in (doc.get("jobs") or {}).items():
+            if isinstance(job, dict):
+                names.append(str(job.get("name") or job_id).strip())
+    for check in swarm_dispatch.PR_BODY_ONLY_CHECKS:
+        assert names.count(check) == 1, (check, names.count(check))
