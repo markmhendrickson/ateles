@@ -241,6 +241,9 @@ class _SpyNotifier:
     def _mark_dedupe_notified(self, key, handler=""):
         self.inner._mark_dedupe_notified(key, handler)
 
+    def clear_dedupe(self, key):
+        self.inner.clear_dedupe(key)
+
     def send(self, message, priority="info", handler="", dedupe_key=None, **kw):
         self.sent.append((message, str(getattr(priority, "value", priority)), dedupe_key))
         return self.inner.send(message, priority=priority, handler=handler,
@@ -306,6 +309,21 @@ def test_a_new_window_alerts_again(monkeypatch, tmp_path, ledger) -> None:
     _usage_file(monkeypatch, tmp_path, "codex", [_window(60, resets_in_hours=170)])
     usage_alerts.check_usage_thresholds("codex", notifier=spy)
     assert len(spy.sent) == 2
+
+
+def test_a_window_with_no_reset_time_alerts_again_after_it_rolls_over(
+    monkeypatch, tmp_path, ledger
+) -> None:
+    """With no resets_at the key cannot name the window, so falling back under
+    a threshold clears it and the next crossing alerts again."""
+    spy = _SpyNotifier()
+    for percent in (60, 61, 5, 55):
+        _usage_file(monkeypatch, tmp_path, "cursor",
+                    [{"name": "monthly", "used_percent": percent}])
+        usage_alerts.check_usage_thresholds("cursor", notifier=spy)
+    assert [k for _, _, k in spy.sent] == [
+        "provider-usage-threshold:cursor:monthly:no-reset:50",
+    ] * 2
 
 
 def test_a_window_past_its_reset_does_not_alert(monkeypatch, tmp_path, ledger) -> None:

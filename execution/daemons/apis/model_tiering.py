@@ -1201,10 +1201,13 @@ def iter_ledger_rows(*, since: datetime | None = None):
     for line in _ledger_lines():
         try:
             row = json.loads(line)
-            when = datetime.fromisoformat(str(row["ts"]))
-        except (ValueError, KeyError, TypeError):
+        except ValueError:
             continue
         if not isinstance(row, dict):
+            continue
+        try:
+            when = datetime.fromisoformat(str(row["ts"]))
+        except (ValueError, KeyError, TypeError):
             continue
         if when.tzinfo is None:
             when = when.replace(tzinfo=timezone.utc)

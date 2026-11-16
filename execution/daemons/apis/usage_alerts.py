@@ -166,6 +166,15 @@ def check_usage_thresholds(
                 continue  # that window has reset; its reading no longer applies
             reset_key = resets_at.isoformat() if resets_at else None
             crossed = [t for t in THRESHOLDS if used >= t]
+            if resets_at is None:
+                # No reset time means no per-window key: the key is reused
+                # across windows, so a threshold usage has fallen back under
+                # (the window rolled over) is cleared and can alert again.
+                if notifier is None and journal is None:
+                    journal = (journal_factory or _default_journal_factory)()
+                probe = notifier if notifier is not None else journal
+                for below in (t for t in THRESHOLDS if used < t):
+                    _clear_if_reported(probe, dedupe_key(provider, name, None, below))
             if not crossed:
                 continue
             # One alert per call per window: the highest newly crossed
@@ -198,7 +207,12 @@ def check_usage_thresholds(
             )
             from lib.notify import Priority
 
-            notifier.send(
+            # The notifier journals the key before routing (its dedupe
+            # contract), so a held notice (silence window) or a host with no
+            # transport still counts as reported; the notice is also recorded
+            # by its Neotoma sink. The log says which happened rather than
+            # claiming delivery.
+            delivered = notifier.send(
                 message, priority=Priority.WARN, handler="apis",
                 dedupe_key=keys[threshold],
             )
@@ -206,7 +220,11 @@ def check_usage_thresholds(
                 if lower != threshold:
                     _mark_reported(notifier, keys[lower])
             sent.append(keys[threshold])
-            log.info(f"[apis] usage alert sent: {message}")
+            log.info(
+                "[apis] usage alert "
+                + ("delivered" if delivered else "recorded (held or no transport)")
+                + f": {message}"
+            )
     except Exception as exc:  # noqa: BLE001 — never block or fail a dispatch
         log.warning(f"[apis] usage threshold check failed (non-fatal): {exc}")
     return sent
@@ -220,6 +238,15 @@ def _already_reported(notifier, key: str) -> bool:
         return bool(notifier.is_dedupe_open(key))
     except Exception:  # noqa: BLE001
         return False
+
+
+def _clear_if_reported(notifier, key: str) -> None:
+    if notifier is None or not _already_reported(notifier, key):
+        return
+    try:
+        notifier.clear_dedupe(key)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _mark_reported(notifier, key: str) -> None:

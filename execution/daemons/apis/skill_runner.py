@@ -4965,6 +4965,10 @@ async def run_skill(
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
 
+    Also accepts ``caller``, ``caller_kind`` and ``pr`` (keyword-only), added by
+    ``_with_dispatch_attribution``: who launched this dispatch and for which
+    pull request, recorded with ``task_entity_id`` on every tier-ledger row.
+
     ``agent_git_identity``: True for a fix round (a run that commits and
     pushes to an existing pull request). The child commits as the configured
     agent identity with signing off; with none configured the run is refused
