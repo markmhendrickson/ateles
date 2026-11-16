@@ -876,6 +876,38 @@ class TestNeotomaProxyJob:
                           time.time() + 600, "")  # fmt: skip
         assert module.stopped == [True]
 
+    _CODEX_ARGV = ["codex", "exec", "-c", run_job.MCP_CONFIG_PLACEHOLDER,
+                   "-c", "mcp_servers.mcpsrv_neotoma.required=true",
+                   "-c", 'mcp_servers.mcpsrv_neotoma.default_tools_approval_mode="prompt"',
+                   "--ephemeral", "-"]  # fmt: skip
+
+    def _codex_proxy_job(self, tmp_path):
+        job_dir = tmp_path / "job"
+        _write_job(job_dir, secrets={"NEOTOMA_AAUTH_PRIVATE_JWK": json.dumps(_test_jwk())},
+                   spec={"neotoma_mcp": "proxy", "provider": "codex"},
+                   argv=list(self._CODEX_ARGV))  # fmt: skip
+        home = tmp_path / "home"
+        home.mkdir()
+        return run_job.load_job(job_dir), home
+
+    def test_a_codex_proxy_job_gets_the_loopback_proxy_as_a_config_override(self, tmp_path):
+        pytest.importorskip("cryptography")
+        job, home = self._codex_proxy_job(tmp_path)
+        argv, env = run_job.prepare_child(job, home, {"PATH": "/usr/bin"},
+                                          neotoma_proxy_port=48123)  # fmt: skip
+        assert argv == ["codex", "exec",
+                        "-c", 'mcp_servers.mcpsrv_neotoma.url="http://127.0.0.1:48123/mcp"',
+                        *self._CODEX_ARGV[4:]]  # fmt: skip
+        assert not any("Bearer" in a or "bearer" in a for a in argv)
+        assert not any("Bearer" in str(v) for v in env.values())
+
+    def test_a_codex_proxy_job_with_no_running_proxy_gets_no_neotoma_server(self, tmp_path):
+        pytest.importorskip("cryptography")
+        job, home = self._codex_proxy_job(tmp_path)
+        argv, _ = run_job.prepare_child(job, home, {"PATH": "/usr/bin"},
+                                        neotoma_proxy_port=None)  # fmt: skip
+        assert argv == ["codex", "exec", "--ephemeral", "-"]
+
     def test_the_legacy_token_job_still_gets_its_bearer_config(self, tmp_path):
         job_dir = tmp_path / "job"
         _write_job(job_dir, secrets={"LANIUS_NEOTOMA_TOKEN": "own-token-123"},

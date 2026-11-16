@@ -77,6 +77,12 @@ MIN_SCRUB_LENGTH = 8
 # goes. The real file is written here, on RAM-backed storage, after the job
 # directory is read and before it is deleted.
 MCP_CONFIG_PLACEHOLDER = "@@ATELES_JOB_MCP_CONFIG@@"
+# A codex job carries the placeholder as a `-c` value, with its other Neotoma
+# server overrides after it (fly_runner.codex_neotoma_proxy_overrides); the
+# placeholder becomes this key set to the loopback proxy URL. Equality with
+# fly_runner's constants is asserted by a test.
+CODEX_NEOTOMA_SERVER = "mcpsrv_neotoma"
+CODEX_PROXY_URL_KEY = f"mcp_servers.{CODEX_NEOTOMA_SERVER}.url"
 # Claude's system prompt arrives as a job file (fly_runner.SYSTEM_PROMPT_*);
 # its path replaces this placeholder in argv.
 SYSTEM_PROMPT_PLACEHOLDER = "@@ATELES_JOB_SYSTEM_PROMPT@@"
@@ -534,7 +540,16 @@ def prepare_child(job: Job, home: Path, base_env,
     """The argv and environment the CLI runs with. ``neotoma_proxy_port``:
     the running signing proxy's port, for a ``neotoma_mcp == "proxy"`` job."""
     argv = list(job.argv)
-    if MCP_CONFIG_PLACEHOLDER in argv:
+    if _codex_mcp_placeholder(argv):
+        if job.neotoma_mcp == "proxy" and neotoma_proxy_port is not None:
+            url = f"http://127.0.0.1:{int(neotoma_proxy_port)}/mcp"
+            value = f"{CODEX_PROXY_URL_KEY}={json.dumps(url)}"
+            argv = [value if a == MCP_CONFIG_PLACEHOLDER else a for a in argv]
+        else:
+            # No proxy is running (or none was asked for): the server is
+            # removed whole. A static bearer is never a substitute.
+            argv = _drop_codex_neotoma_overrides(argv)
+    elif MCP_CONFIG_PLACEHOLDER in argv:
         if job.neotoma_mcp == "proxy" and neotoma_proxy_port is not None:
             cfg = write_proxy_mcp_config(home, neotoma_proxy_port)
             argv = [str(cfg) if a == MCP_CONFIG_PLACEHOLDER else a for a in argv]
@@ -579,6 +594,30 @@ def prepare_child(job: Job, home: Path, base_env,
     credentials = {name: job.secrets[name] for name in job.child_credential_names}
     env = runner_child_environment(base_env, credentials, overrides=overrides)
     return argv, env
+
+
+def _codex_mcp_placeholder(argv: list[str]) -> bool:
+    """Whether the MCP placeholder is a codex ``-c`` value."""
+    return any(a == MCP_CONFIG_PLACEHOLDER and i > 0 and argv[i - 1] == "-c"
+               for i, a in enumerate(argv))  # fmt: skip
+
+
+def _drop_codex_neotoma_overrides(argv: list[str]) -> list[str]:
+    """*argv* without the placeholder's ``-c`` pair and every ``-c`` override
+    of the codex Neotoma server, so no half-declared server is left."""
+    prefix = f"mcp_servers.{CODEX_NEOTOMA_SERVER}."
+    out: list[str] = []
+    skip = False
+    for i, arg in enumerate(argv):
+        if skip:
+            skip = False
+            continue
+        if arg == "-c" and i + 1 < len(argv) and (
+                argv[i + 1] == MCP_CONFIG_PLACEHOLDER or argv[i + 1].startswith(prefix)):
+            skip = True
+            continue
+        out.append(arg)
+    return out
 
 
 def _drop_flag_with_value(argv: list[str], flag: str, value: str) -> list[str]:
