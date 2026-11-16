@@ -31,6 +31,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1995,12 +1996,22 @@ def transcribe_audio_file(
                         for seg in local["segments"]
                     ],
                     diarization,
+                    # Repeat loops are collapsed only on chunked long-memo
+                    # output, which is the result that carries chunk
+                    # evidence; short memos keep the single-pass text intact.
+                    collapse_repeats=isinstance(local.get("raw_response"), dict)
+                    and "chunks" in local["raw_response"],
                 )
                 text = format_turns(turns)
             text = f"{diarization_header(diarization)}\n\n{text}"
+        # Carry chunk evidence in the same raw_response field the two-track
+        # path uses, so withheld text survives storage and the .stt_raw.json
+        # sidecar — markers alone must not be the only remaining record.
+        raw_response = local.get("raw_response")
         return {
             "transcription_text": text,
             **({"diarization": diarization} if diarization is not None else {}),
+            **({"raw_response": raw_response} if raw_response is not None else {}),
             "language": local["language"],
             "audio_duration_seconds": get_audio_duration(audio_path),
             "file_size_bytes": audio_path.stat().st_size,
@@ -3046,6 +3057,29 @@ def _validate_transcription_result(result: object, *, paired: bool) -> None:
             require(isinstance(diar, dict) and diar.get("status") in ("ok", "failed")
                     and text(diar.get("method")), "diarization")
             require(diar["status"] != "failed" or text(diar.get("category")), "diarization.category")
+        # Optional chunk evidence (long memos): the chunker's own records,
+        # stored unchanged (same contract the two-track path stores per track).
+        # Every withheld chunk keeps its rejected text and reason.
+        if "raw_response" in result:
+            raw = result["raw_response"]
+            require(isinstance(raw, dict), "raw_response")
+            chunks = raw.get("chunks")
+            require(isinstance(chunks, list), "raw_response.chunks")
+            for chunk in chunks:
+                require(isinstance(chunk, dict), "raw_response.chunks[]")
+                if chunk.get("kind") == "seam":
+                    require(number(chunk.get("at")), "raw_response seam timing")
+                    continue
+                require(chunk.get("kind") == "chunk", "raw_response.chunk kind")
+                require(number(chunk.get("start")) and number(chunk.get("end"))
+                        and chunk["end"] >= chunk["start"], "raw_response.chunk timing")
+                require(text(chunk.get("status")), "raw_response.chunk status")
+                if str(chunk["status"]).startswith("screened"):
+                    require(
+                        isinstance(chunk.get("withheld_text"), str)
+                        and text(chunk.get("reason")),
+                        "withheld chunk keeps its text and reason",
+                    )
     elif backend == BACKEND_FLUID and paired and isinstance(result.get("raw_response"), dict) \
             and "segment_merge" in result["raw_response"]:
         segment_merge_raw(result["raw_response"], result["transcription_text"])
@@ -3125,29 +3159,77 @@ def _read_pending_store(
         raise RuntimeError("Missing, malformed or mismatched pending store; no ASR was run") from exc
 
 
+def _sidecar_mode(audio_path: Path) -> int:
+    """Permission bits for a sidecar: never broader than the recording's.
+
+    A sidecar carries the recording's speech (and, for long memos, the text
+    the output screen withheld), so it may not be readable by anyone the
+    recording itself is not readable by. When the recording's mode cannot be
+    read, fall back to owner-only 0600.
+    """
+    try:
+        return stat.S_IMODE(os.stat(audio_path).st_mode) & 0o666
+    except OSError:
+        return 0o600
+
+
+def _write_private_sidecar(path: Path, content: str, mode: int) -> None:
+    """Atomically write ``content`` to ``path`` with exactly ``mode``.
+
+    The temporary file is created by ``mkstemp`` (0600, independent of umask)
+    in the target directory, set to ``mode`` before any content is written,
+    then renamed over the target. A fresh write and a replacement of an
+    existing (possibly broader) sidecar both end with a new inode at ``mode``;
+    the file is never visible at the target path with broader permissions.
+    """
+    fd, name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(name)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if fd != -1:
+            os.close(fd)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def _write_transcript_sidecars(
     audio_path: Path, result: dict, verbose: bool = False
 ) -> None:
     """
     Write two sidecars next to the audio file:
       <stem>.transcript.txt   — the merged, speaker-labeled transcript
-      <stem>.stt_raw.json     — the raw ElevenLabs response (word timings, per
-                                channel/speaker), for offline re-merge
+      <stem>.stt_raw.json     — the raw STT response (word timings, per
+                                channel/speaker, chunk evidence including
+                                withheld text), for offline re-merge
+
+    Each sidecar is created atomically with permissions no broader than the
+    recording's (``_sidecar_mode``), on a fresh write and on replacement.
 
     Best-effort: never raise (a sidecar failure must not fail transcription).
     """
     try:
+        mode = _sidecar_mode(audio_path)
         text = (result.get("transcription_text") or "").strip()
         if text:
             txt_path = audio_path.with_suffix(audio_path.suffix + ".transcript.txt")
-            txt_path.write_text(text, encoding="utf-8")
+            _write_private_sidecar(txt_path, text, mode)
             if verbose:
                 print(f"    Wrote transcript sidecar: {txt_path.name}", file=sys.stderr)
         raw = result.get("raw_response")
         if raw is not None:
             json_path = audio_path.with_suffix(audio_path.suffix + ".stt_raw.json")
-            json_path.write_text(
-                json.dumps(raw, ensure_ascii=False), encoding="utf-8"
+            _write_private_sidecar(
+                json_path, json.dumps(raw, ensure_ascii=False), mode
             )
             if verbose:
                 print(
