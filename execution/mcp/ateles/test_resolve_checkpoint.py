@@ -114,6 +114,14 @@ def _checkpoint_entity(
 
 
 @pytest.fixture(autouse=True)
+def _denial_store(tmp_path, monkeypatch) -> Path:
+    """Bind a valid, empty replay-denial store, as the launcher does."""
+    store = tmp_path / "checkpoint-denials"
+    monkeypatch.setenv("APIS_CHECKPOINT_DENIAL_DIR", str(store))
+    return store
+
+
+@pytest.fixture(autouse=True)
 def _no_batch_delay(monkeypatch):
     monkeypatch.setattr(rc, "BATCH_ITEM_DELAY_SECONDS", 0)
 
@@ -1046,3 +1054,230 @@ def test_launcher_help_works_in_clean_shell_without_credentials(tmp_path):
     assert "usage:" in completed.stdout
     assert "1Password op:// reference" in completed.stdout
     assert "NEOTOMA_BEARER_TOKEN" not in completed.stderr
+
+
+def _denial_marker_path(store: Path, checkpoint_id: str) -> Path:
+    # The Apis consumer's marker naming; the test reads it from the consumer
+    # module rather than restating it, so a rename breaks here too.
+    apis_daemon = rc.ateles_server._load_apis_daemon()
+    marker = apis_daemon._checkpoint_denial_marker(checkpoint_id)
+    assert marker is not None and marker.parent == store
+    return marker
+
+
+def test_denial_marker_in_configured_store_blocks_cli_resolution(
+    _denial_store, capsys
+):
+    """Red on 406a0d02: the CLI signed and submitted a checkpoint whose
+    durable denial marker sat in the configured store."""
+    key_text, _jwk, jkt = _key_material()
+    checkpoint_id = "ent_cp_denied"
+    _denial_store.mkdir(parents=True, exist_ok=True)
+    _denial_marker_path(_denial_store, checkpoint_id).write_text("denied\n")
+    reads = {f"/entities/{checkpoint_id}": _checkpoint_entity(checkpoint_id)}
+
+    with (
+        mock.patch.object(
+            rc.subprocess,
+            "run",
+            side_effect=[_op_result(), _op_result(key_text)],
+        ),
+        mock.patch.object(
+            rc.ateles_server,
+            "_get",
+            side_effect=lambda path, params=None: reads.get(path),
+        ),
+        mock.patch.object(
+            rc.ateles_server,
+            "_checkpoint_resolver_authority",
+            return_value=(SUB, jkt, OWNER),
+        ),
+        mock.patch.object(rc, "sign_checkpoint_resolution") as sign,
+        mock.patch.object(rc.ateles_server, "_resolve_checkpoint") as resolve,
+    ):
+        code = rc.main([checkpoint_id, "approve", "--key-ref", KEY_REF])
+
+    assert code == 1
+    sign.assert_not_called()
+    resolve.assert_not_called()
+    out = capsys.readouterr().out
+    assert "durable denial marker" in out
+
+
+@pytest.mark.parametrize("store_kind", ["unset", "empty", "relative", "file", "symlink"])
+def test_unbound_or_invalid_denial_store_refuses_before_op_or_signing(
+    store_kind, tmp_path, monkeypatch, capsys
+):
+    """Red on 406a0d02: the CLI never validated the denial store, so with it
+    unset the consumer read every denial marker as absent."""
+    if store_kind == "unset":
+        monkeypatch.delenv("APIS_CHECKPOINT_DENIAL_DIR", raising=False)
+    elif store_kind == "empty":
+        monkeypatch.setenv("APIS_CHECKPOINT_DENIAL_DIR", "  ")
+    elif store_kind == "relative":
+        monkeypatch.setenv("APIS_CHECKPOINT_DENIAL_DIR", "relative/denials")
+    elif store_kind == "file":
+        regular = tmp_path / "not-a-directory"
+        regular.write_text("")
+        monkeypatch.setenv("APIS_CHECKPOINT_DENIAL_DIR", str(regular))
+    else:
+        real = tmp_path / "real-denials"
+        real.mkdir()
+        link = tmp_path / "linked-denials"
+        link.symlink_to(real, target_is_directory=True)
+        monkeypatch.setenv("APIS_CHECKPOINT_DENIAL_DIR", str(link))
+
+    with (
+        mock.patch.object(rc.subprocess, "run") as op_run,
+        mock.patch.object(rc.ateles_server, "_get") as neotoma_get,
+        mock.patch.object(rc, "sign_checkpoint_resolution") as sign,
+        mock.patch.object(rc.ateles_server, "_resolve_checkpoint") as resolve,
+    ):
+        code = rc.main(["ent_cp_store", "approve", "--key-ref", KEY_REF])
+
+    assert code == 1
+    op_run.assert_not_called()
+    neotoma_get.assert_not_called()
+    sign.assert_not_called()
+    resolve.assert_not_called()
+    assert "replay-denial store unavailable" in capsys.readouterr().err
+
+
+def _run_launcher_with_probe_python(
+    tmp_path: Path, launcher: Path, extra_env: dict[str, str] | None = None
+) -> str:
+    """Run a launcher against a stand-in interpreter that reports the store.
+
+    The stand-in satisfies the dependency probe and, when exec'd, prints the
+    exported denial directory instead of running any Python, so neither the
+    server nor the resolver starts and no credential file is read.
+    """
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    probe = venv / "bin" / "python3"
+    probe.write_text(
+        "#!/bin/bash\n"
+        'if [ "${1:-}" = "-c" ]; then exit 0; fi\n'
+        "printf 'DENIAL_DIR=%s\\n' \"${APIS_CHECKPOINT_DENIAL_DIR-<unset>}\"\n"
+    )
+    probe.chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    empty_env_file = tmp_path / "empty.env"
+    empty_env_file.write_text("")
+    env = {
+        "HOME": str(home),
+        "PATH": "/usr/bin:/bin",
+        "ATELES_MCP_VENV": str(venv),
+        "NEOTOMA_ENV_FILE": str(empty_env_file),
+        "NEOTOMA_BASE_URL": "http://localhost:3180",
+    }
+    env.update(extra_env or {})
+    completed = subprocess.run(
+        ["/bin/bash", str(launcher), "ent_cp_probe", "approve"],
+        cwd=_REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    lines = [
+        line for line in completed.stdout.splitlines() if line.startswith("DENIAL_DIR=")
+    ]
+    assert len(lines) == 1, completed.stdout
+    return lines[0].removeprefix("DENIAL_DIR=")
+
+
+@pytest.mark.parametrize(
+    "override", [None, "/var/tmp/ateles-test-override/checkpoint-denials"]
+)
+def test_cli_launcher_exports_same_denial_store_as_mcp_launcher(tmp_path, override):
+    """Red on 406a0d02: resolve_checkpoint.sh exported no denial store while
+    run_ateles_mcp.sh exported /var/tmp/ateles/checkpoint-denials."""
+    extra = {"APIS_CHECKPOINT_DENIAL_DIR": override} if override else None
+    cli = _run_launcher_with_probe_python(
+        tmp_path / "cli", _SCRIPTS / "resolve_checkpoint.sh", extra
+    )
+    mcp_launcher = _run_launcher_with_probe_python(
+        tmp_path / "mcp", _MCP_DIR / "run_ateles_mcp.sh", extra
+    )
+    expected = override or "/var/tmp/ateles/checkpoint-denials"
+    assert cli == mcp_launcher == expected
+
+
+@pytest.mark.parametrize(
+    "launcher", [_SCRIPTS / "resolve_checkpoint.sh", _MCP_DIR / "run_ateles_mcp.sh"]
+)
+def test_launchers_reach_interpreter_with_a_bearer_token_present(tmp_path, launcher):
+    """Both launchers run under ``set -e``; the shared bootstrap must not end
+    a sourced helper on a false test and silently stop the launch."""
+    store = _run_launcher_with_probe_python(
+        tmp_path, launcher, {"NEOTOMA_BEARER_TOKEN": "placeholder-not-a-token"}
+    )
+    assert store == "/var/tmp/ateles/checkpoint-denials"
+
+
+@pytest.mark.parametrize(
+    "launcher", [_SCRIPTS / "resolve_checkpoint.sh", _MCP_DIR / "run_ateles_mcp.sh"]
+)
+def test_launchers_reach_interpreter_when_last_env_file_key_is_preset(
+    tmp_path, launcher
+):
+    """The environment loader keeps an existing value; skipping the last key
+    must not become the loader's status under ``set -e``."""
+    settings = tmp_path / "settings-fixture"
+    settings.write_text("ATELES_TEST_PRESET_KEY=from-file\n")
+    store = _run_launcher_with_probe_python(
+        tmp_path,
+        launcher,
+        {
+            "NEOTOMA_ENV_FILE": str(settings),
+            "ATELES_TEST_PRESET_KEY": "from-environment",
+        },
+    )
+    assert store == "/var/tmp/ateles/checkpoint-denials"
+
+
+def test_preview_shows_sanitized_reason_and_confidence_against_threshold(capsys):
+    """Red on 406a0d02 (arch advisory): the preview omitted the checkpoint's
+    reason and its confidence against the threshold."""
+    snapshot = {
+        "title": "Hold",
+        "task_entity_id": "ent_task_1",
+        "blast_radius": "high",
+        "confidence": 0.62,
+        "confidence_threshold": "0.85\x1b[2J",
+        "reason": "below\nthreshold \x1b]0;spoof\x07for‮ open_or_merge_pr",
+    }
+
+    with mock.patch.object(
+        rc,
+        "load_checkpoint",
+        return_value=({}, snapshot, SUB, "A" * 43),
+    ):
+        rc.dry_run_one("ent_cp_reason_preview")
+
+    output = capsys.readouterr().out.rstrip("\n")
+    assert "confidence=0.62" in output
+    assert "threshold=0.85\\u001b[2J" in output
+    assert "reason=below\\u000athreshold \\u001b]0;spoof\\u0007for\\u202e open_or_merge_pr" in output
+    assert "\n" not in output
+    assert not any(
+        unicodedata.category(character) in {"Cc", "Cf"} for character in output
+    )
+
+
+def test_preview_marks_missing_reason_and_confidence(capsys):
+    snapshot = {"title": "Hold", "task_entity_id": "t", "blast_radius": "low"}
+
+    with mock.patch.object(
+        rc,
+        "load_checkpoint",
+        return_value=({}, snapshot, SUB, "A" * 43),
+    ):
+        rc.dry_run_one("ent_cp_no_reason")
+
+    output = capsys.readouterr().out
+    assert "confidence=(none) threshold=(none) reason=(none)" in output

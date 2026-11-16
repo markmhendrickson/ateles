@@ -8,6 +8,11 @@ private JWK stays in a 1Password item field. Each real run calls
 requiring a fresh 1Password CLI authorization. The key exists only in this
 process's memory while signing and is never printed, logged, or written.
 
+Before anything is read, signed, or submitted, the replay-denial store
+(``APIS_CHECKPOINT_DENIAL_DIR``, exported by the launcher with the same default
+as the MCP launcher) must pass the MCP server's startup validation, and a
+checkpoint with a durable denial marker in it is refused.
+
 In 1Password, store the complete resolver private JWK in a concealed field,
 enable the desktop app's CLI integration, and copy that field's ``op://``
 secret reference. Pass only the reference:
@@ -49,6 +54,7 @@ import server as ateles_server  # noqa: E402
 
 ENV_KEY_REF = "ATELES_CHECKPOINT_RESOLVER_OP_REF"
 TITLE_MAX = 60
+REASON_MAX = 160
 BATCH_ITEM_DELAY_SECONDS = 2.0
 OP_ENV_ALLOWLIST = (
     "HOME",
@@ -84,11 +90,41 @@ def _sanitize_terminal_text(value: object) -> str:
     return "".join(safe)
 
 
-def _truncate_title(title: object) -> str:
-    text = " ".join(_sanitize_terminal_text(title or "").split())
-    if len(text) <= TITLE_MAX:
+def _one_line(value: object, limit: int) -> str:
+    text = " ".join(_sanitize_terminal_text(value or "").split())
+    if len(text) <= limit:
         return text
-    return text[: TITLE_MAX - 1] + "…"
+    return text[: limit - 1] + "…"
+
+
+def _truncate_title(title: object) -> str:
+    return _one_line(title, TITLE_MAX)
+
+
+def _display_scalar(value: object) -> str:
+    if value is None or value == "":
+        return "(none)"
+    return _one_line(value, TITLE_MAX)
+
+
+def _require_denial_store() -> None:
+    """Refuse unless the replay-denial store validates exactly as at MCP startup.
+
+    This CLI calls the server's resolution path directly, so it never runs the
+    server's startup check. Without a bound store the Apis consumer reads every
+    durable denial marker as absent, so a denied checkpoint could be replayed.
+    """
+    try:
+        ateles_server._require_checkpoint_release_state()
+    except RuntimeError as exc:
+        # The store's messages name the variable and an exception class only.
+        raise ResolveError(f"checkpoint replay-denial store unavailable: {exc}") from None
+
+
+def _denial_marker_present(checkpoint_id: str) -> bool:
+    """Read the durable denial marker with the Apis consumer's own check."""
+    apis_daemon = ateles_server._load_apis_daemon()
+    return bool(apis_daemon._checkpoint_denial_persisted(checkpoint_id))
 
 
 def _resolve_key_ref(explicit: str | None) -> str:
@@ -229,6 +265,11 @@ def load_checkpoint(checkpoint_id: str) -> tuple[dict, dict, str, str]:
     if ateles_server._entity_type_of(data) != stored_type:
         raise ResolveError(f"entity {checkpoint_id} is not a {stored_type}")
 
+    if _denial_marker_present(checkpoint_id):
+        raise ResolveError(
+            "checkpoint has a durable denial marker; refusing replay"
+        )
+
     snap = ateles_server._snapshot_of(data)
     status = str(snap.get("status", "")).strip().lower()
     if status != "awaiting_operator":
@@ -321,7 +362,13 @@ def dry_run_one(checkpoint_id: str) -> None:
     safe_checkpoint_id = _sanitize_terminal_text(checkpoint_id)
     task = _sanitize_terminal_text(snap.get("task_entity_id") or "(none)")
     blast = _sanitize_terminal_text(snap.get("blast_radius") or "(none)")
-    print(f"{safe_checkpoint_id} title={title} task={task} blast_radius={blast}")
+    confidence = _display_scalar(snap.get("confidence"))
+    threshold = _display_scalar(snap.get("confidence_threshold"))
+    reason = _one_line(snap.get("reason"), REASON_MAX) or "(none)"
+    print(
+        f"{safe_checkpoint_id} title={title} task={task} blast_radius={blast} "
+        f"confidence={confidence} threshold={threshold} reason={reason}"
+    )
 
 
 def resolve_one(
@@ -447,6 +494,10 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
 
     try:
+        # Before any read, signing, op call or submission: the same store
+        # validation the MCP server runs at startup.
+        _require_denial_store()
+
         if args.batch:
             ids = _read_batch_ids(Path(args.batch).expanduser())
         else:
