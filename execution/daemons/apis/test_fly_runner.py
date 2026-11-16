@@ -578,7 +578,7 @@ def test_key_not_admitted_by_neotoma_is_ineligible(fly_env):
         _job(neotoma_tools_granted=True)
 
 
-def _codex_job(**kw):
+def _codex_neotoma_job(**kw):
     return fly_runner.build_job(
         provider="codex", role="lanius", cmd=["/x/codex", "exec", "--ephemeral", "-"],
         stdin=b"t", timeout=60, repository="owner/repo", github_requested=True,
@@ -601,7 +601,7 @@ def test_key_only_codex_job_gets_the_signing_proxy_through_config_overrides(
         fly_env, monkeypatch):  # fmt: skip
     monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
     monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", "lanius-own-token-0009")
-    job = _codex_job(neotoma_tool_grant={"mcpsrv_neotoma": ("retrieve_entities", "store")})
+    job = _codex_neotoma_job(neotoma_tool_grant={"mcpsrv_neotoma": ("retrieve_entities", "store")})
     assert job.neotoma_mcp == "proxy" and job.neotoma_tools_unavailable is False
     assert job.neotoma_jwk_name == fly_runner.AAUTH_JWK_JOB_NAME
     i = job.argv.index(fly_runner.MCP_CONFIG_PLACEHOLDER)
@@ -624,7 +624,7 @@ def test_key_only_codex_job_gets_the_signing_proxy_through_config_overrides(
 
 def test_codex_job_with_a_whole_server_grant_has_no_tool_allowlist(fly_env, monkeypatch):
     monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
-    job = _codex_job(neotoma_tool_grant={"mcpsrv_neotoma": None})
+    job = _codex_neotoma_job(neotoma_tool_grant={"mcpsrv_neotoma": None})
     assert job.neotoma_mcp == "proxy"
     assert "mcp_servers.mcpsrv_neotoma.enabled_tools" not in _codex_overrides(job.argv)
 
@@ -632,7 +632,7 @@ def test_codex_job_with_a_whole_server_grant_has_no_tool_allowlist(fly_env, monk
 def test_codex_job_without_its_tool_grant_is_refused(fly_env, monkeypatch):
     monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
     with pytest.raises(fly_runner.FlyIneligible, match="codex tool grant was not provided"):
-        _codex_job()
+        _codex_neotoma_job()
 
 
 def test_codex_job_whose_key_neotoma_does_not_admit_is_refused(fly_env, monkeypatch):
@@ -640,7 +640,7 @@ def test_codex_job_whose_key_neotoma_does_not_admit_is_refused(fly_env, monkeypa
     _session(fly_env).answer = {"aauth": {"admitted": False, "admission_reason": "no_match"}}
     with pytest.raises(fly_runner.FlyIneligible,
                        match=r"role 'lanius''s AAuth key is not admitted by Neotoma \(no_match\)"):
-        _codex_job(neotoma_tool_grant={"mcpsrv_neotoma": None})
+        _codex_neotoma_job(neotoma_tool_grant={"mcpsrv_neotoma": None})
 
 
 def test_key_only_job_on_a_provider_without_the_proxy_is_ineligible(fly_env, monkeypatch):
