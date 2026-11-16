@@ -3139,6 +3139,50 @@ def _normalise_full_sha(value: str) -> str:
     return sha if _FULL_SHA_RE.fullmatch(sha) else ""
 
 
+# Check-run conclusions that make a head's CI "failing".
+_FAILING_CHECK_CONCLUSIONS = ("failure", "timed_out", "cancelled", "action_required")
+
+# Checks that read only the PR BODY, never the code: no push can fix them, and
+# editing the body re-runs them. A head whose only failures are these is not a
+# CI-fix round. Names are the check-run names GitHub reports (the job `name:`).
+PR_BODY_ONLY_CHECKS = frozenset({"design basis line"})
+
+# `_required_ci_state` value for a head whose only failing checks are in
+# PR_BODY_ONLY_CHECKS. Not "green" (merge still holds) and not "failing" (no
+# fix round is routed).
+CI_STATE_PR_BODY_ONLY = "failing_pr_body_only"
+
+
+def _latest_check_runs(runs: list[dict]) -> list[dict]:
+    """Keep only the newest run of each check (same name and app).
+
+    GitHub keeps every run on a commit, so a re-run (e.g. after a PR-body edit)
+    leaves the superseded run beside it. The newest run is the highest id
+    (GitHub ids increase), falling back to `completed_at`. A run with no name
+    cannot be matched to a re-run and is always kept.
+    """
+    latest: dict[tuple[str, str], dict] = {}
+    unnamed: list[dict] = []
+
+    def _rank(run: dict) -> tuple[int, str]:
+        try:
+            run_id = int(run.get("id") or 0)
+        except (TypeError, ValueError):
+            run_id = 0
+        return run_id, str(run.get("completed_at") or "")
+
+    for run in runs:
+        name = (run.get("name") or "").strip()
+        if not name:
+            unnamed.append(run)
+            continue
+        app = str((run.get("app") or {}).get("id") or "")
+        key = (name, app)
+        if key not in latest or _rank(run) > _rank(latest[key]):
+            latest[key] = run
+    return list(latest.values()) + unnamed
+
+
 def _normalise_github_review_id(value: object) -> str:
     """Return a positive GitHub review id, or ``""`` when it is not valid."""
     if isinstance(value, bool):
@@ -10572,6 +10616,56 @@ class SwarmDispatcher:
                 f"could not record fix round {n}: {exc}"
             )
 
+    _PR_BODY_CHECK_MARKER = "<!-- apis-pr-body-check -->"
+
+    async def _note_pr_body_check_failure(self, trigger: SwarmTrigger) -> None:
+        """Post ONE comment saying the PR body needs fixing (best-effort).
+
+        Used instead of a CI-fix round when every failing check reads only the
+        PR body: a code push cannot fix it and it does not count against
+        max_fix_rounds. A marker comment already on the PR means the author was
+        told; later re-runs post nothing.
+        """
+        ref = f"{trigger.repository}#{trigger.number}"
+        list_url = (
+            f"https://api.github.com/repos/{trigger.repository}/issues/"
+            f"{trigger.number}/comments"
+        )
+        if not await self._require_github_write_credential(
+            trigger.repository, "PR-body check note", detail=ref,
+        ):
+            return
+        checks = ", ".join(f"`{name}`" for name in sorted(PR_BODY_ONLY_CHECKS))
+        body = (
+            f"{self._PR_BODY_CHECK_MARKER}\n"
+            f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
+            f"The only failing check ({checks}) reads the PR description, not "
+            "the code, so no fix round was started. Edit the PR body so it "
+            "carries the design basis on ONE line, in the form "
+            "`Design basis: no design applies -- <reason>` or a foundation doc "
+            "anchor. Editing the body re-runs the check; no push is needed."
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                headers = self._github_headers(trigger.repository)
+                resp = await client.get(
+                    list_url, params={"per_page": 100}, headers=headers
+                )
+                resp.raise_for_status()
+                if any(
+                    self._PR_BODY_CHECK_MARKER in (c.get("body") or "")
+                    for c in resp.json()
+                ):
+                    return
+                resp = await client.post(
+                    list_url, json={"body": body}, headers=headers
+                )
+                resp.raise_for_status()
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: could not post PR-body check note: {exc}"
+            )
+
     # ── fix rounds for Fly-delivered PRs ─────────────────────────────────────
     #
     # A PR that Fly delivered is corrected on Fly, never by a commit on this
@@ -11459,6 +11553,10 @@ class SwarmDispatcher:
             # Route a red CI back for a fix, bounded like review findings.
             await self._route_ci_failure(trigger, parent)
             return
+        if ci == CI_STATE_PR_BODY_ONLY:
+            # A PR-body check: tell the author once; spend no fix round.
+            await self._note_pr_body_check_failure(trigger)
+            return
         if ci != "green":
             # pending / unknown — hold without paging; don't claim ready.
             log.info(
@@ -11551,7 +11649,9 @@ class SwarmDispatcher:
             )
             checks.raise_for_status()
             runs = checks.json().get("check_runs", [])
-            return head_sha, state, runs
+            # Judge the head on the newest run of each check only: a failed run
+            # superseded by a passing re-run of the same check is not a failure.
+            return head_sha, state, _latest_check_runs(runs)
 
     async def _failing_check_runs(
         self, trigger: SwarmTrigger
@@ -11565,15 +11665,9 @@ class SwarmDispatcher:
                 f"could not fetch check-runs for CI notify: {exc}"
             )
             return []
-        failing_conclusions = (
-            "failure",
-            "timed_out",
-            "cancelled",
-            "action_required",
-        )
         out: list[dict[str, str]] = []
         for run in runs:
-            if run.get("conclusion") not in failing_conclusions:
+            if run.get("conclusion") not in _FAILING_CHECK_CONCLUSIONS:
                 continue
             out.append(
                 {
@@ -11584,9 +11678,13 @@ class SwarmDispatcher:
         return out
 
     async def _required_ci_state(self, trigger: SwarmTrigger) -> str:
-        """Return "green" | "failing" | "pending" | "unknown" for the PR head.
+        """Return "green" | "failing" | CI_STATE_PR_BODY_ONLY | "pending" |
+        "unknown" for the PR head.
 
-        Gates on the combined commit status + check-runs for the PR's head SHA.
+        Gates on the combined commit status + check-runs for the PR's head SHA,
+        reading only the newest run of each check. CI_STATE_PR_BODY_ONLY means
+        every failing check reads the PR body (PR_BODY_ONLY_CHECKS): merge
+        still holds, but no CI-fix round is routed.
 
         ateles#350: the `pre_merge` boundary's on_check_failure posture governs
         what a check-fetch failure DOES beyond returning "unknown". "unknown"
@@ -11608,11 +11706,23 @@ class SwarmDispatcher:
             run_statuses = [r.get("status") for r in runs]
 
             failing_run = any(
-                c in ("failure", "timed_out", "cancelled", "action_required")
-                for c in run_conclusions
+                c in _FAILING_CHECK_CONCLUSIONS for c in run_conclusions
             )
             pending_run = any(s != "completed" for s in run_statuses)
+            failing_names = {
+                (r.get("name") or "").strip()
+                for r in runs
+                if r.get("conclusion") in _FAILING_CHECK_CONCLUSIONS
+            }
 
+            if (
+                state != "failure"
+                and failing_names
+                and failing_names <= PR_BODY_ONLY_CHECKS
+            ):
+                # Only PR-body checks fail: no code push fixes this, so it is
+                # not "failing" (which routes a CI-fix round).
+                return CI_STATE_PR_BODY_ONLY
             if state == "failure" or failing_run:
                 return "failing"
             if state == "pending" or pending_run:
@@ -12364,6 +12474,17 @@ class SwarmDispatcher:
                 return True
             log.info(f"[{DAEMON_NAME}] {ref}: CI completed failing — routing to fix")
             await self._route_ci_failure(pr_trigger, parent)
+            return True
+        if ci == CI_STATE_PR_BODY_ONLY:
+            if not await self._label_gate_allows(
+                pr_trigger, source="ci_status_pr_body_check"
+            ):
+                return True
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: only PR-body checks failing — "
+                "asking the author to edit the body; no fix round"
+            )
+            await self._note_pr_body_check_failure(pr_trigger)
             return True
         # A review panel held back until this head's checks are green is
         # re-dispatched by the check completion that may have made them green.
