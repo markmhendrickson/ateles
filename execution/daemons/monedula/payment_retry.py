@@ -5,13 +5,48 @@ This is deliberately not a general replay mechanism. It reconstructs one
 recorded calendar obligation, admits only the literal terminal outcome
 ``failed``, raises a separate payment approval, and journals a single
 deterministic retry attempt before calling the existing handler.
+
+ADMISSION
+---------
+- Any rail, ``failure_class == pre_submission``: the first attempt provably
+  stopped before anything was submitted.
+- BTC, any failure class: an automatic, recorded chain reconciliation
+  (``chain_reconcile``) of the payee address from the original intent time
+  onward must show no output paying the payee. It runs before the approval is
+  raised (the evidence is a bound field of the approval), again before the
+  reservation (the fresh evidence is stored on the reservation), and once
+  more after the reservation immediately before ``execute`` (a payment seen
+  then aborts the reservation). A failed, timed-out or unparseable lookup
+  refuses.
+- Wise (or any other rail) with an ``unknown`` or historical unclassified
+  failure: refused. Those need manual reconciliation on the rail; no phrase in
+  the operator's answer can stand in for it.
+
+The operator's authenticated answer carries attendance only.
+
+THE APPROVAL IS THE CONTROL
+---------------------------
+``--execute`` with its interactive TTY prompt (typing the amount and payee)
+is a guard against a slip of the keyboard. It is not an identity control:
+anyone who can run this command on the host can type the confirmation. The
+control is the payment_approval record, whose resolution must be
+authenticated as the configured approver, and which binds the payment terms,
+the original attempt and the chain evidence.
+
+APPROVAL RACES
+--------------
+The final judgment's approval revision (snapshot plus the observation each
+field came from) is bound to the reservation inside the locked journal
+transaction, which re-reads the approval and refuses if it changed. After the
+reservation and immediately before ``handler.execute()`` the approval is read
+again; if it changed, the reservation is marked ``aborted`` and nothing is
+paid.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
-import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -24,6 +59,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+import chain_reconcile  # noqa: E402
 import payment_approval  # noqa: E402
 import payment_journal  # noqa: E402
 from attendance import parse_reply  # noqa: E402
@@ -62,16 +98,16 @@ class RetryResult:
     payment_status: str = ""
 
 
+ADMISSION_PRE_SUBMISSION = "pre_submission"
+ADMISSION_BTC_CHAIN = "btc_chain_reconciled"
+
+
 @dataclass(frozen=True)
 class OriginalAttempt:
     outcome: str
     failure_class: str
     intent_at: float
     outcome_at: float
-
-    @property
-    def requires_rail_check(self) -> bool:
-        return self.failure_class != payment_journal.FAILURE_PRE_SUBMISSION
 
 
 def retry_key(original_key: str) -> str:
@@ -234,6 +270,51 @@ def _resolve_original(
     return candidates[0]
 
 
+def _rail(handler: Any) -> str:
+    profile = getattr(handler, "profile", None)
+    return str(getattr(profile, "payment_type", "") or "wise")
+
+
+def _btc_payee_address(handler: Any) -> str:
+    """The address ``execute`` pays: the handler's payment_profile."""
+    profile = getattr(handler, "profile", None)
+    address = str(getattr(profile, "btc_address", "") or "").strip()
+    if not address:
+        raise RetryRefused("BTC payee address is not configured on the payment profile")
+    return address
+
+
+def _admission(handler: Any, attempt: OriginalAttempt) -> str:
+    if _rail(handler) == "btc":
+        return ADMISSION_BTC_CHAIN
+    if attempt.failure_class == payment_journal.FAILURE_PRE_SUBMISSION:
+        return ADMISSION_PRE_SUBMISSION
+    raise RetryRefused(
+        f"the first {_rail(handler)} attempt's outcome is "
+        f"{attempt.failure_class}, not provably pre-submission; it needs "
+        "manual reconciliation on the rail and cannot be retried by this command"
+    )
+
+
+def _reconcile(
+    explorer: chain_reconcile.EsploraExplorer,
+    handler: Any,
+    attempt: OriginalAttempt,
+) -> dict[str, Any]:
+    try:
+        evidence = chain_reconcile.reconcile(
+            explorer, _btc_payee_address(handler), attempt.intent_at
+        )
+    except chain_reconcile.ReconciliationError as exc:
+        raise RetryRefused(f"chain reconciliation failed; refusing: {exc}") from exc
+    if evidence["result"] != chain_reconcile.RESULT_CLEAR:
+        raise RetryRefused(
+            "the chain shows a payment to the payee since the first attempt "
+            f"(txids {', '.join(evidence['paying_txids'])}); refusing a second payment"
+        )
+    return evidence
+
+
 def _retry_item(
     original: str,
     handler: Any,
@@ -241,11 +322,21 @@ def _retry_item(
     event_id: str,
     generation: int,
     attempt: OriginalAttempt,
+    admission: str,
+    evidence_json: str,
 ) -> PendingItem:
     profile = getattr(handler, "profile", None)
     label = str(getattr(profile, "label", None) or handler.name)
     amount = int(getattr(profile, "amount_eur", 0) or 0)
     retry = retry_key(original)
+    if admission == ADMISSION_PRE_SUBMISSION:
+        notice = "the first attempt provably stopped before submission"
+    else:
+        notice = (
+            "first attempt outcome unconfirmed by the rail; the chain shows no "
+            f"payment to the payee since {_timestamp(chain_reconcile.window_start(attempt.intent_at))} "
+            "(evidence in reconciliation_evidence)"
+        )
     match = {
         "event": {
             "id": event_id,
@@ -253,25 +344,13 @@ def _retry_item(
         },
         "retry_of": original,
         "retry_context": {
-            "original_obligation": original,
-            "original_intent_at": _timestamp(attempt.intent_at),
-            "original_outcome_at": _timestamp(attempt.outcome_at),
-            "failure_class": attempt.failure_class,
-            "admission": (
-                "pre_submission"
-                if not attempt.requires_rail_check
-                else "operator_rail_check_required"
-            ),
-            "operator_notice": (
-                "the first attempt provably stopped before submission"
-                if not attempt.requires_rail_check
-                else (
-                    "FIRST ATTEMPT OUTCOME UNCONFIRMED; check the rail for the "
-                    f"window beginning {_timestamp(attempt.intent_at)} through "
-                    "this approval and include the literal words 'not paid' "
-                    "with the attendance approval"
-                )
-            ),
+            "retry_of": original,
+            "original_intent_at": repr(float(attempt.intent_at)),
+            "original_outcome_at": repr(float(attempt.outcome_at)),
+            "original_failure_class": attempt.failure_class,
+            "retry_admission": admission,
+            "reconciliation_evidence": evidence_json,
+            "operator_notice": notice,
         },
     }
     return PendingItem(
@@ -293,22 +372,11 @@ def _timestamp(value: float) -> str:
     return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
 
 
-def parse_retry_reply(
-    reply: str | None,
-    handler_names: list[str],
-    *,
-    require_not_paid: bool,
-) -> set[str]:
-    """Parse retry approval without letting a bare yes authorize payment."""
+def parse_retry_reply(reply: str | None, handler_names: list[str]) -> set[str]:
+    """Attendance only. No phrase in the answer is evidence of non-payment."""
     if not isinstance(reply, str):
         return set()
-    has_not_paid = re.search(r"\bnot\s+paid\b", reply, flags=re.IGNORECASE) is not None
-    if require_not_paid and not has_not_paid:
-        return set()
-    attendance_text = re.sub(
-        r"\bnot\s+paid\b", "", reply, flags=re.IGNORECASE
-    ).strip(" \t\r\n,;:-")
-    return parse_reply(attendance_text, handler_names)
+    return parse_reply(reply, handler_names)
 
 
 def _confirm_execution(
@@ -341,6 +409,7 @@ def run_retry(
     execute: bool = False,
     stdin: TextIO | None = None,
     stdout: TextIO | None = None,
+    explorer: chain_reconcile.EsploraExplorer | None = None,
 ) -> RetryResult:
     """Advance one failed payment retry by at most one safe step.
 
@@ -353,7 +422,7 @@ def run_retry(
         raise RetryRefused("a payment obligation or session key is required")
 
     journal = payment_journal.load(journal_path)
-    original, _session, handler, payment_date, event_id = _resolve_original(
+    original, session, handler, payment_date, event_id = _resolve_original(
         target, journal, handlers
     )
     attempt = _recorded_outcome(journal, original)
@@ -363,27 +432,56 @@ def run_retry(
         raise RetryRefused(
             f"retry {retry} already has an outcome; a second retry is forbidden"
         )
+    if retry_state == payment_journal.STATE_ABORTED:
+        raise RetryRefused(
+            f"retry {retry} was aborted before payment because its approval "
+            "changed; it needs manual handling"
+        )
     if retry_state == payment_journal.STATE_INTENT:
         raise RetryRefused(
             f"retry {retry} outcome is unknown after intent; refusing a second payment"
         )
+    admission = _admission(handler, attempt)
+    is_btc = admission == ADMISSION_BTC_CHAIN
+    if is_btc:
+        _btc_payee_address(handler)
 
     original_entry = journal["obligations"][original]
     generation = int(original_entry.get("generation") or 0) + 1
-    item = _retry_item(
-        original, handler, payment_date, event_id, generation, attempt
-    )
+
+    def item_for(evidence_json: str) -> PendingItem:
+        return _retry_item(
+            original,
+            handler,
+            payment_date,
+            event_id,
+            generation,
+            attempt,
+            admission,
+            evidence_json,
+        )
+
     if dry_run:
         return RetryResult(
             "dry_run",
             original,
             retry,
-            "would raise or inspect exactly one retry approval; no state changed",
+            f"admission={admission}; would "
+            + ("reconcile the chain, then " if is_btc else "")
+            + "raise or inspect exactly one retry approval; no state changed",
         )
+
+    if is_btc and explorer is None:
+        explorer = chain_reconcile.EsploraExplorer()
 
     entity = payment_approval.find_entity(retry)
     if entity is None:
-        payment_approval.raise_request(item)
+        evidence_json = ""
+        if is_btc:
+            evidence_json = chain_reconcile.canonical(
+                _reconcile(explorer, handler, attempt)
+            )
+        payment_approval.raise_request(item_for(evidence_json))
         return RetryResult(
             "awaiting_approval",
             original,
@@ -391,14 +489,25 @@ def run_retry(
             "fresh retry approval raised; no payment attempted",
         )
 
-    def parser(answer: str | None, names: list[str]) -> set[str]:
-        return parse_retry_reply(
-            answer,
-            names,
-            require_not_paid=attempt.requires_rail_check,
-        )
+    approved_evidence = str(
+        payment_approval._snapshot(entity).get("reconciliation_evidence") or ""
+    )
+    if is_btc:
+        try:
+            chain_reconcile.validate_approved(
+                approved_evidence,
+                explorer=explorer,
+                payee_address=_btc_payee_address(handler),
+                intent_at=attempt.intent_at,
+            )
+        except chain_reconcile.ReconciliationError as exc:
+            return RetryResult("blocked", original, retry, str(exc))
+    # For BTC the stored evidence was just validated against this payment's
+    # own payee, window and explorer. No other rail carries evidence, so a
+    # non-BTC record with any is a mismatch, never self-confirming.
+    item = item_for(approved_evidence if is_btc else "")
 
-    verdict = payment_approval.judge(item, entity, parser)
+    verdict = payment_approval.judge(item, entity, parse_retry_reply)
     if verdict.state == "awaiting":
         return RetryResult(
             "awaiting_approval", original, retry, "approval still awaiting the operator"
@@ -430,42 +539,72 @@ def run_retry(
     if callable(preflight):
         preflight(item.match)
 
-    # The approval may have been rejected, overwritten or withdrawn while the
-    # operator was confirming or preflight ran. Fetch and authenticate it
-    # again immediately before the locked reservation.
-    fresh_entity = payment_approval.find_entity(retry)
-    if fresh_entity is None:
-        raise RetryRefused("retry approval disappeared before reservation")
-    rail_check = {"confirmed": False}
+    def current_approval_revision() -> str:
+        """Re-read and re-judge the approval; return the revision judged."""
+        fresh = payment_approval.find_entity(retry)
+        if fresh is None:
+            raise RetryRefused("retry approval disappeared")
+        fresh_verdict = payment_approval.judge(item, fresh, parse_retry_reply)
+        if fresh_verdict.state != "approved":
+            raise RetryRefused(
+                f"retry approval no longer permits payment: "
+                f"{fresh_verdict.reason or fresh_verdict.state}"
+            )
+        return payment_approval.approval_revision(fresh)
 
-    def fresh_parser(answer: str | None, names: list[str]) -> set[str]:
-        rail_check["confirmed"] = bool(
-            isinstance(answer, str)
-            and re.search(r"\bnot\s+paid\b", answer, flags=re.IGNORECASE)
+    # The final judgment. The operator may still reject or overwrite the
+    # approval after it; the reservation re-checks this exact revision under
+    # the journal lock.
+    revision = current_approval_revision()
+    reconciliation = _reconcile(explorer, handler, attempt) if is_btc else None
+    try:
+        payment_journal.reserve_retry(
+            journal_path,
+            original,
+            session,
+            item.token,
+            generation=item.generation,
+            expected_intent_at=attempt.intent_at,
+            expected_outcome_at=attempt.outcome_at,
+            expected_failure_class=attempt.failure_class,
+            admission=admission,
+            approval_revision=revision,
+            approval_check=current_approval_revision,
+            reconciliation=(
+                {**reconciliation, "approved_evidence_sha256": hashlib.sha256(
+                    approved_evidence.encode()
+                ).hexdigest()}
+                if reconciliation is not None
+                else None
+            ),
         )
-        return parse_retry_reply(
-            answer,
-            names,
-            require_not_paid=attempt.requires_rail_check,
+    except payment_journal.JournalError as exc:
+        raise RetryRefused(f"retry not reserved: {exc}") from exc
+
+    # Last read before money can move.
+    try:
+        unchanged = current_approval_revision() == revision
+        reason = "approval changed after the reservation"
+    except (RetryRefused, payment_approval.ApprovalError) as exc:
+        unchanged = False
+        reason = f"approval could not be confirmed after the reservation: {exc}"
+    if unchanged and is_btc:
+        # Last chain read before money can move: a late broadcast of the
+        # first attempt aborts the reservation.
+        try:
+            _reconcile(explorer, handler, attempt)
+        except RetryRefused as exc:
+            unchanged = False
+            reason = f"final chain check refused: {exc}"
+    if not unchanged:
+        payment_journal.abort_retry(journal_path, original, item.token, reason)
+        return RetryResult(
+            "aborted",
+            original,
+            retry,
+            f"{reason}; reservation aborted, no payment attempted",
         )
 
-    fresh_verdict = payment_approval.judge(item, fresh_entity, fresh_parser)
-    if fresh_verdict.state != "approved":
-        raise RetryRefused(
-            f"retry approval no longer permits payment: "
-            f"{fresh_verdict.reason or fresh_verdict.state}"
-        )
-    payment_journal.reserve_retry(
-        journal_path,
-        original,
-        _session,
-        item.token,
-        generation=item.generation,
-        expected_intent_at=attempt.intent_at,
-        expected_outcome_at=attempt.outcome_at,
-        expected_failure_class=attempt.failure_class,
-        not_paid_confirmed=rail_check["confirmed"],
-    )
     result = handler.execute(item.match)
     status = (
         str(result.get("status") or "unreported")
@@ -501,7 +640,8 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "execute after a valid approval; requires an interactive TTY and "
-            "typed amount/payee confirmation"
+            "typed amount/payee confirmation (a typo guard, not an identity "
+            "control: the authenticated approval is the control)"
         ),
     )
     return parser

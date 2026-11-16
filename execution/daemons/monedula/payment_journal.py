@@ -37,12 +37,14 @@ import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 JOURNAL_NAME = ".monedula_payment_journal.json"
 
 STATE_INTENT = "intent"
 STATE_DONE = "done"
+# A retry reservation withdrawn before any payment was attempted.
+STATE_ABORTED = "aborted"
 FAILURE_PRE_SUBMISSION = "pre_submission"
 FAILURE_UNKNOWN = "unknown"
 
@@ -246,6 +248,13 @@ def record_outcome(
         entry = data["obligations"].get(obligation)
         if not isinstance(entry, dict):
             raise JournalError("outcome for an obligation with no recorded intent")
+        if entry.get("state") == STATE_DONE:
+            # A completed attempt is history a retry approval is bound to.
+            # Rewriting it would let a later approval judge a different past.
+            raise JournalError(
+                "obligation already has a recorded outcome; completed "
+                "obligations are immutable"
+            )
         status, failure_class = _outcome_fields(result)
         entry["state"] = STATE_DONE
         entry["outcome_status"] = status
@@ -265,7 +274,10 @@ def retry_state(data: dict[str, Any], obligation: str) -> str | None:
     retry = original.get("retry")
     if not isinstance(retry, dict):
         return None
-    return STATE_DONE if retry.get("state") == STATE_DONE else STATE_INTENT
+    state = retry.get("state")
+    if state in (STATE_DONE, STATE_ABORTED):
+        return state
+    return STATE_INTENT
 
 
 def reserve_retry(
@@ -278,14 +290,23 @@ def reserve_retry(
     expected_intent_at: float,
     expected_outcome_at: float,
     expected_failure_class: str,
-    not_paid_confirmed: bool,
+    admission: str,
+    approval_revision: str,
+    approval_check: Callable[[], str],
+    reconciliation: dict[str, Any] | None,
 ) -> None:
     """Atomically reserve the sole retry under the original obligation.
 
-    The original failure and source session are revalidated while holding the
-    same exclusive lock that writes the retry intent. Unknown or historical
-    unclassified failures additionally require the operator's authenticated
-    rail check.
+    While holding the same exclusive lock that writes the retry intent:
+
+    - the original failure and source session are revalidated;
+    - ``approval_check`` re-reads and re-judges the payment_approval and must
+      return ``approval_revision``, the revision the caller's final judgment
+      saw. A rejection or overwrite that lands after that judgment changes the
+      revision (or fails the check) and nothing is written;
+    - a failure that is not provably pre-submission requires a clear chain
+      reconciliation, which is stored on the reservation with the approval
+      revision it was bound to.
     """
     with _locked(path, exclusive=True):
         data = _load_unlocked(path)
@@ -310,26 +331,74 @@ def reserve_retry(
         actual_class = str(original.get("failure_class") or "unclassified")
         if actual_class != expected_failure_class:
             raise JournalError("retry source failure class changed before reservation")
-        if actual_class != FAILURE_PRE_SUBMISSION and not not_paid_confirmed:
+        if actual_class != FAILURE_PRE_SUBMISSION and not (
+            isinstance(reconciliation, dict)
+            and reconciliation.get("result") == "no_payment_to_payee_found"
+        ):
             raise JournalError(
-                "retry source outcome is unconfirmed and lacks an authenticated "
-                "'not paid' rail check"
+                "retry source outcome is unconfirmed and has no clear chain "
+                "reconciliation"
             )
         if isinstance(original.get("retry"), dict):
             raise JournalError("retry already reserved for this obligation")
         if token in data["consumed_tokens"]:
             raise JournalError("retry approval token already consumed")
+        if not isinstance(approval_revision, str) or not approval_revision:
+            raise JournalError("retry reservation has no approval revision")
+        try:
+            current = approval_check()
+        except Exception as exc:  # noqa: BLE001 - any doubt holds the payment
+            raise JournalError(
+                f"retry approval could not be confirmed inside the reservation: {exc}"
+            ) from exc
+        if current != approval_revision:
+            raise JournalError(
+                "retry approval changed after the final judgment; not reserved"
+            )
         original["retry"] = {
             "state": STATE_INTENT,
             "token": token,
             "generation": int(generation),
             "intent_at": time.time(),
+            "admission": str(admission),
+            "approval_revision": approval_revision,
+            "reconciliation": reconciliation,
         }
         data["consumed_tokens"][token] = obligation
         _write_unlocked(path, data)
         back = _load_unlocked(path)
-        if retry_state(back, obligation) != STATE_INTENT:
+        if (
+            retry_state(back, obligation) != STATE_INTENT
+            or back["obligations"][obligation]["retry"].get("approval_revision")
+            != approval_revision
+        ):
             raise JournalError("retry intent did not persist")
+
+
+def abort_retry(path: Path, obligation: str, token: str, reason: str) -> None:
+    """Withdraw a reserved retry before any payment was attempted.
+
+    Only an ``intent`` reservation carrying ``token`` can be aborted; the
+    caller guarantees ``execute`` was never called for it. The reservation
+    stays (and its token stays consumed): an aborted retry is never retried
+    automatically.
+    """
+    with _locked(path, exclusive=True):
+        data = _load_unlocked(path)
+        original = data["obligations"].get(obligation)
+        retry = original.get("retry") if isinstance(original, dict) else None
+        if (
+            not isinstance(retry, dict)
+            or retry.get("state") != STATE_INTENT
+            or retry.get("token") != token
+        ):
+            raise JournalError("no matching reserved retry to abort")
+        retry["state"] = STATE_ABORTED
+        retry["aborted_at"] = time.time()
+        retry["abort_reason"] = str(reason)[:200]
+        _write_unlocked(path, data)
+        if retry_state(_load_unlocked(path), obligation) != STATE_ABORTED:
+            raise JournalError("retry abort did not persist")
 
 
 def record_retry_outcome(

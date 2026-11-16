@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import copy
 import io
+import json
+import time
 import multiprocessing
 import os
 import subprocess
@@ -21,6 +23,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+import chain_reconcile  # noqa: E402
 import consent_email  # noqa: E402
 import monedula  # noqa: E402
 import payment_approval  # noqa: E402
@@ -121,7 +124,9 @@ def _execute(
     original: str,
     journal_path: Path,
     handler: FakeHandler,
+    explorer=None,
 ) -> payment_retry.RetryResult:
+    kwargs = {} if explorer is None else {"explorer": explorer}
     return payment_retry.run_retry(
         original,
         journal_path=journal_path,
@@ -129,7 +134,71 @@ def _execute(
         execute=True,
         stdin=FakeTTY("10 EUR Synthetic Payee\n"),
         stdout=io.StringIO(),
+        **kwargs,
     )
+
+
+PAYEE_ADDRESS = "bc1qsyntheticpayee0000000000000000000000"
+OTHER_ADDRESS = "bc1qsyntheticother0000000000000000000000"
+
+
+def _make_btc(handler: FakeHandler) -> None:
+    handler.profile.payment_type = "btc"
+    handler.profile.btc_address = PAYEE_ADDRESS
+
+
+def _txid(n: int) -> str:
+    return f"{n:064x}"
+
+
+def _tx(n: int, *, to: str, block_time: int | None = None) -> dict:
+    status = (
+        {"confirmed": True, "block_time": block_time}
+        if block_time is not None
+        else {"confirmed": False}
+    )
+    return {
+        "txid": _txid(n),
+        "status": status,
+        "vout": [
+            {"scriptpubkey_address": to, "value": 1000},
+            {"scriptpubkey": "6a", "value": 0},
+        ],
+    }
+
+
+class FakeChain:
+    """An Esplora explorer served from memory; records every URL asked for."""
+
+    BASE = "https://explorer.invalid/api"
+
+    def __init__(self) -> None:
+        self.mempool: list = []
+        self.chain: list = []
+        self.urls: list[str] = []
+        self.fail: Exception | None = None
+        self.raw_mempool = None
+
+    def fetch(self, url: str):
+        self.urls.append(url)
+        if self.fail is not None:
+            raise self.fail
+        prefix = f"{self.BASE}/address/{PAYEE_ADDRESS}/txs"
+        assert url.startswith(prefix), url
+        rest = url[len(prefix):]
+        if rest == "/mempool":
+            return self.raw_mempool if self.raw_mempool is not None else list(self.mempool)
+        if rest == "/chain":
+            return self.chain[:25]
+        if rest.startswith("/chain/"):
+            last = rest[len("/chain/"):]
+            ids = [tx["txid"] for tx in self.chain]
+            i = ids.index(last) + 1
+            return self.chain[i:i + 25]
+        raise AssertionError(url)
+
+    def explorer(self) -> chain_reconcile.EsploraExplorer:
+        return chain_reconcile.EsploraExplorer(self.BASE, fetch=self.fetch)
 
 
 class ProcessHandler:
@@ -165,11 +234,18 @@ def _reserve_then_execute(
             expected_intent_at=intent_at,
             expected_outcome_at=outcome_at,
             expected_failure_class=failure_class,
-            not_paid_confirmed=False,
+            admission="pre_submission",
+            approval_revision="rev-1",
+            approval_check=_same_revision,
+            reconciliation=None,
         )
     except payment_journal.JournalError:
         return
     ProcessHandler(counter_path).execute()
+
+
+def _same_revision() -> str:
+    return "rev-1"
 
 
 def _advance_generation(start, journal_path: str) -> None:
@@ -374,63 +450,41 @@ def test_execute_refuses_wrong_typed_amount_or_payee(retry_env):
     assert handler.execute_calls == []
 
 
-@pytest.mark.parametrize("failure_class", ["unknown", "unclassified"])
-def test_unconfirmed_original_requires_authenticated_not_paid_confirmation(
-    monkeypatch, tmp_path, failure_class
-):
-    handler = FakeHandler()
-    journal_path = tmp_path / payment_journal.JOURNAL_NAME
-    stored_class = "" if failure_class == "unclassified" else failure_class
-    real_outcome_fields = getattr(payment_journal, "_outcome_fields", None)
-    if failure_class == "unclassified" and real_outcome_fields is not None:
+def _journal_with_class(monkeypatch, journal_path, handler, failure_class):
+    """Journal a failed original with ``failure_class``; ``unclassified``
+    reproduces a row written before failure classes existed."""
+    if failure_class == "unclassified":
+        real = payment_journal._outcome_fields
         monkeypatch.setattr(
-            payment_journal,
-            "_outcome_fields",
-            lambda result: ("failed", None),
+            payment_journal, "_outcome_fields", lambda result: ("failed", None)
         )
-    original = _journal(
-        journal_path,
-        handler,
-        failure_class=stored_class,
-    )
-    if real_outcome_fields is not None:
-        monkeypatch.setattr(payment_journal, "_outcome_fields", real_outcome_fields)
-    neo = FakeNeotoma()
-    monkeypatch.setenv("MONEDULA_PAYMENT_APPROVER_SUB", APPROVER_SUB)
-    monkeypatch.setenv("MONEDULA_PAYMENT_APPROVER_JKT", APPROVER_JKT)
-    monkeypatch.setattr(payment_approval, "_request", neo.request)
-    monkeypatch.setattr(
-        gating,
-        "_fetch_entity_observations",
-        lambda entity_id, **kwargs: list(neo.obs.get(entity_id, [])),
-    )
+        original = _journal(journal_path, handler, failure_class="")
+        monkeypatch.setattr(payment_journal, "_outcome_fields", real)
+        return original
+    return _journal(journal_path, handler, failure_class=failure_class)
 
-    raised = payment_retry.run_retry(
-        original, journal_path=journal_path, handlers=[handler]
-    )
-    row = neo.only
-    assert row["title"].startswith("Retry of failed payment")
-    assert f"original_obligation={original}" in row["title"]
-    assert f"failure_class={failure_class}" in row["title"]
-    assert "FIRST ATTEMPT OUTCOME UNCONFIRMED" in row["title"]
-    assert "payee=Synthetic Payee" in row["title"]
-    assert "amount=10 EUR" in row["title"]
 
-    neo.resolve(raised.retry_key, "approved", "attended yoga")
-    result = payment_retry.run_retry(
-        original, journal_path=journal_path, handlers=[handler], execute=False
-    )
-    assert result.state == "blocked"
+@pytest.mark.parametrize("failure_class", ["unknown", "unclassified"])
+@pytest.mark.parametrize("answer", ["attended yoga", "attended yoga; not paid"])
+def test_wise_unconfirmed_failure_is_refused_for_manual_reconciliation(
+    retry_env, monkeypatch, failure_class, answer
+):
+    handler, journal_path, _original, neo = retry_env
+    journal_path.unlink()
+    original = _journal_with_class(monkeypatch, journal_path, handler, failure_class)
+
+    with pytest.raises(payment_retry.RetryRefused, match="manual reconciliation"):
+        payment_retry.run_retry(
+            original, journal_path=journal_path, handlers=[handler]
+        )
+    with pytest.raises(payment_retry.RetryRefused, match="manual reconciliation"):
+        _execute(original, journal_path, handler)
+
+    assert neo.writes == 0
     assert handler.execute_calls == []
-
-    neo.resolve(
-        raised.retry_key,
-        "approved",
-        "attended yoga; not paid",
-    )
-    result = _execute(original, journal_path, handler)
-    assert result.state == "paid"
-    assert len(handler.execute_calls) == 1
+    assert payment_journal.retry_state(
+        payment_journal.load(journal_path), original
+    ) is None
 
 
 def test_retry_does_not_pay_on_rejection(retry_env):
@@ -735,20 +789,22 @@ def test_wise_failures_distinguish_pre_submission_from_unknown(monkeypatch):
 
 def test_retry_uses_handler_execute_without_memo_or_op_return(retry_env):
     handler, journal_path, original, neo = retry_env
-    handler.profile.payment_type = "btc"
+    _make_btc(handler)
     handler.profile.wise_reference = "must-not-be-used"
     original = _original_key(handler)
     journal_path.unlink()
     _journal(journal_path, handler)
+    chain = FakeChain()
     raised = payment_retry.run_retry(
-        original, journal_path=journal_path, handlers=[handler]
+        original, journal_path=journal_path, handlers=[handler],
+        explorer=chain.explorer(),
     )
     assert neo.only["rail"] == "btc"
     assert neo.only["reference"] == ""
     assert "memo" not in neo.only
     neo.resolve(raised.retry_key, "approved", "attended yoga")
 
-    _execute(original, journal_path, handler)
+    _execute(original, journal_path, handler, explorer=chain.explorer())
 
     (match,) = handler.execute_calls
     assert "memo" not in match
@@ -771,3 +827,482 @@ def test_documented_script_runs_from_repository_root(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert "original obligation key or handler:event-id" in result.stdout
+
+
+# ── Finding 1: approval withdrawal races ─────────────────────────────────────
+
+
+def _count_judgments(monkeypatch, after_call: int, action) -> dict:
+    """Run ``action`` right after the ``after_call``-th approval judgment
+    returns, i.e. between that judgment and whatever the code does next."""
+    real = payment_approval.judge
+    calls = {"count": 0}
+
+    def judge(*args, **kwargs):
+        verdict = real(*args, **kwargs)
+        calls["count"] += 1
+        if calls["count"] == after_call:
+            action()
+        return verdict
+
+    monkeypatch.setattr(payment_approval, "judge", judge)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("status", "answer"),
+    [("rejected", "no"), ("approved", "attended yoga, but hold on")],
+)
+def test_retry_refuses_withdrawal_between_final_judgment_and_reservation(
+    retry_env, monkeypatch, status, answer
+):
+    handler, journal_path, original, neo = retry_env
+    raised = payment_retry.run_retry(
+        original, journal_path=journal_path, handlers=[handler]
+    )
+    neo.resolve(raised.retry_key, "approved", "attended yoga")
+    # Judgment 1 admits the run; judgment 2 is the final one before the
+    # reservation. The operator's rejection or overwrite lands right after it.
+    _count_judgments(
+        monkeypatch, 2, lambda: neo.resolve(raised.retry_key, status, answer)
+    )
+
+    with pytest.raises(payment_retry.RetryRefused):
+        _execute(original, journal_path, handler)
+
+    assert handler.execute_calls == []
+    journal = payment_journal.load(journal_path)
+    assert payment_journal.retry_state(journal, original) is None
+    assert "retry" not in journal["obligations"][original]
+
+
+@pytest.mark.parametrize(
+    ("status", "answer"),
+    [("rejected", "no"), ("approved", "attended yoga again")],
+)
+def test_retry_aborts_when_approval_changes_between_reservation_and_execute(
+    retry_env, monkeypatch, status, answer
+):
+    handler, journal_path, original, neo = retry_env
+    raised = payment_retry.run_retry(
+        original, journal_path=journal_path, handlers=[handler]
+    )
+    neo.resolve(raised.retry_key, "approved", "attended yoga")
+    real_reserve = payment_journal.reserve_retry
+
+    def reserve_then_change(*args, **kwargs):
+        real_reserve(*args, **kwargs)
+        neo.resolve(raised.retry_key, status, answer)
+
+    monkeypatch.setattr(payment_journal, "reserve_retry", reserve_then_change)
+
+    result = _execute(original, journal_path, handler)
+
+    assert result.state == "aborted"
+    assert handler.execute_calls == []
+    journal = payment_journal.load(journal_path)
+    assert payment_journal.retry_state(journal, original) == "aborted"
+    assert "outcome_status" not in journal["obligations"][original]["retry"]
+    with pytest.raises(payment_retry.RetryRefused, match="aborted"):
+        _execute(original, journal_path, handler)
+    assert handler.execute_calls == []
+
+
+def test_reservation_records_the_approval_revision_it_was_bound_to(retry_env):
+    handler, journal_path, original, neo = retry_env
+    raised = payment_retry.run_retry(
+        original, journal_path=journal_path, handlers=[handler]
+    )
+    neo.resolve(raised.retry_key, "approved", "attended yoga")
+
+    _execute(original, journal_path, handler)
+
+    retry = payment_journal.load(journal_path)["obligations"][original]["retry"]
+    entity = payment_approval.find_entity(raised.retry_key)
+    assert retry["approval_revision"] == payment_approval.approval_revision(entity)
+    assert retry["admission"] == "pre_submission"
+
+
+# ── Finding 3: the approval is bound to the original attempt ────────────────
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("outcome_at", 12345.0),
+        ("intent_at", 12340.0),
+        ("failure_class", "unknown"),
+    ],
+)
+def test_retry_refused_when_original_mutated_after_approval(
+    retry_env, field, value
+):
+    handler, journal_path, original, neo = retry_env
+    raised = payment_retry.run_retry(
+        original, journal_path=journal_path, handlers=[handler]
+    )
+    neo.resolve(raised.retry_key, "approved", "attended yoga")
+
+    data = json.loads(journal_path.read_text())
+    data["obligations"][original][field] = value
+    journal_path.write_text(json.dumps(data))
+
+    try:
+        result = _execute(original, journal_path, handler)
+    except payment_retry.RetryRefused:
+        result = None
+    assert result is None or result.state == "blocked"
+    assert handler.execute_calls == []
+    assert payment_journal.retry_state(
+        payment_journal.load(journal_path), original
+    ) is None
+
+
+def test_completed_original_outcome_is_immutable(tmp_path):
+    path = tmp_path / payment_journal.JOURNAL_NAME
+    payment_journal.record_intent(path, "obligation", "token", generation=1)
+    payment_journal.record_outcome(
+        path, "obligation", {"status": "failed", "failure_class": "pre_submission"}
+    )
+    before = payment_journal.load(path)["obligations"]["obligation"]
+
+    with pytest.raises(payment_journal.JournalError, match="immutable"):
+        payment_journal.record_outcome(path, "obligation", {"status": "sent"})
+
+    assert payment_journal.load(path)["obligations"]["obligation"] == before
+
+
+def test_approval_record_carries_structured_retry_fields_not_title_text(retry_env):
+    handler, journal_path, original, neo = retry_env
+    entry = payment_journal.load(journal_path)["obligations"][original]
+
+    payment_retry.run_retry(original, journal_path=journal_path, handlers=[handler])
+
+    row = neo.only
+    assert row["retry_of"] == original
+    assert row["original_failure_class"] == "pre_submission"
+    assert row["retry_admission"] == "pre_submission"
+    assert row["reconciliation_evidence"] == ""
+    assert row["original_intent_at"] == repr(float(entry["intent_at"]))
+    assert row["original_outcome_at"] == repr(float(entry["outcome_at"]))
+    assert set(payment_approval.RETRY_BOUND_FIELDS) <= set(payment_approval.FIELD_SPECS)
+
+
+# ── Finding 2: BTC admission is a recorded chain reconciliation ──────────────
+
+
+@pytest.fixture
+def btc_env(retry_env, monkeypatch):
+    handler, journal_path, _original, neo = retry_env
+    _make_btc(handler)
+    journal_path.unlink()
+    return handler, journal_path, neo, monkeypatch
+
+
+@pytest.mark.parametrize("failure_class", ["unknown", "unclassified", "pre_submission"])
+def test_btc_retry_pays_after_clear_chain_reconciliation_and_attendance(
+    btc_env, failure_class
+):
+    handler, journal_path, neo, monkeypatch = btc_env
+    original = _journal_with_class(monkeypatch, journal_path, handler, failure_class)
+    chain = FakeChain()
+    old = int(time.time()) - 7 * 86400
+    chain.chain = [_tx(1, to=PAYEE_ADDRESS, block_time=old)]  # last week's payment
+    chain.mempool = [_tx(2, to=OTHER_ADDRESS)]
+
+    raised = payment_retry.run_retry(
+        original, journal_path=journal_path, handlers=[handler],
+        explorer=chain.explorer(),
+    )
+    row = neo.only
+    evidence = json.loads(row["reconciliation_evidence"])
+    assert row["retry_admission"] == "btc_chain_reconciled"
+    assert evidence["result"] == chain_reconcile.RESULT_CLEAR
+    assert evidence["explorer"] == FakeChain.BASE
+    assert evidence["txids_seen"] == [_txid(2)]
+    assert evidence["payee_address_sha256"] == chain_reconcile.address_digest(PAYEE_ADDRESS)
+    assert PAYEE_ADDRESS not in json.dumps(row)
+    queried = len(chain.urls)
+    assert queried >= 2
+
+    neo.resolve(raised.retry_key, "approved", "attended yoga")
+    result = _execute(original, journal_path, handler, explorer=chain.explorer())
+
+    assert result.state == "paid"
+    assert len(handler.execute_calls) == 1
+    assert len(chain.urls) > queried, "reconciled again before reserving"
+    retry = payment_journal.load(journal_path)["obligations"][original]["retry"]
+    assert retry["admission"] == "btc_chain_reconciled"
+    assert retry["reconciliation"]["result"] == chain_reconcile.RESULT_CLEAR
+    assert retry["reconciliation"]["payee_address_sha256"] == evidence["payee_address_sha256"]
+    assert retry["reconciliation"]["window_start_epoch"] == evidence["window_start_epoch"]
+    assert PAYEE_ADDRESS not in journal_path.read_text()
+
+
+@pytest.mark.parametrize("where", ["mempool", "confirmed", "confirmed_just_before_intent"])
+def test_btc_retry_refuses_when_chain_shows_any_payment_to_payee(btc_env, where):
+    handler, journal_path, neo, monkeypatch = btc_env
+    original = _journal_with_class(monkeypatch, journal_path, handler, "unknown")
+    intent_at = payment_journal.load(journal_path)["obligations"][original]["intent_at"]
+    chain = FakeChain()
+    if where == "mempool":
+        chain.mempool = [_tx(7, to=PAYEE_ADDRESS)]
+    elif where == "confirmed":
+        chain.chain = [_tx(7, to=PAYEE_ADDRESS, block_time=int(intent_at) + 60)]
+    else:  # block timestamps may lag wall time
+        chain.chain = [_tx(7, to=PAYEE_ADDRESS, block_time=int(intent_at) - 600)]
+
+    with pytest.raises(payment_retry.RetryRefused, match=_txid(7)):
+        payment_retry.run_retry(
+            original, journal_path=journal_path, handlers=[handler],
+            explorer=chain.explorer(),
+        )
+    assert neo.writes == 0
+    assert handler.execute_calls == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["error", "timeout", "not_a_list", "malformed_tx", "full_mempool", "unbounded_history"],
+)
+def test_btc_retry_refuses_when_chain_lookup_cannot_be_trusted(btc_env, failure):
+    handler, journal_path, neo, monkeypatch = btc_env
+    original = _journal_with_class(monkeypatch, journal_path, handler, "unknown")
+    chain = FakeChain()
+    now = int(time.time())
+    if failure == "error":
+        chain.fail = OSError("synthetic network down")
+    elif failure == "timeout":
+        chain.fail = TimeoutError("synthetic timeout")
+    elif failure == "not_a_list":
+        chain.raw_mempool = {"error": "rate limited"}
+    elif failure == "malformed_tx":
+        chain.mempool = [{"txid": "zz", "status": {}, "vout": []}]
+    elif failure == "full_mempool":
+        chain.mempool = [_tx(100 + i, to=OTHER_ADDRESS) for i in range(50)]
+    else:
+        chain.chain = [
+            _tx(1000 + i, to=OTHER_ADDRESS, block_time=now) for i in range(25 * 21)
+        ]
+
+    with pytest.raises(payment_retry.RetryRefused, match="chain reconciliation failed"):
+        payment_retry.run_retry(
+            original, journal_path=journal_path, handlers=[handler],
+            explorer=chain.explorer(),
+        )
+    assert neo.writes == 0
+    assert handler.execute_calls == []
+
+
+def test_btc_chain_history_is_paged_until_before_the_window(btc_env):
+    handler, journal_path, neo, monkeypatch = btc_env
+    original = _journal_with_class(monkeypatch, journal_path, handler, "unknown")
+    now = int(time.time())
+    chain = FakeChain()
+    chain.chain = [_tx(10 + i, to=OTHER_ADDRESS, block_time=now) for i in range(25)]
+    chain.chain.append(_tx(99, to=PAYEE_ADDRESS, block_time=now))
+
+    with pytest.raises(payment_retry.RetryRefused, match=_txid(99)):
+        payment_retry.run_retry(
+            original, journal_path=journal_path, handlers=[handler],
+            explorer=chain.explorer(),
+        )
+    assert any("/chain/" in url for url in chain.urls)
+    assert neo.writes == 0
+
+
+def test_btc_payment_seen_after_approval_refuses_before_reservation(btc_env):
+    handler, journal_path, neo, monkeypatch = btc_env
+    original = _journal_with_class(monkeypatch, journal_path, handler, "unknown")
+    chain = FakeChain()
+    raised = payment_retry.run_retry(
+        original, journal_path=journal_path, handlers=[handler],
+        explorer=chain.explorer(),
+    )
+    neo.resolve(raised.retry_key, "approved", "attended yoga")
+    chain.mempool = [_tx(5, to=PAYEE_ADDRESS)]  # the timed-out child broadcast late
+
+    with pytest.raises(payment_retry.RetryRefused, match=_txid(5)):
+        _execute(original, journal_path, handler, explorer=chain.explorer())
+
+    assert handler.execute_calls == []
+    assert payment_journal.retry_state(
+        payment_journal.load(journal_path), original
+    ) is None
+
+
+@pytest.mark.parametrize("answer", ["attended yoga", "attended yoga; not paid", "not paid attended yoga"])
+def test_not_paid_in_the_answer_is_not_evidence_for_btc(btc_env, answer):
+    handler, journal_path, neo, monkeypatch = btc_env
+    original = _journal_with_class(monkeypatch, journal_path, handler, "unknown")
+    chain = FakeChain()
+    raised = payment_retry.run_retry(
+        original, journal_path=journal_path, handlers=[handler],
+        explorer=chain.explorer(),
+    )
+    neo.resolve(raised.retry_key, "approved", answer)
+    chain.fail = OSError("synthetic explorer outage")
+
+    try:
+        result = _execute(original, journal_path, handler, explorer=chain.explorer())
+    except payment_retry.RetryRefused as exc:
+        assert "chain reconciliation failed" in str(exc)
+        result = None
+    assert result is None or result.state == "blocked"
+    assert handler.execute_calls == []
+    assert payment_journal.retry_state(
+        payment_journal.load(journal_path), original
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["paid_result", "other_payee", "other_window", "other_explorer", "empty"],
+)
+def test_btc_approval_must_carry_matching_clear_evidence(btc_env, tamper):
+    handler, journal_path, neo, monkeypatch = btc_env
+    original = _journal_with_class(monkeypatch, journal_path, handler, "unknown")
+    chain = FakeChain()
+    raised = payment_retry.run_retry(
+        original, journal_path=journal_path, handlers=[handler],
+        explorer=chain.explorer(),
+    )
+    evidence = json.loads(neo.rows[raised.retry_key]["reconciliation_evidence"])
+    if tamper == "paid_result":
+        evidence["result"] = chain_reconcile.RESULT_PAID
+        evidence["paying_txids"] = [_txid(3)]
+    elif tamper == "other_payee":
+        evidence["payee_address_sha256"] = chain_reconcile.address_digest(OTHER_ADDRESS)
+    elif tamper == "other_window":
+        evidence["window_start_epoch"] += 86400
+    elif tamper == "other_explorer":
+        evidence["explorer"] = "https://elsewhere.invalid/api"
+    raw = "" if tamper == "empty" else chain_reconcile.canonical(evidence)
+    neo.rows[raised.retry_key]["reconciliation_evidence"] = raw
+    neo.resolve(raised.retry_key, "approved", "attended yoga")
+
+    result = _execute(original, journal_path, handler, explorer=chain.explorer())
+
+    assert result.state == "blocked"
+    assert handler.execute_calls == []
+
+
+def test_btc_without_payee_address_is_refused(btc_env):
+    handler, journal_path, neo, monkeypatch = btc_env
+    original = _journal_with_class(monkeypatch, journal_path, handler, "unknown")
+    handler.profile.btc_address = ""
+    with pytest.raises(payment_retry.RetryRefused):
+        payment_retry.run_retry(
+            original, journal_path=journal_path, handlers=[handler],
+            explorer=FakeChain().explorer(),
+        )
+    assert neo.writes == 0
+
+
+# ── Tests never touch the daemon directory's state files ─────────────────────
+
+
+def test_tests_use_a_temporary_journal_not_the_daemon_directory(tmp_path):
+    daemon_dir = Path(payment_retry.__file__).resolve().parent
+    assert consent_email.journal_path().parent != daemon_dir
+    assert tmp_path in consent_email.journal_path().parents
+
+
+def test_retry_raise_fails_closed_when_schema_drops_retry_fields(retry_env):
+    handler, journal_path, original, neo = retry_env
+    neo.drop_fields = {"retry_of", "reconciliation_evidence"}
+
+    with pytest.raises(payment_approval.ApprovalError, match="did not persist"):
+        payment_retry.run_retry(
+            original, journal_path=journal_path, handlers=[handler]
+        )
+    assert handler.execute_calls == []
+
+
+# ── Self-review fixes ────────────────────────────────────────────────────────
+
+
+def test_btc_payee_address_matches_case_insensitively(btc_env):
+    handler, journal_path, neo, monkeypatch = btc_env
+    handler.profile.btc_address = PAYEE_ADDRESS.upper()
+    original = _journal_with_class(monkeypatch, journal_path, handler, "unknown")
+    chain = FakeChain()
+    chain.mempool = [_tx(8, to=PAYEE_ADDRESS)]
+
+    with pytest.raises(payment_retry.RetryRefused, match=_txid(8)):
+        payment_retry.run_retry(
+            original, journal_path=journal_path, handlers=[handler],
+            explorer=chain.explorer(),
+        )
+    assert neo.writes == 0
+
+
+def test_btc_paging_does_not_stop_on_one_old_looking_block(btc_env):
+    handler, journal_path, neo, monkeypatch = btc_env
+    original = _journal_with_class(monkeypatch, journal_path, handler, "unknown")
+    now = int(time.time())
+    chain = FakeChain()
+    page = [_tx(10 + i, to=OTHER_ADDRESS, block_time=now) for i in range(24)]
+    page.append(_tx(40, to=OTHER_ADDRESS, block_time=now - 3 * 86400))
+    chain.chain = page + [_tx(99, to=PAYEE_ADDRESS, block_time=now)]
+
+    with pytest.raises(payment_retry.RetryRefused, match=_txid(99)):
+        payment_retry.run_retry(
+            original, journal_path=journal_path, handlers=[handler],
+            explorer=chain.explorer(),
+        )
+    assert neo.writes == 0
+
+
+def test_btc_explorer_must_use_https(btc_env):
+    handler, journal_path, neo, monkeypatch = btc_env
+    original = _journal_with_class(monkeypatch, journal_path, handler, "unknown")
+    chain = FakeChain()
+    explorer = chain_reconcile.EsploraExplorer("http://explorer.invalid/api", fetch=chain.fetch)
+
+    with pytest.raises(payment_retry.RetryRefused, match="https"):
+        payment_retry.run_retry(
+            original, journal_path=journal_path, handlers=[handler], explorer=explorer
+        )
+    assert chain.urls == []
+    assert neo.writes == 0
+
+
+def test_btc_late_broadcast_after_reservation_aborts_before_execute(btc_env):
+    handler, journal_path, neo, monkeypatch = btc_env
+    original = _journal_with_class(monkeypatch, journal_path, handler, "unknown")
+    chain = FakeChain()
+    raised = payment_retry.run_retry(
+        original, journal_path=journal_path, handlers=[handler],
+        explorer=chain.explorer(),
+    )
+    neo.resolve(raised.retry_key, "approved", "attended yoga")
+    real_reserve = payment_journal.reserve_retry
+
+    def reserve_then_broadcast(*args, **kwargs):
+        real_reserve(*args, **kwargs)
+        chain.mempool = [_tx(6, to=PAYEE_ADDRESS)]
+
+    monkeypatch.setattr(payment_journal, "reserve_retry", reserve_then_broadcast)
+
+    result = _execute(original, journal_path, handler, explorer=chain.explorer())
+
+    assert result.state == "aborted"
+    assert handler.execute_calls == []
+    assert payment_journal.retry_state(
+        payment_journal.load(journal_path), original
+    ) == "aborted"
+
+
+def test_non_btc_retry_record_carrying_evidence_is_blocked(retry_env):
+    handler, journal_path, original, neo = retry_env
+    raised = payment_retry.run_retry(
+        original, journal_path=journal_path, handlers=[handler]
+    )
+    neo.rows[raised.retry_key]["reconciliation_evidence"] = '{"result":"x"}'
+    neo.resolve(raised.retry_key, "approved", "attended yoga")
+
+    result = _execute(original, journal_path, handler)
+
+    assert result.state == "blocked"
+    assert handler.execute_calls == []
