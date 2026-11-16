@@ -1,5 +1,12 @@
-"""Tests for git_hook_bypass_guard.py (PreToolUse: Bash)."""
+"""Tests for git_hook_bypass_guard.py (PreToolUse: Bash), the allowlist guard
+loaded into the Phoenicurus release prepare agent.
+
+Every refusal and allowance is driven through the hook entry point: the hook
+runs as a subprocess with real PreToolUse JSON on stdin, exactly as the Claude
+CLI runs it under prepare's --settings.
+"""
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -7,8 +14,6 @@ from pathlib import Path
 import pytest
 
 HOOK = Path(__file__).resolve().parent / "git_hook_bypass_guard.py"
-sys.path.insert(0, str(HOOK.parent))
-import git_hook_bypass_guard as guard  # noqa: E402
 
 
 def run_hook(payload) -> subprocess.CompletedProcess:
@@ -18,252 +23,390 @@ def run_hook(payload) -> subprocess.CompletedProcess:
 
 
 def bash(command: str) -> dict:
-    return {"tool_name": "Bash", "tool_input": {"command": command}}
+    return {"tool_name": "Bash", "tool_input": {"command": command},
+            "hook_event_name": "PreToolUse"}
 
 
-REFUSED = [
+def assert_refused(command: str) -> dict:
+    proc = run_hook(bash(command))
+    assert proc.returncode == 2, (command, proc.stdout, proc.stderr)
+    out = json.loads(proc.stdout)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny"
+    assert "SKIP_TESTS_REASON" in out["permissionDecisionReason"]
+    return out
+
+
+def assert_allowed(command: str) -> None:
+    proc = run_hook(bash(command))
+    assert proc.returncode == 0, (command, proc.stdout, proc.stderr)
+    assert proc.stdout.strip() == ""
+
+
+# --- the bypasses review rounds found past the denylist ---------------------
+
+# Options the shell assembles, and env -S / --split-string.
+SHELL_ASSEMBLED = [
+    "git commit --no-ver\"\"ify -m x",
+    "git commit --no-veri''fy -m x",
+    "git commit --no-$'verify' -m x",
+    "git commit --no-ver\\ify -m x",
+    "git commit -a\"\"n -m x",
+    "git commit -a'n' -m x",
+    "F=--no-verify; git commit $F -m x",
+    "git commit \"$F\" -m x",
+    "git commit --$FLAG -m x",
+    "git push origin \"$OPT\"",
+    "git push \"--no-$X\" origin main",
+    "git merge $OPT feature",
+    "git $SUBCOMMAND -m x",
+    "git commit $(printf -- --no-verify) -m x",
+    "git commit `printf -- --no-verify` -m x",
+    "env -S 'git commit --no-verify -m x'",
+    "env -S'git commit --no-verify -m x'",
+    "env --split-string='git commit -n -m x'",
+    "/usr/bin/env -S \"git push --no-verify\"",
+    "env -iS 'HUSKY=0 git commit -m x'",
+]
+
+# Every GIT_CONFIG* variable and the variables that relocate git or disable Husky.
+GIT_VARIABLES = [
+    "GIT_CONFIG_NOSYSTEM=1 git commit -m x",
+    "env GIT_CONFIG_NOSYSTEM=1 git commit -m x",
+    "export GIT_CONFIG_NOSYSTEM=1",
+    "export GIT_CONFIG_NOSYSTEM=1; git commit -m x",
+    "GIT_CONFIG_NOSYSTEM=1; git commit -m x",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit -m x",
+    "env GIT_CONFIG_VALUE_0=/dev/null git commit -m x",
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/dev/null'\" git commit -m x",
+    "env GIT_CONFIG_GLOBAL=/tmp/empty git commit -m x",
+    "export GIT_CONFIG_SYSTEM=/tmp/empty",
+    "GIT_CONFIG=/tmp/empty git commit -m x",
+    "GIT_DIR=/tmp/other/.git git commit -m x",
+    "env GIT_WORK_TREE=/tmp/other git commit -m x",
+    "GIT_EXEC_PATH=/tmp/bin git commit -m x",
+    "declare -x GIT_DIR=/tmp/other/.git",
+    "HUSKY=0 git commit -m x",
+    "env HUSKY=0 git commit -m x",
+    "export HUSKY=0 && git commit -m x",
+]
+
+# core.hooksPath unset, rewritten or redirected, and every other config write.
+CONFIG_WRITES = [
+    "git config --unset core.hooksPath",
+    "git config --unset-all core.hooksPath",
+    "git config unset core.hooksPath",
+    "git config --unse core.hooksPath",
+    "git config --global --unset core.hooksPath",
+    "git config --system --unset core.hooksPath",
+    "git config --worktree --unset-all core.hooksPath",
+    "git config -f .git/config --unset core.hooksPath",
+    "git config --unset core.hooksPath && git commit -m release",
+    "git config core.hooksPath /dev/null",
+    "git config set core.hooksPath /dev/null",
+    "git config --global core.hooksPath /dev/null",
+    "git config --replace-all core.hooksPath /dev/null",
+    "git config --add core.hooksPath /dev/null",
+    "git config --remove-section core",
+    "git config rename-section core oldcore",
+    "git config --edit",
+    "git config -e --local",
+    "git config include.path /tmp/no-hooks.gitconfig",
+    "git config core.hooks$X /dev/null",
+    "git config core.bare false",
+]
+
+# Global options that change config, relocate git or swap its programs.
+GLOBAL_OPTIONS = [
+    "git -c core.hooksPath=/dev/null commit -m x",
+    "git -ccore.hooksPath= commit -m x",
+    "git -c include.path=/tmp/no-hooks.gitconfig commit -m x",
+    "git --config-env=core.hooksPath=X commit -m x",
+    "git --config-env core.hooksPath=X commit -m x",
+    "git --exec-path=/tmp/bin commit -m x",
+    "git --git-dir=/tmp/other/.git commit -m x",
+    "git --work-tree /tmp/other commit -m x",
+    "git --bare status",
+]
+
+# Git aliases, passed once or saved, and any subcommand off the allowlist.
+ALIASES_AND_UNLISTED = [
+    "git -c alias.ci='commit --no-verify' ci -m x",
+    "git -c alias.ci='!git commit -n' ci",
+    "git config alias.ci 'commit --no-verify' && git ci -m x",
+    "git config --global alias.ci 'commit -n'",
+    "git ci -m x",
+    "git stash",
+    "git hook run pre-commit",
+    "git rebase --no-verify origin/main",
+    "git am --no-verify patch.mbox",
+    "git pull --no-verify origin main",
+    "git cherry-pick abc123",
+    "git tag v1.2.3",
+    "git tag -a v1.2.3 -m 'Release v1.2.3'",
+    "git tag -d v1.2.3",
+]
+
+# A bash -c body behind another bash option, and other inline programs.
+INLINE_PROGRAMS = [
+    "bash --rcfile X -c 'git commit --no-verify -m x'",
+    "bash -o posix -c 'git commit -n -m x'",
+    "bash -O extglob -c 'git push --no-verify'",
+    "bash --norc -c 'git commit -n'",
+    "bash -c 'git commit -m x'",
+    "bash -lc 'git commit --no-verify -m x'",
+    "sh -ec 'git commit --no-verify -m x'",
+    "zsh -xc 'git commit --no-verify -m x'",
+    "bash -l -c 'git commit --no-verify -m x'",
+    "eval git commit -m x",
+    "CMD='git commit -n'; eval \"$CMD\"",
+    "X='git commit -n'; bash -c \"$X\"",
+    "source <(echo git commit -n)",
+    "python3 -c \"import subprocess; subprocess.run(['git','commit','-m','x'])\"",
+    "python3 -c \"print('git commit --no-verify')\"",
+    "node -e \"require('child_process').execSync('git push --no-verify')\"",
+    "perl -e 'open P, \"git commit --no-verify|\"'",
+    "ruby -e '%x(git push --no-verify)'",
+    "awk 'BEGIN { system(\"git commit -n\") }'",
+    "python3 - <<'PY'\nimport subprocess\nsubprocess.run(['git', 'commit', '--no-verify'])\nPY",
+    "bash <<EOF\ngit -c core.hooksPath=/dev/null commit -m x\nEOF",
+    "bash <<< 'git commit -n'",
+    "echo 'git commit --no-verify' | bash",
+    "printf 'git commit -n' | sh -s",
+    "git diff | bash",
+]
+
+# Wrappers, path-qualified or assembled git binaries, and substitutions around git.
+WRAPPERS_AND_SUBSTITUTIONS = [
+    "env git commit -m x",
+    "env -u NEOTOMA_ENV git commit -m x",
+    "command git commit -m x",
+    "exec git commit -m x",
+    "nice git commit -m x",
+    "timeout 600 git commit -m x",
+    "nohup git push --no-verify &",
+    "time git status",
+    "echo HEAD | xargs git log",
+    "find . -name '*.md' -exec git add {} \\;",
+    "/usr/bin/git commit -m x",
+    "\\git commit --no-verify -m x",
+    "/usr/libexec/git-core/git-commit -m x",
+    "git-commit -n",
+    "\"$GIT\" commit -m x",
+    "$GIT commit -n",
+    "g=git; $g commit -n",
+    "g=gi; ${g}t commit -n",
+    "$X push --no-verify",
+    "echo $(git commit --no-verify -m x)",
+    "echo `git commit -n`",
+    "ls $(git rev-parse --git-dir)/index.lock",
+    "diff <(git log) <(git log origin/main)",
+    "git -C \"$(git rev-parse --show-toplevel)\" commit -m x",
+]
+
+# Hook-skipping options on allowlisted subcommands, the original rule.
+FORBIDDEN_FLAGS = [
     "git commit --no-verify -m 'bump'",
+    "git commit --no-veri -m x",
+    "git commit --no-verif -m x",
+    "git commit --no-verify=1 -m x",
     "git push --no-verify origin release/v1.2.3",
     "git push origin HEAD --no-verify",
     "git -C /tmp/wt commit --no-verify -m x",
-    "git commit --no-veri -m x",
-    "git commit --no-verif -m x",
+    "git -C \"$WT\" commit --no-verify -m x",
     "git merge --no-verify feature",
     "git commit -n -m x",
     "git commit -an -m x",
     "git commit -nm 'msg'",
     "git commit -m 'msg' -n",
-    "git -c core.hooksPath=/dev/null commit -m x",
-    "git -c core.hookspath=/dev/null push",
-    "git config core.hooksPath /dev/null",
-    "git config set core.hooksPath /dev/null",
-    "HUSKY=0 git commit -m x",
-    "env HUSKY=0 git commit -m x",
-    "export HUSKY=0",
-    "export HUSKY=0 && git commit -m x",
+    "git commit -C HEAD~1 -n",
+    "git commit -m -n -n",
+    "git commit --amend --no-post-rewrite -m x",
     "cd /tmp/wt && git add -A && git commit --no-verify -m x",
     "git add -A; git commit --no-verify -m x",
     "git add -A\ngit commit --no-verify -m x",
     "git commit \\\n  --no-verify -m x",
-    "bash -c 'git commit --no-verify -m x'",
-    "sh -c \"git push --no-verify\"",
-    "eval git commit --no-verify -m x",
-    "echo $(git commit --no-verify -m x)",
-    "echo `git commit --no-verify -m x`",
-    "nohup git push --no-verify &",
-    "git commit -C HEAD~1 -n",  # -C consumes HEAD~1; -n is still a flag
-    "timeout 600 git commit --no-verify -m x",
-    "/usr/bin/git commit --no-verify -m x",
-    "python3 -c \"import subprocess; subprocess.run(['git','commit','--no-verify'])\"",
-    "node -e \"require('child_process').execSync('git push --no-verify')\"",
+    "if true; then git commit -n -m x; fi",
+    "for i in 1; do git push --no-verify; done",
+    "(cd /tmp/wt && git commit -n -m x)",
+    "git status # harmless\ngit commit -n -m x",
 ]
 
-NEW_REFUSED = [
-    "git --config-env=core.hooksPath=X commit -m x",
-    "git --config-env core.HOOKSPATH=X commit -m x",
-    "GIT_CONFIG_COUNT=1 git commit -m x",
-    "GIT_CONFIG_KEY_0=core.hooksPath git commit -m x",
-    "env GIT_CONFIG_VALUE_0=/dev/null git commit -m x",
-    "GIT_CONFIG_PARAMETERS='core.hooksPath=/dev/null' git commit -m x",
-    "env GIT_CONFIG_GLOBAL=/tmp/empty-gitconfig git commit -m x",
-    "export GIT_CONFIG_SYSTEM=/tmp/empty-gitconfig",
-    "HUSKY=1 git commit -m x",
-    "env HUSKY=true git commit -m x",
-    "export HUSKY=enabled",
-    "bash -lc 'git commit --no-verify -m x'",
-    "sh -ec 'git commit --no-verify -m x'",
-    "zsh -xc 'git commit --no-verify -m x'",
-    "bash -l -c 'git commit --no-verify -m x'",
-    "git commit $(printf -- --no-verify) -m x",
-    "git commit `printf -- --no-verify` -m x",
-    "git commit --$FLAG -m x",
-    "git $SUBCOMMAND -m x",
-    "git ${SUBCOMMAND} -m x",
-    'git -C "$REPO" commit -m x',
-    "python3 - <<'PY'\nimport subprocess\nsubprocess.run(['git', 'commit', '--no-verify'])\nPY",
-    "bash <<EOF\ngit -c core.hooksPath=/dev/null commit -m x\nEOF",
-    "node <<'JS'\nrequire('child_process').execSync('HUSKY=1 git commit -m x')\nJS",
-    "python3 -c \"import subprocess; subprocess.run(['git','commit','-n'])\"",
-    "node -e \"require('child_process').execSync('git config core.hooksPath /dev/null')\"",
+# Input the guard cannot read fully, around git.
+UNREADABLE = [
+    "git commit --no-verify -m 'oops",
+    "git commit -m \"unterminated",
+    "git commit -m \"$(cat <<'EOF'\nno closing delimiter",
+    "cat <<EOF | bash\ngit commit -n",
 ]
-REFUSED += NEW_REFUSED
 
-# Round 3 (ateles PR 1771): every write, unset, rename or removal of
-# core.hooksPath in any form and scope; shell-assembled options and env -S;
-# the whole GIT_CONFIG* family and the variables that relocate git.
-ROUND3_REFUSED = [
-    # finding 1: core.hooksPath removed or rewritten
-    "git config --unset core.hooksPath",
-    "git config --unset-all core.hooksPath",
-    "git config unset core.hooksPath",
-    "git config --unset core.hooksPath && git commit -m release",
-    "git config unset --all core.hooksPath",
-    "git config --system --unset core.hooksPath",
-    "git config --worktree --unset-all core.hooksPath",
-    "git config --global unset core.hooksPath",
-    "git config --unse core.hooksPath",  # abbreviation git accepts
-    "git config -f .git/config --unset core.hooksPath",
-    "git config --rename-section core oldcore",
-    "git config --remove-section core",
-    "git config remove-section core",
-    "git config rename-section core oldcore",
-    "git config --edit",
-    "git config -e --local",
-    "git config include.path /tmp/no-hooks.gitconfig",
-    "git -c include.path=/tmp/no-hooks.gitconfig commit -m x",
-    "git --exec-path=/tmp/bin commit -m x",
-    "git --git-dir=/tmp/other/.git commit -m x",
-    "git --work-tree /tmp/other commit -m x",
-    # finding 2: options assembled by the shell, and env -S
-    "git commit --no-ver\"\"ify -m x",
-    "git commit -a\"\"n -m x",
-    "git commit -a'n' -m x",
-    "git commit \"-an\" -m x",
-    "\"$GIT\" commit --no-verify -m x",
-    "env -S 'git commit --no-verify -m x'",
-    "env -S'git commit --no-verify -m x'",
-    "env --split-string='git commit -n -m x'",
-    "env -S 'git -c core.hooksPath=/dev/null commit' -m x",
-    "/usr/bin/env -S \"git push --no-verify\"",
-    "env -S 'git config --unset core.hooksPath'",
-    # finding 3: GIT_CONFIG* and relocating variables
-    "GIT_CONFIG_NOSYSTEM=1 git commit -m x",
-    "env GIT_CONFIG_NOSYSTEM=1 git commit -m x",
-    "export GIT_CONFIG_NOSYSTEM=1",
-    "GIT_CONFIG=/tmp/empty git commit -m x",
-    "GIT_DIR=/tmp/other/.git git commit -m x",
-    "env GIT_WORK_TREE=/tmp/other git commit -m x",
-    "export GIT_EXEC_PATH=/tmp/bin",
-    "GIT_EXEC_PATH=/tmp/bin git commit -m x",
+# Found by the author-side self-review of the allowlist rewrite.
+SELF_REVIEW = [
+    # wrappers the guard has no name for: git must be the command itself
+    "setsid git commit -n -m x",
+    "arch -arm64 git commit -m x",
+    "ionice git commit --no-verify -m x",
+    "chroot / git commit -m x",
+    # brace expansion and globs that assemble the command or its options
+    "{git,commit,--no-verify}",
+    "/usr/bin/gi? commit -n",
+    "/usr/bin/gi[t] commit -n",
+    "git commit {--no-verify,-m,x}",
+    "git {commit,--no-verify} -m x",
+    # append-assignments of git variables
+    "GIT_DIR+=x git status",
+    "GIT_CONFIG_COUNT+=1; git commit -m x",
+    "export GIT_CONFIG_PARAMETERS+=x",
+    # options that make an allowed subcommand run any program
+    "git fetch --upload-pack='git -c core.hooksPath=/dev/null commit -m x' origin",
+    "git fetch --upl=x origin",
+    "git ls-remote --upload-pack=x origin",
+    "git ls-remote -u x origin",
+    "git push --receive-pack=x origin main",
+    "git push --exec=x origin main",
 ]
-REFUSED += ROUND3_REFUSED
 
-# Round 3 self-review: a shell-assembled command name judged as git, env
-# option clusters that take a value, and a config key the shell assembles.
-ROUND3_REVIEW_REFUSED = [
-    "$GIT commit -n",
-    "\"$GIT\" commit -an -m x",
-    "g=git; $g commit -n",
-    "$GIT -c core.hooksPath=/dev/null commit -m x",
-    "env -iu FOO git commit --no-verify -m x",
-    "env -iC /tmp git commit --no-verify -m x",
-    "git config core.hooks$X /dev/null",
-    "git config --unset core.hooks${X}",
-]
-REFUSED += ROUND3_REVIEW_REFUSED
+REFUSED = (SHELL_ASSEMBLED + GIT_VARIABLES + CONFIG_WRITES + GLOBAL_OPTIONS
+           + ALIASES_AND_UNLISTED + INLINE_PROGRAMS + WRAPPERS_AND_SUBSTITUTIONS
+           + FORBIDDEN_FLAGS + UNREADABLE + SELF_REVIEW)
 
-ALLOWED = [
-    "git commit -m 'never use --no-verify here'",
-    "git commit -m \"docs: explain why --no-verify is refused\"",
+
+# --- what the agent legitimately runs ---------------------------------------
+
+AGENT_COMMANDS = [
+    "git -C \"$WT\" status",
+    "git -C \"$WT\" commit -m release",
+    "git -C ~/repos/x push origin HEAD:branch",
+    "git -C /tmp/wt diff --stat v0.29.1..origin/main",
+    "git fetch origin --tags -q && git log --oneline v0.29.1..origin/main && "
+    "git diff --stat v0.29.1..origin/main | tail -20",
+    "git worktree add -b release/v0.29.2 /tmp/neotoma-release-v0.29.2 origin/main 2>&1 | tail -2",
+    "git worktree list | head",
+    "cd /tmp/wt && git show --stat --format=%s HEAD | head -12",
+    "git push -q -u origin release/v0.29.2 2>&1 | tail -2",
+    "git ls-remote origin release/v0.29.2 | head -1; git rev-parse HEAD",
+    "git log --format='%h %p %s' -3 2e4d8b558; git rev-list --count origin/main",
+    "git tag --sort=-v:refname | head -1",
+    "git tag -l 'v0.*'",
+    "git tag --contains HEAD",
+    "git describe --tags --abbrev=0 origin/main",
+    "git branch -a --list '*v0.29.2*'",
+    "git merge-base --is-ancestor origin/main HEAD && echo contains-main",
+    "git merge --ff-only origin/main && git log --oneline -1",
+    "git checkout -q --detach origin/main 2>/dev/null; git status --short | head -3",
+    "git switch -c release/v1.2.3",
+    "git add package.json package-lock.json docs/releases/in_progress/v1.2.3",
+    "git for-each-ref --sort=-creatordate --format='%(creatordate:iso) %(refname)' refs/tags | head -5",
+    "git cat-file -t v0.27.0",
+    "git fsck --connectivity-only 2>&1 | tail -2",
+    "git reflog -5",
+    "git --no-pager log -1",
+    "git push -n origin main",
+    "git commit -m 'chore(release): bump version to v1.2.3 + supplement'",
     "SKIP_TESTS=1 SKIP_TESTS_REASON='suite stalls on host load' git commit -m x",
-    "git push origin release/v1.2.3",
-    "git push -n origin main",  # -n is --dry-run on push
-    "git commit -m x -- notes-n.md",
+    "git commit -q -m \"chore(release): bump version to v1.2.3 + supplement\n\n"
+    "Co-Authored-By: Claude <noreply@anthropic.com>\" 2>&1 | tail -5; git log --oneline -2",
+    "git commit -m \"$(cat <<'EOF'\nchore(release): it's v1.2.3 (git hooks ran)\n\nNever --no-verify.\nEOF\n)\"",
+    "git commit -F - <<'EOF'\nrelease notes mentioning git commit --no-verify\nEOF",
+    "git commit -m \"$MSG\"",
+    "git commit -m x -- --no-verify",
+    "git commit -m -n",
+    "git commit -uno -m x",
+    "git commit --amend --no-edit",
     "git config --get core.hooksPath",
-    "grep -rn -- --no-verify docs/",
-    "rg -n 'no-verify' .",
-    "echo --no-verify",
-    "gh pr create --title x --body 'the agent used --no-verify'",
-    "ls -ln /tmp",
-    "npm run test -- --no-verify-cache",
-    "git log --oneline -n 5",
-    "git commit -m 'n'",
-    "git config get core.hooksPath",
-    "git config get --all core.hooksPath",
     "git config --get-all core.hooksPath",
     "git config --list",
+    "git config --worktree --list 2>&1 | head -5",
     "git config --show-origin --get core.hooksPath",
+    "git config get core.hooksPath",
     "git config core.hooksPath",
     "git config --show-origin core.hooksPath",
-    "git commit -uno",
-    "git commit -uall",
-    "git commit --message -n",
-    "git commit -m x -- --no-verify",
-    'git commit -m "$MSG"',
-    'git commit --message "$MSG"',
-    'git commit -F "$FILE"',
-    'git commit --file "$FILE"',
-    "python3 -c \"import subprocess; subprocess.run(['git','config','--get','core.hooksPath'])\"",
+    "git --version",
 ]
 
-# Round 3: reads in every scope stay allowed, and a program that only prints
-# text naming the flag is not a git invocation.
-ROUND3_ALLOWED = [
-    "python3 -c \"print('git commit --no-verify')\"",
-    "node -e \"console.log('do not use git push --no-verify')\"",
-]
-ALLOWED += ROUND3_ALLOWED
-
-# Regression pins added in round 3. The guard at c53d7159 already handled
-# these; they are kept so the rewritten config and quick-filter logic cannot
-# lose them (refusals) or over-refuse (reads and unrelated config writes).
-ROUND3_REGRESSION_REFUSED = [
-    "git config --global core.hooksPath /dev/null",
-    "git config --local core.hooksPath .git/hooks",
-    "git config --replace-all core.hooksPath /dev/null",
-    "git config --add core.hooksPath /dev/null",
-    "git -c core.hooksPath= commit -m x",
-    "git -ccore.hooksPath= commit -m x",
-    "git commit --no-veri''fy -m x",
-    "git commit --no-$'verify' -m x",
-    "git commit --no-ver\\ify -m x",
-    "F=--no-verify; git commit $F -m x",
-    "g\"\"it commit --no-verify -m x",
-    "\\git commit --no-verify -m x",
-    "env -iS 'HUSKY=0 git commit -m x'",
-]
-ROUND3_REGRESSION_ALLOWED = [
-    "git config --global --get core.hooksPath",
-    "git config --show-origin --list",
-    "git config --list --show-scope",
-    "git config --get-regexp hooks",
-    "git config get --show-origin core.hooksPath",
-    "git config --file .git/config --get core.hooksPath",
-    "git config --global user.name 'Release Bot'",
-    "git config --unset user.signingkey",
-    "env -S 'echo hello'",
-    "env -S 'git status'",
-    "git --exec-path",
+NON_GIT = [
     "ls -la",
-]
-ROUND3_REGRESSION_REFUSED += [
-    # perl pipe-open runs git; the narrowed inline-program check must see it
-    "perl -e 'open P, \"git commit --no-verify|\"'",
-    "ruby -e '%x(git push --no-verify)'",
-    "git config --remove-section $SECTION",
-]
-ROUND3_REGRESSION_ALLOWED += [
+    "echo --no-verify",
+    "grep -rn -- --no-verify docs/",
+    "rg -n 'no-verify' .",
+    "gh pr create --base main --head release/v1.2.3 --title x --body 'the agent used --no-verify'",
+    "npm run test -- --no-verify-cache",
+    "npm version 1.2.3 --no-git-tag-version",
+    "npm run -s release-notes:render -- --tag v1.2.3 --head-ref HEAD --supplement notes.md",
+    "cat > notes.md <<'EOF'\nNever run git commit --no-verify.\nEOF",
+    "python3 - <<'PY'\nprint('hello')\nPY",
+    "python3 - <<'EOF'\nprint(1)\nEOF\ngit diff --stat",
+    "git diff | python3 -c 'import sys; print(len(sys.stdin.read()))'",
+    "python3 store_release_result.py --version v1.2.3 --status pending_approval",
+    "node -e 'console.log(require(\"./package.json\").version)'",
     "\"$PYTHON\" scripts/report.py -n",
     "$EDITOR notes.md",
     "env -iu FOO ls",
+    "command -v git",
+    "which git",
+    "echo 'unterminated",
+    "gws gmail +send --to x --subject y --html --body \"$(cat /tmp/release-v1.2.3-email.html)\"",
+    "sed -n 1,20p github_release_supplement.md",
+    # self-review: a `git-hooks` path, the test command, globs and readers
+    "bash scripts/git-hooks/install.sh",
+    "for f in a b; do [ -f \"$f\" ] && echo \"$f\"; done",
+    "ls *.md",
+    "echo git",
+    "brew list git",
+    # self-review: heredoc text inside a substitution is data, so a later
+    # command with an expanded argument is not judged as git-assembled
+    "git commit -m \"$(cat <<'EOF'\nuses git hooks\nEOF\n)\" && python3 check.py \"$X\"",
 ]
-REFUSED += ROUND3_REGRESSION_REFUSED
-ALLOWED += ROUND3_REGRESSION_ALLOWED
+
+SELF_REVIEW_ALLOWED_GIT = [
+    "git ls-files | head",
+    "git ls-tree HEAD docs/",
+    "git remote get-url origin",
+    "git show-ref --tags",
+    "git symbolic-ref HEAD",
+    "git restore --staged package-lock.json",
+    "git rm -q docs/releases/in_progress/old.md",
+    "git mv a.md b.md",
+    "git add docs/*.md",
+]
+AGENT_COMMANDS += SELF_REVIEW_ALLOWED_GIT
+
+ALLOWED = AGENT_COMMANDS + NON_GIT
 
 
 @pytest.mark.parametrize("command", REFUSED)
 def test_refused(command):
-    assert guard.find_bypass(command) is not None, command
-    proc = run_hook(bash(command))
-    assert proc.returncode == 2
-    out = json.loads(proc.stdout)["hookSpecificOutput"]
-    assert out["permissionDecision"] == "deny"
-    assert "SKIP_TESTS_REASON" in out["permissionDecisionReason"]
+    assert_refused(command)
 
 
 @pytest.mark.parametrize("command", ALLOWED)
 def test_allowed(command):
-    assert guard.find_bypass(command) is None, command
-    proc = run_hook(bash(command))
-    assert proc.returncode == 0
-    assert proc.stdout.strip() == ""
+    assert_allowed(command)
 
 
-def test_commit_value_flag_consumes_next_token():
-    # `-m -n`: the -n is the message, not a flag.
-    assert guard.find_bypass("git commit -m -n") is None
-    # but a real -n after the message is still caught
-    assert guard.find_bypass("git commit -m -n -n") is not None
+def test_config_write_naming_hookspath_as_value_is_a_config_write():
+    # `user.name` is the key; core.hooksPath is only its value. Still refused,
+    # because every config write is, and the reason says so.
+    out = assert_refused("git config user.name core.hooksPath")
+    assert "config write" in out["permissionDecisionReason"]
+    assert "core.hooksPath=" not in out["permissionDecisionReason"].split("\n")[0]
+
+
+def test_refusal_names_the_sanctioned_path():
+    out = assert_refused("git commit --no-verify -m x")
+    reason = out["permissionDecisionReason"]
+    assert "SKIP_TESTS=1 SKIP_TESTS_REASON=" in reason
+    assert "plain, allowlisted git" in reason
+
+
+def test_unlisted_subcommand_refusal_lists_the_allowlist():
+    reason = assert_refused("git ci -m x")["permissionDecisionReason"]
+    assert "not on the prepare agent's allowlist" in reason
+    assert "commit" in reason and "worktree" in reason
+
+
+def test_assembled_argument_refusal_says_what_to_change():
+    reason = assert_refused("git push origin \"$BRANCH\"")["permissionDecisionReason"]
+    assert "$BRANCH" in reason and "literally" in reason
 
 
 def test_non_bash_tool_ignored():
@@ -272,20 +415,33 @@ def test_non_bash_tool_ignored():
 
 
 @pytest.mark.parametrize("raw", ["", "not json", "[]", "null"])
-def test_fail_open_on_bad_input(raw):
+def test_fail_open_on_bad_input_logs_loudly(raw):
     proc = run_hook(raw)
     assert proc.returncode == 0
+    assert proc.stdout.strip() == ""
+    assert "FAIL-OPEN" in proc.stderr
 
 
-def test_unbalanced_quote_still_judged():
-    assert guard.find_bypass("git commit --no-verify -m 'oops") is not None
-    assert guard.find_bypass("echo 'unterminated") is None
+def test_fail_open_when_command_is_missing():
+    proc = run_hook({"tool_name": "Bash", "tool_input": {}})
+    assert proc.returncode == 0
+    assert "FAIL-OPEN" in proc.stderr
 
 
-def test_no_override_env_is_honoured(monkeypatch):
-    monkeypatch.setenv("ATELES_ALLOW_NO_VERIFY", "1")
-    assert guard.find_bypass("git commit --no-verify -m x") is not None
-    assert guard.find_bypass("ATELES_ALLOW_NO_VERIFY=1 git commit --no-verify -m x") is not None
+def test_no_override_env_is_honoured():
+    env = {**os.environ, "ATELES_ALLOW_NO_VERIFY": "1"}
+    for command in ("git commit --no-verify -m x",
+                    "ATELES_ALLOW_NO_VERIFY=1 git commit --no-verify -m x"):
+        proc = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(bash(command)),
+                              capture_output=True, text=True, timeout=30, env=env)
+        assert proc.returncode == 2, command
+
+
+def test_allowlist_is_data():
+    sys.path.insert(0, str(HOOK.parent))
+    import git_hook_bypass_guard as guard  # noqa: PLC0415
+    assert {"status", "commit", "push", "worktree", "config", "tag"} <= guard.ALLOWED_SUBCOMMANDS
+    assert not {"stash", "hook", "rebase", "am", "pull"} & guard.ALLOWED_SUBCOMMANDS
 
 
 # The real-harness check lives in execution/daemons/phoenicurus-release/verify_guard_live.py:

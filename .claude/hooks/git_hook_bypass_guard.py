@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreToolUse hook — refuse Bash commands that skip a repository's git hooks.
+"""PreToolUse hook — the release prepare agent may run only allowlisted git.
 
 The rule is "never --no-verify" (CLAUDE.md, Standing constraints). When tests
 must be skipped, the sanctioned form is the hook's own escape hatch,
@@ -11,144 +11,931 @@ Why it is mechanical: the Phoenicurus release-prepare agent (a headless
 including v0.29.2 on 2026-11-15, although both its repository's rules and the
 operator's rules forbid it. A brief alone did not hold, so the prepare runner
 loads this hook into the agent through ``--settings``
-(``execution/daemons/phoenicurus-release/prepare.py``).
+(``execution/daemons/phoenicurus-release/prepare.py``). It is not wired into
+interactive sessions.
 
-Refused (each skips or disables the hooks):
-  - ``--no-verify`` on any git subcommand, including unambiguous abbreviations
-    git accepts (``--no-veri``, ``--no-verif``)
-  - ``git commit -n``, including inside a short-flag cluster (``-an``, ``-nm``)
-  - ``git -c core.hooksPath=...`` (and ``include.path``), and every
-    ``git config`` write, unset, rename or removal that can reach
-    ``core.hooksPath`` in any scope (``--global``, ``--system``, ``--local``,
-    ``--worktree``, ``--file``), plus ``git config --edit``; an unrecognised
-    option on a command naming the key counts as a write
-  - ``git --git-dir``, ``--work-tree`` and ``--exec-path=<dir>``
-  - ``HUSKY``, every ``GIT_CONFIG*`` variable, ``GIT_DIR``, ``GIT_WORK_TREE``
-    and ``GIT_EXEC_PATH`` as a command prefix, through ``env``, or via
-    ``export``
-  - options the shell assembles (``--no-ver""ify``, ``--no-$'verify'``,
-    ``$FLAG``), a command name it assembles, and the command ``env -S`` /
-    ``--split-string`` runs, judged recursively
-  - the same inside ``sh|bash|zsh -c '...'``, ``eval``, ``$(...)`` and
-    backticks, and an inline ``python -c`` / ``node -e`` / ``perl -e`` /
-    ``ruby -e`` program that can start a process and names ``--no-verify``,
-    ``core.hooksPath`` or ``HUSKY`` together with git
+Why an allowlist: the first version was a denylist over shell syntax, and
+three review rounds each found another way past it (shell-assembled options,
+``env -S``, ``GIT_CONFIG_*`` variables, unsetting ``core.hooksPath``, git
+aliases, a ``bash -c`` body behind another bash option). A denylist over shell
+syntax cannot be completed. This hook only serves one agent, so it allows
+exactly the git that agent needs and refuses everything else.
 
-Not refused: text that merely mentions the flag. Commands are tokenised with
-shell quoting, so a commit message, PR body, grep pattern or echo that contains
-``--no-verify`` is one quoted token and never matches; only a bare argument to
-a git invocation does. Reads (``git config --get core.hooksPath``,
-``--list``, ``--show-origin``, ``git config get ...``) are allowed, and so is
-an inline program with no process-spawning call (``print('--no-verify')``).
-The pre-filter only skips commands with no quoting, escape or expansion and
-no word that could name git, so shell-assembled text is always parsed.
+The allowlisted surface (``ALLOWED_SUBCOMMANDS``) comes from the agent's brief
+(``_build_agent_prompt`` in prepare.py), the Neotoma ``/release`` skill's
+prepare phase, and the git commands the agent actually ran in its recorded
+release-prep sessions: status, diff, log, show, rev-parse, rev-list, fetch,
+add, commit, push, checkout, switch, merge, branch, worktree, ls-remote,
+merge-base, describe, cat-file, for-each-ref, reflog, fsck, plus read-only
+``git config`` and listing-only ``git tag`` (the agent must not tag). A few
+read-only inspections and release-file edits that run no hook are added
+(ls-files, ls-tree, show-ref, symbolic-ref, remote, blame, shortlog,
+name-rev, check-ignore, restore, rm, mv).
 
-This is a tripwire against accidental bypass, not a security boundary. A script
-written to disk, or an indirection this parser cannot see, can still skip hooks.
-The real controls are the prepare child's allowlisted environment and the
-release checks that run after the agent.
+The rule. The command is lexed as shell (quotes, escapes, ``$'...'``,
+expansions, substitutions, heredocs, comments) and split into simple commands
+on ``;``, ``&&``, ``||``, ``|``, ``&`` and newlines. Every git invocation must:
+  - be a plain ``git`` as the command itself: no path-qualified or dashed
+    binary, no command name the shell assembles (variable, brace expansion,
+    glob), and no other command carrying git as an argument (``env``,
+    ``command``, ``exec``, ``xargs``, ``nice``, ``timeout``, ``setsid``,
+    ``find -exec`` and any wrapper not named here); commands that only print,
+    search or locate the word are exempt
+  - use only allowlisted global options; ``-C <path>`` may take a quoted or
+    expanded path; ``-c``, ``--config-env``, ``--exec-path``, ``--git-dir``,
+    ``--work-tree`` and every other global option are refused
+  - name an allowlisted subcommand (so an alias, ``git stash``, ``git hook``
+    and ``git rebase`` are refused)
+  - carry no hook-skipping option: ``--no-verify`` (and the abbreviations git
+    accepts) or ``--no-post-rewrite`` on any subcommand, ``-n`` alone or in a
+    short-flag cluster on commit; nor an option that makes git run another
+    program (``--upload-pack``, ``--receive-pack``, ``--exec``,
+    ``ls-remote -u``); no argument may be a brace expansion, and on commit,
+    push and merge no argument may start with an expansion (it could expand
+    to an option), except the value of ``-m``/``-F`` and the ``-C`` path
+  - not write config: ``git config`` is allowed only as a read (``--get``,
+    ``--get-all``, ``--get-regexp``, ``--list``, ``get``, ``list``, or one key
+    with ``--show-origin`` and similar modifiers)
+  - carry no ``GIT_*`` or ``HUSKY`` assignment, and the command may not
+    assign, append to or export one anywhere (prefix, standalone, ``+=``,
+    ``export``, ``declare``, ``env``)
+A git invocation the lexer cannot read fully (unbalanced quoting, an
+unterminated substitution or heredoc) is refused, as is a command or process
+substitution, an inline interpreter program (``python -c``, ``perl -e``,
+``ruby -e``, ``node -e``, ``sh|bash|zsh -c``, ``eval``, ``source``) or a
+heredoc, here-string or pipe feeding a shell or interpreter, whose text
+mentions git. Commands that neither invoke git nor feed git to an interpreter
+are allowed without further inspection; text that merely mentions a flag (a
+commit message, PR body, grep pattern, a heredoc written to a file) is data.
 
-There is no override. Unlike the stash and Gmail gates, skipping hooks has no
-approved form: the approved way to skip tests is SKIP_TESTS, which this hook
-does not touch.
+This is a tripwire against accidental bypass, not a sandbox. A script written
+to disk and then run, a sourced file, or an alias defined outside the command
+can still reach git unseen. The real controls are the prepare child's
+allowlisted environment and the release checks that run after the agent.
 
-Fail-open: any internal error or unreadable input exits 0, so a bug here never
-blocks a session.
+There is no override. Skipping hooks has no approved form: the approved way to
+skip tests is SKIP_TESTS, which this hook does not touch.
+
+Fail-open: malformed hook input or an internal error exits 0, logged loudly to
+stderr, so a bug here never wedges the agent. A refusal exits 2.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
-import shlex
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _session_integrity import read_hook_input  # noqa: E402
 
-# Long options git accepts by unambiguous prefix. `--no-ver` is ambiguous
-# with `--no-verbose` on commit, so the shortest refused spelling is
-# `--no-veri`.
-_NO_VERIFY = re.compile(r"^--no-veri(?:f|fy)?$")
-_OPERATOR = re.compile(r"^[;&|()<>]+$")
-_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-# Every GIT_CONFIG* variable (COUNT, KEY_n, VALUE_n, PARAMETERS, GLOBAL,
-# SYSTEM, NOSYSTEM and the legacy GIT_CONFIG itself) changes which config git
-# reads and so where core.hooksPath comes from. GIT_DIR and GIT_WORK_TREE move
-# git to another repository's config and hooks; GIT_EXEC_PATH swaps the
-# programs git runs, git-commit included.
-_SENSITIVE_ASSIGNMENT_NAME = re.compile(
-    r"^(?:HUSKY|GIT_CONFIG(?:_[A-Za-z0-9_]*)?|GIT_DIR|GIT_WORK_TREE|GIT_EXEC_PATH)$"
-)
-_SHELL_EXPANSION = re.compile(
-    r"\$\(|`|\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)"
-)
-_SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
-_INTERPRETERS = {
-    "python": "-c", "python3": "-c", "node": "-e", "perl": "-e", "ruby": "-e",
-}
-# Wrappers whose remaining arguments are themselves a command.
-_PASSTHROUGH = {"command", "nohup", "exec", "builtin", "time", "sudo", "xargs"}
-# git global options that take a separate value token.
-_GIT_GLOBAL_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace",
-                          "--exec-path", "--super-prefix", "--config-env"}
-# `git commit` options whose next token is data, even when it looks like an
-# option or contains shell expansion.
-_COMMIT_SHORT_VALUE_FLAGS = set("mFCct")
-_COMMIT_LONG_VALUE_FLAGS = {
+# --- the allowlisted surface ------------------------------------------------
+
+# git subcommands the release prepare agent legitimately runs. Source: the
+# agent brief in prepare.py, the Neotoma /release skill's prepare phase, and
+# the agent's recorded release-prep sessions.
+ALLOWED_SUBCOMMANDS = frozenset({
+    # what the agent ran in its recorded sessions
+    "status", "diff", "log", "show", "rev-parse", "rev-list", "fetch", "add",
+    "commit", "push", "checkout", "switch", "merge", "branch", "worktree",
+    "tag", "config", "ls-remote", "merge-base", "describe", "cat-file",
+    "for-each-ref", "reflog", "fsck",
+    # read-only inspection and release-file edits a prep plausibly needs; none
+    # runs or skips a hook
+    "ls-files", "ls-tree", "show-ref", "symbolic-ref", "remote", "blame",
+    "shortlog", "name-rev", "check-ignore", "restore", "rm", "mv",
+})
+# Global options that neither relocate git nor change its configuration.
+# `-C <path>` is handled separately because it takes a value.
+ALLOWED_GLOBAL_FLAGS = frozenset({
+    "--no-pager", "-P", "-p", "--paginate", "--no-optional-locks",
+    "--no-advice", "--literal-pathspecs", "--version", "--help",
+})
+# Long options that skip hooks, with the shortest abbreviation refused (git
+# accepts unambiguous prefixes; shorter ones are ambiguous and git rejects
+# them anyway, so refusing them costs nothing).
+_FORBIDDEN_LONG = (("--no-verify", len("--no-v")),
+                   ("--no-post-rewrite", len("--no-po")),
+                   # these make fetch, push or ls-remote run any program,
+                   # which could run git again unjudged
+                   ("--upload-pack", len("--upl")),
+                   ("--receive-pack", len("--rece")),
+                   ("--exec", len("--exe")))
+# Subcommands with a --no-verify-style option: no option may be assembled by
+# the shell there, because the assembled text could be that option.
+_HOOK_SUBCOMMANDS = frozenset({"commit", "push", "merge"})
+
+# `git commit` options whose value is the next token (or the rest of a short
+# cluster); the value is data, so it may be quoted or expanded.
+_COMMIT_SHORT_VALUE = set("mFCct")
+_COMMIT_SHORT_OPTIONAL_VALUE = set("uS")
+_COMMIT_LONG_VALUE = frozenset({
     "--message", "--file", "--reuse-message", "--reedit-message", "--template",
-    "--author", "--date", "--cleanup", "--fixup", "--squash",
+    "--author", "--date", "--cleanup", "--fixup", "--squash", "--trailer",
     "--pathspec-from-file",
-}
-# `git config` and hook configuration. Any write, unset, rename or removal
-# that can reach core.hooksPath is refused; only a recognised read with
-# recognised modifiers is allowed. Anything unrecognised counts as a write.
-_CONFIG_READ_FLAGS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch",
-                      "--get-color", "--get-colorbool", "--list", "-l"}
-_CONFIG_READ_ACTIONS = {"get", "list"}
-_CONFIG_ACTIONS = {"get", "list", "set", "unset", "rename-section",
-                   "remove-section", "edit"}
-# Modifiers that never write: scope selection and output shape.
-_CONFIG_SAFE_FLAGS = {"--global", "--system", "--local", "--worktree",
-                      "--show-origin", "--show-scope", "--null", "-z",
-                      "--name-only", "--includes", "--no-includes", "--all",
-                      "--bool", "--int", "--bool-or-int", "--path",
-                      "--expiry-date", "--no-type"}
-# Options whose value is the next token unless given as --opt=value.
-_CONFIG_VALUE_FLAGS = {"-f", "--file", "--blob", "--type", "--default",
-                       "--comment", "--value", "--url"}
-_CONFIG_SECTION_FLAGS = {"--rename-section", "--remove-section"}
-_CONFIG_EDIT = {"-e", "--edit"}
-# git global options that point git at another repository, worktree or set of
-# programs, and so at other hooks.
-_GIT_RELOCATING_OPTIONS = {"--git-dir", "--work-tree", "--exec-path"}
-# Anything that could carry a bypass, including text the shell will assemble
-# (quotes, escapes, expansions). A command matching none of these cannot name
-# git or set a hook variable, so it is allowed without parsing.
-_QUICK = re.compile(
-    r"git|husky|hooks|no-?veri|env|export|eval|['\"\\$`]",
-    re.IGNORECASE,
+})
+
+# `git config` read actions and the modifiers allowed with them.
+_CONFIG_READ_FLAGS = frozenset({"--get", "--get-all", "--get-regexp", "--list", "-l"})
+_CONFIG_READ_ACTIONS = frozenset({"get", "list"})
+_CONFIG_MODIFIERS = frozenset({
+    "--global", "--system", "--local", "--worktree", "--show-origin",
+    "--show-scope", "--null", "-z", "--name-only", "--includes",
+    "--no-includes", "--all", "--regexp", "--fixed-value", "--bool", "--int",
+    "--bool-or-int", "--path", "--expiry-date", "--no-type",
+})
+_CONFIG_VALUE_MODIFIERS = frozenset({"-f", "--file", "--blob", "--type", "--default",
+                                     "--value", "--url"})
+
+# `git tag` is listing only: the agent must not tag.
+_TAG_LIST_FLAGS = frozenset({"-l", "--list", "--column", "--no-column", "-i",
+                             "--ignore-case", "--omit-empty"})
+_TAG_LIST_VALUE = frozenset({"--sort", "--format", "--contains", "--no-contains",
+                             "--merged", "--no-merged", "--points-at", "--color"})
+
+# --- shell vocabulary -------------------------------------------------------
+
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
+_SENSITIVE_NAME = re.compile(r"^(?:GIT_[A-Za-z0-9_]*|HUSKY[A-Za-z0-9_]*)$")
+# A word that names git: `git`, a path to it, a dashed builtin (git-commit), a
+# remote spec (git@host). Not `github`, `.gitignore` or `digit`.
+# A dashed word counts only when it is a git command (git-commit), so a path
+# such as scripts/git-hooks/install.sh does not.
+_GIT_DASHED = ("commit|push|merge|config|rebase|am|pull|fetch|tag|stash|hook|"
+               "cherry-pick|reset|add|checkout|switch|worktree|receive-pack|"
+               "upload-pack|sh")
+_MENTIONS_GIT = re.compile(
+    rf"(?<![A-Za-z0-9_.-])git(?:-(?:{_GIT_DASHED}))?(?![A-Za-z0-9_.-])")
+_RESERVED_START = frozenset({"if", "then", "else", "elif", "do", "while", "until",
+                             "!", "{", "}", "fi", "done", "esac"})
+_EXPORTERS = frozenset({"export", "declare", "typeset", "local", "readonly"})
+# Commands whose arguments are themselves a command.
+_WRAPPERS = frozenset({"env", "command", "exec", "builtin", "xargs", "nice", "timeout",
+                       "gtimeout", "nohup", "time", "sudo", "doas", "stdbuf",
+                       "caffeinate", "unbuffer", "watch", "parallel", "script", "flock"})
+_SHELLS = re.compile(r"^(?:sh|bash|zsh|dash|ksh|mksh|fish|tcsh|csh|busybox)$")
+_INTERPRETERS = re.compile(
+    r"^(?:python|pypy|node|nodejs|deno|bun|perl|ruby|php|osascript|lua|tclsh|"
+    r"awk|gawk|mawk|nawk)[0-9.]*$"
 )
-# Calls by which an inline python/node/perl/ruby program can start a process
-# or reach code indirectly. A program with none of them cannot run git, so
-# text in it that merely mentions a flag is allowed. Deliberately broad: a
-# false match only restores the stricter judgement.
-_PROGRAM_CAN_SPAWN = re.compile(
-    r"subprocess|\bos\b|system|popen|spawn|exec|child_process|require|"
-    r"import|eval|getattr|__|\bqx\b|%x|`|\bopen\b|Open3|\bIO\b|Function|"
-    r"binding|pty|ctypes|Process|Kernel|send|globals|compile|Deno|Bun|fork|"
-    r"pipe|shell|\brun\b|\bcall\b|\$\(|\|",
-    re.IGNORECASE,
-)
-_HEREDOC_START = re.compile(
-    r"(?m)^[ \t]*(?:/[^\s]+/)?"
-    r"(?P<program>python(?:3(?:\.\d+)*)?|node|perl|ruby|sh|bash|zsh|dash|ksh)"
-    r"\b[^\n]*<<-?[ \t]*(?P<quote>['\"]?)(?P<delimiter>[A-Za-z_][A-Za-z0-9_]*)"
-    r"(?P=quote)[^\n]*\n"
-)
+_EVALUATORS = frozenset({"eval", "source", "."})
+# Interpreter options whose value is the next token, so it is not a script.
+_INTERPRETER_VALUE_OPTIONS = frozenset({"-o", "-O", "--rcfile", "--init-file", "-W", "-X",
+                                        "-r", "--require", "-I", "-f"})
+_INTERPRETER_PROGRAM_OPTIONS = frozenset({"-c", "-e", "-E", "-p", "--eval", "--print",
+                                          "-m", "--command"})
+
+
+class Unreadable(Exception):
+    """The lexer could not read the command fully."""
+
+
+@dataclass
+class Word:
+    text: str = ""
+    expanded: bool = False        # contains a parameter, command or arithmetic expansion
+    lead_expansion: bool = False  # the expansion is at the very start
+    unquoted: str = ""            # the unquoted characters, for brace and glob checks
+
+    @property
+    def braced(self) -> bool:
+        """Contains a brace expansion the shell will turn into several words."""
+        return bool(re.search(r"\{[^{}]*(?:,|\.\.)[^{}]*\}", self.unquoted))
+
+    @property
+    def globbed(self) -> bool:
+        """Contains a pathname pattern (`*`, `?`, or a closed `[...]`; a bare
+        `[` is the test command)."""
+        return bool(re.search(r"[*?]|\[[^\]]+\]", self.unquoted))
+
+
+@dataclass
+class SimpleCommand:
+    words: list[Word] = field(default_factory=list)
+    stdin: list[str] = field(default_factory=list)  # heredoc bodies, here-strings
+    pipe_in: bool = False
+
+
+# --- lexer ------------------------------------------------------------------
+
+_OPERATOR_CHARS = set(";&|()<>")
+_BLANKS = set(" \t")
+
+
+def _skip_single(s: str, i: int) -> int:
+    end = s.find("'", i)
+    if end < 0:
+        raise Unreadable("unterminated single quote")
+    return end + 1
+
+
+def _skip_double(s: str, i: int) -> int:
+    while i < len(s):
+        c = s[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == '"':
+            return i + 1
+        i += 1
+    raise Unreadable("unterminated double quote")
+
+
+def _skip_heredoc_bodies(s: str, i: int, pending: list[tuple[str, bool]]) -> int:
+    """i is just after a newline; skip each pending heredoc body in turn."""
+    for delimiter, strip_tabs in pending:
+        while True:
+            if i >= len(s):
+                raise Unreadable("unterminated heredoc")
+            end = s.find("\n", i)
+            line = s[i:] if end < 0 else s[i:end]
+            i = len(s) if end < 0 else end + 1
+            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                break
+    return i
+
+
+def _heredoc_delimiter(s: str, i: int) -> tuple[str, bool, int]:
+    """i is at `<<` (not `<<<`); return (delimiter, strip_tabs, next index)."""
+    j = i + 2
+    strip_tabs = s[j:j + 1] == "-"
+    if strip_tabs:
+        j += 1
+    while j < len(s) and s[j] in _BLANKS:
+        j += 1
+    delimiter = ""
+    while j < len(s) and s[j] not in _BLANKS and s[j] != "\n" and s[j] not in _OPERATOR_CHARS:
+        if s[j] in "'\"":
+            end = s.find(s[j], j + 1)
+            if end < 0:
+                raise Unreadable("unterminated heredoc delimiter")
+            delimiter += s[j + 1:end]
+            j = end + 1
+            continue
+        if s[j] == "\\":
+            j += 1
+            if j >= len(s):
+                break
+        delimiter += s[j]
+        j += 1
+    if not delimiter:
+        raise Unreadable("heredoc without a delimiter")
+    return delimiter, strip_tabs, j
+
+
+def _read_parens(s: str, i: int) -> int:
+    """i is just after `$(` or `<(`; return the index after the matching `)`.
+
+    Heredoc bodies inside the substitution (the common
+    `git commit -m "$(cat <<'EOF' ... EOF)"` form) are skipped as data, so an
+    apostrophe or parenthesis in a commit message does not unbalance it.
+    """
+    depth = 1
+    pending: list[tuple[str, bool]] = []
+    while i < len(s):
+        c = s[i]
+        if c == "\n" and pending:
+            i = _skip_heredoc_bodies(s, i + 1, pending)
+            pending = []
+            continue
+        if c == "\\":
+            i += 2
+            continue
+        if c == "'":
+            i = _skip_single(s, i + 1)
+            continue
+        if c == '"':
+            i = _skip_double(s, i + 1)
+            continue
+        if c == "#" and (i == 0 or s[i - 1] in " \t\n;(|&"):
+            end = s.find("\n", i)
+            i = len(s) if end < 0 else end
+            continue
+        if s.startswith("<<", i) and not s.startswith("<<<", i):
+            delimiter, strip_tabs, i = _heredoc_delimiter(s, i)
+            pending.append((delimiter, strip_tabs))
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    raise Unreadable("unterminated substitution")
+
+
+def _read_backtick(s: str, i: int) -> int:
+    """i is just after the opening backtick."""
+    while i < len(s):
+        if s[i] == "\\":
+            i += 2
+            continue
+        if s[i] == "`":
+            return i + 1
+        i += 1
+    raise Unreadable("unterminated backtick")
+
+
+def _read_braces(s: str, i: int) -> int:
+    """i is just after `${`."""
+    depth = 1
+    while i < len(s):
+        c = s[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    raise Unreadable("unterminated ${")
+
+
+def _decode_ansi_c(body: str) -> str:
+    try:
+        return body.encode("latin-1", "backslashreplace").decode("unicode_escape")
+    except Exception:  # noqa: BLE001 — undecodable escapes stay literal
+        return body
+
+
+class _Lexer:
+    def __init__(self, s: str) -> None:
+        self.s = s
+        self.subs: list[str] = []
+
+    def _expansion(self, word: Word, i: int) -> int:
+        """s[i] == '$' (unquoted or in double quotes). Returns the next index."""
+        s = self.s
+        nxt = s[i + 1] if i + 1 < len(s) else ""
+        start = i
+        if nxt == "(":
+            end = _read_parens(s, i + 2)
+            self.subs.append(s[i + 2:end - 1])
+        elif nxt == "{":
+            end = _read_braces(s, i + 2)
+            self.subs.append(s[i + 2:end - 1])
+        elif nxt and (nxt.isalnum() or nxt == "_"):
+            end = i + 1
+            while end < len(s) and (s[end].isalnum() or s[end] == "_"):
+                end += 1
+        elif nxt and nxt in "@*#?$!-":
+            end = i + 2
+        else:
+            word.text += "$"
+            return i + 1
+        if not word.text:
+            word.lead_expansion = True
+        word.expanded = True
+        word.text += s[start:end]
+        return end
+
+    def _backtick(self, word: Word, i: int) -> int:
+        end = _read_backtick(self.s, i + 1)
+        self.subs.append(self.s[i + 1:end - 1])
+        if not word.text:
+            word.lead_expansion = True
+        word.expanded = True
+        word.text += self.s[i:end]
+        return end
+
+    def read_word(self, i: int) -> tuple[Word | None, int]:
+        s = self.s
+        word = Word()
+        started = False
+        while i < len(s):
+            c = s[i]
+            if c in _BLANKS or c == "\n" or c in _OPERATOR_CHARS:
+                break
+            started = True
+            if c == "\\":
+                if i + 1 < len(s) and s[i + 1] == "\n":
+                    i += 2
+                    continue
+                word.text += s[i + 1] if i + 1 < len(s) else ""
+                i += 2
+            elif c == "'":
+                end = _skip_single(s, i + 1)
+                word.text += s[i + 1:end - 1]
+                i = end
+            elif c == "$" and i + 1 < len(s) and s[i + 1] == "'":
+                j = i + 2
+                while j < len(s) and s[j] != "'":
+                    j += 2 if s[j] == "\\" else 1
+                if j >= len(s):
+                    raise Unreadable("unterminated $'")
+                word.text += _decode_ansi_c(s[i + 2:j])
+                i = j + 1
+            elif c == '"':
+                i += 1
+                while True:
+                    if i >= len(s):
+                        raise Unreadable("unterminated double quote")
+                    d = s[i]
+                    if d == '"':
+                        i += 1
+                        break
+                    if d == "\\" and i + 1 < len(s) and s[i + 1] in '$`"\\\n':
+                        if s[i + 1] != "\n":
+                            word.text += s[i + 1]
+                        i += 2
+                    elif d == "$":
+                        i = self._expansion(word, i)
+                    elif d == "`":
+                        i = self._backtick(word, i)
+                    else:
+                        word.text += d
+                        i += 1
+            elif c == "$":
+                i = self._expansion(word, i)
+            elif c == "`":
+                i = self._backtick(word, i)
+            else:
+                word.text += c
+                word.unquoted += c
+                i += 1
+        return (word if started else None), i
+
+    def lex(self) -> list[SimpleCommand]:
+        s = self.s
+        commands: list[SimpleCommand] = []
+        cur = SimpleCommand()
+        pending: list[tuple[str, bool, SimpleCommand]] = []
+        pipe_next = False
+
+        def finish(pipe: bool = False) -> None:
+            nonlocal cur, pipe_next
+            if cur.words or cur.stdin:
+                commands.append(cur)
+            cur = SimpleCommand(pipe_in=pipe)
+            pipe_next = pipe
+
+        i = 0
+        while i < len(s):
+            c = s[i]
+            if c in _BLANKS:
+                i += 1
+                continue
+            if c == "\\" and i + 1 < len(s) and s[i + 1] == "\n":
+                i += 2
+                continue
+            if c == "\n":
+                finish()
+                i += 1
+                for delimiter, strip_tabs, target in pending:
+                    start = i
+                    i = _skip_heredoc_bodies(s, i, [(delimiter, strip_tabs)])
+                    body = s[start:i].split("\n")
+                    target.stdin.append("\n".join(body[:-2] if body[-1] == "" else body[:-1]))
+                pending = []
+                continue
+            if c == "#" :
+                end = s.find("\n", i)
+                i = len(s) if end < 0 else end
+                continue
+            if c in "<>" or (c == "&" and s[i + 1:i + 2] == ">"):
+                j = i
+                while j < len(s) and s[j] in "<>&|-":
+                    if s[j] == "-" and j > i and s[j - 1] != "<":
+                        break
+                    j += 1
+                op = s[i:j]
+                if j < len(s) and s[j] == "(" and op in ("<", ">"):
+                    end = _read_parens(s, j + 1)
+                    self.subs.append(s[j + 1:end - 1])
+                    cur.words.append(Word(s[i:end], True, True))
+                    i = end
+                    continue
+                i = j
+                while i < len(s) and s[i] in _BLANKS:
+                    i += 1
+                target, i = self.read_word(i)
+                if target is None:
+                    raise Unreadable(f"redirection {op} without a target")
+                if op in ("<<", "<<-"):
+                    pending.append((target.text, op == "<<-", cur))
+                elif op == "<<<":
+                    cur.stdin.append(target.text)
+                continue
+            if c in ";&|()":
+                j = i + 1
+                if c in "&|;" and s[j:j + 1] in ("&", "|", ";"):
+                    j += 1
+                op = s[i:j]
+                finish(pipe=op in ("|", "|&"))
+                i = j
+                continue
+            word, i = self.read_word(i)
+            if word is None:  # pragma: no cover — read_word always advances here
+                raise Unreadable("lexer stalled")
+            # An fd number directly before a redirection (`2>&1`) is not a word.
+            if word.text.isdigit() and not word.expanded and s[i:i + 1] in ("<", ">"):
+                continue
+            cur.words.append(word)
+        if pending:
+            raise Unreadable("heredoc with no body")
+        finish()
+        return commands
+
+
+# --- judgement --------------------------------------------------------------
+
+def mentions_git(text: str) -> bool:
+    return bool(_MENTIONS_GIT.search(text))
+
+
+def _forbidden_long(text: str) -> str | None:
+    if not text.startswith("--"):
+        return None
+    name = text.split("=", 1)[0]
+    for option, shortest in _FORBIDDEN_LONG:
+        if len(name) >= shortest and option.startswith(name):
+            return option
+    return None
+
+
+def _commit_violation(rest: list[Word]) -> str | None:
+    j = 0
+    while j < len(rest):
+        w = rest[j]
+        t = w.text
+        if t == "--" and not w.expanded:
+            return None
+        if t.startswith("--"):
+            name, has_value, _ = t.partition("=")
+            if name in _COMMIT_LONG_VALUE:
+                j += 1 if has_value else 2
+                continue
+            if w.expanded:
+                return "git commit with an option assembled by the shell"
+            j += 1
+            continue
+        if t.startswith("-") and len(t) > 1:
+            consumed_next = False
+            for k, ch in enumerate(t[1:]):
+                if ch in "$`":
+                    return "git commit with an option assembled by the shell"
+                if ch == "n":
+                    return "git commit -n"
+                if ch in _COMMIT_SHORT_VALUE:
+                    consumed_next = k + 2 == len(t)
+                    break
+                if ch in _COMMIT_SHORT_OPTIONAL_VALUE and k + 2 < len(t):
+                    break
+            j += 2 if consumed_next else 1
+            continue
+        if w.lead_expansion:
+            return (f"git commit with an argument assembled by the shell "
+                    f"(`{w.text}` could expand to an option; write it literally, "
+                    f"or pass it as the value of -m or -F)")
+        j += 1
+    return None
+
+
+def _config_violation(rest: list[Word]) -> str | None:
+    if any(w.expanded for w in rest):
+        return "git config with an argument assembled by the shell"
+    flags: list[str] = []
+    positionals: list[str] = []
+    j = 0
+    while j < len(rest):
+        t = rest[j].text
+        if t == "--":
+            positionals.extend(w.text for w in rest[j + 1:])
+            break
+        if t.startswith("-") and len(t) > 1:
+            name = t.split("=", 1)[0]
+            flags.append(name)
+            if name in _CONFIG_VALUE_MODIFIERS and "=" not in t:
+                j += 1
+            j += 1
+            continue
+        positionals.append(t)
+        j += 1
+    unknown = [f for f in flags if f not in _CONFIG_READ_FLAGS
+               and f not in _CONFIG_MODIFIERS and f not in _CONFIG_VALUE_MODIFIERS]
+    if unknown:
+        return f"git config {unknown[0]} (only config reads are allowed)"
+    if positionals and positionals[0] in _CONFIG_READ_ACTIONS:
+        return None
+    if set(flags) & _CONFIG_READ_FLAGS:
+        return None
+    if len(positionals) == 1:
+        return None  # `git config <key>` reads it
+    return "git config write (only config reads are allowed)"
+
+
+def _tag_violation(rest: list[Word]) -> str | None:
+    listing = False
+    positionals = 0
+    j = 0
+    while j < len(rest):
+        w = rest[j]
+        t = w.text
+        if w.expanded:
+            return "git tag with an argument assembled by the shell"
+        if t == "--":
+            positionals += len(rest) - j - 1
+            break
+        name = t.split("=", 1)[0]
+        if name in _TAG_LIST_VALUE:
+            j += 1 if "=" in t else 2
+            continue
+        if name in _TAG_LIST_FLAGS or re.fullmatch(r"-n[0-9]*", t):
+            listing = listing or name in ("-l", "--list")
+            j += 1
+            continue
+        if t.startswith("-"):
+            return f"git tag {t} (the prepare agent lists tags only)"
+        positionals += 1
+        j += 1
+    if positionals and not listing:
+        return "git tag creating a tag (the prepare agent lists tags only)"
+    return None
+
+
+def git_violation(args: list[Word]) -> str | None:
+    """Judge the arguments of a plain `git` invocation against the allowlist."""
+    i = 0
+    while i < len(args):
+        w = args[i]
+        if w.text == "-C" and not w.expanded:
+            if i + 1 >= len(args):
+                return "git -C without a path"
+            i += 2  # the path may be quoted or expanded
+            continue
+        if w.expanded or w.braced:
+            return "git global option or subcommand assembled by the shell"
+        if w.text in ALLOWED_GLOBAL_FLAGS:
+            i += 1
+            continue
+        if w.text.startswith("-"):
+            return f"git {w.text} (global option not on the allowlist)"
+        break
+    if i >= len(args):
+        return None  # bare `git`, `git --version`
+    sub = args[i].text
+    if sub not in ALLOWED_SUBCOMMANDS:
+        return (f"git {sub} (not on the prepare agent's allowlist; allowed: "
+                f"{', '.join(sorted(ALLOWED_SUBCOMMANDS))})")
+    rest = args[i + 1:]
+    for w in rest:
+        if w.text == "--" and not w.expanded:
+            break
+        if w.braced:
+            return f"git {sub} with a brace expansion (write each argument literally)"
+        option = _forbidden_long(w.text)
+        if option:
+            return f"git {sub} {option}"
+    if sub == "commit":
+        return _commit_violation(rest)
+    if sub == "config":
+        return _config_violation(rest)
+    if sub == "tag":
+        return _tag_violation(rest)
+    if sub == "ls-remote" and any(w.text == "-u" for w in rest):
+        return "git ls-remote -u (runs an arbitrary upload-pack program)"
+    if sub in _HOOK_SUBCOMMANDS:
+        for w in rest:
+            if w.text == "--" and not w.expanded:
+                break
+            if w.lead_expansion or (w.expanded and w.text.startswith("-")):
+                return (f"git {sub} with an argument assembled by the shell "
+                        f"(`{w.text}` could expand to an option; write it literally)")
+    return None
+
+
+def _words_mention_git(words: list[Word], extra: tuple[str, ...] | list[str] = ()) -> bool:
+    """Whether any word names git, including one glued to a short option
+    (``env -S'git ...'`` lexes as ``-Sgit ...``)."""
+    for t in [w.text for w in words] + list(extra):
+        if mentions_git(t):
+            return True
+        if t.startswith("-") and not t.startswith("--") and mentions_git(t[2:]):
+            return True
+    return False
+
+
+_OTHER_GIT_SUBCOMMANDS = frozenset({"stash", "hook", "rebase", "am", "pull",
+                                    "cherry-pick", "reset", "clean"})
+
+
+def _looks_like_git(head: Word, args: list[Word]) -> bool:
+    """For a command name the shell assembles: could it be git?
+
+    True when the variable is named for git (``$GIT``, ``${git_bin}``), when
+    the first argument is a git subcommand, or when the arguments would skip
+    hooks if git received them.
+    """
+    if re.search(r"git", head.text, re.IGNORECASE):
+        return True
+    if args and not args[0].expanded and (
+            args[0].text in ALLOWED_SUBCOMMANDS or args[0].text in _OTHER_GIT_SUBCOMMANDS):
+        return True
+    texts = [w.text for w in args]
+    if any(_forbidden_long(t) for t in texts):
+        return True
+    for k, t in enumerate(texts):
+        if t in ("-c", "--config-env") and k + 1 < len(texts) and re.match(
+                r"^[A-Za-z][\w-]*\.[^=\s]+=?", texts[k + 1]):
+            return True
+        if t == "commit":
+            return _commit_violation(args[k + 1:]) is not None
+    return False
+
+
+def _reads_program_from_stdin(rest: list[Word]) -> bool:
+    """An interpreter with no program option and no script operand reads stdin."""
+    j = 1
+    while j < len(rest):
+        t = rest[j].text
+        if t in _INTERPRETER_PROGRAM_OPTIONS:
+            return False
+        if t in ("-", "-s", "--"):
+            return True
+        if t in _INTERPRETER_VALUE_OPTIONS:
+            j += 2
+            continue
+        if t.startswith("-"):
+            j += 1
+            continue
+        return False  # a script operand
+    return True
+
+
+def _program_word_expanded(rest: list[Word], is_shell: bool) -> bool:
+    """Whether the inline program (the word after -c/-e, or after a shell's
+    short cluster containing c) is assembled by the shell. An expanded
+    argument to a script file is data for that script, not a program."""
+    for k, w in enumerate(rest[1:], start=1):
+        t = w.text
+        is_program_option = t in _INTERPRETER_PROGRAM_OPTIONS or (
+            is_shell and t.startswith("-") and not t.startswith("--") and "c" in t[1:])
+        if is_program_option:
+            return k + 1 < len(rest) and rest[k + 1].expanded
+        if t in _INTERPRETER_VALUE_OPTIONS:
+            continue
+        if not t.startswith("-"):
+            return False  # a script operand
+    return False
+
+
+def _assignment_violation(words: list[Word]) -> str | None:
+    for w in words:
+        if _ASSIGNMENT.match(w.text):
+            name = w.text.split("=", 1)[0].rstrip("+")
+            if _SENSITIVE_NAME.match(name):
+                return f"{name}=... (git and Husky variables may not be set)"
+    return None
+
+
+# Commands that take `git` as data (print it, search for it, look it up).
+_GIT_WORD_READERS = frozenset({"echo", "printf", "which", "type", "whereis", "grep",
+                               "rg", "egrep", "fgrep", "man", "gh", "brew", "test",
+                               "[", "[[", "cat", "ls", "head", "tail", "wc", "sed"})
+
+
+def _is_git_binary_word(text: str) -> bool:
+    base = os.path.basename(text)
+    return base == "git" or bool(re.fullmatch(rf"git-(?:{_GIT_DASHED})", base))
+
+
+def command_violation(cmd: SimpleCommand, whole_mentions_git: bool) -> str | None:
+    words = list(cmd.words)
+    while words and not words[0].expanded and words[0].text in _RESERVED_START:
+        words.pop(0)
+    i = 0
+    while i < len(words) and _ASSIGNMENT.match(words[i].text):
+        i += 1
+    hit = _assignment_violation(words[:i])
+    if hit:
+        return hit
+    rest = words[i:]
+    if not rest:
+        return None
+    head = rest[0]
+    base = os.path.basename(head.text)
+    own_mentions = _words_mention_git(rest[1:], cmd.stdin)
+    any_expanded = any(w.expanded for w in rest[1:])
+
+    if head.expanded or head.braced or head.globbed:
+        if whole_mentions_git or _looks_like_git(head, rest[1:]):
+            return "a command name assembled by the shell, around git"
+        return None
+    if base in _EXPORTERS:
+        for w in rest[1:]:
+            name = w.text.split("=", 1)[0].rstrip("+")
+            if _SENSITIVE_NAME.match(name):
+                return f"{base} {name} (git and Husky variables may not be set)"
+        return None
+    if base == "git" or base.startswith("git-"):
+        if head.text != "git":
+            return f"{head.text} (only a plain `git` is allowed)"
+        return git_violation(rest[1:])
+    if base in _WRAPPERS:
+        if base == "env":
+            hit = _assignment_violation(rest[1:])
+            if hit:
+                return f"env {hit}"
+        if base == "command" and len(rest) > 1 and rest[1].text in ("-v", "-V"):
+            return None
+        if own_mentions or (any_expanded and whole_mentions_git):
+            return f"{base} wrapping git (run plain git instead)"
+        return None
+    if base == "find" and any(w.text in ("-exec", "-execdir", "-ok", "-okdir") for w in rest):
+        if own_mentions:
+            return "find -exec running git"
+        return None
+    is_shell = bool(_SHELLS.match(base))
+    if is_shell or _INTERPRETERS.match(base) or base in _EVALUATORS:
+        if own_mentions:
+            return f"{base} running a program that mentions git"
+        program_assembled = (any_expanded if base in _EVALUATORS
+                             else _program_word_expanded(rest, is_shell))
+        if program_assembled and whole_mentions_git:
+            return f"{base} running an assembled program in a command that mentions git"
+        # A heredoc or here-string program was judged above as own text; a
+        # pipe can carry git from anywhere earlier in the line.
+        if base not in _EVALUATORS and cmd.pipe_in and not cmd.stdin and (
+                _reads_program_from_stdin(rest)) and whole_mentions_git:
+            return f"{base} reading a program from a pipe in a command that mentions git"
+        return None
+    # Any other command carrying git as a word may be a wrapper this guard
+    # does not know (setsid, arch, ionice, chroot ...): git must be the
+    # command itself. Commands that only print, search or locate are exempt.
+    if base not in _GIT_WORD_READERS and any(
+            _is_git_binary_word(w.text) for w in rest[1:]):
+        return f"{base} running git (run plain git as the command itself)"
+    return None
+
+
 _MAX_DEPTH = 4
 
+
+def _is_git_invocation(cmd: SimpleCommand) -> bool:
+    words = [w for w in cmd.words if not _ASSIGNMENT.match(w.text)]
+    while words and not words[0].expanded and words[0].text in _RESERVED_START:
+        words.pop(0)
+    if not words:
+        return False
+    base = os.path.basename(words[0].text)
+    return base == "git" or base.startswith("git-")
+
+
+def _code_mentions_git(text: str, depth: int) -> bool:
+    """Whether shell code names git in its words, not in heredoc data."""
+    lexer = _Lexer(text)
+    try:
+        commands = lexer.lex()
+    except Unreadable:
+        return mentions_git(text)
+    if any(mentions_git(w.text) for c in commands for w in c.words):
+        return True
+    if depth >= _MAX_DEPTH:
+        return any(mentions_git(body) for body in lexer.subs)
+    return any(_code_mentions_git(body, depth + 1) for body in lexer.subs)
+
+
+def _judge(command: str, depth: int, in_substitution: bool) -> str | None:
+    lexer = _Lexer(command)
+    try:
+        commands = lexer.lex()
+    except Unreadable as exc:
+        if mentions_git(command) or re.search(r"GIT_|HUSKY", command):
+            return f"a git command the guard cannot read fully ({exc})"
+        return None
+    # Whether the command line names git anywhere a shell could act on it:
+    # its words and substitutions, not heredoc data written to a file.
+    whole = any(mentions_git(w.text) for c in commands for w in c.words) or any(
+        _code_mentions_git(body, depth + 1) for body in lexer.subs)
+    for body in lexer.subs:
+        if depth >= _MAX_DEPTH:
+            if mentions_git(body):
+                return "command or process substitution around git"
+            continue
+        hit = _judge(body, depth + 1, True)
+        if hit:
+            return hit
+    for cmd in commands:
+        if in_substitution and _is_git_invocation(cmd):
+            return "command or process substitution around git"
+        hit = command_violation(cmd, whole)
+        if hit:
+            return hit
+    return None
+
+
+def find_violation(command: str) -> str | None:
+    """Return a refusal label for the command, or None when it is allowed."""
+    return _judge(command, 0, False)
+
+
+# --- hook entry point -------------------------------------------------------
 
 def log(msg: str) -> None:
     try:
@@ -168,473 +955,45 @@ def deny(reason: str) -> int:
 
 def guidance(label: str) -> str:
     return (
-        f"Refused: `{label}` skips this repository's git hooks. The standing "
-        f"rule is never --no-verify, and the hooks are not to be disabled any "
-        f"other way (git commit -n, HUSKY=0, core.hooksPath).\n\n"
+        f"Refused: {label}.\n\n"
+        f"The release prepare agent may run only plain, allowlisted git "
+        f"commands, with their hooks: for example `git -C <path> status`, "
+        f"`git -C <path> commit -m \"...\"`, `git -C <path> push origin "
+        f"<branch>`. Run git directly, not through a wrapper, alias, variable, "
+        f"substitution or inline interpreter program, and never skip or "
+        f"redirect hooks (--no-verify, commit -n, core.hooksPath, HUSKY, "
+        f"GIT_* variables).\n\n"
         f"If the test stage cannot pass for a reason unrelated to your change, "
         f"use the hook's own escape hatch, which still runs type-check, lint "
         f"and format and records why:\n"
-        f"  SKIP_TESTS=1 SKIP_TESTS_REASON=\"<why>\" git commit ...\n"
+        f"  SKIP_TESTS=1 SKIP_TESTS_REASON=\"<why>\" git commit -m \"...\"\n"
         f"and state that reason in your report.\n\n"
         f"If any other stage fails, or the hook fails for an environment "
         f"reason, stop and report it. There is no override for this guard."
     )
 
 
-def _tokens(command: str) -> list[str] | None:
-    # Newlines separate commands. Backticks stay in their argument so a git
-    # option assembled by command substitution is visible as unjudgeable;
-    # standalone backtick bodies are recursed into separately in find_bypass.
-    text = re.sub(r"\\[ \t]*\n", " ", command).replace("\n", " ; ")
-    lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|()<>")
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    try:
-        return list(lexer)
-    except ValueError:
-        return None
-
-
-def _simple_commands(tokens: list[str]) -> list[list[str]]:
-    out: list[list[str]] = []
-    cur: list[str] = []
-    for tok in tokens:
-        if _OPERATOR.match(tok):
-            if cur:
-                out.append(cur)
-            cur = []
-            continue
-        cur.append(tok)
-    if cur:
-        out.append(cur)
-    return out
-
-
-def _sensitive_assignment(tok: str) -> str | None:
-    if not _ASSIGNMENT.match(tok):
-        return None
-    name = tok.split("=", 1)[0]
-    return name if _SENSITIVE_ASSIGNMENT_NAME.fullmatch(name) else None
-
-
-def _env_split_string(cmd: list[str], i: int) -> tuple[str | None, int]:
-    """If cmd[i] is env's -S/--split-string, return (payload, next index).
-
-    Handles ``-S STR``, ``-SSTR``, ``-iS STR`` style clusters and
-    ``--split-string[=STR]`` including unambiguous prefixes. Returns
-    (None, i) when cmd[i] is not that option.
-    """
-    tok = cmd[i]
-    if tok.startswith("--"):
-        name, has_equals, value = tok.partition("=")
-        if len(name) > 3 and "--split-string".startswith(name):
-            if has_equals:
-                return value, i + 1
-            return (cmd[i + 1] if i + 1 < len(cmd) else ""), i + 2
-        return None, i
-    if tok.startswith("-") and len(tok) > 1:
-        cluster = tok[1:]
-        for k, ch in enumerate(cluster):
-            if ch == "S":
-                rest = cluster[k + 1:]
-                if rest:
-                    return rest, i + 1
-                return (cmd[i + 1] if i + 1 < len(cmd) else ""), i + 2
-            if ch in "uC":
-                return None, i  # the remainder is that option's value
-    return None, i
-
-
-def _cluster_value_last(cluster: str) -> bool:
-    """True when env's first value-taking short option (u, C) ends the cluster."""
-    for k, ch in enumerate(cluster):
-        if ch in "uC":
-            return k + 1 == len(cluster)
-    return False
-
-
-def _strip_leading(cmd: list[str]) -> tuple[list[str], str | None, str | None]:
-    """Drop leading assignments and pass-through wrappers.
-
-    Returns the bare command, the name of any environment assignment that
-    can redirect or disable git's hook configuration, and, for ``env -S``,
-    the command text env will split and run (judged recursively).
-    """
-    label = None
-    i = 0
-    while i < len(cmd):
-        tok = cmd[i]
-        if _ASSIGNMENT.match(tok):
-            label = label or _sensitive_assignment(tok)
-            i += 1
-            continue
-        base = os.path.basename(tok)
-        if base == "env":
-            i += 1
-            while i < len(cmd) and (cmd[i].startswith("-") or _ASSIGNMENT.match(cmd[i])):
-                payload, after = _env_split_string(cmd, i)
-                if payload is not None:
-                    # env splits the string into words and runs them, followed
-                    # by any remaining arguments.
-                    nested = " ".join([payload, *(shlex.quote(t) for t in cmd[after:])])
-                    return [], label, nested
-                tok_i = cmd[i]
-                takes_value = tok_i in ("--unset", "--chdir") or (
-                    # a short cluster ending in u or C (-u, -iu, -iC) takes
-                    # the next token as that option's value
-                    not tok_i.startswith("--") and len(tok_i) > 1
-                    and tok_i.startswith("-") and _cluster_value_last(tok_i[1:])
-                )
-                if takes_value:
-                    i += 1
-                else:
-                    label = label or _sensitive_assignment(cmd[i])
-                i += 1
-            continue
-        if base in _PASSTHROUGH:
-            i += 1
-            while i < len(cmd) and cmd[i].startswith("-"):
-                i += 1
-            continue
-        if base in ("timeout", "nice"):
-            i += 1
-            while i < len(cmd) and cmd[i].startswith("-"):
-                i += 1
-            if base == "timeout" and i < len(cmd):
-                i += 1  # the duration
-            continue
-        break
-    return cmd[i:], label, None
-
-
-def _has_shell_expansion(tok: str) -> bool:
-    return bool(_SHELL_EXPANSION.search(tok))
-
-
-def _sensitive_config_key(key: str) -> bool:
-    """A config key whose value decides which hooks run."""
-    key = key.lower()
-    return (
-        key == "core.hookspath"
-        or key == "include.path"
-        or (key.startswith("includeif.") and key.endswith(".path"))
-    )
-
-
-def _sensitive_config_section(section: str) -> bool:
-    section = section.lower()
-    return section in ("core", "include") or section.startswith("includeif")
-
-
-def _config_violation(rest: list[str]) -> str | None:
-    """Judge `git config <rest>`: refuse anything that can change hook config.
-
-    Reads (``--get``, ``--list``, ``get``, the one-argument legacy form) are
-    allowed. Every set, unset, edit, section rename or removal touching
-    core.hooksPath (or an include that could set it), in any scope, is
-    refused; an unrecognised option makes the command count as a write.
-    """
-    flags: list[str] = []
-    positionals: list[str] = []
-    j = 0
-    while j < len(rest):
-        tok = rest[j]
-        if tok == "--":
-            positionals.extend(rest[j + 1:])
-            break
-        if tok.startswith("-") and len(tok) > 1:
-            name = tok.split("=", 1)[0].lower()
-            flags.append(name)
-            if name in _CONFIG_VALUE_FLAGS and "=" not in tok:
-                j += 1  # its value
-            j += 1
-            continue
-        positionals.append(tok)
-        j += 1
-    lowered = [p.lower() for p in positionals]
-    action = lowered[0] if lowered and lowered[0] in _CONFIG_ACTIONS else None
-    args = lowered[1:] if action else lowered
-
-    if action == "edit" or set(flags) & _CONFIG_EDIT:
-        return "git config --edit"
-    if action in ("rename-section", "remove-section") or set(flags) & _CONFIG_SECTION_FLAGS:
-        if not args or any(_sensitive_config_section(a) or _has_shell_expansion(a)
-                           for a in args):
-            return "git config section rename/removal touching core"
-        return None
-    # The key is the first argument; one the shell assembles (core.hooks$X)
-    # may be core.hooksPath, so it counts as sensitive.
-    key_assembled = bool(args) and _has_shell_expansion(args[0])
-    if not key_assembled and not any(_sensitive_config_key(a) for a in args):
-        return None
-    # A sensitive key is named: allow only an unambiguous read.
-    unknown = [f for f in flags if f not in _CONFIG_SAFE_FLAGS
-               and f not in _CONFIG_VALUE_FLAGS and f not in _CONFIG_READ_FLAGS]
-    if unknown:
-        return "git config core.hooksPath"
-    if action in _CONFIG_READ_ACTIONS:
-        return None
-    if action is not None:  # set / unset
-        return "git config core.hooksPath"
-    if set(flags) & _CONFIG_READ_FLAGS:
-        return None
-    # Legacy syntax: one positional (the key) is a read; a value makes a set.
-    if len(args) == 1:
-        return None
-    return "git config core.hooksPath"
-
-
-def _commit_violation(rest: list[str]) -> str | None:
-    j = 0
-    while j < len(rest):
-        tok = rest[j]
-        if tok == "--":
-            return None
-        if tok.startswith("--"):
-            name, has_equals, _value = tok.partition("=")
-            if name in _COMMIT_LONG_VALUE_FLAGS:
-                if not has_equals:
-                    j += 1
-                j += 1
-                continue
-            if _NO_VERIFY.match(tok):
-                return f"git commit {tok}"
-            if _has_shell_expansion(tok):
-                return "git commit with an expanded option"
-            j += 1
-            continue
-        if tok.startswith("-") and len(tok) > 1:
-            cluster = tok[1:]
-            for k, ch in enumerate(cluster):
-                if ch == "n":
-                    return "git commit -n"
-                if ch == "u":
-                    # -uno / -uall: the remainder is the optional mode value,
-                    # not a cluster containing -n.
-                    if k + 1 < len(cluster):
-                        break
-                    continue
-                if ch in _COMMIT_SHORT_VALUE_FLAGS:
-                    if k + 1 == len(cluster):
-                        j += 1
-                    break
-            else:
-                if _has_shell_expansion(tok):
-                    return "git commit with an expanded option"
-            j += 1
-            continue
-        if tok.startswith("$") or "`" in tok:
-            return "git commit with an expanded option"
-        j += 1
-    return None
-
-
-def _git_violation(args: list[str]) -> str | None:
-    i = 0
-    sub = None
-    while i < len(args):
-        tok = args[i]
-        if _has_shell_expansion(tok):
-            return "git global option assembled by shell expansion"
-        if tok.startswith("--config-env="):
-            if _sensitive_config_key(tok.split("=", 1)[1].split("=", 1)[0]):
-                return "git --config-env core.hooksPath=..."
-            i += 1
-            continue
-        if tok in ("-c", "--config-env") and i + 1 < len(args):
-            value = args[i + 1]
-            if _has_shell_expansion(value):
-                return "git global option assembled by shell expansion"
-            if _sensitive_config_key(value.split("=", 1)[0]):
-                return "git -c core.hooksPath=..."
-            i += 2
-            continue
-        if tok.startswith("-c") and len(tok) > 2:
-            if _sensitive_config_key(tok[2:].split("=", 1)[0]):
-                return "git -c core.hooksPath=..."
-            i += 1
-            continue
-        relocating = tok.split("=", 1)[0]
-        if relocating in _GIT_RELOCATING_OPTIONS and (
-            "=" in tok or relocating != "--exec-path"
-        ):
-            # --exec-path alone prints the path; with a value it swaps the
-            # programs git runs. --git-dir/--work-tree point at other hooks.
-            return f"git {relocating}"
-        if tok in _GIT_GLOBAL_WITH_VALUE and i + 1 < len(args):
-            if _has_shell_expansion(args[i + 1]):
-                return "git global option assembled by shell expansion"
-            i += 2
-            continue
-        if tok.startswith("-"):
-            i += 1
-            continue
-        sub = tok
-        i += 1
-        break
-    rest = args[i:]
-    if sub == "commit":
-        return _commit_violation(rest)
-    if sub == "config":
-        for tok in rest:
-            if tok == "--":
-                break
-            if _has_shell_expansion(tok) and (tok.startswith(("-", "$")) or "`" in tok):
-                return "git config option assembled by shell expansion"
-        return _config_violation(rest)
-    for tok in rest:
-        if tok == "--":
-            break
-        if _NO_VERIFY.match(tok):
-            return f"git {sub or ''} {tok}".replace("  ", " ")
-        if _has_shell_expansion(tok) and (tok.startswith(("-", "$")) or "`" in tok):
-            return f"git {sub or ''} option assembled by shell expansion".replace("  ", " ")
-    return None
-
-
-def _program_words(program: str) -> list[str]:
-    return re.findall(r"--?[A-Za-z0-9_.$/:=-]+|[A-Za-z0-9_.$/:=-]+", program)
-
-
-def _inline_program_violation(program: str, interpreted: bool = True) -> str | None:
-    """Judge an inline program's text for a git hook bypass.
-
-    ``interpreted`` is True for python/node/perl/ruby: such a program can only
-    run git through a process-spawning or indirect call, so one with none of
-    those (``print('... --no-verify')``) is allowed. Shell bodies run git
-    directly and are always judged.
-    """
-    words = _program_words(program)
-    if not any(os.path.basename(tok) == "git" for tok in words):
-        return None
-    if interpreted and not _PROGRAM_CAN_SPAWN.search(program):
-        return None
-    if any(tok.upper().startswith("HUSKY") for tok in words):
-        return "inline program sets HUSKY around git"
-    for i, tok in enumerate(words):
-        if os.path.basename(tok) == "git":
-            hit = _git_violation(words[i + 1:])
-            if hit:
-                return hit
-    return None
-
-
-def _heredoc_violation(command: str, depth: int = 0) -> str | None:
-    for match in _HEREDOC_START.finditer(command):
-        delimiter = re.escape(match.group("delimiter"))
-        end = re.search(rf"(?m)^[ \t]*{delimiter}[ \t]*$", command[match.end():])
-        if end is None:
-            continue
-        body = command[match.end():match.end() + end.start()]
-        program = match.group("program")
-        if program in _SHELLS:
-            if find_bypass(body, depth + 1) or _inline_program_violation(body, False):
-                return f"{program} heredoc program skipping git hooks"
-        elif _inline_program_violation(body):
-            return f"{program} heredoc program skipping git hooks"
-    return None
-
-
-def _shell_program_index(cmd: list[str]) -> int | None:
-    for i, tok in enumerate(cmd[1:], start=1):
-        if tok == "-c":
-            return i + 1
-        if tok.startswith("-") and not tok.startswith("--") and "c" in tok[1:]:
-            return i + 1
-        if not tok.startswith("-"):
-            return None
-    return None
-
-
-def find_bypass(command: str, depth: int = 0) -> str | None:
-    if depth > _MAX_DEPTH:
-        return None
-    heredoc_hit = _heredoc_violation(command, depth)
-    if heredoc_hit:
-        return heredoc_hit
-    for body in re.findall(r"`([^`]*)`", command, flags=re.DOTALL):
-        hit = find_bypass(body, depth + 1)
-        if hit:
-            return hit
-    tokens = _tokens(command)
-    if tokens is None:
-        # Unbalanced quoting: judge the raw text conservatively.
-        if re.search(r"\bgit\b[^;&|]*\s--no-veri", command):
-            return "git ... --no-verify"
-        return None
-    for cmd in _simple_commands(tokens):
-        cmd, label, nested = _strip_leading(cmd)
-        if label:
-            return label
-        if nested is not None:
-            hit = find_bypass(nested, depth + 1)
-            if hit:
-                return f"env -S: {hit}"
-            continue
-        if not cmd:
-            continue
-        base = os.path.basename(cmd[0])
-        if _has_shell_expansion(cmd[0]):
-            # The program name is assembled by the shell ($GIT, `which git`):
-            # judge its arguments as git's. Only a specific bypass counts; the
-            # generic "assembled by expansion" verdict would refuse ordinary
-            # `$PYTHON script "$ARG"` calls.
-            if any(_NO_VERIFY.match(t) or _sensitive_config_key(t.split("=", 1)[0])
-                   for t in cmd[1:]):
-                return "expanded command name with a hook-bypass argument"
-            as_git = _git_violation(cmd[1:])
-            if as_git and "expansion" not in as_git:
-                return f"expanded command name: {as_git}"
-        if base == "export":
-            assignment = next(
-                (name for tok in cmd[1:] if (name := _sensitive_assignment(tok))),
-                None,
-            )
-            if assignment:
-                return f"export {assignment}"
-        if base == "git":
-            hit = _git_violation(cmd[1:])
-            if hit:
-                return hit
-            continue
-        if base in _SHELLS:
-            program_index = _shell_program_index(cmd)
-            if program_index is not None and program_index < len(cmd):
-                hit = find_bypass(cmd[program_index], depth + 1)
-                if hit:
-                    return hit
-            continue
-        if base == "eval":
-            hit = find_bypass(" ".join(cmd[1:]), depth + 1)
-            if hit:
-                return hit
-            continue
-        flag = _INTERPRETERS.get(re.sub(r"[0-9.]+$", "", base)) or _INTERPRETERS.get(base)
-        if flag and flag in cmd[1:]:
-            idx = cmd.index(flag, 1)
-            program = cmd[idx + 1] if idx + 1 < len(cmd) else ""
-            if _inline_program_violation(program):
-                return f"{base} {flag} program skipping git hooks"
-    return None
-
-
 def main() -> int:
     payload = read_hook_input()
+    if not payload:
+        log("FAIL-OPEN: empty or malformed hook input; nothing was judged")
+        return 0
     if payload.get("tool_name") != "Bash":
         return 0
     command = (payload.get("tool_input") or {}).get("command")
-    if not isinstance(command, str) or not _QUICK.search(command):
+    if not isinstance(command, str):
+        log("FAIL-OPEN: Bash hook input has no command string; nothing was judged")
         return 0
-    label = find_bypass(command)
+    label = find_violation(command)
     if label is None:
         return 0
-    log(f"blocking {label}")
+    log(f"blocking: {label}")
     return deny(guidance(label))
 
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except Exception as exc:  # noqa: BLE001 — fail open, never break a session
-        log(f"internal error, failing open: {exc}")
+    except Exception as exc:  # noqa: BLE001 — fail open, never wedge the agent
+        log(f"FAIL-OPEN: internal error, command not judged: {type(exc).__name__}: {exc}")
         sys.exit(0)
