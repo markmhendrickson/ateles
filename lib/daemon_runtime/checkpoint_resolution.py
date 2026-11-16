@@ -8,9 +8,9 @@ to ``resolve_checkpoint``.
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import Any, Mapping
 
-from .aauth_httpsig import AAuthSigningError, load_http_sig_signer
+from .aauth_httpsig import AAuthSigningError, HttpSigSigner
 from .checkpoint_protocol import canonical_json_bytes, checkpoint_resolution_body
 
 MAX_RESOLUTION_PROOF_TTL_SECONDS = 300
@@ -20,7 +20,7 @@ def sign_checkpoint_resolution(
     checkpoint_id: str,
     action: str,
     *,
-    private_jwk_path: Path,
+    private_jwk: Mapping[str, Any],
     expected_sub: str,
     expected_jkt: str,
     issuer: str,
@@ -37,11 +37,22 @@ def sign_checkpoint_resolution(
     ttl = int(ttl_seconds)
     if ttl < 1 or ttl > MAX_RESOLUTION_PROOF_TTL_SECONDS:
         raise AAuthSigningError("checkpoint resolution proof lifetime is invalid")
-    signer = load_http_sig_signer(
-        Path(private_jwk_path),
-        expected_sub=str(expected_sub or "").strip(),
-        issuer=str(issuer or "").strip(),
-    )
+    required_sub = str(expected_sub or "").strip()
+    key_sub = str(private_jwk.get("sub") or "").strip()
+    if not key_sub or (required_sub and key_sub != required_sub):
+        raise AAuthSigningError("resolver JWK subject is missing or mismatched")
+    resolved_issuer = str(issuer or "").strip()
+    if not resolved_issuer:
+        raise AAuthSigningError("resolver JWK issuer is missing")
+    try:
+        signer = HttpSigSigner(
+            private_jwk=private_jwk,
+            sub=key_sub,
+            iss=resolved_issuer,
+            kid=str(private_jwk.get("kid") or "").strip() or None,
+        )
+    except Exception:  # noqa: BLE001 — normalize without exposing key material
+        raise AAuthSigningError("could not load resolver JWK") from None
     if signer.thumbprint != str(expected_jkt or "").strip():
         raise AAuthSigningError("resolver JWK thumbprint does not match authority")
     signer.ttl_sec = ttl
