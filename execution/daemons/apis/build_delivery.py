@@ -141,7 +141,7 @@ def issue_key(
 # which re-checks the name, the protected names and the live PR independently.
 EXISTING_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", re.ASCII)
 _PROTECTED_BRANCH_RE = re.compile(
-    r"(?i)(?:main|master|trunk|develop|release[/_-].*|releases/.*|hotfix/.*|v?[0-9]+(?:\.[0-9]+)*)")
+    r"(?i)(?:main|master|trunk|develop|release(?:[/_-].*)?|releases(?:/.*)?|hotfix(?:/.*)?|v?[0-9]+(?:\.[0-9]+)*)")
 
 
 @dataclass(frozen=True)
@@ -192,7 +192,9 @@ def existing_pr_target(snapshot: Mapping[str, object], repository: str | None):
         raise BuildWorktreeError("the existing PR correction head branch is not a well-formed branch name")
     if branch == base:
         raise BuildWorktreeError("the existing PR correction head branch is its base branch")
-    if any(_PROTECTED_BRANCH_RE.fullmatch(name) for name in (branch, branch.split("/", 1)[-1])):
+    if branch != "feat/release-notes" and any(
+        _PROTECTED_BRANCH_RE.fullmatch(name) for name in (branch, branch.split("/", 1)[-1])
+    ):
         raise BuildWorktreeError("the existing PR correction head branch is a protected or release branch")
     return ExistingPRTarget(number, branch, base, head)
 

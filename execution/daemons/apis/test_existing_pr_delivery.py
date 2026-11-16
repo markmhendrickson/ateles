@@ -135,6 +135,19 @@ def test_a_base_protected_or_malformed_head_branch_is_refused_with_its_reason(mo
     assert not spawn(row).ok
 
 
+@pytest.mark.parametrize("branch", ["release", "Release", "releases", "hotfix"])
+def test_a_bare_release_or_hotfix_head_is_refused(branch):
+    row = snapshot(context=json.dumps({"branch": branch, "base_branch": "main"}))
+    with pytest.raises(delivery.BuildWorktreeError, match="protected or release branch"):
+        delivery.existing_pr_target(row, REPO)
+
+
+@pytest.mark.parametrize("branch", ["feat/release-notes", "releasenotes"])
+def test_a_non_release_head_remains_admissible(branch):
+    row = snapshot(context=json.dumps({"branch": branch, "base_branch": "main"}))
+    assert delivery.existing_pr_target(row, REPO).branch == branch
+
+
 def test_the_dispatcher_and_runner_agree_on_existing_branch_names():
     from test_fly_repo_delivery import rd
     assert delivery.EXISTING_BRANCH_RE.pattern == rd.EXISTING_BRANCH_RE.pattern

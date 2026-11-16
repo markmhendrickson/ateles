@@ -1681,6 +1681,18 @@ def test_an_existing_pr_head_on_a_default_or_protected_branch_is_never_pushed(br
     assert exc.value.category == rd.PUSH_REFUSED
 
 
+@pytest.mark.parametrize("branch", ["release", "Release", "releases", "hotfix"])
+def test_a_bare_release_or_hotfix_branch_is_never_pushed(branch):
+    with pytest.raises(rd.RepoWorkError) as exc:
+        rd.check_push_branch(branch, "main", existing=True)
+    assert exc.value.category == rd.PUSH_REFUSED
+
+
+@pytest.mark.parametrize("branch", ["feat/release-notes", "releasenotes"])
+def test_a_non_release_existing_pr_branch_remains_pushable(branch):
+    assert rd.check_push_branch(branch, "main", existing=True) == branch
+
+
 @pytest.mark.parametrize("branch", ["refs/heads/x", "HEAD", "a/../b", "a//b", "a/.b", "a.lock", "x/", "a b", ""])
 def test_an_existing_pr_head_that_is_not_a_plain_branch_name_is_refused(branch):
     with pytest.raises(rd.RepoWorkError, match="builder pattern"):

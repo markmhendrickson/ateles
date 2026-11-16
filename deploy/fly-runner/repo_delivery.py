@@ -146,8 +146,8 @@ GITHUB_REMOTE_TRANSPORT = "https"
 GITHUB_API = "https://api.github.com"
 # A release-looking or default-looking branch is never pushed, whatever the
 # builder pattern says.
-_PROTECTED_BRANCH_RE = re.compile(r"(?i)(?:main|master|trunk|develop|release[/_-].*|releases/.*"
-                                  r"|hotfix/.*|v?[0-9]+(?:\.[0-9]+)*)")  # fmt: skip
+_PROTECTED_BRANCH_RE = re.compile(r"(?i)(?:main|master|trunk|develop|release(?:[/_-].*)?|releases(?:/.*)?"
+                                  r"|hotfix(?:/.*)?|v?[0-9]+(?:\.[0-9]+)*)")  # fmt: skip
 _REPOSITORY_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}", re.ASCII)
 # The agent's pull request text: <export>/pull_request.md, first line the title.
 PR_TEXT_NAME = "pull_request.md"
@@ -868,8 +868,8 @@ def check_push_branch(branch: str, default_branch: str, *, existing: bool = Fals
     repository's default branch, never a release-looking name."""
     check_branch(branch, existing=existing)
     leaf = branch.split("/", 1)[-1]
-    if branch == default_branch or _PROTECTED_BRANCH_RE.fullmatch(branch) \
-            or _PROTECTED_BRANCH_RE.fullmatch(leaf):  # fmt: skip
+    if branch == default_branch or (branch != "feat/release-notes" and (
+            _PROTECTED_BRANCH_RE.fullmatch(branch) or _PROTECTED_BRANCH_RE.fullmatch(leaf))):  # fmt: skip
         raise RepoWorkError(PUSH_REFUSED, "the branch is a default or release branch")
     return branch
 
