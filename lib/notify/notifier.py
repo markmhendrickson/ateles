@@ -735,6 +735,31 @@ class Notifier:
                     exc,
                 )
 
+    def release_dedupe(self, key: str) -> None:
+        """Forget ``key`` in the journal only, after a send that did not deliver.
+
+        ``send(dedupe_key=key)`` records the key before routing (see its
+        comment), so a send that was then held or failed still reads as
+        reported. A caller that must retry until the operator is actually told
+        calls this when ``send`` returned False. Unlike ``clear_dedupe`` it
+        does not resolve the alert's Neotoma sink record: the condition is
+        still open and still unreported. Never raises.
+        """
+        with self._notification_lock:
+            try:
+                journal = self._dedupe_journal
+                if key in journal:
+                    del journal[key]
+                    self._persist_dedupe_journal(journal)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "[notify] could not release dedupe key %r (%s)", key, exc
+                )
+
+    def dedupe_journal_path(self) -> Path:
+        """Where this notifier's dedupe journal lives (for a sidecar lock)."""
+        return self._dedupe_path
+
     def clear_dedupe(self, key: str) -> None:
         """Clear a dedupe key once its condition has resolved.
 

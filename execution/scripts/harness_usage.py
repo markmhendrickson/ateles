@@ -60,6 +60,7 @@ if str(_APIS_DIR) not in sys.path:
 
 import harness_router  # noqa: E402
 import model_tiering  # noqa: E402
+import usage_alerts  # noqa: E402
 import usage_probe  # noqa: E402
 
 
@@ -326,6 +327,9 @@ def main(argv: list[str] | None = None) -> int:
             harness_router.record_usage(args.provider, args.window)
         except ValueError as exc:
             parser.error(str(exc))
+        # Alert a 50%/75% crossing now, even if no dispatch follows
+        # (ent_e5259618cae6cafd4be120e0). Never raises.
+        usage_alerts.check_after_usage_write(args.provider)
     elif args.command == "exhausted":
         until = harness_router._wall_from_iso(args.until)
         if until is None:

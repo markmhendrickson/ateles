@@ -647,7 +647,27 @@ def refresh_usage_if_stale(
         except Exception as exc:  # noqa: BLE001 - feeding must never break dispatch
             log.error(f"[apis] usage refresh for {provider} failed: {exc}")
             outcomes[provider] = f"error: {type(exc).__name__}"
+            continue
+        if outcomes[provider] == "refreshed":
+            _alert_on_new_reading(provider)
     return outcomes
+
+
+def _alert_on_new_reading(provider: str) -> None:
+    """Alert a 50%/75% crossing as soon as the reading that shows it is written.
+
+    Provider spend governance (ent_e5259618cae6cafd4be120e0): the dispatch path
+    also checks, but a crossing seen by a refresh no dispatch follows would
+    otherwise never be alerted. ``usage_alerts`` is imported here, not at
+    module top, so the probe keeps no import-time dependency on the notifier.
+    Never raises.
+    """
+    try:
+        import usage_alerts
+
+        usage_alerts.check_after_usage_write(provider)
+    except Exception as exc:  # noqa: BLE001 - an alert never breaks a refresh
+        log.warning(f"[apis] usage threshold check after refresh failed: {exc}")
 
 
 def _observed_age(provider: str, moment: float) -> float | None:
