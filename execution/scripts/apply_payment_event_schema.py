@@ -177,9 +177,13 @@ def run(apply_change: bool, request: Requester | None = None,
     if not apply_change:
         print("\nDRY RUN: nothing was written. Re-run with --apply to register it.")
         return 0
-    if live is not None and is_empty(d) and live.get("active") is True:
-        print("Live schema already matches the file; nothing posted.")
-        return 0
+    if live is not None and is_empty(d):
+        if live.get("active") is True:
+            print("Live schema already matches the file; nothing posted.")
+            return 0
+        print("REFUSED: the live schema matches the file but is not active; activate "
+              "that registered version rather than registering it again.", file=sys.stderr)
+        return 1
     if d["removed"] or d["type_changed"]:
         print("REFUSED: the change would drop a field or change a field's type; "
               "update the file to keep the live types first.", file=sys.stderr)

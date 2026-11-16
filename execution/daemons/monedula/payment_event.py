@@ -43,7 +43,7 @@ def store_body(
     """The ``POST /store`` body for one payment_event."""
     if not payment_date:
         raise PaymentEventError("payment_event needs payment_date")
-    keys = [str(k) for k in (session_keys or []) if str(k).strip()]
+    keys = [str(k).strip() for k in (session_keys or []) if str(k).strip()]
     approval = (approval_id or "").strip()
     if not approval and not keys:
         raise PaymentEventError(

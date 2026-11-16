@@ -52,3 +52,10 @@ def test_store_posts_the_strict_body(monkeypatch):
     ((method, path, body),) = calls
     assert (method, path) == ("POST", "/store") and body["strict"] is True
     assert body["entities"][0]["approval_id"] == "ent_a"
+
+
+def test_session_keys_are_trimmed_before_they_become_identity():
+    body = payment_event.store_body(FIELDS, payment_date="2030-01-02",
+                                    session_keys=[" synthetic_handler:evt-1 "])
+    assert body["entities"][0]["primary_session_key"] == "synthetic_handler:evt-1"
+    assert body["entities"][0]["session_keys"] == ["synthetic_handler:evt-1"]

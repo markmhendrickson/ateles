@@ -159,3 +159,10 @@ def test_main_never_prints_the_token(monkeypatch, capsys):
     assert tool.main(["--apply"]) == 0
     out = capsys.readouterr()
     assert "https://neotoma.example.net" in out.out and token not in out.out + out.err
+
+
+def test_apply_refuses_a_matching_but_inactive_schema(capsys):
+    fake = Fake([{**_live_matching(), "active": False}])
+    assert tool.run(True, fake, DEF) == 1
+    assert [c[0] for c in fake.calls] == ["GET"]
+    assert "not active" in capsys.readouterr().err
