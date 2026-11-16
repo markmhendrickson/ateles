@@ -142,7 +142,7 @@ def test_a_bare_release_or_hotfix_head_is_refused(branch):
         delivery.existing_pr_target(row, REPO)
 
 
-@pytest.mark.parametrize("branch", ["feat/release-notes", "releasenotes"])
+@pytest.mark.parametrize("branch", ["feat/releasenotes", "releasenotes", "fix/hotfixes-doc"])
 def test_a_non_release_head_remains_admissible(branch):
     row = snapshot(context=json.dumps({"branch": branch, "base_branch": "main"}))
     assert delivery.existing_pr_target(row, REPO).branch == branch
@@ -151,6 +151,7 @@ def test_a_non_release_head_remains_admissible(branch):
 def test_the_dispatcher_and_runner_agree_on_existing_branch_names():
     from test_fly_repo_delivery import rd
     assert delivery.EXISTING_BRANCH_RE.pattern == rd.EXISTING_BRANCH_RE.pattern
+    assert delivery._PROTECTED_BRANCH_RE.pattern == rd._PROTECTED_BRANCH_RE.pattern
     for name in [*SESSION_BRANCHES, "refs/heads/x", "HEAD", "a/../b", "a//b", "a/.b", "a.lock", "x/"]:
         row = snapshot(context=json.dumps({"branch": name, "base_branch": "main"}))
         try:

@@ -868,8 +868,8 @@ def check_push_branch(branch: str, default_branch: str, *, existing: bool = Fals
     repository's default branch, never a release-looking name."""
     check_branch(branch, existing=existing)
     leaf = branch.split("/", 1)[-1]
-    if branch == default_branch or (branch != "feat/release-notes" and (
-            _PROTECTED_BRANCH_RE.fullmatch(branch) or _PROTECTED_BRANCH_RE.fullmatch(leaf))):  # fmt: skip
+    if branch == default_branch or _PROTECTED_BRANCH_RE.fullmatch(branch) \
+            or _PROTECTED_BRANCH_RE.fullmatch(leaf):  # fmt: skip
         raise RepoWorkError(PUSH_REFUSED, "the branch is a default or release branch")
     return branch
 

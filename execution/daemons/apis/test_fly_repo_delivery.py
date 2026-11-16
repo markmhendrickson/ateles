@@ -1688,7 +1688,7 @@ def test_a_bare_release_or_hotfix_branch_is_never_pushed(branch):
     assert exc.value.category == rd.PUSH_REFUSED
 
 
-@pytest.mark.parametrize("branch", ["feat/release-notes", "releasenotes"])
+@pytest.mark.parametrize("branch", ["feat/releasenotes", "releasenotes", "fix/hotfixes-doc"])
 def test_a_non_release_existing_pr_branch_remains_pushable(branch):
     assert rd.check_push_branch(branch, "main", existing=True) == branch
 

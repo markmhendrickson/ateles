@@ -192,9 +192,7 @@ def existing_pr_target(snapshot: Mapping[str, object], repository: str | None):
         raise BuildWorktreeError("the existing PR correction head branch is not a well-formed branch name")
     if branch == base:
         raise BuildWorktreeError("the existing PR correction head branch is its base branch")
-    if branch != "feat/release-notes" and any(
-        _PROTECTED_BRANCH_RE.fullmatch(name) for name in (branch, branch.split("/", 1)[-1])
-    ):
+    if any(_PROTECTED_BRANCH_RE.fullmatch(name) for name in (branch, branch.split("/", 1)[-1])):
         raise BuildWorktreeError("the existing PR correction head branch is a protected or release branch")
     return ExistingPRTarget(number, branch, base, head)
 
