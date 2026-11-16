@@ -56,7 +56,11 @@ environment (needed for both the dry run and --apply, which read the live schema
 Safe to re-run: a live schema that already matches the file is left alone.
 """
 
-Requester = Callable[[str, str, "dict[str, Any] | None"], "dict[str, Any]"]
+Requester = Callable[[str, str, "dict[str, Any] | None"], Any]
+
+
+class UnreadableLiveSchemaError(ValueError):
+    """A successful schema response cannot be safely compared with the file."""
 
 
 def load_definition(path: Path = DEFINITION_PATH) -> dict[str, Any]:
@@ -113,7 +117,8 @@ def diff(live: dict[str, Any] | None, definition: dict[str, Any]) -> dict[str, A
 
 
 def is_empty(d: dict[str, Any]) -> bool:
-    return not (d["added"] or d["removed"] or d["type_changed"] or d["identity"])
+    return not (d["added"] or d["removed"] or d["type_changed"] or d["identity"]
+                or d["live_version"] != d["file_version"])
 
 
 def verify(live: dict[str, Any] | None, definition: dict[str, Any]) -> list[str]:
@@ -122,12 +127,17 @@ def verify(live: dict[str, Any] | None, definition: dict[str, Any]) -> list[str]
         return ["no live schema read back"]
     d = diff(live, definition)
     problems = [f"field {n!r} missing from the live schema" for n in d["added"]]
+    problems += [f"field {n!r} is present live but absent from the file"
+                 for n in d["removed"]]
     problems += [
         f"field {n!r} has type {t['live']!r}, expected {t['file']!r}"
         for n, t in d["type_changed"].items()
     ]
     if d["identity"]:
         problems.append("identity rule differs from the file")
+    if d["live_version"] != d["file_version"]:
+        problems.append(f"schema version {d['live_version']!r} differs from the file version "
+                        f"{d['file_version']!r}")
     if live.get("active") is not True:
         problems.append("schema is not active")
     return problems
@@ -140,9 +150,17 @@ def fetch_live(request: Requester, entity_type: str) -> dict[str, Any] | None:
         if exc.status == 404:
             return None
         raise
-    if isinstance(live, dict) and isinstance(live.get("schema"), dict):
+    if not isinstance(live, dict):
+        raise UnreadableLiveSchemaError("response body is not an object")
+    if "schema" in live:
+        if not isinstance(live["schema"], dict):
+            raise UnreadableLiveSchemaError("response schema is not an object")
         live = live["schema"]
-    return live if isinstance(live, dict) else None
+    if not isinstance(live.get("schema_definition"), dict):
+        raise UnreadableLiveSchemaError("schema definition is not an object")
+    if not isinstance(live["schema_definition"].get("fields"), dict):
+        raise UnreadableLiveSchemaError("schema fields are not an object")
+    return live
 
 
 def print_diff(d: dict[str, Any]) -> None:
@@ -168,6 +186,9 @@ def run(apply_change: bool, request: Requester | None = None,
     entity_type = definition["entity_type"]
     try:
         live = fetch_live(request, entity_type)
+    except UnreadableLiveSchemaError as exc:
+        print(f"REFUSED reading the live schema: {exc}.", file=sys.stderr)
+        return 1
     except neotoma_http.NeotomaRequestError as exc:
         print(f"FAILED reading the live schema: HTTP {exc.status}. Server said: {exc.body}",
               file=sys.stderr)
@@ -196,6 +217,9 @@ def run(apply_change: bool, request: Requester | None = None,
     try:
         request("POST", "/register_schema", build_payload(definition))
         back = fetch_live(request, entity_type)
+    except UnreadableLiveSchemaError as exc:
+        print(f"READ-BACK FAILED: {exc}.", file=sys.stderr)
+        return 1
     except neotoma_http.NeotomaRequestError as exc:
         print(f"FAILED: HTTP {exc.status}. Server said: {exc.body}", file=sys.stderr)
         return 1

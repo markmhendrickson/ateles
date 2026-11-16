@@ -38,7 +38,10 @@ class Fake:
     def __call__(self, method, path, body):
         self.calls.append((method, path, body))
         if method == "GET":
-            return self.gets.pop(0)
+            response = self.gets.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
         return {}
 
 
@@ -98,6 +101,27 @@ def test_diff_reports_type_changes_and_removed_fields():
     assert d["removed"] == ["legacy_only"]
 
 
+def test_real_404_means_absent_and_dry_run_still_works(capsys):
+    fake = Fake([tool.neotoma_http.NeotomaRequestError(404, "not found")])
+    assert tool.run(False, fake, DEF) == 0
+    assert [method for method, _, _ in fake.calls] == ["GET"]
+    assert "DRY RUN" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("response,problem", [
+    (["unexpected"], "response body is not an object"),
+    ("unexpected", "response body is not an object"),
+    ({"schema": "x"}, "response schema is not an object"),
+])
+def test_apply_refuses_unreadable_initial_read(response, problem, capsys):
+    fake = Fake([response])
+    assert tool.run(True, fake, DEF) == 1
+    assert [method for method, _, _ in fake.calls] == ["GET"]
+    error = capsys.readouterr().err
+    assert "REFUSED" in error and problem in error
+    assert "unexpected" not in error and "'x'" not in error
+
+
 # --- apply -----------------------------------------------------------------
 
 def test_apply_posts_then_reads_back_and_passes_when_it_matches():
@@ -124,6 +148,32 @@ def test_apply_read_back_mismatch_exits_non_zero(capsys):
 
     inactive = {**_live_matching(), "active": False}
     assert tool.run(True, Fake([_live_v1(), inactive]), DEF) == 1
+
+
+@pytest.mark.parametrize("response,problem", [
+    (["unexpected"], "response body is not an object"),
+    ("unexpected", "response body is not an object"),
+    ({"schema": "x"}, "response schema is not an object"),
+])
+def test_apply_refuses_unreadable_read_back(response, problem, capsys):
+    fake = Fake([_live_v1(), response])
+    assert tool.run(True, fake, DEF) == 1
+    assert [method for method, _, _ in fake.calls] == ["GET", "POST", "GET"]
+    error = capsys.readouterr().err
+    assert "READ-BACK FAILED" in error and problem in error
+    assert "unexpected" not in error and "'x'" not in error
+
+
+def test_verify_reports_every_extra_live_field_and_version_mismatch():
+    live = _live_matching()
+    live["schema_definition"]["fields"]["extra_one"] = {"type": "string"}
+    live["schema_definition"]["fields"]["extra_two"] = {"type": "number"}
+    live["schema_version"] = "different-version"
+    problems = tool.verify(live, DEF)
+    assert any("extra_one" in problem for problem in problems)
+    assert any("extra_two" in problem for problem in problems)
+    assert any("version" in problem and "different-version" in problem for problem in problems)
+    assert tool.verify(_live_matching(), DEF) == []
 
 
 def test_apply_is_a_no_op_when_live_already_matches():
