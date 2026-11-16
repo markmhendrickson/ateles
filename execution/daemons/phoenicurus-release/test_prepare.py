@@ -400,7 +400,37 @@ def test_agent_env_drops_storage_git_and_unknown_ambient_names(monkeypatch, name
     assert _os.environ.get(name) == "canary", "daemon env untouched"
 
 
+def test_agent_env_maps_swarm_gws_config(monkeypatch):
+    # The RC email must go out as the swarm mailbox: a configured swarm gws
+    # directory becomes the child's GOOGLE_WORKSPACE_CLI_CONFIG_DIR and wins
+    # over an already-set value, the same precedence email_channel uses.
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", "/synthetic/swarm-gws")
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", "/synthetic/operator-gws")
+    env = prepare._agent_env()
+    assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == "/synthetic/swarm-gws"
+    assert "ATELES_SWARM_GWS_CONFIG_DIR" not in env
+    import os as _os
+    assert _os.environ["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == "/synthetic/operator-gws"
+
+    monkeypatch.delenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR")
+    env = prepare._agent_env()
+    assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == "/synthetic/swarm-gws"
+
+
+def test_agent_env_invents_no_gws_config_when_unset(monkeypatch):
+    # The mapping is the shared email_channel helper, called rather than copied.
+    from lib.approval import email_channel
+    assert prepare.gws_config_dir_env is email_channel.gws_config_dir_env
+    monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", raising=False)
+    env = prepare._agent_env()
+    assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" not in env
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", "")
+    assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" not in prepare._agent_env()
+
+
 def test_agent_env_keeps_only_needed_release_additions(monkeypatch):
+    monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR", raising=False)
     monkeypatch.setenv("PATH", "/synthetic/bin")
     monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", "/synthetic/gws")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/synthetic/claude")

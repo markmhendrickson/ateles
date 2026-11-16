@@ -224,6 +224,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from lib.daemon_runtime.logging_setup import configure_daemon_logging
 from lib import github_app_token  # noqa: E402
+from lib.approval.email_channel import gws_config_dir_env  # noqa: E402
 from lib.environment_allowlist import (  # noqa: E402
     ALLOWED_ENVIRONMENT_NAMES,
     RUNNER_ENVIRONMENT_NAMES,
@@ -1137,6 +1138,18 @@ def _agent_env() -> dict:
     for name in _PREPARE_AGENT_RELEASE_ADDITIONS:
         if name in os.environ:
             env[name] = os.environ[name]
+    # The RC email goes out through gws as the swarm mailbox when one is
+    # configured: the shared mapping turns ATELES_SWARM_GWS_CONFIG_DIR into the
+    # child's GOOGLE_WORKSPACE_CLI_CONFIG_DIR, falls back to an already-set
+    # value, and adds nothing when neither is set.
+    env.pop("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", None)
+    env.update(gws_config_dir_env())
+    gws_dir = env.get("GOOGLE_WORKSPACE_CLI_CONFIG_DIR")
+    if gws_dir and not os.path.isdir(gws_dir):
+        log.warning(
+            "prepare agent: the gws config directory selected for the RC email "
+            "does not exist; the agent's gws calls will fail"
+        )
 
     oauth = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
     api_key = os.environ.get("ANTHROPIC_API_KEY")

@@ -954,3 +954,14 @@ class TestSwarmMailboxProblems:
         only_dir = " ".join(ec.swarm_mailbox_problems())
         assert "ATELES_SWARM_GWS_CONFIG_DIR" in only_dir
         assert "ATELES_SWARM_EMAIL" not in only_dir
+
+
+def test_gws_config_dir_env_precedence(monkeypatch):
+    # Swarm dir wins, an already-set dir is kept otherwise, nothing is invented.
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", "/synthetic/operator-gws")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", "/synthetic/swarm-gws")
+    assert ec.gws_config_dir_env() == {"GOOGLE_WORKSPACE_CLI_CONFIG_DIR": "/synthetic/swarm-gws"}
+    monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR")
+    assert ec.gws_config_dir_env() == {"GOOGLE_WORKSPACE_CLI_CONFIG_DIR": "/synthetic/operator-gws"}
+    monkeypatch.delenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR")
+    assert ec.gws_config_dir_env() == {}

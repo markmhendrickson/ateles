@@ -22,9 +22,11 @@ Operator-approved release executor for Neotoma. Two halves:
 The agent never skips the release checkout's git hooks. `spawn_prepare_agent`
 passes it `--settings` with a PreToolUse guard,
 `.claude/hooks/git_hook_bypass_guard.py`, which refuses `--no-verify`,
-`git commit -n`, git-config/Husky environment overrides and a
-`core.hooksPath` override, including the shell and inline-program forms it can
-inspect. The agent's cwd is the Neotoma checkout, so this repository's own
+`git commit -n`, Husky and every `GIT_CONFIG*` environment override (plus
+`GIT_DIR`, `GIT_WORK_TREE`, `GIT_EXEC_PATH`), and any write, unset, rename or
+removal of `core.hooksPath` in any scope, including the shell-quoted,
+`env -S` and inline-program forms it can inspect. Reads of `core.hooksPath`
+stay allowed. The agent's cwd is the Neotoma checkout, so this repository's own
 `.claude/settings.json` does not reach it; `--settings` is the only way the
 guard is loaded. If the guard file is missing, prepare refuses to spawn the
 agent. The sanctioned way to skip the test stage is the hook's own
@@ -35,7 +37,12 @@ format.
 only the Claude authentication/configuration and gws configuration the prepare
 child needs. Unknown ambient variables, Neotoma storage/target selectors, git
 configuration overrides and unrelated vendor credentials never pass by
-inheritance. `store_release_result.py` loads its own Neotoma target and signing
+inheritance. The RC email goes out as the swarm mailbox: when
+`ATELES_SWARM_GWS_CONFIG_DIR` is set, the shared mapping in
+`lib/approval/email_channel.py` (`gws_config_dir_env`) makes it the child's
+`GOOGLE_WORKSPACE_CLI_CONFIG_DIR`; otherwise an already-set
+`GOOGLE_WORKSPACE_CLI_CONFIG_DIR` passes through, and with neither set none is
+added. `store_release_result.py` loads its own Neotoma target and signing
 inputs when it runs.
 
 The Bash guard is an accidental-bypass tripwire, not a security boundary: a
