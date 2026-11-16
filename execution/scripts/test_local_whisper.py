@@ -407,21 +407,10 @@ def test_long_file_uses_chunked_route_and_preserves_result_shape(
         "silence",
         "raw_response",
     }
+    # The chunker's own records, stored unchanged.
     assert result["raw_response"]["chunks"] == [
-        {
-            "kind": "chunk",
-            "index": None,
-            "start": 0.0,
-            "end": 120.0,
-            "status": "kept",
-        },
-        {
-            "kind": "chunk",
-            "index": None,
-            "start": 120.0,
-            "end": 123.0,
-            "status": "kept",
-        },
+        {"kind": "chunk", "start": 0.0, "end": 120.0, "status": "ok"},
+        {"kind": "chunk", "start": 120.0, "end": 123.0, "status": "ok"},
     ]
 
 
@@ -507,7 +496,7 @@ def test_long_file_discloses_a_chunk_withheld_by_the_output_screen(
     assert "[SPEECH WITHHELD" in result["transcription_text"]
     assert "repeated_phrase: synthetic loop" in result["transcription_text"]
     withheld = result["raw_response"]["chunks"][1]
-    assert withheld["status"] == "withheld"
+    assert withheld["status"] == "screened: repeated_phrase"
     assert withheld["withheld_text"] == "loop loop loop"
     assert withheld["reason"] == "repeated_phrase"
 
@@ -620,7 +609,9 @@ def test_long_chunked_diarization_attributes_gap_markers_and_collapses_turn_loop
     audio.write_bytes(b"x")
 
     result = lw.transcribe_local(audio, diarize=True)
-    turns = lf.attribute_segments(result["segments"], result["diarization"])
+    turns = lf.attribute_segments(
+        result["segments"], result["diarization"], collapse_repeats=True
+    )
 
     assert [(turn["speaker"], turn["text"]) for turn in turns] == [
         ("S1", f"{phrase} {phrase} […]"),
@@ -687,7 +678,7 @@ def test_all_withheld_chunks_are_audible_evidence_not_silence(
     assert result["segments"][0]["withheld_text"] == "rejected words"
     assert "[SPEECH WITHHELD" in result["transcription_text"]
     assert result["raw_response"]["chunks"][0]["withheld_text"] == "rejected words"
-    assert result["raw_response"]["chunks"][0]["status"] == "withheld"
+    assert result["raw_response"]["chunks"][0]["status"].startswith("screened")
 
 
 def test_malformed_whisper_segment_raises_local_unavailable_with_source():
@@ -699,6 +690,82 @@ def test_malformed_whisper_segment_raises_local_unavailable_with_source():
 
     assert "broken-memo.json" in str(exc.value)
     assert "not object" in str(exc.value)
+
+
+def test_short_malformed_whisper_segment_raises_local_unavailable_with_source(
+    monkeypatch, tmp_path
+):
+    """The short single-pass route validates whisper JSON like the long route."""
+    _stub_pipeline(monkeypatch, tmp_path, rms=-30.0)
+
+    def fake_run(cmd, **_kw):
+        out_stem = cmd[cmd.index("--output-file") + 1]
+        Path(f"{out_stem}.json").write_text(
+            json.dumps({"transcription": ["not-an-object"]}), encoding="utf-8"
+        )
+
+        class R:
+            returncode = 0
+            stderr = ""
+
+        return R()
+
+    monkeypatch.setattr(lw.subprocess, "run", fake_run)
+    audio = tmp_path / "short-broken-memo.m4a"
+    audio.write_bytes(b"x")
+
+    with pytest.raises(lw.LocalWhisperUnavailable) as exc:
+        lw.transcribe_local(audio)
+
+    assert "short-broken-memo" in str(exc.value)
+    assert "not object" in str(exc.value)
+
+
+def test_stored_chunk_evidence_yields_the_chunkers_own_gaps(monkeypatch, tmp_path):
+    """raw_response.chunks is the chunker's record, so chunk_outcomes agrees."""
+    import two_track_merge as ttm
+
+    _stub_pipeline(monkeypatch, tmp_path, rms=-30.0)
+    monkeypatch.setattr(
+        lw, "_wav_duration_seconds", lambda _wav: cw.CHUNK_SECONDS * 4 + 1.0
+    )
+    chunker_records = [
+        {"kind": "chunk", "index": 0, "start": 0.0, "end": 120.0,
+         "status": "ok", "words": 3},
+        {"kind": "chunk", "index": 1, "start": 120.0, "end": 240.0,
+         "status": "screened: foreign_diacritic", "reason": "foreign_diacritic",
+         "detail": "unexpected language", "withheld_text": "rejected words",
+         "withheld_segments": [{"start": 121.0, "end": 122.0,
+                                "text": "rejected words"}]},
+        {"kind": "chunk", "index": 2, "start": 240.0, "end": 360.0,
+         "status": "silent"},
+        {"kind": "chunk", "index": 3, "start": 360.0, "end": 481.0,
+         "status": "empty", "rerun": True, "loop_after_rerun": True},
+        {"kind": "seam", "at": 120.0, "replaced": True,
+         "replaced_text": "opening words"},
+    ]
+    monkeypatch.setattr(
+        cw, "whisper_cli_asr",
+        lambda *_a, **_k: lambda *_a, **_k: pytest.fail("ASR ran"),
+    )
+    monkeypatch.setattr(
+        cw, "transcribe_track",
+        lambda *_a, **_k: {
+            "segments": [{"start": 0.0, "end": 2.0, "text": "Usable opening words."}],
+            "chunks": json.loads(json.dumps(chunker_records)),
+        },
+    )
+    audio = tmp_path / "evidence.m4a"
+    audio.write_bytes(b"x")
+
+    stored = lw.transcribe_local(audio)["raw_response"]["chunks"]
+
+    assert stored == chunker_records
+    expected = ttm.chunk_outcomes(chunker_records)
+    assert [g["kind"] for g in expected["gaps"]] == [
+        ttm.KIND_WITHHELD, ttm.KIND_SILENT, ttm.KIND_EMPTY,
+    ]
+    assert ttm.chunk_outcomes(stored) == expected
 
 
 def test_chunked_failure_is_wrapped_with_source_and_cause(

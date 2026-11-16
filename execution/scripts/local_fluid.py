@@ -291,11 +291,18 @@ def format_clock(seconds: float) -> str:
     return f"{total // 60}:{total % 60:02d}"
 
 
-def attribute_segments(segments: list[dict], diarization: dict) -> list[dict]:
+def attribute_segments(
+    segments: list[dict], diarization: dict, *, collapse_repeats: bool = False
+) -> list[dict]:
     """Label timed ASR segments with the diarized speaker of greatest overlap.
 
     A segment overlapping no speech stays ``Unassigned``; nothing is guessed.
     Consecutive segments from one speaker merge into one turn.
+
+    ``collapse_repeats`` collapses whisper repeat loops on the joined turns. It
+    is for chunked long-audio results only (``chunked_whisper`` emits one loop
+    as many consecutive segments); a short single-pass memo keeps every
+    segment's words exactly as before, including genuine repetition.
     """
     speech = diarization.get("segments") or []
     turns: list[dict] = []
@@ -311,7 +318,8 @@ def attribute_segments(segments: list[dict], diarization: dict) -> list[dict]:
             turns[-1]["text"] += " " + segment["text"]
         else:
             turns.append({**segment, "speaker": speaker})
-    collapse_item_repeats(turns)
+    if collapse_repeats:
+        collapse_item_repeats(turns)
     return turns
 
 

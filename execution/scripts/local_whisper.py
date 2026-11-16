@@ -33,6 +33,7 @@ before:
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -293,16 +294,59 @@ def convert_to_wav16k_mono(
     return out_path
 
 
-def _parse_whisper_json(json_path: Path) -> tuple[str, str | None]:
-    """Extract (text, detected_language) from whisper-cli's JSON output."""
-    data = json.loads(json_path.read_text(encoding="utf-8"))
+def _validated_segments(data: object) -> list[dict]:
+    """whisper-cli ``transcription`` entries, each checked to be an object.
 
+    Raises ``TypeError`` on a malformed shape; callers wrap it into
+    ``LocalWhisperUnavailable`` with the source file named.
+    """
+    if not isinstance(data, dict):
+        raise TypeError(f"whisper JSON is {type(data).__name__}, not object")
     segments = data.get("transcription") or []
-    parts: list[str] = []
+    if not isinstance(segments, list):
+        raise TypeError(
+            f"transcription is {type(segments).__name__}, not a list"
+        )
     for seg in segments:
-        chunk = (seg.get("text") or "").strip()
-        if chunk:
-            parts.append(chunk)
+        if not isinstance(seg, dict):
+            raise TypeError(
+                f"transcription segment is {type(seg).__name__}, not object"
+            )
+    return segments
+
+
+def _segment_texts(data: object, label: str) -> list[str]:
+    """Non-empty stripped segment texts; malformed shapes name ``label``."""
+    try:
+        return [
+            text
+            for text in (
+                (seg.get("text") or "").strip()
+                for seg in _validated_segments(data)
+            )
+            if text
+        ]
+    except (TypeError, AttributeError) as exc:
+        raise LocalWhisperUnavailable(
+            f"malformed whisper JSON in {label}: {exc}"
+        ) from exc
+
+
+def _parse_whisper_json(json_path: Path) -> tuple[str, str | None]:
+    """Extract (text, detected_language) from whisper-cli's JSON output.
+
+    Malformed output (unparseable JSON, a non-object document or a non-object
+    ``transcription`` entry) raises ``LocalWhisperUnavailable`` naming the file
+    and cause, the same contract as ``timed_segments_from_json`` on the long
+    path — never a bare ``AttributeError``.
+    """
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise LocalWhisperUnavailable(
+            f"malformed whisper JSON in {json_path.name}: {exc}"
+        ) from exc
+    parts = _segment_texts(data, json_path.name)
     text = " ".join(parts).strip()
 
     # whisper.cpp sometimes opens a segment with a subtitle-style speaker dash
@@ -337,11 +381,7 @@ def timed_segments_from_json(
     label = Path(source).name if source else "whisper JSON"
     segments = []
     try:
-        for seg in data.get("transcription") or []:
-            if not isinstance(seg, dict):
-                raise TypeError(
-                    f"transcription segment is {type(seg).__name__}, not object"
-                )
+        for seg in _validated_segments(data):
             chunk = (seg.get("text") or "").strip()
             offsets = seg.get("offsets") or {}
             if chunk:
@@ -357,46 +397,16 @@ def timed_segments_from_json(
     return segments
 
 
-def _chunk_evidence(found: dict) -> list[dict]:
-    """Per-chunk storage evidence, independent of diarization outcome.
-
-    One record per source chunk: index, time range, status (``kept`` /
-    ``withheld`` / ``silent`` / ``empty``), and — when withheld — reason plus
-    the rejected text. Same ``raw_response.chunks`` field the two-track path
-    uses under each track.
-    """
-    evidence = []
-    for chunk in found.get("chunks") or []:
-        if chunk.get("kind") != "chunk":
-            continue
-        raw_status = str(chunk.get("status") or "")
-        withheld = raw_status.startswith("screened")
-        if withheld:
-            status = "withheld"
-        elif raw_status == "ok":
-            status = "kept"
-        else:
-            status = raw_status or "empty"
-        entry: dict = {
-            "kind": "chunk",
-            "index": chunk.get("index"),
-            "start": float(chunk.get("start", 0.0)),
-            "end": float(chunk.get("end", chunk.get("start", 0.0))),
-            "status": status,
-        }
-        if chunk.get("reason") is not None:
-            entry["reason"] = chunk["reason"]
-        if chunk.get("detail") is not None:
-            entry["detail"] = chunk["detail"]
-        if withheld:
-            entry["withheld_text"] = str(chunk.get("withheld_text", ""))
-        evidence.append(entry)
-    return evidence
-
-
 def _chunk_raw_response(found: dict) -> dict:
-    """``raw_response`` body carrying chunk evidence for stored transcriptions."""
-    return {"chunks": _chunk_evidence(found)}
+    """``raw_response`` body carrying the chunker's own records, unchanged.
+
+    ``chunked_whisper.transcribe_track`` records are the shared chunk-evidence
+    contract: ``two_track_merge.chunk_outcomes`` and the result validator read
+    ``screened: …`` statuses, ``withheld_text`` and seam records from exactly
+    this shape, the same one the two-track path stores under each track. A
+    deep copy keeps the stored evidence independent of later mutation.
+    """
+    return {"chunks": copy.deepcopy(list(found.get("chunks") or []))}
 
 
 def detected_language_from_json(data: dict) -> str | None:
