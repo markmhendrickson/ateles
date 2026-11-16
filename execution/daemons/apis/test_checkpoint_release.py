@@ -1852,14 +1852,21 @@ def test_runtime_configs_bind_absolute_persistent_denial_store():
     )
     assert "apis-checkpoint-denials" in compose["volumes"]
 
-    mcp_wrapper = (
-        _HERE.parent.parent / "mcp" / "ateles" / "run_ateles_mcp.sh"
-    ).read_text()
+    # One shared default, exported by the bootstrap both checkpoint-resolving
+    # launchers source; the launched value itself is exercised end to end in
+    # execution/mcp/ateles/test_resolve_checkpoint.py.
+    mcp_dir = _HERE.parent.parent / "mcp" / "ateles"
+    bootstrap = (mcp_dir / "ateles_mcp_bootstrap.sh").read_text()
     assert (
-        'APIS_CHECKPOINT_DENIAL_DIR="${APIS_CHECKPOINT_DENIAL_DIR:-'
-        '/var/tmp/ateles/checkpoint-denials}"'
-    ) in mcp_wrapper
-    assert "export APIS_CHECKPOINT_DENIAL_DIR" in mcp_wrapper
+        'ATELES_DEFAULT_CHECKPOINT_DENIAL_DIR="/var/tmp/ateles/checkpoint-denials"'
+        in bootstrap
+    )
+    assert "export APIS_CHECKPOINT_DENIAL_DIR" in bootstrap
+    for launcher in (
+        mcp_dir / "run_ateles_mcp.sh",
+        _HERE.parent.parent / "scripts" / "resolve_checkpoint.sh",
+    ):
+        assert "ateles_export_checkpoint_denial_dir" in launcher.read_text()
 
 
 def test_mcp_startup_proves_checkpoint_denial_store(monkeypatch, tmp_path):
