@@ -270,7 +270,7 @@ def test_colon_header_normalized_and_accepted_by_gate_reader(tmp_path):
     assert rc == 0
     body = (tmp_path / "pm.verdict.md").read_text()
     assert body.splitlines()[0] == "**\U0001F916 Pavo — Ateles swarm, pm lens panelist**"
-    assert sd.lens_own_verdict(body, lens_agent="pavo") == "SIGNED_OFF"
+    assert sd.lens_own_verdict(body, lens_agent="pavo") == "signed_off"
     assert (sd.describe_gate_verdict_position(body, lens_agent="pavo")
             == "the reply carries a second header or a second verdict line")
 
