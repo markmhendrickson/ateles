@@ -58,7 +58,11 @@ LENS_ROLES: dict[str, str] = {
     "security": "falco",
     "qa": "phoenicurus",
     "ux": "accipiter",
+    "legal": "buteo",  # same mapping as approve_pr_as_app.LENS_AGENTS
 }
+# The five bootstrap lenses `--lens all` always runs, in this order. `legal`
+# is appended only when the approval floor requires it for the PR's diff
+# (see `lenses_for_all`); `content`/Corvus is never run (bootstrap exclusion).
 LENS_ORDER = ("pm", "arch", "security", "qa", "ux")
 
 JOB_TIMEOUT_SECONDS = 45 * 60  # approved per-job limit
@@ -66,6 +70,7 @@ QUEUE_MAX_WAIT_SECONDS = 60 * 60  # approved queue limit
 MAX_ATTEMPTS = 2  # one try plus one retry
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+APIS_DIR = SCRIPT_DIR.parent / "daemons" / "apis"
 DEFAULT_DISPATCH = SCRIPT_DIR.parent / "daemons" / "apis" / "dispatch_role.py"
 DEFAULT_POST = SCRIPT_DIR / "post_lens_verdict.py"
 
@@ -112,6 +117,49 @@ def resolve_head(repo: str, pr: int) -> str:
             f"(rc={proc.returncode}): {(proc.stderr or '').strip()[:200]}"
         )
     return sha
+
+
+def resolve_changed_files(repo: str, pr: int) -> list[str]:
+    """The PR's changed file paths, or raise RuntimeError."""
+    proc = subprocess.run(
+        ["gh", "api", "--paginate", f"repos/{repo}/pulls/{pr}/files",
+         "--jq", ".[].filename"],
+        capture_output=True, text=True, timeout=120,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"could not list the changed files of {repo}#{pr} "
+            f"(rc={proc.returncode}): {(proc.stderr or '').strip()[:200]}"
+        )
+    return [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+
+
+def lenses_for_all(changed_files: list[str] | None) -> list[str]:
+    """The lenses `--lens all` runs: the approval tool's required set.
+
+    The five bootstrap lenses in LENS_ORDER, plus any lens the approval
+    floor (`review_panel.approval_floor`, the function
+    `approve_pr_as_app.derive_required_lenses` uses) adds for this diff that
+    this runner can dispatch, i.e. `legal`. Lenses the approval tool excludes
+    in bootstrap mode (`content`) are never added. Lenses pre-registered on
+    the parent issue are not read here. ``None`` means the file list could
+    not be read: fail toward MORE review and add every runnable extra lens.
+    """
+    if str(APIS_DIR) not in sys.path:
+        sys.path.insert(0, str(APIS_DIR))
+    import review_panel  # noqa: PLC0415 - daemon module, stdlib only
+
+    extras = [name for name in LENS_ROLES
+              if name not in LENS_ORDER
+              and name not in review_panel.APPROVAL_EXCLUDED_LENSES]
+    if changed_files is None:
+        return [*LENS_ORDER, *extras]
+    max_panel = int(os.environ.get("APIS_PANEL_MAX", "6"))
+    if max_panel < 1:  # select_panel would silently drop lenses
+        raise ValueError(f"APIS_PANEL_MAX={max_panel}")
+    floor = {lens.lens for lens in
+             review_panel.approval_floor(set(), changed_files, max_panel)}
+    return [*LENS_ORDER, *(name for name in extras if name in floor)]
 
 
 # --------------------------------------------------------------------------
@@ -304,7 +352,8 @@ def post_verdict(*, python: str, post_script: Path, repo: str, pr: int, lens: st
 def main(argv: list[str] | None = None, *,
          dispatch: Callable[..., dict[str, Any]] = dispatch_once,
          head_resolver: Callable[[str, int], str] = resolve_head,
-         poster: Callable[..., tuple[bool, str]] = post_verdict) -> int:
+         poster: Callable[..., tuple[bool, str]] = post_verdict,
+         files_resolver: Callable[[str, int], list[str]] = resolve_changed_files) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--repo", required=True, help="owner/name")
     p.add_argument("--pr", required=True, type=int)
@@ -346,7 +395,20 @@ def main(argv: list[str] | None = None, *,
         f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}")
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"out-dir: {out_dir}", flush=True)
-    lenses = list(LENS_ORDER) if args.lens == "all" else [args.lens]
+    if args.lens == "all":
+        try:
+            changed: list[str] | None = files_resolver(args.repo, args.pr)
+        except RuntimeError as exc:
+            log(f"{exc}; running every lens the approval tool could require")
+            changed = None
+        try:
+            lenses = lenses_for_all(changed)
+        except ValueError:
+            log("APIS_PANEL_MAX must be an integer")
+            return 2
+    else:
+        lenses = [args.lens]
+    print(f"lenses: {', '.join(lenses)}", flush=True)
     summary: dict[str, Any] = {
         "repo": args.repo, "pr": args.pr, "head": head, "started": now_iso(),
         "task_entity_id": args.task_entity_id, "posted": False, "complete": False,

@@ -34,7 +34,8 @@ class Script:
         return self.envs.pop(0)
 
 
-def run(tmp_path, dispatch, *extra, heads=(HEAD,), poster=None, lens="pm"):
+def run(tmp_path, dispatch, *extra, heads=(HEAD,), poster=None, lens="pm",
+        files=("README.md",)):
     seq = list(heads)
 
     def head_resolver(repo, pr):
@@ -49,7 +50,8 @@ def run(tmp_path, dispatch, *extra, heads=(HEAD,), poster=None, lens="pm"):
     rc = f.main(["--repo", "o/r", "--pr", "7", "--lens", lens, "--task-entity-id",
                  "ent_x", "--out-dir", str(tmp_path), *extra],
                 dispatch=dispatch, head_resolver=head_resolver,
-                poster=poster or default_poster)
+                poster=poster or default_poster,
+                files_resolver=lambda repo, pr: list(files))
     return rc, posts
 
 
@@ -243,3 +245,56 @@ def test_default_out_dir_is_not_cwd(tmp_path, monkeypatch):
     assert rc == 0
     assert not list(tmp_path.glob("fly-lens-review-*"))
     assert list((tmp_path / "home" / ".ateles-work" / "fly-lens-review").glob("*/summary.json"))
+
+
+def lens_env(role, lname):
+    return ok_env(GOOD.replace("Pavo", role).replace("pm lens", lname + " lens"))
+
+
+def test_legal_lens_accepted_and_dispatched_as_buteo(tmp_path):
+    d = Script(lens_env("Buteo", "legal"))
+    rc, posts = run(tmp_path, d, "--post", lens="legal")
+    assert rc == 0
+    assert [(c["lens"], c["role"]) for c in d.calls] == [("legal", "buteo")]
+    assert ".claude/skills/buteo/SKILL.md" in (tmp_path / "legal.brief.md").read_text()
+    rec = json.loads((tmp_path / "summary.json").read_text())["lenses"][0]
+    assert (rec["role"], rec["verdict"]) == ("buteo", "SIGNED_OFF")
+    assert [p["lens"] for p in posts] == ["legal"]
+
+
+def test_all_adds_legal_for_a_package_json_diff(tmp_path):
+    roles = [("Pavo", "pm"), ("Waxwing", "arch"), ("Falco", "security"),
+             ("Phoenicurus", "qa"), ("Accipiter", "ux"), ("Buteo", "legal")]
+    d = Script(*[lens_env(r, n) for r, n in roles])
+    rc, _ = run(tmp_path, d, lens="all", files=("package.json", "src/a.ts"))
+    assert rc == 0
+    assert [c["lens"] for c in d.calls] == [*f.LENS_ORDER, "legal"]
+    assert d.calls[-1]["role"] == "buteo"
+
+
+def test_all_without_legal_path_is_the_five_in_order(tmp_path):
+    d = Script(*[lens_env("Pavo", "pm")] * 5)
+    rc, _ = run(tmp_path, d, lens="all", files=("execution/scripts/x.py", "README.md"))
+    assert rc == 0
+    assert [c["lens"] for c in d.calls] == ["pm", "arch", "security", "qa", "ux"]
+
+
+def test_all_never_includes_content():
+    # a large docs diff is what lets select_panel pick the forward-looking content lens
+    many = [f"docs/page{i}.md" for i in range(12)] + ["package.json"]
+    for files in (many, ["README.md"], None):
+        assert "content" not in f.lenses_for_all(files)
+    assert "content" not in f.LENS_ROLES
+
+
+def test_all_unreadable_file_list_runs_legal_too(tmp_path):
+    def broken(repo, pr):
+        raise RuntimeError("gh failed")
+
+    d = Script(*[lens_env("Pavo", "pm")] * 6)
+    rc = f.main(["--repo", "o/r", "--pr", "7", "--lens", "all", "--task-entity-id",
+                 "ent_x", "--out-dir", str(tmp_path)],
+                dispatch=d, head_resolver=lambda r, p: HEAD,
+                poster=lambda **kw: (True, ""), files_resolver=broken)
+    assert rc == 0
+    assert [c["lens"] for c in d.calls] == [*f.LENS_ORDER, "legal"]
