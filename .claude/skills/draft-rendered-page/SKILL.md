@@ -295,7 +295,7 @@ Note on credentials: a hub on a client instance is usually owned by that instanc
 
 ### Periodic reconciliation
 
-Run `execution/scripts/hub_reconcile.py check --hub <hub id> [--exempt ent_...]` and act on its exit code: 0 means every listed page is reachable, 1 reports orphan IDs to link, 2 means the result is inconclusive, and 3 means the check failed. Use `--exempt` for pages deliberately left without a hub card or a two-click link.
+Run `execution/scripts/hub_reconcile.py check --hub <hub id> [--exempt ent_...]` and act on its exit code: 0 means every listed page that is not exempt is reachable, 1 reports orphan IDs to link, 2 means the result is inconclusive, and 3 means the check failed. Use `--exempt` for pages deliberately left without a hub card or a two-click link. A link counts only in its canonical form (`/entities/<id>/html`, optionally with `?access_token=`), so a page linked any other way is reported as an orphan.
 
 
 ## Rendered-page short links (required publication preference)

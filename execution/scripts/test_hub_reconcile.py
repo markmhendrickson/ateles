@@ -1236,7 +1236,7 @@ def test_check_reaches_card_and_linked_child_within_two_clicks(check_fake, capsy
     assert check_fake.snapshots == [("bearer", HUB_ID), ("bearer", CARD_ID)]
 
 
-def test_check_decodes_nested_href_ids_and_ignores_non_card_hub_links(
+def test_check_rejects_nested_href_ids_and_ignores_non_card_hub_links(
     check_fake, capsys
 ):
     encoded = "%2565%256E%2574_" + CARD_ID.removeprefix("ent_")
@@ -1248,8 +1248,8 @@ def test_check_decodes_nested_href_ids_and_ignores_non_card_hub_links(
 
     assert H.cmd_check(_check_args(), BASE, "bearer") == H.EXIT_FINDINGS
     assert capsys.readouterr().out == (
-        f"orphan {CHILD_ID}\norphan {ORPHAN_ID}\n"
-        "checked=4 orphans=2 exempt=0 result=FINDINGS\n"
+        f"orphan {CARD_ID}\norphan {CHILD_ID}\norphan {ORPHAN_ID}\n"
+        "checked=4 orphans=3 exempt=0 result=FINDINGS\n"
     )
 
 
@@ -1295,8 +1295,18 @@ def test_check_ignores_links_in_inert_html(check_fake, capsys, body):
 
 @pytest.mark.parametrize(
     "href",
-    [f"/entities/{CHILD_ID}/html/", f"{BASE}/entities/{CHILD_ID}/html"],
-    ids=["relative-trailing-slash", "absolute-same-origin"],
+    [
+        f"/entities/{CHILD_ID}/html/",
+        f"{BASE}/entities/{CHILD_ID}/html",
+        f"https://example-neotoma.fly.dev:443/entities/{CHILD_ID}/html",
+        f"//example-neotoma.fly.dev/entities/{CHILD_ID}/html",
+    ],
+    ids=[
+        "relative-trailing-slash",
+        "absolute-same-origin",
+        "explicit-default-port",
+        "scheme-relative-same-host",
+    ],
 )
 def test_check_follows_valid_rendered_page_destinations(check_fake, capsys, href):
     check_fake.bodies[CARD_ID] = f'<a href="{href}">child</a>'
@@ -1320,6 +1330,129 @@ def test_check_ignores_cards_inside_template(check_fake, capsys):
         "checked=4 orphans=3 exempt=0 result=FINDINGS\n"
     )
     assert check_fake.snapshots == [("bearer", HUB_ID)]
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        f"{BASE}/entities%2F{CARD_ID}/html",
+        f"{BASE}/entities&amp;#x2f;{CARD_ID}/html",
+        f"{BASE}/ENTITIES/{CARD_ID}/html",
+        f"{BASE}/entities/{CARD_ID}/html?access_token=bad_token",
+        f"{BASE}/entities/{CARD_ID}/html?" + "access_token" + "=",
+        f"{BASE}/entities/{CARD_ID}/html?access_token=good&other=1",
+    ],
+    ids=[
+        "encoded-delimiter",
+        "nested-entity",
+        "uppercase-path",
+        "token-underscore",
+        "empty-token",
+        "extra-query-key",
+    ],
+)
+def test_check_noncanonical_hub_cards_leave_page_orphan(check_fake, capsys, href):
+    check_fake.bodies[HUB_ID] = H.build_card(href, "Card", "D", [])
+
+    assert H.cmd_check(_check_args(), BASE, "bearer") == H.EXIT_FINDINGS
+    assert capsys.readouterr().out == (
+        f"orphan {CARD_ID}\norphan {CHILD_ID}\norphan {ORPHAN_ID}\n"
+        "checked=4 orphans=3 exempt=0 result=FINDINGS\n"
+    )
+
+
+def test_check_counts_exact_href_written_by_add(check_fake, capsys):
+    check_fake.bodies[HUB_ID] = H.build_card(
+        f"{BASE}/entities/{CARD_ID}/html?access_token=page-token",
+        "Card",
+        "D",
+        [],
+    )
+
+    assert H.cmd_check(_check_args(exempt=[ORPHAN_ID]), BASE, "bearer") == H.EXIT_OK
+    assert capsys.readouterr().out == "checked=4 orphans=0 exempt=1 result=OK\n"
+
+
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        "<noscript>{card}</noscript>",
+        "<template/>{card}",
+        "<div hidden>{card}</div>",
+        "<div inert>{card}</div>",
+        '<div aria-hidden="true">{card}</div>',
+        '<a hidden href="/entities/{id}/html" class="card">card</a>',
+    ],
+    ids=[
+        "noscript",
+        "self-closing-template",
+        "hidden-ancestor",
+        "inert-ancestor",
+        "aria-hidden-ancestor",
+        "hidden-anchor",
+    ],
+)
+def test_check_ignores_inert_or_hidden_hub_cards(check_fake, capsys, wrapper):
+    card = H.build_card(f"{BASE}/entities/{CARD_ID}/html", "Card", "D", [])
+    check_fake.bodies[HUB_ID] = wrapper.format(card=card, id=CARD_ID)
+
+    assert H.cmd_check(_check_args(), BASE, "bearer") == H.EXIT_FINDINGS
+    assert capsys.readouterr().out == (
+        f"orphan {CARD_ID}\norphan {CHILD_ID}\norphan {ORPHAN_ID}\n"
+        "checked=4 orphans=3 exempt=0 result=FINDINGS\n"
+    )
+
+
+@pytest.mark.parametrize("tag", ["script", "style", "iframe", "object", "svg", "math"])
+def test_check_ignores_links_inside_inert_elements(check_fake, capsys, tag):
+    check_fake.bodies[CARD_ID] = (
+        f"<{tag}><a href='/entities/{CHILD_ID}/html'>child</a></{tag}>"
+    )
+
+    assert H.cmd_check(_check_args(), BASE, "bearer") == H.EXIT_FINDINGS
+    assert capsys.readouterr().out == (
+        f"orphan {CHILD_ID}\norphan {ORPHAN_ID}\n"
+        "checked=4 orphans=2 exempt=0 result=FINDINGS\n"
+    )
+
+
+def test_check_unwinds_to_nearest_matching_end_tag_and_ignores_void_elements(
+    check_fake, capsys
+):
+    check_fake.bodies[HUB_ID] = (
+        "<div hidden><section><img></div></template>"
+        + H.build_card(f"{BASE}/entities/{CARD_ID}/html", "Card", "D", [])
+    )
+
+    assert H.cmd_check(_check_args(), BASE, "bearer") == H.EXIT_FINDINGS
+    assert capsys.readouterr().out == (
+        f"orphan {ORPHAN_ID}\nchecked=4 orphans=1 exempt=0 result=FINDINGS\n"
+    )
+
+
+def test_check_rejects_duplicate_href_attributes(check_fake, capsys):
+    check_fake.bodies[HUB_ID] = (
+        f'<a class="card" href="/entities/{CARD_ID}/html" '
+        f'href="/entities/{CHILD_ID}/html">card</a>'
+    )
+
+    assert H.cmd_check(_check_args(), BASE, "bearer") == H.EXIT_FINDINGS
+    assert capsys.readouterr().out == (
+        f"orphan {CARD_ID}\norphan {CHILD_ID}\norphan {ORPHAN_ID}\n"
+        "checked=4 orphans=3 exempt=0 result=FINDINGS\n"
+    )
+
+
+def test_check_class_uses_ascii_whitespace_only(check_fake, capsys):
+    check_fake.bodies[HUB_ID] = (
+        f'<a class="prefix\u00a0card" href="/entities/{CARD_ID}/html">card</a>'
+    )
+
+    assert H.cmd_check(_check_args(), BASE, "bearer") == H.EXIT_FINDINGS
+    assert capsys.readouterr().out == (
+        f"orphan {CARD_ID}\norphan {CHILD_ID}\norphan {ORPHAN_ID}\n"
+        "checked=4 orphans=3 exempt=0 result=FINDINGS\n"
+    )
 
 
 def test_check_does_not_follow_a_third_click(check_fake, capsys):
@@ -1418,6 +1551,37 @@ def test_check_explicitly_truncated_listing_is_inconclusive(check_fake, capsys):
     assert check_fake.snapshots == []
 
 
+@pytest.mark.parametrize("truncated", [1, "yes", None], ids=["one", "yes", "null"])
+def test_check_non_false_truncation_metadata_is_inconclusive(
+    check_fake, capsys, truncated
+):
+    check_fake.pages[""] = {
+        **_listing([HUB_ID, CARD_ID, CHILD_ID]),
+        "truncated": truncated,
+    }
+
+    assert H.cmd_check(_check_args(), BASE, "bearer") == H.EXIT_INCONCLUSIVE
+    assert capsys.readouterr().out == (
+        "checked=0 orphans=0 exempt=0 result=INCONCLUSIVE\n"
+    )
+    assert check_fake.snapshots == []
+
+
+@pytest.mark.parametrize(
+    "metadata", [{}, {"truncated": False}], ids=["absent", "false"]
+)
+def test_check_absent_or_false_truncation_metadata_allows_ok(
+    check_fake, capsys, metadata
+):
+    check_fake.pages[""] = {
+        **_listing([HUB_ID, CARD_ID, CHILD_ID]),
+        **metadata,
+    }
+
+    assert H.cmd_check(_check_args(), BASE, "bearer") == H.EXIT_OK
+    assert capsys.readouterr().out == "checked=3 orphans=0 exempt=0 result=OK\n"
+
+
 def test_check_unreadable_carded_page_is_inconclusive(check_fake, capsys):
     check_fake.bodies[CARD_ID] = urllib.error.URLError("fixture-token-value-0022")
 
@@ -1468,15 +1632,16 @@ def test_check_changing_listing_total_is_inconclusive(check_fake, capsys):
     )
 
 
-def test_check_unresolvable_href_encoding_is_inconclusive(check_fake, capsys):
+def test_check_unresolvable_href_encoding_leaves_page_orphan(check_fake, capsys):
     encoded = "%" + "25" * 9 + "65nt_" + CARD_ID.removeprefix("ent_")
     check_fake.bodies[HUB_ID] = H.build_card(
         f"{BASE}/entities/{encoded}/html", "Card", "D", []
     )
 
-    assert H.cmd_check(_check_args(), BASE, "bearer") == H.EXIT_INCONCLUSIVE
+    assert H.cmd_check(_check_args(), BASE, "bearer") == H.EXIT_FINDINGS
     assert capsys.readouterr().out == (
-        "checked=4 orphans=0 exempt=0 result=INCONCLUSIVE\n"
+        f"orphan {CARD_ID}\norphan {CHILD_ID}\norphan {ORPHAN_ID}\n"
+        "checked=4 orphans=3 exempt=0 result=FINDINGS\n"
     )
 
 

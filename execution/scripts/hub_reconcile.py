@@ -222,48 +222,95 @@ def _decode_probe(value: str) -> str | None:
     return None
 
 
+# A link counts only when it is unambiguously a live link in a canonical form.
+# Anything ambiguous is NOT counted, so the page is reported as an orphan.
+# A false orphan is safe (a person looks and adds a card); a false OK is not.
 class _PageLinks(HTMLParser):
+    _VOID_ELEMENTS = {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+    _INERT_ELEMENTS = {
+        "template",
+        "noscript",
+        "script",
+        "style",
+        "iframe",
+        "object",
+        "svg",
+        "math",
+    }
+
     def __init__(self, base_url: str):
         super().__init__(convert_charrefs=True)
-        self.base_url = urllib.parse.urlsplit(base_url)
+        parsed = urllib.parse.urlsplit(base_url)
+        authorities = {parsed.netloc}
+        default_port = 443 if parsed.scheme == "https" else 80
+        if parsed.port in (None, default_port):
+            authorities.add(f"{parsed.hostname}:{default_port}")
+            authorities.add(parsed.hostname)
+        origins = {""} | {
+            origin
+            for authority in authorities
+            for origin in (f"{parsed.scheme}://{authority}", f"//{authority}")
+        }
+        origin_pattern = "|".join(
+            re.escape(origin) for origin in sorted(origins, reverse=True)
+        )
+        self.href_pattern = re.compile(
+            rf"(?:{origin_pattern})/entities/({ENTITY_ID_RE.pattern})/html/?"
+            r"(?:\?access_token=[A-Za-z0-9-]+)?"
+        )
         self.links: set[str] = set()
         self.cards: set[str] = set()
-        self.template_depth = 0
+        self.open_elements: list[tuple[str, bool]] = []
 
     def handle_starttag(self, tag, attrs):
-        if tag == "template":
-            self.template_depth += 1
-            return
-        if tag != "a" or self.template_depth:
-            return
         attributes = dict(attrs)
-        href = attributes.get("href")
-        if not isinstance(href, str):
-            return
-        probe = _decode_probe(href)
-        if probe is None:
-            raise ValueError("unresolvable encoding")
-        try:
-            target = urllib.parse.urlsplit(probe)
-        except ValueError:
-            return
-        if target.scheme or target.netloc:
-            if (
-                target.scheme != self.base_url.scheme
-                or target.netloc != self.base_url.netloc.lower()
-            ):
-                return
-        match = RENDERED_PAGE_PATH_RE.fullmatch(target.path)
-        if not match:
-            return
-        entity_id = match.group(1)
-        self.links.add(entity_id)
-        if "card" in (attributes.get("class") or "").split():
-            self.cards.add(entity_id)
+        inert = (
+            tag in self._INERT_ELEMENTS
+            or "hidden" in attributes
+            or "inert" in attributes
+            or attributes.get("aria-hidden") == "true"
+        )
+        if (
+            tag == "a"
+            and not inert
+            and not any(ancestor_inert for _, ancestor_inert in self.open_elements)
+        ):
+            hrefs = [value for name, value in attrs if name == "href"]
+            if len(hrefs) == 1 and isinstance(hrefs[0], str):
+                match = self.href_pattern.fullmatch(hrefs[0])
+                if match:
+                    entity_id = match.group(1)
+                    self.links.add(entity_id)
+                    classes = attributes.get("class") or ""
+                    if "card" in re.split(r"[ \t\n\f\r]+", classes):
+                        self.cards.add(entity_id)
+        if tag not in self._VOID_ELEMENTS:
+            self.open_elements.append((tag, inert))
 
     def handle_endtag(self, tag):
-        if tag == "template" and self.template_depth:
-            self.template_depth -= 1
+        for index in range(len(self.open_elements) - 1, -1, -1):
+            if self.open_elements[index][0] == tag:
+                del self.open_elements[index:]
+                break
+
+    def handle_startendtag(self, tag, attrs):
+        # HTML ignores the slash on non-void elements, including <template/>.
+        self.handle_starttag(tag, attrs)
 
 
 def _page_links(body: str, base_url: str) -> _PageLinks:
@@ -288,7 +335,7 @@ def _list_rendered_pages(base_url: str, token: str) -> tuple[set[str], bool]:
             return found, False
         if not isinstance(data, dict):
             return found, False
-        if data.get("truncated") is True:
+        if "truncated" in data and data["truncated"] is not False:
             return found, False
         entities = data.get("entities")
         total = data.get("total")
