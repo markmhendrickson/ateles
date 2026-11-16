@@ -22,5 +22,9 @@ if [ "$help_only" = false ]; then
     ateles_promote_neotoma_token
 fi
 
+# Same replay-denial store as the MCP launcher; resolve_checkpoint.py validates
+# it before anything that can sign or submit a resolution.
+ateles_export_checkpoint_denial_dir
+
 PYTHON="$(ateles_select_mcp_python)"
 exec "$PYTHON" "$SCRIPT_DIR/resolve_checkpoint.py" "$@"

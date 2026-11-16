@@ -32,9 +32,14 @@ ateles_load_neotoma_environment() {
                 '"'*'"') value="${value:1:${#value}-2}" ;;
                 "'"*"'") value="${value:1:${#value}-2}" ;;
             esac
-            [ -z "${!key-}" ] && export "$key=$value"
+            if [ -z "${!key-}" ]; then
+                export "$key=$value"
+            fi
         done < "$env_file"
     fi
+    # Callers run under set -e: a false test above must not become this
+    # function's status and silently stop the launch.
+    return 0
 }
 
 ateles_neotoma_host_is_local() {
@@ -67,7 +72,23 @@ ateles_promote_neotoma_token() {
             ateles_mcp_log "WARNING: NEOTOMA_BASE_URL=$base_url is remote but NEOTOMA_BEARER_TOKEN_PROD is unset — using local-scoped token, which will likely 401 against prod entity reads"
         fi
     fi
-    [ -z "${NEOTOMA_BEARER_TOKEN:-}" ] && ateles_mcp_log "WARNING: NEOTOMA_BEARER_TOKEN is unset — tool calls will fail to authenticate"
+    if [ -z "${NEOTOMA_BEARER_TOKEN:-}" ]; then
+        ateles_mcp_log "WARNING: NEOTOMA_BEARER_TOKEN is unset — tool calls will fail to authenticate"
+    fi
+    return 0
+}
+
+# Checkpoint approval is consumed inline by every process that can resolve a
+# checkpoint (the MCP server and the operator CLI). Bind their replay-denial
+# evidence to the same restart-persistent host directory as the launchd Apis
+# daemon. Both Python entry points validate it (absolute, real directory, not a
+# symlink, writable) before they can resolve anything; this only supplies the
+# shared default so the two launchers cannot drift apart.
+ATELES_DEFAULT_CHECKPOINT_DENIAL_DIR="/var/tmp/ateles/checkpoint-denials"
+
+ateles_export_checkpoint_denial_dir() {
+    APIS_CHECKPOINT_DENIAL_DIR="${APIS_CHECKPOINT_DENIAL_DIR:-$ATELES_DEFAULT_CHECKPOINT_DENIAL_DIR}"
+    export APIS_CHECKPOINT_DENIAL_DIR
 }
 
 ateles_python_has_mcp_deps() {

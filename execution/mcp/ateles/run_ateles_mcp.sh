@@ -52,12 +52,10 @@ ateles_promote_neotoma_token
 # deliberately NOT a fallback — it lacks `mcp`, so falling back there would
 # reintroduce a silent no-tools start. A bare python3 is accepted only if it
 # already satisfies both imports.
-# Checkpoint approval is also consumed inline by this MCP process. Bind its
-# replay-denial evidence to the same restart-persistent host directory as the
-# launchd Apis daemon; server.py validates that this is absolute, real (not a
-# symlink), and writable before it exposes any tools.
-APIS_CHECKPOINT_DENIAL_DIR="${APIS_CHECKPOINT_DENIAL_DIR:-/var/tmp/ateles/checkpoint-denials}"
-export APIS_CHECKPOINT_DENIAL_DIR
+# Checkpoint approval is also consumed inline by this MCP process. The default
+# and export live in ateles_mcp_bootstrap.sh, shared with the checkpoint CLI
+# launcher; server.py validates the store before it exposes any tools.
+ateles_export_checkpoint_denial_dir
 
 PYTHON="$(ateles_select_mcp_python)"
 
