@@ -293,6 +293,10 @@ A byte count is a weak signal, since an equal-length edit leaves it unchanged; a
 
 Note on credentials: a hub on a client instance is usually owned by that instance's shared-graph user. A token scoped to a different user gets `RESOURCE_NOT_FOUND` on an entity that renders perfectly at its guest URL — that is a scope problem, not a missing entity, and writes require the owning identity.
 
+### Periodic reconciliation
+
+Run `execution/scripts/hub_reconcile.py check --hub <hub id> [--exempt ent_...]` and act on its exit code: 0 means every listed page is reachable, 1 reports orphan IDs to link, 2 means the result is inconclusive, and 3 means the check failed. Use `--exempt` for pages deliberately left without a hub card or a two-click link.
+
 
 ## Rendered-page short links (required publication preference)
 

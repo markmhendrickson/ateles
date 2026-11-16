@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-hub_reconcile.py — add a card to a shared-materials hub by exact byte splice.
+hub_reconcile.py — add hub cards and check rendered-page reachability.
 
 A hub is a `rendered_page` whose whole value is being the canonical index of a
 page set. This script deliberately does not interpret the hub's arbitrary HTML.
@@ -17,7 +17,7 @@ It refuses to write when the page is already referenced anywhere in the hub.
         --marker materials \
         --title "…" --desc "…" --badge-class b-mark --badge-text "Recap" [--apply]
 
-Global options (--hub) go BEFORE the subcommand.
+Global options go before `add`; `check` also accepts --hub after its name.
 `add` is a dry run unless --apply is passed.
 The dry run prints only the hub id, page id, marker name, and proposed body
 byte length; it never prints the card, body, or token-bearing href.
@@ -26,8 +26,13 @@ After a write, `add` re-reads the stored hub body and requires exact string
 equality. It deliberately does not fetch guest/share URLs; open the new card's
 link as a guest before sharing.
 
-Exit codes: 0 ok; 1 verification mismatch; 3 tool error (bad input, missing
-credentials, HTTP failure, refused write).
+    hub_reconcile.py check --hub ent_… [--exempt ent_… ...]
+
+`check` lists rendered pages and follows hub cards and their page links up to
+two clicks from the hub. It prints only entity IDs and counts, never titles.
+
+Exit codes: 0 ok; 1 findings; 2 inconclusive enumeration or reachability;
+3 tool error (bad input, missing credentials, HTTP failure, refused write).
 
 Env: NEOTOMA_BASE_URL + NEOTOMA_BEARER_TOKEN (both, or neither; the fallback is
 a complete pair from ~/.config/neotoma/<profile>.env, never a mix),
@@ -47,15 +52,17 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+from html.parser import HTMLParser
 from pathlib import Path
 
 # Cloudflare 1010-blocks urllib's default User-Agent on hosted instances, so
 # every request must carry an explicit one.
 USER_AGENT = "ateles-hub-reconcile/1.0"
 
-EXIT_OK, EXIT_FINDINGS, EXIT_ERROR = 0, 1, 3
+EXIT_OK, EXIT_FINDINGS, EXIT_INCONCLUSIVE, EXIT_ERROR = 0, 1, 2, 3
 
 ENTITY_ID_RE = re.compile(r"ent_[0-9a-f]{24}")
+ENTITY_ID_IN_HREF_RE = re.compile(r"ent_[0-9a-f]{24}(?![0-9a-f])")
 PROFILE_RE = re.compile(r"[A-Za-z0-9_-]+")
 BADGE_CLASS_RE = re.compile(r"[a-z0-9-]+")
 MARKER_NAME_RE = re.compile(r"[a-z0-9-]{1,64}")
@@ -197,6 +204,147 @@ def _fetch_snapshot(base_url: str, token: str, entity_id: str) -> dict:
     return snapshot
 
 
+def _decode_probe(value: str) -> str | None:
+    """Apply the same bounded, browser-equivalent decoding as add's reference probe."""
+    probe = value
+    for _ in range(8):
+        normalized = urllib.parse.unquote(html.unescape(probe)).translate(
+            {ord(char): None for char in "\t\n\r"}
+        )
+        if normalized == probe:
+            return probe.lower()
+        probe = normalized
+    return None
+
+
+class _PageLinks(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.links: set[str] = set()
+        self.cards: set[str] = set()
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "a":
+            return
+        attributes = dict(attrs)
+        href = attributes.get("href")
+        if not isinstance(href, str):
+            return
+        probe = _decode_probe(href)
+        if probe is None:
+            raise ValueError("unresolvable encoding")
+        ids = set(ENTITY_ID_IN_HREF_RE.findall(probe))
+        self.links.update(ids)
+        if "card" in (attributes.get("class") or "").split():
+            self.cards.update(ids)
+
+
+def _page_links(body: str) -> _PageLinks:
+    links = _PageLinks()
+    links.feed(body)
+    return links
+
+
+def _list_rendered_pages(base_url: str, token: str) -> tuple[set[str], bool]:
+    """Return listed IDs and whether the listing is proven complete."""
+    found: set[str] = set()
+    visited_cursors: set[str] = set()
+    cursor = ""
+    expected_total = None
+    while True:
+        url = f"{base_url}/entities?entity_type=rendered_page&limit=200"
+        if cursor:
+            url += f"&cursor={urllib.parse.quote(cursor, safe='')}"
+        try:
+            data = _request(url, token)
+        except (urllib.error.URLError, json.JSONDecodeError, UnicodeError, ValueError):
+            return found, False
+        if not isinstance(data, dict):
+            return found, False
+        entities = data.get("entities")
+        total = data.get("total")
+        next_cursor = data.get("next_cursor")
+        if (
+            not isinstance(entities, list)
+            or isinstance(total, bool)
+            or not isinstance(total, int)
+            or total < 0
+            or next_cursor is not None
+            and not isinstance(next_cursor, str)
+        ):
+            return found, False
+        if expected_total is None:
+            expected_total = total
+        elif total != expected_total:
+            return found, False
+        for entity in entities:
+            if not isinstance(entity, dict):
+                return found, False
+            entity_id = entity.get("entity_id")
+            if not isinstance(entity_id, str) or not ENTITY_ID_RE.fullmatch(entity_id):
+                return found, False
+            found.add(entity_id)
+        if len(found) > total:
+            return found, False
+        if not next_cursor:
+            return found, len(found) == total
+        if next_cursor in visited_cursors or next_cursor == cursor or not entities:
+            return found, False
+        visited_cursors.add(next_cursor)
+        cursor = next_cursor
+
+
+def cmd_check(args, base_url, token) -> int:
+    """Report pages unreachable from hub cards within two clicks."""
+    if not ENTITY_ID_RE.fullmatch(args.hub):
+        fail("--hub must look like ent_ followed by 24 hex characters")
+    if any(not ENTITY_ID_RE.fullmatch(entity_id) for entity_id in args.exempt):
+        fail("--exempt IDs must look like ent_ followed by 24 hex characters")
+    exempt = set(args.exempt)
+    pages, complete = _list_rendered_pages(base_url, token)
+    if not complete or args.hub not in pages:
+        print(
+            f"checked={len(pages)} orphans=0 exempt={len(exempt)} result=INCONCLUSIVE"
+        )
+        return EXIT_INCONCLUSIVE
+
+    try:
+        hub = _fetch_snapshot(base_url, token, args.hub)
+        if hub.get("entity_type") != "rendered_page" or not isinstance(
+            hub.get("html_body"), str
+        ):
+            fail("hub is not a readable rendered_page; refusing")
+        carded = _page_links(hub["html_body"]).cards & pages
+        reachable = {args.hub} | carded
+        for entity_id in sorted(carded):
+            snapshot = _fetch_snapshot(base_url, token, entity_id)
+            if snapshot.get("entity_type") != "rendered_page" or not isinstance(
+                snapshot.get("html_body"), str
+            ):
+                raise ValueError("unreadable page")
+            reachable.update(_page_links(snapshot["html_body"]).links & pages)
+    except (
+        urllib.error.URLError,
+        json.JSONDecodeError,
+        UnicodeError,
+        TypeError,
+        ValueError,
+    ):
+        print(
+            f"checked={len(pages)} orphans=0 exempt={len(exempt)} result=INCONCLUSIVE"
+        )
+        return EXIT_INCONCLUSIVE
+
+    orphans = sorted(pages - reachable - exempt)
+    for entity_id in orphans:
+        print(f"orphan {entity_id}")
+    result = "FINDINGS" if orphans else "OK"
+    print(
+        f"checked={len(pages)} orphans={len(orphans)} exempt={len(exempt)} result={result}"
+    )
+    return EXIT_FINDINGS if orphans else EXIT_OK
+
+
 def build_card(url: str, title: str, desc: str, badges: list[tuple[str, str]]) -> str:
     """Build a card matching the hub's existing markup contract exactly."""
     esc = html.escape
@@ -292,17 +440,9 @@ def cmd_add(args, base_url, token) -> int:
 
     quoted = urllib.parse.quote(args.page_token, safe="")
     href = f"{base_url}/entities/{args.page}/html?access_token={quoted}"
-    probe = before_body
-    for _ in range(8):
-        normalized = urllib.parse.unquote(html.unescape(probe)).translate(
-            {ord(char): None for char in "\t\n\r"}
-        )
-        if normalized == probe:
-            break
-        probe = normalized
-    else:
+    probe = _decode_probe(before_body)
+    if probe is None:
         fail("hub body has unresolvable encoding; refusing")
-    probe = probe.lower()
     if args.page.lower() in probe:
         fail(
             f"page {args.page} is already referenced in the hub; "
@@ -366,7 +506,7 @@ def _run() -> int:
     ap = _SafeArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Exit codes: 0 ok; 1 verification mismatch; 3 tool error.",
+        epilog="Exit codes: 0 ok; 1 findings; 2 inconclusive; 3 tool error.",
     )
     # No client default: this repo is public, so instance names stay out of it.
     # Pass --profile <name> for ~/.config/neotoma/<name>.env, or set the env vars.
@@ -392,16 +532,26 @@ def _run() -> int:
         action="store_true",
         help="actually write to the live hub (default is a dry run)",
     )
+    check = sub.add_parser("check", help="report pages unreachable from hub cards")
+    check.add_argument("--hub", default=argparse.SUPPRESS)
+    check.add_argument("--exempt", nargs="+", default=[], metavar="ENTITY_ID")
 
     args = ap.parse_args()
-    args.page_token = os.environ.get("PAGE_GUEST_TOKEN", "")
+    if args.cmd == "add":
+        args.page_token = os.environ.get("PAGE_GUEST_TOKEN", "")
     if not args.hub:
         fail("--hub or ATELES_HUB_ENTITY_ID required")
     if not ENTITY_ID_RE.fullmatch(args.hub):
         fail("--hub must look like ent_ followed by 24 hex characters")
+    if args.cmd == "check" and any(
+        not ENTITY_ID_RE.fullmatch(entity_id) for entity_id in args.exempt
+    ):
+        fail("--exempt IDs must look like ent_ followed by 24 hex characters")
     base_url, token = _load_env(args.profile)
 
     try:
+        if args.cmd == "check":
+            return cmd_check(args, base_url, token)
         return cmd_add(args, base_url, token)
     except urllib.error.HTTPError as exc:
         if 300 <= exc.code < 400:
