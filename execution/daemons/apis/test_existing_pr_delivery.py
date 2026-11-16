@@ -74,6 +74,80 @@ def test_admitted_target_reaches_existing_fly_adapter_without_new_branch(monkeyp
     assert not got.ok
 
 
+# A session opens its PR on a branch of its own choosing; a correction round
+# for that PR must still run on Fly, on that same branch.
+SESSION_BRANCHES = ["feat/session-change", "fix-gate-wording", "claude/lens-round-2", "feature/a.b_c"]
+
+
+@pytest.mark.parametrize("branch", SESSION_BRANCHES)
+def test_a_session_branch_is_an_admissible_existing_pr_head(branch):
+    row = snapshot(context=json.dumps({"branch": branch, "base_branch": "main"}))
+    target = delivery.existing_pr_target(row, REPO)
+    assert target == delivery.ExistingPRTarget(12, branch, "main", HEAD)
+
+
+@pytest.mark.parametrize("branch", SESSION_BRANCHES)
+def test_a_session_branch_correction_reaches_fly_on_its_own_branch(monkeypatch, branch):
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
+    monkeypatch.setattr(apis, "_token_for_agent_on_repo", lambda *a: "inert-reader-token")
+    monkeypatch.setattr(artifact_resolver, "_gh_repository_view", lambda *a: (0, json.dumps({"full_name": REPO, "default_branch": "main"})))
+    monkeypatch.setattr(artifact_resolver, "_gh_branch_view", lambda *a: (0, json.dumps({"ref": f"refs/heads/{branch}", "object": {"type": "commit", "sha": HEAD}})))
+    monkeypatch.setattr(artifact_resolver, "_gh_pr_view", lambda *a, **kw: (0, json.dumps({
+        "number": 12, "baseRefName": "main", "headRefName": branch, "headRefOid": HEAD,
+        "headRepository": {"nameWithOwner": REPO}, "state": "OPEN", "isCrossRepository": False}), ""))
+    seen = []
+
+    async def run(skill, prompt, **kw):
+        seen.append(kw["fly_delivery"])
+        return SkillResult(skill, False, 0, "", "", fly_delivery_status="no_changes",
+                           remote_run_id="inert-run")
+
+    monkeypatch.setattr(apis, "run_skill", run)
+    spawn(snapshot(context=json.dumps({"branch": branch, "base_branch": "main"})))
+    assert seen == [{"branch": branch, "base_branch": "main",
+                     "author_name": delivery.FLY_DELIVERY_AUTHOR[0],
+                     "author_email": delivery.FLY_DELIVERY_AUTHOR[1],
+                     "pr_number": "12", "head_sha": HEAD}]
+
+
+@pytest.mark.parametrize("branch,base,reason", [
+    ("feature-x", "feature-x", "is its base branch"),
+    ("main", "develop", "protected or release branch"),
+    ("master", "main", "protected or release branch"),
+    ("release/1.0", "main", "protected or release branch"),
+    ("hotfix/urgent", "main", "protected or release branch"),
+    ("v1.2.3", "main", "protected or release branch"),
+    ("feat/main", "main", "protected or release branch"),
+    ("refs/heads/feat", "main", "not a well-formed branch name"),
+    ("HEAD", "main", "not a well-formed branch name"),
+    ("feat/../main", "main", "not a well-formed branch name"),
+    ("feat/.hidden", "main", "not a well-formed branch name"),
+    ("feat/x.lock", "main", "not a well-formed branch name"),
+    ("feat x", "main", "not a well-formed branch name"),
+])
+def test_a_base_protected_or_malformed_head_branch_is_refused_with_its_reason(monkeypatch, branch, base, reason):
+    row = snapshot(context=json.dumps({"branch": branch, "base_branch": base}))
+    with pytest.raises(delivery.BuildWorktreeError, match=reason):
+        delivery.existing_pr_target(row, REPO)
+    async def never(*a, **kw):
+        raise AssertionError("a refused head branch reached a runner")
+    monkeypatch.setattr(apis, "run_skill", never)
+    assert not spawn(row).ok
+
+
+def test_the_dispatcher_and_runner_agree_on_existing_branch_names():
+    from test_fly_repo_delivery import rd
+    assert delivery.EXISTING_BRANCH_RE.pattern == rd.EXISTING_BRANCH_RE.pattern
+    for name in [*SESSION_BRANCHES, "refs/heads/x", "HEAD", "a/../b", "a//b", "a/.b", "a.lock", "x/"]:
+        row = snapshot(context=json.dumps({"branch": name, "base_branch": "main"}))
+        try:
+            delivery.existing_pr_target(row, REPO)
+            admitted = True
+        except delivery.BuildWorktreeError:
+            admitted = False
+        assert admitted == rd.existing_branch_name_ok(name), name
+
+
 @pytest.fixture
 def admitted_reader(monkeypatch):
     answer = {"number": 12, "baseRefName": "main", "headRefName": BRANCH,

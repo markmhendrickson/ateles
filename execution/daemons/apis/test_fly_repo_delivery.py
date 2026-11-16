@@ -1659,3 +1659,29 @@ def test_a_refused_comment_raises_pr_failed_without_its_text(monkeypatch):
     with pytest.raises(rd.RepoWorkError) as exc:
         rd.post_pr_comment(repository="owner/repo", number=5, token="tok", body="Round text.")
     assert exc.value.category == rd.PR_FAILED and "Round text." not in str(exc.value)
+
+
+# An existing PR's head may be a session's own branch, not only a builder
+# branch; a NEW delivery's branch is still only the builder shape.
+@pytest.mark.parametrize("branch", ["feat/session-change", "fix-gate-wording", "claude/lens-round-2"])
+def test_an_existing_pr_head_may_be_a_session_branch_but_a_new_branch_may_not(branch):
+    assert rd.check_branch(branch, existing=True) == branch
+    assert rd.check_push_branch(branch, "main", existing=True) == branch
+    with pytest.raises(rd.RepoWorkError, match="builder pattern"):
+        rd.check_branch(branch)
+
+
+@pytest.mark.parametrize("branch,default", [
+    ("main", "main"), ("trunk", "main"), ("feature-x", "feature-x"), ("release-2", "main"),
+    ("feat/master", "main"), ("hotfix/x", "main"), ("2.0", "main"),
+])
+def test_an_existing_pr_head_on_a_default_or_protected_branch_is_never_pushed(branch, default):
+    with pytest.raises(rd.RepoWorkError) as exc:
+        rd.check_push_branch(branch, default, existing=True)
+    assert exc.value.category == rd.PUSH_REFUSED
+
+
+@pytest.mark.parametrize("branch", ["refs/heads/x", "HEAD", "a/../b", "a//b", "a/.b", "a.lock", "x/", "a b", ""])
+def test_an_existing_pr_head_that_is_not_a_plain_branch_name_is_refused(branch):
+    with pytest.raises(rd.RepoWorkError, match="builder pattern"):
+        rd.check_branch(branch, existing=True)

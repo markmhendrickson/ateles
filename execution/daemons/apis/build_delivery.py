@@ -135,6 +135,15 @@ def issue_key(
 
 
 
+# An existing PR's head may be any well-formed branch of the same repository,
+# not only a builder branch (a session opens PRs on branches of its own
+# choosing). Kept equal to the Fly runner's ``repo_delivery.EXISTING_BRANCH_RE``,
+# which re-checks the name, the protected names and the live PR independently.
+EXISTING_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", re.ASCII)
+_PROTECTED_BRANCH_RE = re.compile(
+    r"(?i)(?:main|master|trunk|develop|release[/_-].*|releases/.*|hotfix/.*|v?[0-9]+(?:\.[0-9]+)*)")
+
+
 @dataclass(frozen=True)
 class ExistingPRTarget:
     number: int
@@ -174,13 +183,17 @@ def existing_pr_target(snapshot: Mapping[str, object], repository: str | None):
         raise BuildWorktreeError("an existing PR correction needs branch and base_branch context")
     branch, base = context["branch"], context["base_branch"]
     # The runner independently validates refs and the live same-repository PR.
-    if (not isinstance(branch, str) or not re.fullmatch(r"(?:cicada|codex)/[A-Za-z0-9][A-Za-z0-9._/-]*", branch)
+    if not isinstance(base, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", base) or ".." in base:
+        raise BuildWorktreeError("the existing PR correction base branch is not permitted")
+    if (not isinstance(branch, str) or not EXISTING_BRANCH_RE.fullmatch(branch)
+            or branch.startswith(("refs/", "HEAD"))
             or any(x in branch for x in ("..", "//")) or branch.endswith(("/", ".", ".lock"))
-            or any(part.startswith(".") or part.endswith(".lock") for part in branch.split("/"))
-            or not isinstance(base, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", base)
-            or ".." in base or branch == base
-            or re.fullmatch(r"(?i)(?:main|master|trunk|develop|release[/_-].*|releases/.*|hotfix/.*|v?[0-9]+(?:\.[0-9]+)*)", branch.split("/", 1)[1])):
-        raise BuildWorktreeError("the existing PR correction branch or base is not permitted")
+            or any(part.startswith(".") or part.endswith(".lock") for part in branch.split("/"))):
+        raise BuildWorktreeError("the existing PR correction head branch is not a well-formed branch name")
+    if branch == base:
+        raise BuildWorktreeError("the existing PR correction head branch is its base branch")
+    if any(_PROTECTED_BRANCH_RE.fullmatch(name) for name in (branch, branch.split("/", 1)[-1])):
+        raise BuildWorktreeError("the existing PR correction head branch is a protected or release branch")
     return ExistingPRTarget(number, branch, base, head)
 
 # ── In-flight builds ─────────────────────────────────────────────────────────
