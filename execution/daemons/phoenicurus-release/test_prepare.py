@@ -527,3 +527,5 @@ def test_prompt_forbids_hook_bypass_and_names_skip_tests():
     p = prepare._build_agent_prompt("v0.19.0", 3)
     assert "--no-verify" in p and "Never skip git hooks" in p
     assert 'SKIP_TESTS=1 SKIP_TESTS_REASON="<why>"' in p
+    # The guard is an allowlist; the brief names the plain-git shape it allows.
+    assert "plain `git` command" in p and "no wrapper such as `env`" in p

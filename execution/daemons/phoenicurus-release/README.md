@@ -21,12 +21,23 @@ Operator-approved release executor for Neotoma. Two halves:
 
 The agent never skips the release checkout's git hooks. `spawn_prepare_agent`
 passes it `--settings` with a PreToolUse guard,
-`.claude/hooks/git_hook_bypass_guard.py`, which refuses `--no-verify`,
-`git commit -n`, Husky and every `GIT_CONFIG*` environment override (plus
-`GIT_DIR`, `GIT_WORK_TREE`, `GIT_EXEC_PATH`), and any write, unset, rename or
-removal of `core.hooksPath` in any scope, including the shell-quoted,
-`env -S` and inline-program forms it can inspect. Reads of `core.hooksPath`
-stay allowed. The agent's cwd is the Neotoma checkout, so this repository's own
+`.claude/hooks/git_hook_bypass_guard.py`. The guard is an allowlist: the agent
+may run only a plain `git` (optionally `-C <path>`) with a subcommand a release
+prep needs (`ALLOWED_SUBCOMMANDS` in the guard: status, diff, log, show,
+fetch, add, commit, push, checkout, switch, merge, worktree and a few reads),
+with no hook-skipping option (`--no-verify`, `commit -n`,
+`--no-post-rewrite`), no `git config` write (reads stay allowed), no tag
+creation, and no `GIT_*` or `HUSKY` variable set anywhere in the command.
+Everything else around git is refused: wrappers (`env`, `xargs`, `timeout`),
+path-qualified or variable-named git binaries, other global options (`-c`,
+`--config-env`, `--git-dir`, `--work-tree`, `--exec-path`), aliases, command
+and process substitution, and inline interpreter programs, heredocs or pipes
+that feed git to a shell. Commands that do not involve git are not inspected.
+An earlier denylist was bypassed in each of three review rounds, which is why
+the guard now allows a known surface instead. It is a tripwire, not a
+sandbox: a script written to disk and run can still reach git.
+
+The agent's cwd is the Neotoma checkout, so this repository's own
 `.claude/settings.json` does not reach it; `--settings` is the only way the
 guard is loaded. If the guard file is missing, prepare refuses to spawn the
 agent. The sanctioned way to skip the test stage is the hook's own

@@ -974,7 +974,11 @@ CRITICAL CONSTRAINTS — read carefully:
 - Work in an isolated git worktree off origin/main. Do NOT disturb the operator's
   main checkout or any unrelated uncommitted changes.
 - Never skip git hooks: no `--no-verify`, no `git commit -n`, no `HUSKY=0`, no
-  `core.hooksPath` override. A guard refuses them. If the pre-commit TEST stage
+  `core.hooksPath` override. Run git as a plain `git` command (`git -C <path>
+  ...` is fine): no wrapper such as `env`, `xargs` or `timeout`, no alias, no
+  `git config` write, no `$(git ...)` substitution and no git inside
+  `bash -c` or `python -c`. A guard allows only the git commands a release
+  prep needs and refuses everything else. If the pre-commit TEST stage
   cannot pass for a reason unrelated to the release diff, commit with the hook's
   own escape hatch, which still runs type-check, lint and format:
   `SKIP_TESTS=1 SKIP_TESTS_REASON="<why>" git commit ...`
