@@ -4787,3 +4787,32 @@ def test_cli_model_selector_contract_refuses_invalid_inputs_before_dispatch(
 @pytest.mark.parametrize("model", [None, "gpt-6-sol", "gpt-5.6-terra", "provider/custom-v1:latest"])
 def test_model_selector_contract_preserves_omission_and_valid_identifiers(model):
     assert hlr.validate_model_selector(model) == model
+
+
+def test_run_one_passes_the_repo_qualified_pr_to_dispatch(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+):
+    """Spend attribution (ent_e5259618cae6cafd4be120e0): the interactive lens
+    route hands ``owner/repo#N`` to ``dispatch_role.dispatch``, which records it
+    as ``pr`` on the tier-ledger rows (test_dispatch_attribution covers that
+    leg)."""
+    _install_minimal_lens_worktree(monkeypatch, target)
+    inner = _delivery_denied_dispatch(target)
+    seen: list[dict] = []
+
+    async def _dispatch(role, task, **kwargs):
+        seen.append(kwargs)
+        return await inner(role, task, **kwargs)
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
+    monkeypatch.setattr(hlr, "current_pr_head", lambda **kwargs: SAMPLE_HEAD)
+
+    import asyncio
+
+    asyncio.run(hlr.run_one(
+        target, provider="codex", post=False, dry_run=False,
+        repo_worktree_name="ateles", scratch_root=tmp_path,
+        brief_path=brief_file, timeout=None,
+    ))
+    assert len(seen) == 1
+    assert seen[0]["pr"] == f"{target.repo}#{target.pr}"

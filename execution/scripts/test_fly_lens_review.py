@@ -243,3 +243,21 @@ def test_default_out_dir_is_not_cwd(tmp_path, monkeypatch):
     assert rc == 0
     assert not list(tmp_path.glob("fly-lens-review-*"))
     assert list((tmp_path / "home" / ".ateles-work" / "fly-lens-review").glob("*/summary.json"))
+
+
+def test_main_passes_the_repo_qualified_pr_to_dispatch_role(monkeypatch, tmp_path):
+    """Spend attribution (ent_e5259618cae6cafd4be120e0): the natural call path
+    (main -> run_lens -> dispatch_once -> dispatch_role.py) carries
+    ``--pr owner/repo#N``, so the tier-ledger rows name the reviewed PR."""
+    seen = []
+
+    class P:
+        returncode, stdout, stderr = 0, json.dumps(ok_env()), ""
+
+    monkeypatch.setattr(f.subprocess, "run", lambda cmd, **kw: seen.append(cmd) or P())
+    rc = f.main(["--repo", "o/r", "--pr", "7", "--lens", "pm", "--task-entity-id",
+                 "ent_x", "--out-dir", str(tmp_path)],
+                head_resolver=lambda r, p: HEAD, poster=lambda **kw: (True, "posted"))
+    assert rc == 0 and len(seen) == 1
+    cmd = seen[0]
+    assert cmd[cmd.index("--pr") + 1] == "o/r#7"

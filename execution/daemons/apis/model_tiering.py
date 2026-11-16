@@ -1178,6 +1178,14 @@ def usage_totals(
 SUMMARY_KEY_FIELDS: tuple[str, ...] = (
     "provider", "model", "caller_kind", "caller", "task_entity_id", "pr",
 )
+# Which model a summary group's ``model`` names: the one the harness reported
+# on a usage row, else the one the dispatch requested.
+MODEL_REPORTED = "reported"
+MODEL_REQUESTED = "requested"
+# A summary group is either a dispatch's (start row plus the usage rows joined
+# to it by ``dispatch_id``) or usage rows whose start row is not in the ledger.
+GROUP_DISPATCH = "dispatch"
+GROUP_USAGE_ONLY = "usage_without_dispatch"
 NULL_KEY = None
 
 
@@ -1189,6 +1197,14 @@ def _ledger_lines() -> list[str]:
         return []
     except (OSError, UnicodeError) as exc:
         raise LedgerReadError(path, exc) from exc
+
+
+def _row_time(row: dict) -> datetime | None:
+    try:
+        when = datetime.fromisoformat(str(row["ts"]))
+    except (ValueError, KeyError, TypeError):
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
 
 
 def iter_ledger_rows(*, since: datetime | None = None):
@@ -1205,12 +1221,9 @@ def iter_ledger_rows(*, since: datetime | None = None):
             continue
         if not isinstance(row, dict):
             continue
-        try:
-            when = datetime.fromisoformat(str(row["ts"]))
-        except (ValueError, KeyError, TypeError):
+        when = _row_time(row)
+        if when is None:
             continue
-        if when.tzinfo is None:
-            when = when.replace(tzinfo=timezone.utc)
         if since is not None and when < since:
             continue
         yield row
@@ -1220,10 +1233,23 @@ def attribution_summary(*, since_hours: float | None = None) -> dict:
     """Dispatches and tokens per provider/model/caller/task/PR from the ledger.
 
     ``{"since_hours": h, "dispatch_rows": n, "usage_rows": n, "groups": [
-    {"provider", "model", "caller_kind", "caller", "task_entity_id", "pr",
+    {"group", "provider", "model", "model_label", "requested_model",
+     "caller_kind", "caller", "task_entity_id", "pr",
      "dispatches": n, "usage_rows": n,
      "tokens": {field: {"sum": int | None, "reported_rows": n, "null_rows": n}}},
     ...]}``, groups ordered by dispatch count (descending).
+
+    One dispatch is one group. A usage row is joined to its start row by
+    ``dispatch_id`` and counted under the start row's keys, so a dispatch that
+    requested ``opus`` and was reported as ``claude-opus-5`` is not split in
+    two. A usage row is joined even when its start row is older than the
+    window (only rows inside the window are counted). The group's ``model`` is
+    the model the harness reported on its usage rows when it named one
+    (``model_label: "reported"``; several are joined with ", "), else the
+    requested one (``"requested"``); ``requested_model`` is always the start
+    row's. Usage rows with no matching start row (none recorded, or written
+    before ``dispatch_id`` existed) still count, under ``group:
+    "usage_without_dispatch"`` and their own row's keys.
 
     ``dispatches`` counts start rows (one per provider attempt); token totals
     come from the end-of-dispatch usage rows. A key field nobody recorded —
@@ -1231,14 +1257,11 @@ def attribution_summary(*, since_hours: float | None = None) -> dict:
     ``None`` in the group key, never a guessed value. For tokens, ``sum`` is
     ``None`` when no row reported the field, a measured zero stays ``0``, and
     ``null_rows`` counts usage rows that did not report it, so unknown is never
-    folded into zero. ``model`` is the row's own model: the requested model on
-    a start row, the reported model (when the harness named one) on a usage row.
+    folded into zero.
     """
     since = None
     if since_hours is not None:
         since = datetime.now(timezone.utc) - timedelta(hours=since_hours)
-    groups: dict[tuple, dict] = {}
-    dispatch_rows = usage_rows = 0
 
     def _key_value(row: dict, name: str):
         value = row.get(name)
@@ -1246,32 +1269,61 @@ def attribution_summary(*, since_hours: float | None = None) -> dict:
             return normalize_pr(value)
         return _clean(value)
 
+    def _key(row: dict) -> tuple:
+        return tuple(_key_value(row, name) for name in SUMMARY_KEY_FIELDS)
+
     def _number(value: object) -> bool:
         return isinstance(value, (int, float)) and not isinstance(value, bool)
 
-    for row in iter_ledger_rows(since=since):
+    rows = list(iter_ledger_rows())
+    # Every start row's keys, whether or not it falls in the window, so a usage
+    # row in the window still joins a dispatch that started before it.
+    start_keys: dict[str, tuple] = {}
+    for row in rows:
+        if (row.get("event") or DISPATCH_EVENT) == DISPATCH_EVENT:
+            dispatch_id = _clean(row.get("dispatch_id"))
+            if dispatch_id is not None:
+                start_keys[dispatch_id] = _key(row)
+
+    groups: dict[tuple, dict] = {}
+    dispatch_rows = usage_rows = 0
+    for row in rows:
+        if since is not None and _row_time(row) < since:  # type: ignore[operator]
+            continue
         event = row.get("event") or DISPATCH_EVENT  # the oldest rows had no event
         if event not in (DISPATCH_EVENT, USAGE_EVENT):
             continue
-        key = tuple(_key_value(row, name) for name in SUMMARY_KEY_FIELDS)
-        entry = groups.get(key)
+        if event == DISPATCH_EVENT:
+            kind, key = GROUP_DISPATCH, _key(row)
+        else:
+            joined = start_keys.get(_clean(row.get("dispatch_id")) or "")
+            if joined is not None:
+                kind, key = GROUP_DISPATCH, joined
+            else:
+                kind, key = GROUP_USAGE_ONLY, _key(row)
+        entry = groups.get((kind, key))
         if entry is None:
-            entry = dict(zip(SUMMARY_KEY_FIELDS, key))
+            entry = {"group": kind, **dict(zip(SUMMARY_KEY_FIELDS, key))}
+            entry["requested_model"] = entry["model"] if kind == GROUP_DISPATCH else None
             entry.update({
                 "dispatches": 0,
                 "usage_rows": 0,
+                "_reported": set(),
                 "tokens": {
                     name: {"sum": None, "reported_rows": 0, "null_rows": 0}
                     for name in USAGE_TOKEN_FIELDS
                 },
             })
-            groups[key] = entry
+            groups[(kind, key)] = entry
         if event == DISPATCH_EVENT:
             dispatch_rows += 1
             entry["dispatches"] += 1
             continue
         usage_rows += 1
         entry["usage_rows"] += 1
+        row_model = _clean(row.get("model"))
+        if row_model is not None and _clean(row.get("model_source")) == MODEL_REPORTED:
+            entry["_reported"].add(row_model)
         for name in USAGE_TOKEN_FIELDS:
             value = row.get(name)
             field_entry = entry["tokens"][name]
@@ -1280,9 +1332,19 @@ def attribution_summary(*, since_hours: float | None = None) -> dict:
                 field_entry["reported_rows"] += 1
             else:
                 field_entry["null_rows"] += 1
+
+    for entry in groups.values():
+        reported = sorted(entry.pop("_reported"))
+        if reported:
+            entry["model"] = ", ".join(reported)
+            entry["model_label"] = MODEL_REPORTED
+        else:
+            # No harness-reported model: the dispatch's requested model (a
+            # usage-only row falls back to it too); nothing recorded is None.
+            entry["model_label"] = MODEL_REQUESTED if entry["model"] is not None else None
     ordered = sorted(
         groups.values(),
-        key=lambda g: (-g["dispatches"], -g["usage_rows"],
+        key=lambda g: (-g["dispatches"], -g["usage_rows"], g["group"],
                        tuple(str(g[n]) for n in SUMMARY_KEY_FIELDS)),
     )
     return {
@@ -1327,12 +1389,17 @@ def render_attribution_summary(report: dict) -> str:
         + (f", last {window:g}h" if window is not None else ", all rows")
         + f": {report['dispatch_rows']} dispatches, {report['usage_rows']} usage rows",
     ]
-    header = ("provider", "model", "caller_kind", "caller", "task", "pr",
-              "dispatches", "input_tokens", "output_tokens", "total_tokens")
+    header = ("group", "provider", "model", "model_is", "caller_kind", "caller",
+              "task", "pr", "dispatches", "input_tokens", "output_tokens",
+              "total_tokens")
     rows = [header]
     for g in report["groups"]:
+        group_label = (
+            "usage, no dispatch row" if g["group"] == GROUP_USAGE_ONLY else "dispatch"
+        )
         rows.append((
-            _cell(g["provider"]), _cell(g["model"]), _cell(g["caller_kind"]),
+            group_label, _cell(g["provider"]), _cell(g["model"]),
+            _cell(g.get("model_label")), _cell(g["caller_kind"]),
             _cell(g["caller"]), _cell(g["task_entity_id"]), _cell(g["pr"]),
             str(g["dispatches"]), _tok(g["tokens"]["input_tokens"]),
             _tok(g["tokens"]["output_tokens"]), _tok(g["tokens"]["total_tokens"]),
