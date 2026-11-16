@@ -11,7 +11,7 @@
       "label": {"type": "string", "description": "Human label for the payment (handler or profile label)."},
       "payment_type": {"type": "string", "description": "Rail: btc or wise."},
       "amount_eur": {"type": "number", "description": "Amount in euros."},
-      "amount_btc": {"type": "number", "description": "Amount in BTC, for BTC payments."},
+      "amount_btc": {"type": "string", "description": "Amount in BTC, for BTC payments."},
       "btc_address": {"type": "string", "description": "Destination address. Payee detail, never identity: many payments share one address."},
       "txid": {"type": "string", "description": "On-chain transaction id, for BTC payments."},
       "status": {"type": "string", "description": "Outcome status reported by the rail (e.g. sent, failed)."},

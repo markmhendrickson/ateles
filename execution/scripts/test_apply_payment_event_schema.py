@@ -76,6 +76,29 @@ def test_definition_keeps_existing_fields_and_adds_the_new_ones():
     assert set(DEF["reducer_config"]["merge_policies"]) == set(fields)
 
 
+# The live version 1.0 field types, read from prod on 2026-11-16 by the dry run.
+# --apply refuses any type change, so the file must keep every one of them.
+LIVE_V1_TYPES = {
+    "label": "string",
+    "payment_type": "string",
+    "amount_eur": "number",
+    "amount_btc": "string",
+    "btc_address": "string",
+    "txid": "string",
+    "status": "string",
+    "payment_date": "date",
+    "memo_policy": "string",
+    "network": "string",
+    "fee_sats": "number",
+    "notes": "string",
+}
+
+
+def test_definition_keeps_every_live_field_type():
+    fields = DEF["schema_definition"]["fields"]
+    assert {n: fields[n]["type"] for n in LIVE_V1_TYPES} == LIVE_V1_TYPES
+
+
 # --- dry run ---------------------------------------------------------------
 
 def test_dry_run_prints_a_field_level_diff_and_posts_nothing(capsys):
