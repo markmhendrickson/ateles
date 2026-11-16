@@ -82,6 +82,40 @@ def test_credit_balance_output_is_pre_submission_failure(fake_cli):
     assert "Credit balance is too low" in result["error"]
 
 
+def test_credit_balance_on_stderr_is_pre_submission_failure(fake_cli):
+    _, reply = fake_cli
+    reply["stderr"] = "Credit balance is too low\n"
+
+    result = _handler().execute({"summary": "Yoga"})
+
+    assert result["status"] == "failed"
+    assert result["failure_stage"] == "pre_submission"
+    assert "Credit balance is too low" in result["error"]
+
+
+def test_payment_result_wins_over_credit_balance_text(fake_cli):
+    _, reply = fake_cli
+    reply["stdout"] = 'PAYMENT_RESULT: {"status": "failed", "error": "synthetic"}\n'
+    reply["stderr"] = "Credit balance is too low\n"
+
+    result = _handler().execute({"summary": "Yoga"})
+
+    assert result["error"] == "synthetic"
+    assert "failure_stage" not in result
+
+
+def test_credit_balance_after_other_output_is_not_called_pre_submission(fake_cli):
+    # A refusal that follows other output may come after a wallet tool call,
+    # so the handler must not claim nothing was sent.
+    _, reply = fake_cli
+    reply["stdout"] = "Calling the wallet transfer tool\nCredit balance is too low\n"
+
+    result = _handler().execute({"summary": "Yoga"})
+
+    assert result["status"] == "failed"
+    assert "failure_stage" not in result
+
+
 def test_metered_names_match_skill_runner():
     """The local tuple must stay equal to the Apis runner's list.
 

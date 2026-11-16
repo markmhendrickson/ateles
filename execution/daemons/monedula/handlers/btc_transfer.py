@@ -43,6 +43,12 @@ _METERED_CREDENTIALS = (
 _CREDIT_BALANCE_TOO_LOW = "Credit balance is too low"
 
 
+def _refused_before_any_turn(stdout: str, stderr: str) -> bool:
+    """True only when the CLI printed its credit refusal and nothing else."""
+    parts = [text.strip() for text in (stdout, stderr) if text.strip()]
+    return len(parts) == 1 and parts[0].rstrip(".") == _CREDIT_BALANCE_TOO_LOW
+
+
 class BtcTransferHandler(PaymentHandler):
     """Generic BTC transfer handler parameterised by a PaymentProfile."""
 
@@ -127,10 +133,11 @@ class BtcTransferHandler(PaymentHandler):
         )
 
         payment_result = _parse_payment_result(output)
-        if payment_result is None and _CREDIT_BALANCE_TOO_LOW in (
-            output + (result.stderr or "")
-        ):
-            # The CLI stopped before reaching the wallet, so nothing was sent.
+        if payment_result is None and _refused_before_any_turn(output, result.stderr or ""):
+            # The CLI's whole output is its credit refusal: it stopped before the
+            # first model turn, so no wallet tool can have run and nothing was sent.
+            # Any other output means a turn may have run, so the outcome is unknown
+            # and falls through to the failure below with no pre_submission claim.
             log.error(f"[{self.name}] claude CLI refused: {_CREDIT_BALANCE_TOO_LOW}")
             return {
                 "status": "failed",
