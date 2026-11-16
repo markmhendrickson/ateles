@@ -2,7 +2,9 @@
 
 A Fly job's agent reaches Neotoma through this forwarder instead of holding
 the role's AAuth key. The forwarder listens on 127.0.0.1, accepts only the
-MCP endpoint (``/mcp``), forwards a fixed set of request headers, adds the
+MCP endpoint (``/mcp``) and ``GET /sources/<id>/content`` (one uploaded
+file's bytes, with ``<id>`` a lowercase UUID and no query string), forwards
+a fixed set of request headers, adds the
 HTTP message signature headers produced by a signing function the caller
 supplies, and streams the upstream response back as it arrives.
 
@@ -36,6 +38,14 @@ from urllib.parse import urlsplit
 log = logging.getLogger("neotoma_proxy")
 
 MCP_PATH = "/mcp"
+# The one non-MCP route: the bytes of one uploaded source. No MCP tool returns
+# a file's bytes, so a job that must read an upload fetches this instead. The
+# id must be a lowercase UUID, so no dot, slash, percent-escape or query string
+# can reach upstream; anything else, and any method but GET, answers 404.
+SOURCE_CONTENT_PATH = re.compile(
+    r"/sources/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/content"
+)
+SOURCE_CONTENT_METHOD = "GET"
 MAX_BODY_BYTES = 8 * 1024 * 1024
 READ_CHUNK = 65536
 ALLOWED_METHODS = ("GET", "POST", "DELETE")
@@ -265,7 +275,7 @@ def health_check(
 
 
 class NeotomaSigningProxy:
-    """Forward ``/mcp`` on a loopback port to ``upstream_base + "/mcp"``."""
+    """Forward ``/mcp`` (and ``GET /sources/<id>/content``) on a loopback port to ``upstream_base``."""
 
     def __init__(
         self,
@@ -370,12 +380,20 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             if peer_uid != allowed_uid:
                 log.warning("neotoma proxy refused a connection from uid %s", peer_uid)
                 return self._reject(403, method, path)
-        if path != MCP_PATH:
+        if path == MCP_PATH:
+            upstream_path = MCP_PATH
+            upstream_url = self.proxy.upstream_url
+            if sep:
+                return self._reject(400, method, path)
+            if method not in ALLOWED_METHODS:
+                return self._reject(405, method, path, extra={"Allow": ", ".join(ALLOWED_METHODS)})
+        elif SOURCE_CONTENT_PATH.fullmatch(path) and not sep and method == SOURCE_CONTENT_METHOD:
+            upstream_path = path
+            upstream_url = self.proxy.upstream_base + path
+        else:
+            # Unknown paths, and a source path with a query string or any
+            # other method, look the same as a missing route.
             return self._reject(404, method, path)
-        if sep:
-            return self._reject(400, method, path)
-        if method not in ALLOWED_METHODS:
-            return self._reject(405, method, path, extra={"Allow": ", ".join(ALLOWED_METHODS)})
 
         length_header = self.headers.get("Content-Length")
         if length_header is None:
@@ -404,14 +422,14 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         if method == "POST":
             headers["content-type"] = content_type
         signed_body = body if method == "POST" and body else None
-        signature = self.proxy._sign(method, self.proxy.upstream_url, signed_body, content_type)
+        signature = self.proxy._sign(method, upstream_url, signed_body, content_type)
         for name, value in signature.items():
             headers[name] = value
 
         conn = None
         try:
             conn = self.proxy._connect()
-            conn.request(method, MCP_PATH, body=body if method == "POST" else None, headers=headers)
+            conn.request(method, upstream_path, body=body if method == "POST" else None, headers=headers)
             resp = conn.getresponse()
         except (OSError, http.client.HTTPException):
             if conn is not None:
