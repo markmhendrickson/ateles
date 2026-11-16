@@ -28,25 +28,25 @@ log = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.parent  # ateles repo root
 
-# Metered API keys the claude CLI would bill instead of the subscription login.
-# Monedula loads the shared dotenv, which defines them, so they are dropped from
-# the CLI's environment. Mirrors ``_METERED_CREDENTIALS`` in
-# ``execution/daemons/apis/skill_runner.py`` (a test asserts they are equal);
-# importing that module here would pull in the whole Apis runner.
+# Credentials the claude CLI would use instead of the subscription login.
+# Monedula loads the shared dotenv, so they are dropped from the CLI's
+# environment. Covers ``_METERED_CREDENTIALS`` in
+# ``execution/daemons/apis/skill_runner.py`` (a test asserts it is a subset;
+# importing that module here would pull in the whole Apis runner) plus
+# ``ANTHROPIC_AUTH_TOKEN``, a custom authorization credential the CLI also
+# honours. The Apis runner never passes that one, because its children start
+# from an allowlist; this handler starts from the daemon's environment.
 _METERED_CREDENTIALS = (
     "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
     "OPENAI_API_KEY",
     "CURSOR_API_KEY",
 )
 
-# CLI output meaning the metered account refused the run before any tool call.
+# CLI output meaning the metered account refused a model call. ``--print`` does
+# not show tool calls, so this text cannot prove that no wallet call ran before
+# it: the outcome stays unknown (docs/foundation/payments.md, the unknown case).
 _CREDIT_BALANCE_TOO_LOW = "Credit balance is too low"
-
-
-def _refused_before_any_turn(stdout: str, stderr: str) -> bool:
-    """True only when the CLI printed its credit refusal and nothing else."""
-    parts = [text.strip() for text in (stdout, stderr) if text.strip()]
-    return len(parts) == 1 and parts[0].rstrip(".") == _CREDIT_BALANCE_TOO_LOW
 
 
 class BtcTransferHandler(PaymentHandler):
@@ -133,19 +133,20 @@ class BtcTransferHandler(PaymentHandler):
         )
 
         payment_result = _parse_payment_result(output)
-        if payment_result is None and _refused_before_any_turn(output, result.stderr or ""):
-            # The CLI's whole output is its credit refusal: it stopped before the
-            # first model turn, so no wallet tool can have run and nothing was sent.
-            # Any other output means a turn may have run, so the outcome is unknown
-            # and falls through to the failure below with no pre_submission claim.
+        if payment_result is None and _CREDIT_BALANCE_TOO_LOW in (
+            output + (result.stderr or "")
+        ):
+            # Named in the error so the operator sees why, but with no
+            # pre_submission claim: a wallet call before the refusal cannot be
+            # ruled out, so the chain is checked before any manual payment.
             log.error(f"[{self.name}] claude CLI refused: {_CREDIT_BALANCE_TOO_LOW}")
             return {
                 "status": "failed",
                 "handler": self.name,
                 "error": (
-                    f"claude CLI refused before submission: {_CREDIT_BALANCE_TOO_LOW}"
+                    f"claude CLI refused ({_CREDIT_BALANCE_TOO_LOW}); outcome unknown, "
+                    "check the chain before any retry or manual payment"
                 ),
-                "failure_stage": "pre_submission",
             }
         if payment_result is None:
             log.error(
