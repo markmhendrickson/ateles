@@ -101,6 +101,9 @@ class PendingItem:
     # key payments.md requires. Never contains raw payee/account data.
     obligation: str = ""
     generation: int = 0
+    # Entity id of the payment_approval record that authorized this item, when
+    # the payment_approval channel read one back. Identity for its payment_event.
+    approval_id: str = ""
 
 
 @dataclass

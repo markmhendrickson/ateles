@@ -1568,6 +1568,64 @@ def _resolve_item_session(item: Any, state: str) -> None:
         log.error(f"could not record session {state}: {exc}")
 
 
+# Result keys copied onto a payment_event: fields its schema declares that a
+# handler result may carry. Identity fields come from the queued item, never
+# the result, and free text such as ``error`` is not copied.
+_PAYMENT_EVENT_RESULT_FIELDS = (
+    "payment_type",
+    "amount_eur",
+    "amount_btc",
+    "btc_address",
+    "txid",
+    "memo_policy",
+    "network",
+    "fee_sats",
+)
+
+
+def _record_payment_event(item: Any, result: Any, status: str) -> None:
+    """Record one approved item's outcome as a payment_event. Never raises.
+
+    Runs after the journal outcome is recorded; the payment outcome, the
+    journal entry and the operator alert never depend on it. Written once,
+    through ``payment_event.store`` (the one store path), with no retry: a
+    failed store is logged and the tick continues.
+    """
+    try:
+        import payment_event
+        import payment_journal
+        from consent_email import event_id_of
+
+        approval_id = str(getattr(item, "approval_id", "") or "").strip()
+        eid = event_id_of(item.match)
+        session_keys = (
+            [payment_journal.session_key(item.handler_name, eid)] if eid else []
+        )
+        if not approval_id and not session_keys:
+            log.warning(
+                f"payment_event_not_recorded {item.handler_name} "
+                f"[{str(item.obligation)[:12]}]: no approval id or session key"
+            )
+            return
+        fields: dict[str, Any] = {"label": item.label, "status": status}
+        if isinstance(result, dict):
+            for name in _PAYMENT_EVENT_RESULT_FIELDS:
+                if result.get(name) not in (None, ""):
+                    fields[name] = result[name]
+        fields.setdefault("amount_eur", item.amount_eur)
+        payment_event.store(
+            fields,
+            payment_date=item.payment_date,
+            approval_id=approval_id or None,
+            session_keys=session_keys,
+        )
+    except Exception as exc:  # noqa: BLE001 - the record never alters the payment
+        log.error(
+            f"payment_event_store_failed {getattr(item, 'handler_name', '?')} "
+            f"[{str(getattr(item, 'obligation', ''))[:12]}]: {type(exc).__name__}"
+        )
+
+
 def _resolve_sessions(triggered: list[tuple], state: str) -> None:
     import payment_journal
     from consent_email import event_id_of, journal_path
@@ -2036,6 +2094,7 @@ def main() -> bool:
                 dedupe_key=f"monedula:payment_outcome:{item.obligation}",
                 email_eligible=True,
             )
+            _record_payment_event(item, result, status)
             log.info(f"{label} result: {result}")
             if _job:
                 _job.finished(f"{handler.name} payment executed")
