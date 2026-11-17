@@ -46,12 +46,20 @@ def test_no_identity_is_refused():
 
 def test_store_posts_the_strict_body(monkeypatch):
     calls = []
-    monkeypatch.setattr(payment_approval, "_request",
-                        lambda m, p, b=None: calls.append((m, p, b)) or {})
+    def request(method, path, body=None):
+        calls.append((method, path, body))
+        if method == "POST":
+            return {"entity_ids": ["ent_synthetic_event"]}
+        return {"snapshot": {"snapshot": {
+            "approval_id": "ent_a", "payment_date": "2030-01-02", "status": "sent"
+        }}}
+
+    monkeypatch.setattr(payment_approval, "_request", request)
     payment_event.store(FIELDS, payment_date="2030-01-02", approval_id="ent_a")
-    ((method, path, body),) = calls
+    (method, path, body), (read_method, read_path, _) = calls
     assert (method, path) == ("POST", "/store") and body["strict"] is True
     assert body["entities"][0]["approval_id"] == "ent_a"
+    assert (read_method, read_path) == ("GET", "/entities/ent_synthetic_event")
 
 
 def test_session_keys_are_trimmed_before_they_become_identity():

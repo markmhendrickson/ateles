@@ -69,5 +69,17 @@ def store_body(
 
 
 def store(fields: dict[str, Any], **identity: Any) -> Any:
-    """Store one payment_event. Raises on a missing identity or a failed request."""
-    return payment_approval._request("POST", "/store", store_body(fields, **identity))
+    """Store one payment_event and verify its identity and outcome by reading it."""
+    body = store_body(fields, **identity)
+    response = payment_approval._request("POST", "/store", body)
+    ids = response.get("entity_ids") if isinstance(response, dict) else None
+    if not isinstance(ids, list) or len(ids) != 1 or not isinstance(ids[0], str) or not ids[0]:
+        raise PaymentEventError("payment_event store returned no entity id")
+    read = payment_approval._request("GET", f"/entities/{ids[0]}")
+    snap = payment_approval._snapshot(read) if isinstance(read, dict) else {}
+    written = body["entities"][0]
+    identity_field = "approval_id" if written.get("approval_id") else "primary_session_key"
+    for field in (identity_field, "payment_date", "status"):
+        if snap.get(field) != written.get(field):
+            raise PaymentEventError(f"payment_event read-back mismatched {field}")
+    return response

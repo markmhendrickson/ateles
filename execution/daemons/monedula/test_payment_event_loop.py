@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 import types
+import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -17,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 import monedula  # noqa: E402
 import payment_approval  # noqa: E402
 import payment_event  # noqa: E402
+import consent_email  # noqa: E402
 from test_payment_approval import (  # noqa: E402
     APPROVER_JKT,
     APPROVER_SUB,
@@ -26,19 +28,28 @@ from test_payment_approval import (  # noqa: E402
 from test_session_payments import _event, _Handler, _World  # noqa: E402
 
 
-def _capture_events(neo, monkeypatch, *, fail: bool = False) -> list[dict]:
+def _capture_events(neo, monkeypatch, *, state: dict | None = None) -> list[dict]:
     """Route payment_event stores to a list; everything else to the fake."""
     events: list[dict] = []
+    rows: dict[str, dict] = {}
+    state = state if state is not None else {}
     inner = neo.request
 
     def request(method, path, body=None):
         if path == "/store" and any(
             e.get("entity_type") == payment_event.ENTITY_TYPE for e in body["entities"]
         ):
-            if fail:
+            if state.get("fail"):
                 raise payment_approval.ApprovalError("HTTP 500: synthetic store failure")
             events.append(body)
-            return {"ok": True}
+            entity_id = f"ent_payment_{len(rows)}"
+            rows[entity_id] = dict(body["entities"][0])
+            return {"entity_ids": [entity_id]}
+        if path in {f"/entities/{eid}" for eid in rows}:
+            row = dict(rows[path.rsplit("/", 1)[1]])
+            if state.get("mismatch"):
+                row["status"] = "stale"
+            return {"snapshot": {"snapshot": row}}
         return inner(method, path, body)
 
     monkeypatch.setattr(payment_approval, "_request", request)
@@ -98,26 +109,33 @@ def test_failed_result_writes_one_payment_event_with_status_failed(env, monkeypa
     assert "txid" not in entity, "empty result fields are not copied"
 
 
-def test_item_with_no_approval_id_and_no_session_key_writes_nothing(monkeypatch):
-    calls: list = []
+def test_one_off_without_match_has_stable_obligation_identity(monkeypatch, tmp_path):
+    monkeypatch.setattr(monedula, "PAYMENT_EVENT_PENDING_FILE", tmp_path / "pending.json", raising=False)
+    events = _capture_events(FakeNeotoma(), monkeypatch)
+    handler = _Handler()
+    handler.profile.calendar_keywords = []
+    first = consent_email.build_pending_items([(handler, [])], "2030-01-02")[0]
+    second = consent_email.build_pending_items([(handler, [])], "2030-01-02")[0]
+    assert first.match is None and first.obligation == second.obligation
+    assert monedula._record_payment_event(first, {"status": "sent"}, "sent")
+    assert monedula._record_payment_event(second, {"status": "sent"}, "sent")
+    keys = [body["entities"][0]["primary_session_key"] for body in events]
+    assert keys == [f"{handler.name}:obligation-{first.obligation}"] * 2
+
+
+def test_no_identity_is_a_record_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(monedula, "PAYMENT_EVENT_PENDING_FILE", tmp_path / "pending.json", raising=False)
+    calls = []
     monkeypatch.setattr(payment_approval, "_request", lambda *a, **k: calls.append(a))
-    lines: list[str] = []
-    fake_log = types.SimpleNamespace(
-        warning=lines.append, error=lines.append, info=lines.append
-    )
-    monkeypatch.setattr(monedula, "log", fake_log)
+    alerts = _capture_alerts(monkeypatch)
     item = types.SimpleNamespace(
-        handler_name="synthetic_handler",
-        label="Synthetic",
-        amount_eur=10,
-        payment_date="2030-01-02",
-        match={"summary": "no calendar event"},
-        obligation="0123456789abcdef",
-        approval_id="",
+        handler_name="synthetic_handler", label="Synthetic", amount_eur=10,
+        payment_date="2030-01-02", match=None, obligation="", approval_id="",
     )
-    monedula._record_payment_event(item, {"status": "sent"}, "sent")
+    assert monedula._record_payment_event(item, {"status": "sent"}, "sent") is False
     assert calls == []
-    assert len(lines) == 1 and "payment_event_not_recorded" in lines[0]
+    assert len(json.loads((tmp_path / "pending.json").read_text())["entries"]) == 1
+    assert sum("could not be recorded" in repr(a) for a in alerts) == 1
 
 
 def _world(m, tmp_path):
@@ -137,6 +155,7 @@ def _world(m, tmp_path):
         gating, "_fetch_entity_observations", lambda eid, **k: list(neo.obs.get(eid, []))
     )
     w.calendars["primary"] = [_event("evt-1")]
+    m.setattr(monedula, "PAYMENT_EVENT_PENDING_FILE", tmp_path / "pending.json", raising=False)
     return w, neo
 
 
@@ -145,7 +164,7 @@ def _run(monkeypatch, tmp_path, *, fail: bool):
     tmp_path.mkdir()
     with monkeypatch.context() as m:
         w, neo = _world(m, tmp_path)
-        _capture_events(neo, m, fail=fail)
+        _capture_events(neo, m, state={"fail": fail})
         alerts = _capture_alerts(m)
         _approve_and_pay(w, neo)
         obligations = {
@@ -163,4 +182,48 @@ def test_store_error_leaves_journal_and_alert_identical(monkeypatch, tmp_path):
     (entry,) = obligations.values()
     assert entry["state"] == "done" and entry["outcome_status"] == "sent"
     assert any("payment_outcome" in repr(a) for a in alerts)
-    assert failing == baseline
+    assert obligations == baseline[1]
+    assert [a for a in alerts if "payment_outcome" in repr(a)] == [
+        a for a in baseline[2] if "payment_outcome" in repr(a)
+    ]
+    assert (tmp_path / "fail" / "pending.json").exists()
+
+
+def _two_approved(w, neo):
+    w.calendars["primary"] = [_event("evt-1"), _event("evt-2")]
+    w.tick()
+    for key in list(neo.rows):
+        neo.resolve(key, "approved", "attended yoga")
+
+
+def test_readback_mismatch_halts_next_approved_payment(monkeypatch, tmp_path):
+    w, neo = _world(monkeypatch, tmp_path)
+    _capture_events(neo, monkeypatch, state={"mismatch": True})
+    alerts = _capture_alerts(monkeypatch)
+    _two_approved(w, neo)
+    assert w.tick(minutes=15) is False
+    assert len(w.handler.execute_calls) == 1
+    assert sum("payment outcome could not be recorded" in repr(a) for a in alerts) == 1
+    assert len(json.loads((tmp_path / "pending.json").read_text())["entries"]) == 1
+    assert w.tick(minutes=15) is False
+    assert len(w.handler.execute_calls) == 1
+
+
+def test_store_error_retries_record_only_then_resumes(monkeypatch, tmp_path):
+    w, neo = _world(monkeypatch, tmp_path)
+    state = {"fail": True}
+    events = _capture_events(neo, monkeypatch, state=state)
+    alerts = _capture_alerts(monkeypatch)
+    _two_approved(w, neo)
+    assert w.tick(minutes=15) is False
+    assert len(w.handler.execute_calls) == 1
+    assert w.tick(minutes=15) is False
+    assert w.tick(minutes=15) is False
+    assert len(w.handler.execute_calls) == 1
+    assert sum("payment outcome could not be recorded" in repr(a) for a in alerts) == 1
+    state["fail"] = False
+    w.tick(minutes=15)
+    assert len(w.handler.execute_calls) == 2
+    assert len(events) == 2
+    assert json.loads((tmp_path / "pending.json").read_text())["entries"] == []
+    assert sum("halt cleared" in repr(a) for a in alerts) == 1
