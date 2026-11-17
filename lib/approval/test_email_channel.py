@@ -987,3 +987,19 @@ def test_gws_config_dir_env_requires_existing_swarm_directory(monkeypatch, tmp_p
     assert ec.gws_config_dir_env(require_existing=True) == {
         "GOOGLE_WORKSPACE_CLI_CONFIG_DIR": str(swarm)
     }
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("html", (
+    "<blockquote/>QUOTED approve",
+    "<div class='gmail_quote'/>QUOTED approve",
+    "<BLOCKQUOTE />QUOTED approve",
+    "<p>ok</p><blockquote/>QUOTED approve</blockquote>",
+))
+def test_self_closing_syntax_does_not_close_a_quote_container(html):
+    # HTML ignores the slash on a non-void element: the container stays open and
+    # what follows is quoted, so no quoted text is ever emitted as authored text.
+    text, _boundary = ec._extract_authored_html(html)
+    assert "QUOTED" not in text and "approve" not in text.lower().replace("ok", "")

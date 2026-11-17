@@ -145,11 +145,10 @@ class _AuthoredHTML(HTMLParser):
             self.parts.append("\n")
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in self._VOID:
-            self.handle_starttag(tag, attrs)
-            return
+        # HTML ignores the slash on a non-void element: `<blockquote/>` OPENS a
+        # blockquote. Treat it as a start tag only, so a quote container written
+        # that way keeps hiding what follows (and an unclosed one is unreadable).
         self.handle_starttag(tag, attrs)
-        self.handle_endtag(tag)
 
     def handle_endtag(self, tag: str) -> None:
         if tag in self._VOID:
