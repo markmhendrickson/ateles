@@ -515,21 +515,44 @@ def test_each_journal_mutation_preserves_a_concurrent_instances_key(
     first = _notifier(tmp_path, NO_SILENCE, [])
     second = _notifier(tmp_path, NO_SILENCE, [])
     first._mark_dedupe_notified("target")
-    assert "target" in first._dedupe_journal  # this instance loaded before the other write
-    second._mark_dedupe_notified("other")
     monkeypatch.setattr(neotoma_sink, "migrate_key", lambda old, new: True)
-    if mutation == "pending":
-        first._mark_dedupe_pending("target")
-    elif mutation == "delivered":
-        first._mark_dedupe_delivered("target")
-    elif mutation == "notified":
-        first._mark_dedupe_notified("new")
-    elif mutation == "clear":
-        first.clear_dedupe("target")
-    elif mutation == "migrate":
-        assert first.migrate_dedupe("target", "moved")
-    else:
-        first.release_dedupe("target")
+    entered = threading.Event()
+    release = threading.Event()
+    original = first._persist_dedupe_journal
+
+    def paused_persist(journal):
+        entered.set()  # first writer has read the journal, but has not written it
+        assert release.wait(timeout=3)
+        return original(journal)
+
+    monkeypatch.setattr(first, "_persist_dedupe_journal", paused_persist)
+
+    def mutate():
+        if mutation == "pending":
+            first._mark_dedupe_pending("target")
+        elif mutation == "delivered":
+            first._mark_dedupe_delivered("target")
+        elif mutation == "notified":
+            first._mark_dedupe_notified("new")
+        elif mutation == "clear":
+            first.clear_dedupe("target")
+        elif mutation == "migrate":
+            assert first.migrate_dedupe("target", "moved")
+        else:
+            first.release_dedupe("target")
+
+    worker = threading.Thread(target=mutate)
+    worker.start()
+    try:
+        assert entered.wait(timeout=3)
+        other = threading.Thread(target=lambda: second._mark_dedupe_notified("other"))
+        other.start()
+        other.join(timeout=0.1)
+    finally:
+        release.set()
+        worker.join(timeout=3)
+    other.join(timeout=3)
+    assert not worker.is_alive() and not other.is_alive()
     assert "other" in second._dedupe_journal
 
 
