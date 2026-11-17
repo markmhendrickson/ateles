@@ -530,6 +530,10 @@ def email_send(subject: str, body: str) -> bool:
     if not OPERATOR_EMAIL:
         log.info("OPERATOR_EMAIL unset — skipping release email (Telegram only)")
         return False
+    swarm_gws = gws_config_dir_env(require_existing=True)
+    if not swarm_gws:
+        log.warning("swarm mailbox unavailable — skipping release email")
+        return False
     gws = shutil.which("gws")
     if not gws:
         log.warning("gws CLI not found — cannot email release notification")
@@ -540,7 +544,7 @@ def email_send(subject: str, body: str) -> bool:
         cmd += ["--from", SWARM_EMAIL]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
-                           env=os.environ)
+                           env={**os.environ, **swarm_gws})
         if r.returncode != 0:
             log.warning(f"gws +send failed (rc={r.returncode}): "
                         f"{(r.stderr or '').strip()[:200]}")
