@@ -41,19 +41,27 @@ def held_notice_line(state: dict) -> str:
     """
     info = _load_held_view().summary()
     total = int(info["total"])
-    fingerprint = str(info["fingerprint"])
-    if total == 0 or fingerprint == state.get("held_notices_hash"):
+    unconfirmed = int(info.get("unconfirmed", 0))
+    fingerprint = str(info["fingerprint"]) + ":" + str(info.get("unconfirmed_fingerprint", ""))
+    if total == 0 and unconfirmed == 0 or fingerprint == state.get("held_notices_hash"):
         state["held_notices_hash"] = fingerprint  # re-arm after the queue empties
         return ""
     state["held_notices_hash"] = fingerprint
     ranked = sorted(info["by_handler"].items(), key=lambda kv: (-kv[1], kv[0]))
     parts = ", ".join(f"{name}: {int(n)}" for name, n in ranked[:6])
     what = "operator notice is" if total == 1 else "operator notices are"
-    return (
+    held_line = (
         f"[held-notices] {total} {what} waiting undelivered ({parts}). In your "
         "reply, tell the operator what needs them: read them with python3 "
         "lib/notify/held_view.py, then clear what you showed with --clear."
-    )
+    ) if total else ""
+    recovery_line = (
+        f"[unconfirmed alerts] {unconfirmed} alert outcome(s) are unknown. "
+        "Read python3 lib/notify/held_view.py and tell the operator. "
+        "After the operator decides to allow a resend, clear one with "
+        "python3 lib/notify/held_view.py --clear-unconfirmed <key>."
+    ) if unconfirmed else ""
+    return "\n".join(part for part in (held_line, recovery_line) if part)
 
 
 def main() -> int:

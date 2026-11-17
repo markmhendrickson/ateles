@@ -163,6 +163,8 @@ def test_super_send_called_with_same_arguments_and_result_returned(state, base_s
         True,
         "dk",
         False,
+        False,
+        (),
     )
 
 

@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import sys
 import tempfile
 import time
@@ -58,8 +59,19 @@ BACKUP_MAX = 1000
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
-def is_actionable(message: str) -> bool:
-    return (message or "").lstrip().startswith(ACTIONABLE_HELD_PREFIXES)
+def notice_text(item: str | dict) -> str:
+    return item.get("message", "") if isinstance(item, dict) else item
+
+
+def notice_identity(item: str | dict) -> tuple[str, ...] | str:
+    """Stable identity for keyed notices; legacy notices retain text identity."""
+    if isinstance(item, dict):
+        return tuple(sorted(item["keys"]))
+    return item
+
+
+def is_actionable(message: str | dict) -> bool:
+    return (notice_text(message) or "").lstrip().startswith(ACTIONABLE_HELD_PREFIXES)
 
 
 def queue_path() -> Path:
@@ -77,6 +89,39 @@ def email_queue_path(main: Path) -> Path:
 
 def budget_path(main: Path) -> Path:
     return main.with_name(f"{main.stem}-email-budget.json")
+
+
+def recovery_path(main: Path) -> Path:
+    return main.with_name(f"{main.stem}-recovery.json")
+
+
+def recovery_lock_path(main: Path) -> Path:
+    return main.with_name(f"{main.stem}-recovery.json.lock")
+
+
+def read_recovery(main: Path) -> list[dict]:
+    try:
+        records = json.loads(read_text_nofollow(recovery_path(main)))
+    except FileNotFoundError:
+        return []
+    if not isinstance(records, list) or any(
+        not isinstance(row, dict) or not isinstance(row.get("key"), str)
+        or not isinstance(row.get("time"), str) or not isinstance(row.get("cause"), str)
+        for row in records
+    ):
+        raise ValueError("unconfirmed alert recovery file is malformed")
+    return records
+
+
+def write_recovery(main: Path, records: list[dict]) -> None:
+    atomic_write(recovery_path(main), json.dumps(records[-50:]))
+
+
+def journal_path() -> Path:
+    return Path(
+        os.environ.get("ATELES_DEDUPE_JOURNAL_PATH", "").strip()
+        or Path(tempfile.gettempdir()) / "ateles-notify-dedupe.json"
+    )
 
 
 def queue_lock_path(main: Path) -> Path:
@@ -97,13 +142,16 @@ def snapshot_path(main: Path) -> Path:
 
 
 @contextlib.contextmanager
-def file_lock(lock_path: Path, blocking: bool = True):
+def file_lock(lock_path: Path, blocking: bool = True, fail_open: bool = True):
     """flock a sidecar file; yields True to proceed, False if busy.
 
-    Fail-open: any locking error yields True, because a notification must
-    never crash or hang its caller. A blocking wait is bounded for the same
-    reason. Non-blocking returns False only when another process holds it.
+    Fail-open by default: any locking error yields True, because a
+    notification must never crash or hang its caller. A blocking wait is
+    bounded for the same reason. Non-blocking returns False only when another
+    process holds it. With ``fail_open=False`` (single-owner sends), a lock
+    that cannot be taken yields False instead, and the caller retries later.
     """
+    action = "proceeding unlocked" if fail_open else "not proceeding; retried later"
     fd = None
     held = False
     busy = False
@@ -124,15 +172,15 @@ def file_lock(lock_path: Path, blocking: bool = True):
                             break
                         if time.monotonic() >= deadline:
                             log.warning(
-                                "[notify] lock %s busy — proceeding unlocked", lock_path
+                                "[notify] lock %s busy — %s", lock_path, action
                             )
                             break
                         time.sleep(0.02)
             except Exception as exc:  # noqa: BLE001
                 log.warning(
-                    "[notify] could not lock %s (%s) — proceeding unlocked", lock_path, exc
+                    "[notify] could not lock %s (%s) — %s", lock_path, exc, action
                 )
-        yield not busy
+        yield not busy and (held or fail_open)
     finally:
         if fd is not None:
             if held:
@@ -172,16 +220,28 @@ def atomic_write(path: Path, text: str) -> None:
         raise
 
 
-def read_queue(path: Path) -> list[str]:
+def read_queue(path: Path) -> list[str | dict]:
     """Queue contents; a missing file is empty, other errors propagate."""
     try:
         raw = json.loads(read_text_nofollow(path))
     except FileNotFoundError:
         return []
-    return [str(x) for x in raw] if isinstance(raw, list) else []
+    if not isinstance(raw, list):
+        raise ValueError(f"held queue {path} is not a list")
+    items = []
+    for item in raw:
+        if isinstance(item, str):
+            items.append(item)
+        elif (isinstance(item, dict) and isinstance(item.get("message"), str)
+              and isinstance(item.get("keys"), list) and item["keys"]
+              and all(isinstance(key, str) and key for key in item["keys"])):
+            items.append(item)
+        else:
+            raise ValueError(f"held queue {path} has an invalid notice")
+    return items
 
 
-def write_queue(path: Path, items: list[str]) -> None:
+def write_queue(path: Path, items: list[str | dict]) -> None:
     """Atomically rewrite a queue file; an empty queue removes it. Raises."""
     if items:
         atomic_write(path, json.dumps(items))
@@ -213,17 +273,45 @@ def summary(main: Path | None = None) -> dict:
     counts: Counter[str] = Counter()
     items = actionable_items(main)
     for item in items:
-        m = _HANDLER_RE.match(item)
+        m = _HANDLER_RE.match(notice_text(item))
         counts[m.group(1) if m else "other"] += 1
     fp = hashlib.sha256(json.dumps(items).encode()).hexdigest() if items else ""
-    return {"total": len(items), "by_handler": dict(counts), "fingerprint": fp}
+    try:
+        recovery = read_recovery(main or queue_path())
+    except Exception:
+        recovery = [{"key": "unreadable", "time": "", "cause": "unreadable"}]
+    recovery_fp = hashlib.sha256(json.dumps(recovery).encode()).hexdigest() if recovery else ""
+    return {"total": len(items), "by_handler": dict(counts), "fingerprint": fp,
+            "unconfirmed": len(recovery), "unconfirmed_fingerprint": recovery_fp}
 
 
 def _print_notices(main: Path, show_all: bool) -> int:
+    try:
+        recovery = read_recovery(main)
+    except Exception as exc:
+        recovery = []
+        print(f"RECOVERY REQUIRED: unconfirmed alert file unreadable: {exc}")
+    if recovery:
+        print(f"# {len(recovery)} unconfirmed alerts (transport outcome unknown):")
+        for row in recovery:
+            print(f"- key={row['key']!r} window={row.get('window', '')!r} "
+                  f"time={row['time']!r} cause={row['cause']!r}")
+            print("  Clear only after deciding to resend: python3 "
+                  "lib/notify/held_view.py --clear-unconfirmed "
+                  f"{shlex.quote(row['key'])}")
+    unreadable = []
+    for path in (main, email_queue_path(main)):
+        try:
+            read_queue(path)
+        except Exception:  # noqa: BLE001 — show a recovery signal without queue data
+            unreadable.append(path)
+    for path in unreadable:
+        print(f"RECOVERY REQUIRED: held notice queue unreadable at {path}; preserve the file and repair it before clearing notices.")
     items = actionable_items(main)
     if not items:
-        print("No held operator notices.")
-        return 0
+        if not unreadable:
+            print("No held operator notices.")
+        return 1 if unreadable else 0
     info = summary(main)
     shown = items if show_all else items[-VIEW_LIMIT:]
     try:
@@ -238,7 +326,7 @@ def _print_notices(main: Path, show_all: bool) -> int:
     )
     base = len(items) - len(shown)
     for i, item in enumerate(shown, base + 1):
-        print(f"{i}. {item[:600]!r}")
+        print(f"{i}. {notice_text(item)[:600]!r}")
     hidden = len(items) - len(shown)
     if hidden:
         print(
@@ -248,15 +336,20 @@ def _print_notices(main: Path, show_all: bool) -> int:
         )
     else:
         print("# --clear removes only the notices printed above.")
-    return 0
+    return 1 if unreadable else 0
 
 
 def _clear(main: Path) -> int:
     email = email_queue_path(main)
     snap = snapshot_path(main)
-    with file_lock(queue_lock_path(main)):
+    with file_lock(queue_lock_path(main), fail_open=False) as locked:
+        if not locked:
+            print(f"could not lock held queues at {main}; nothing cleared", file=sys.stderr)
+            return 1
         try:
-            shown = [str(x) for x in json.loads(read_text_nofollow(snap))]
+            shown = json.loads(read_text_nofollow(snap))
+            if not isinstance(shown, list):
+                raise ValueError("shown notices are not a list")
         except FileNotFoundError:
             shown = []
         except Exception as exc:  # noqa: BLE001
@@ -272,14 +365,15 @@ def _clear(main: Path) -> int:
             return 1
         # Multiset removal from a fresh read: a notice that arrived after the
         # listing is not in ``shown`` and survives.
-        want = Counter(shown)
-        removed: list[str] = []
-        kept: dict[Path, list[str]] = {}
+        want = Counter(notice_identity(item) for item in shown)
+        removed: list[str | dict] = []
+        kept: dict[Path, list[str | dict]] = {}
         for path, items in queues.items():
-            keep: list[str] = []
+            keep: list[str | dict] = []
             for item in items:
-                if want[item] > 0:
-                    want[item] -= 1
+                identity = notice_identity(item)
+                if want[identity] > 0:
+                    want[identity] -= 1
                     removed.append(item)
                 else:
                     keep.append(item)
@@ -289,10 +383,40 @@ def _clear(main: Path) -> int:
             if removed:
                 try:
                     old = json.loads(read_text_nofollow(backup))
-                    old = [str(x) for x in old] if isinstance(old, list) else []
+                    old = old if isinstance(old, list) else []
                 except Exception:  # noqa: BLE001 — a missing/corrupt backup restarts
                     old = []
                 atomic_write(backup, json.dumps((old + removed)[-BACKUP_MAX:]))
+                # Queue -> journal is the shared lock order. A cleared usage
+                # threshold remains settled for this window, while a higher
+                # threshold has its own key and can still alert.
+                journal_file = journal_path()
+                with file_lock(journal_file.with_name(journal_file.name + ".lock"),
+                               fail_open=False) as journal_locked:
+                    if not journal_locked:
+                        raise OSError("dedupe journal lock unavailable")
+                    try:
+                        journal = json.loads(read_text_nofollow(journal_file))
+                    except FileNotFoundError:
+                        journal = {}
+                    if not isinstance(journal, dict):
+                        raise ValueError("dedupe journal is not an object")
+                    changed = False
+                    for key, entry in journal.items():
+                        if (isinstance(entry, dict) and entry.get("state") == "held"
+                                and any(
+                                    (key in item["keys"] if isinstance(item, dict)
+                                     else entry.get("held_message") == item)
+                                    for item in removed)):
+                            journal[key] = {
+                                "state": "delivered", "notified_at": time.strftime(
+                                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                "handler": entry.get("handler", ""),
+                                "cleared": True,
+                            }
+                            changed = True
+                    if changed:
+                        atomic_write(journal_file, json.dumps(journal))
                 for path, keep in kept.items():
                     write_queue(path, keep)
             snap.unlink(missing_ok=True)
@@ -307,9 +431,70 @@ def _clear(main: Path) -> int:
     return 0
 
 
+def _clear_unconfirmed(main: Path, key: str) -> int:
+    journal_file = journal_path()
+    with file_lock(queue_lock_path(main), fail_open=False) as queue_locked:
+        if not queue_locked:
+            return 1
+        with file_lock(journal_file.with_name(journal_file.name + ".lock"),
+                       fail_open=False) as journal_locked:
+            if not journal_locked:
+                return 1
+            with file_lock(recovery_lock_path(main), fail_open=False) as recovery_locked:
+                if not recovery_locked:
+                    return 1
+                written: list[Path] = []
+                queues: dict[Path, list[str | dict]] = {}
+                try:
+                    records = read_recovery(main)
+                    if not any(row["key"] == key for row in records):
+                        print(f"No unconfirmed alert for {key!r}.")
+                        return 1
+                    journal = json.loads(read_text_nofollow(journal_file))
+                    if not isinstance(journal, dict):
+                        raise ValueError("dedupe journal is not an object")
+                    entry = journal.get(key)
+                    if not isinstance(entry, dict) or entry.get("state") not in (
+                        "sending", "delivered_unconfirmed"
+                    ):
+                        raise ValueError("key is no longer in an uncertain state")
+                    paths = (main, email_queue_path(main))
+                    queues = {path: read_queue(path) for path in paths}
+                    kept = {path: [item for item in items if not (
+                        isinstance(item, dict) and key in item["keys"]
+                    )] for path, items in queues.items()}
+                    for path in paths:
+                        if kept[path] != queues[path]:
+                            write_queue(path, kept[path])
+                            written.append(path)
+                    del journal[key]
+                    try:
+                        atomic_write(journal_file, json.dumps(journal))
+                        write_recovery(main, [row for row in records if row["key"] != key])
+                    except Exception:
+                        atomic_write(journal_file, json.dumps({**journal, key: entry}))
+                        raise
+                except Exception as exc:
+                    for path in written:
+                        try:
+                            write_queue(path, queues[path])
+                        except Exception:
+                            print(f"queue rollback failed at {path}; recovery remains visible", file=sys.stderr)
+                    print(f"could not clear unconfirmed alert: {exc}", file=sys.stderr)
+                    return 1
+    print(f"Cleared unconfirmed alert {key!r}; its key can be sent again.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     path = queue_path()
+    if "--clear-unconfirmed" in args:
+        index = args.index("--clear-unconfirmed")
+        if index + 1 >= len(args):
+            print("--clear-unconfirmed needs a key", file=sys.stderr)
+            return 2
+        return _clear_unconfirmed(path, args[index + 1])
     if "--clear" in args:
         return _clear(path)
     return _print_notices(path, "--all" in args)

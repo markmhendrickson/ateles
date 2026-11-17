@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import math
 import os
 import tempfile
@@ -87,6 +88,8 @@ from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 FRONTIER_PROVIDERS = ("claude", "codex", "cursor")
 LOCAL_PROVIDERS = ("claude-local",)
@@ -135,11 +138,14 @@ def _wall_from_iso(raw: object) -> float | None:
         return None
     try:
         parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
-    except ValueError:
+    except (ValueError, OverflowError, OSError):
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.timestamp()
+    try:
+        return parsed.timestamp()
+    except (ValueError, OverflowError, OSError):
+        return None
 
 
 def _iso_from_wall(wall: float) -> str:
@@ -423,10 +429,19 @@ def _window_problem(window: object) -> str | None:
     name = window.get("name")
     if not isinstance(name, str) or not name.strip():
         return "window has no name"
+    if len(name) > 64:
+        return "window name exceeds 64 characters"
+    if name.startswith("window_") and name.endswith("m"):
+        minutes = name[7:-1]
+        if minutes.isdigit() and (len(minutes) > 6 or not 1 <= int(minutes) <= 525600):
+            return "window span exceeds one year"
     if _percent(window.get("used_percent")) is None:
         return f"window {name!r} has no valid used_percent (need a finite 0-100)"
-    if window.get("resets_at") is not None and _wall_from_iso(window["resets_at"]) is None:
-        return f"window {name!r} has an unparseable resets_at"
+    if window.get("resets_at") is not None:
+        reset = _wall_from_iso(window["resets_at"])
+        now = time.time()
+        if reset is None or not now - 366 * 86400 <= reset <= now + 366 * 86400:
+            return f"window {name!r} has an invalid or out-of-range resets_at"
     return None
 
 
@@ -695,6 +710,7 @@ def record_usage(
     for window in windows:
         problem = _window_problem(window)
         if problem is not None:
+            log.warning("refusing malformed usage window: %s", problem)
             raise ValueError(f"refusing to record a malformed usage window: {problem}")
         item: dict[str, object] = {
             "name": str(window["name"]).strip(),
@@ -706,6 +722,8 @@ def record_usage(
     if not rendered:
         raise ValueError("refusing to record a usage observation with no windows")
     at = time.time() if observed_at is None else observed_at
+    if not isinstance(at, (int, float)) or not math.isfinite(at) or not 946684800 <= at <= 4102444800:
+        raise ValueError("refusing to record an out-of-range observation time")
     entry: dict[str, object] = {
         "observed_at": _iso_from_wall(at),
         "windows": rendered,
