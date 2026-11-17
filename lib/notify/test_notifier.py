@@ -899,6 +899,22 @@ def test_two_instances_retry_after_queue_lock_timeout(tmp_path, monkeypatch):
     assert len(held_view.read_queue(first._digest_path)) == 1
 
 
+def test_evicted_key_released_even_when_new_held_receipt_fails(tmp_path, monkeypatch):
+    from . import held_view
+
+    n = _notifier(tmp_path, ALWAYS_SILENT, [])
+    n.should_flush_digest = lambda: False
+    monkeypatch.setattr(notifier_mod, "HELD_QUEUE_MAX", 1)
+    assert not n.send("first", Priority.WARN, handler="apis",
+                      dedupe_key="first", retryable=True)
+    assert n._dedupe_journal["first"]["state"] == "held"
+    monkeypatch.setattr(n, "_mark_dedupe_held", lambda *args: False)
+    assert not n.send("second", Priority.WARN, handler="apis",
+                      dedupe_key="second", retryable=True)
+    assert held_view.read_queue(n._digest_path) == ["⚠ [apis] second"]
+    assert "first" not in n._dedupe_journal
+
+
 def test_clear_dedupe_on_a_key_never_seen_does_not_raise(tmp_path):
     n = Notifier(rubric=NO_SILENCE)
     n._dedupe_path = tmp_path / "dedupe.json"
