@@ -34,8 +34,8 @@ _HOOK_MUTATIONS = {
         '({parts}) " + " ".join(_load_held_view().actionable_items()) + ". In your "',
     ),
     "hook_keys_on_total": (
-        'fingerprint = str(info["fingerprint"])',
-        'fingerprint = str(info["total"])',
+        'fingerprint = (str(info["fingerprint"]) + ":" +',
+        'fingerprint = (str(info["total"]) + ":" +',
     ),
 }
 
