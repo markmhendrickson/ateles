@@ -1636,6 +1636,10 @@ def _announce_payment_event_halt(data: dict[str, Any]) -> None:
         return
     data["halted"] = True
     _save_pending_payment_events(data)
+    # Re-arm the "cleared" alert: its dedupe key stays open until released, so
+    # without this only the first halt of the daemon's life would announce
+    # its own recovery.
+    _clear_notify_dedupe(f"{_PAYMENT_EVENT_HALT_KEY}:cleared")
     _notify(
         "monedula: payment outcome could not be recorded and verified; "
         "no further payment or approval request until recording succeeds.",
@@ -1710,6 +1714,7 @@ def _record_payment_event(item: Any, result: Any, status: str) -> bool:
             "session_keys": session_keys,
         },
     }
+    data: dict[str, Any] | None = None
     try:
         data = _load_pending_payment_events()
         data["entries"].append(entry)
@@ -1721,6 +1726,8 @@ def _record_payment_event(item: Any, result: Any, status: str) -> bool:
     except Exception as exc:  # noqa: BLE001 - payment itself is never retried
         log.error(f"payment_event_store_failed {item.handler_name}: {type(exc).__name__}")
         try:
+            if data is None:
+                raise RuntimeError("pending payment events unreadable")
             _announce_payment_event_halt(data)
         except Exception as local_exc:  # noqa: BLE001 - fail closed on local write
             log.error(f"payment_event_pending_unwritable: {type(local_exc).__name__}")

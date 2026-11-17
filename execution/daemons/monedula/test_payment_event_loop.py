@@ -227,3 +227,42 @@ def test_store_error_retries_record_only_then_resumes(monkeypatch, tmp_path):
     assert len(events) == 2
     assert json.loads((tmp_path / "pending.json").read_text())["entries"] == []
     assert sum("halt cleared" in repr(a) for a in alerts) == 1
+
+
+def test_each_halt_announces_its_own_recovery(monkeypatch, tmp_path):
+    """Dedupe keys stay open until released, as the real notifier's do: a
+    second halt-and-recover cycle still sends one halt alert and one cleared
+    alert."""
+    import payment_event
+
+    monkeypatch.setattr(monedula, "PAYMENT_EVENT_PENDING_FILE", tmp_path / "pending.json", raising=False)
+    open_keys: set[str] = set()
+    sent: list[str] = []
+
+    def notify(msg, *a, dedupe_key=None, **k):
+        if dedupe_key and dedupe_key in open_keys:
+            return
+        if dedupe_key:
+            open_keys.add(dedupe_key)
+        sent.append(msg)
+
+    monkeypatch.setattr(monedula, "_notify", notify)
+    monkeypatch.setattr(monedula, "_clear_notify_dedupe", open_keys.discard)
+    state = {"fail": True}
+
+    def store(fields, **identity):
+        if state["fail"]:
+            raise payment_event.PaymentEventError("synthetic store failure")
+        return {"entity_ids": ["ent_synthetic"]}
+
+    monkeypatch.setattr(payment_event, "store", store)
+    entry = {"fields": {"status": "sent"}, "identity": {"payment_date": "2026-01-02", "approval_id": "ent_a", "session_keys": []}}
+    for _cycle in range(2):
+        state["fail"] = True
+        monedula._save_pending_payment_events({"entries": [entry], "halted": False})
+        assert monedula._retry_pending_payment_events() is False
+        assert monedula._retry_pending_payment_events() is False
+        state["fail"] = False
+        assert monedula._retry_pending_payment_events() is True
+    assert sum("could not be recorded" in m for m in sent) == 2
+    assert sum("halt cleared" in m for m in sent) == 2
