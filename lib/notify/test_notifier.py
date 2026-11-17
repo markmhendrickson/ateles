@@ -675,6 +675,68 @@ def test_drain_between_queue_write_and_held_mark_settles_delivered(
     assert len(sent) == 1
 
 
+def test_held_check_takes_notification_lock_before_queue_lock(tmp_path, monkeypatch):
+    """A usage check on a held key must not hold the queue lock while waiting
+    for the notification lock: a send holding the notification lock would then
+    time out on the queue lock and write the queue unlocked."""
+    import contextlib
+
+    monkeypatch.setattr(held_view, "_LOCK_WAIT_SECONDS", 0.3)
+    sent = []
+    n = _notifier(tmp_path, ALWAYS_SILENT, sent)
+    n.should_flush_digest = lambda: False
+    key = "usage:weekly:75"
+    n.send("usage crossed 75", Priority.WARN, handler="apis",
+           dedupe_key=key, retryable=True)
+    assert n._dedupe_journal[key]["state"] == "held"
+    n._persist_queue([], n._digest_path)  # the held notice is gone
+
+    real = n._queue_lock
+    guard = threading.Lock()
+    inside = {"now": 0, "max": 0}
+    checker_in_queue = threading.Event()
+    sender_has_notification_lock = threading.Event()
+
+    @contextlib.contextmanager
+    def tracked():
+        with real() as ok:
+            with guard:
+                inside["now"] += 1
+                inside["max"] = max(inside["max"], inside["now"])
+            try:
+                if threading.current_thread().name == "usage-check" \
+                        and not checker_in_queue.is_set():
+                    checker_in_queue.set()
+                    sender_has_notification_lock.wait(timeout=0.6)
+                yield ok
+            finally:
+                with guard:
+                    inside["now"] -= 1
+
+    monkeypatch.setattr(n, "_queue_lock", tracked)
+    result = {}
+    checker = threading.Thread(
+        name="usage-check", daemon=True,
+        target=lambda: result.__setitem__("open", n.is_dedupe_open(key)),
+    )
+
+    def sender():
+        assert checker_in_queue.wait(timeout=3)
+        with n._notification_lock:
+            sender_has_notification_lock.set()
+            with n._queue_lock():
+                pass
+
+    other = threading.Thread(target=sender, daemon=True)
+    checker.start()
+    other.start()
+    checker.join(timeout=5)
+    other.join(timeout=5)
+    assert not checker.is_alive() and not other.is_alive()
+    assert inside["max"] == 1, "a queue writer entered while another held the queue lock"
+    assert result["open"] is False  # missing held notice released for retry
+
+
 def test_clear_dedupe_lets_a_genuine_recurrence_notify_again(tmp_path):
     sent = []
     n = _notifier(tmp_path, NO_SILENCE, sent)

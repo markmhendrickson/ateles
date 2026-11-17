@@ -839,8 +839,9 @@ class Notifier:
             return False
         if isinstance(entry, dict) and entry.get("state") == "held":
             # A held key suppresses only while its notice survives in either
-            # queue. Queue lock precedes journal lock on every shared path.
-            with self._queue_lock():
+            # queue. Lock order on every shared path: this instance's
+            # notification lock, then the queue lock, then the journal lock.
+            with self._notification_lock, self._queue_lock():
                 try:
                     queued = (
                         held_view.read_queue(self._digest_path)
