@@ -805,6 +805,11 @@ def test_real_read_partial_failure_holds_every_payment(monkeypatch, tmp_path):
         tok,
         auth_by_id={"m1": [_GOOGLE_PASS], "m2": [_GOOGLE_PASS]},
         body_by_id={"m1": "ATTENDED", "m2": None}))
+    outcome = _ec.read_replies_with_status([tok])
+    assert outcome.kind == "transport_error"
+    assert outcome.texts == []
+    assert outcome.replies == ()
+    assert [r.message_id for r in outcome.unreadable_replies] == ["m2"]
     result = consent_email.request_and_collect(
         [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
     assert result.reason_code == "consent_reply_read_failed"

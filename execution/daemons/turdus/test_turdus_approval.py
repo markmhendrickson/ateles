@@ -650,3 +650,57 @@ def test_approval_message_recorded_for_dedup(monkeypatch):
     state = _run(turdus.poll_once(notifier, {"last_message_id": None}))
     assert "appr1" in state.get("processed_ids", [])
     assert [m for m in notifier.sent if "invoice(s)" in m] == []
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+def test_unreadable_authenticated_reply_notices_once_then_routes_once(
+    monkeypatch, tmp_path, kind
+):
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(turdus, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setattr(turdus, "_STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(turdus, "DRY_RUN", False)
+    monkeypatch.setattr(turdus, "_poll_gmail_messages", lambda *_: [])
+    monkeypatch.setattr(email_channel, "_gws", lambda: "/synthetic/gws")
+    monkeypatch.setattr(email_channel, "_fetch_auth_results", lambda _mid: [_AUTH_PASS])
+    subject = ("Re: Release v1.2.3 ready to approve" if kind == "release" else
+               "Re: [Ateles] PR o/r#7 is READY TO MERGE")
+    body = ("approve v1.2.3\nrelease-approve: v1.2.3" if kind == "release" else
+            "APPROVE\nswarm-approve: o/r#7")
+    read_attempts = []
+    posts = []
+
+    def fake_gws(args, timeout=45):
+        if "+triage" in args:
+            token = args[args.index("--query") + 1]
+            matches = ("release-approve:" in token) == (kind == "release")
+            return {"messages": [{"id": "approval-1", "from": "Op <op@example.com>",
+                                  "subject": subject}]} if matches else {"messages": []}
+        if "+read" in args:
+            read_attempts.append(args)
+            return None if len(read_attempts) < 3 else {"body_text": body}
+        raise AssertionError(args)
+
+    async def post(*args):
+        posts.append(args)
+        return True
+
+    monkeypatch.setattr(email_channel, "gws_json", fake_gws)
+    monkeypatch.setattr(turdus, "_post_release_approval", post)
+    monkeypatch.setattr(turdus, "_post_email_approval", post)
+    notices = []
+    for poll in range(3):
+        notifier = _StubNotifier()
+        state = _run(turdus.poll_once(notifier, turdus._load_state()))
+        notices.extend(m for m in notifier.sent if "could not be read yet" in m)
+        if poll < 2:
+            assert "approval-1" not in state.get("processed_ids", [])
+            assert posts == []
+        else:
+            assert state.get("processed_ids", []).count("approval-1") == 1
+    assert len(notices) == 1
+    assert ("v1.2.3" if kind == "release" else "o/r#7") in notices[0]
+    assert "Telegram" in notices[0]
+    assert len(posts) == 1

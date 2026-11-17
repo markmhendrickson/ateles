@@ -1048,6 +1048,8 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
 
     processed_ids: list[str] = list(state.get("processed_ids", []))
     processed_id_set = set(processed_ids)
+    unreadable_notice_ids: list[str] = list(state.get("unreadable_notice_ids", []))
+    unreadable_notice_set = set(unreadable_notice_ids)
 
     def _mark_handled(mid: str) -> None:
         if mid and mid not in processed_id_set:
@@ -1060,6 +1062,30 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         [_RELEASE_APPROVE_TOKEN_PREFIX, _APPROVE_TOKEN_PREFIX],
         max_msgs=MAX_MESSAGES, require_enabled=False,
     )
+    for reply in outcome.unreadable_replies:
+        mid = reply.message_id
+        if not mid or mid in unreadable_notice_set or mid in processed_id_set:
+            continue
+        subject = reply.subject
+        target = None
+        if _RELEASE_READY_SUBJECT_MARKER.lower() in subject.lower():
+            match = re.search(r"\bRelease\s+(v[0-9][\w.+-]*)", subject, re.IGNORECASE)
+            target = match.group(1) if match else "this release"
+        elif _MERGE_READY_SUBJECT_MARKER in subject:
+            match = re.search(r"\bPR\s+([A-Za-z0-9._-]+/[A-Za-z0-9._-]+#\d+)", subject)
+            target = match.group(1) if match else "this PR"
+        if target is None:
+            continue
+        notifier.send(
+            f"{DAEMON_NAME}: email approval for {target} could not be read yet. "
+            "Approve through Telegram instead.",
+            priority=Priority.BLOCKER, handler=DAEMON_NAME,
+        )
+        unreadable_notice_ids.append(mid)
+        unreadable_notice_set.add(mid)
+    if unreadable_notice_ids != state.get("unreadable_notice_ids", []):
+        state["unreadable_notice_ids"] = unreadable_notice_ids[-_MAX_PROCESSED_IDS:]
+        _save_state(state)
     approval_count = 0
     if outcome.kind in ("ok", "transport_error"):
         # A partial read cannot approve anything; rejected metadata can still

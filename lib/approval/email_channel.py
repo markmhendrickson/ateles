@@ -70,6 +70,7 @@ class ReadRepliesOutcome:
     detail: str = ""
     replies: tuple[ApprovalReply, ...] = ()
     rejected_replies: tuple[ApprovalReply, ...] = ()
+    unreadable_replies: tuple[ApprovalReply, ...] = ()
 
 
 def _strip_html(html: str) -> str:
@@ -518,6 +519,7 @@ def read_replies_with_status(
     texts: list[str] = []
     replies: list[ApprovalReply] = []
     rejected_replies: list[ApprovalReply] = []
+    unreadable_replies: list[ApprovalReply] = []
     seen_ids: set[str] = set()
     saw_transport_error = False
     transport_detail = ""
@@ -590,6 +592,7 @@ def read_replies_with_status(
             if body_data is None:
                 saw_transport_error = True
                 transport_detail = "gws_read_failed"
+                unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
             body = ""
             if isinstance(body_data, dict):
@@ -629,6 +632,7 @@ def read_replies_with_status(
         return ReadRepliesOutcome(
             kind="transport_error", texts=[], detail=transport_detail or "gws_failed",
             rejected_replies=tuple(rejected_replies),
+            unreadable_replies=tuple(unreadable_replies),
         )
     return ReadRepliesOutcome(kind="ok", texts=texts, detail="",
                               replies=tuple(replies),

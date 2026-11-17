@@ -740,6 +740,9 @@ class TestPartialReadFailsClosed:
             out = ec.read_replies_with_status(["TOK"])
         assert out.kind == "transport_error"
         assert out.texts == []
+        assert out.replies == ()
+        assert [(r.message_id, r.subject) for r in out.unreadable_replies] == [
+            ("m2", "RE: x [APPROVE-TOK]")]
 
     def test_one_metadata_fetch_fails_other_succeeds_is_not_ok(self, monkeypatch):
         self._env(monkeypatch)
