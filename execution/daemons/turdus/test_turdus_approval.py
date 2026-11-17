@@ -1212,6 +1212,79 @@ def test_visible_styled_html_body_still_approves(monkeypatch, tmp_path, kind, st
 
 
 @pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("wrapper", (
+    "<span style='font-size:50%'>" * 20 + "{approval}" + "</span>" * 20,
+    "<span style='font-size:.5em'>" * 20 + "{approval}" + "</span>" * 20,
+    "<span style='font-size:smaller'>" * 20 + "{approval}" + "</span>" * 20,
+    *[f"<p style='{side}:99999px'>{{approval}}</p>" for side in (
+        "margin", "padding", "margin-left", "margin-right", "margin-top",
+        "margin-bottom", "padding-left", "padding-right", "padding-top", "padding-bottom")],
+    "<p style='margin:0 0 0 99999px'>{approval}</p>",
+    "<p style='padding:0 99999px'>{approval}</p>",
+    "<p style='width:99999px'>{approval}</p>",
+    "<p style='position:relative;left:99999px'>{approval}</p>",
+    "<details><p>{approval}</p></details>",
+    "<dialog>{approval}</dialog>", "<menu>{approval}</menu>",
+    '<p style="font-size:14px" style="font-size:0">{approval}</p>',
+    '<p class="ordinary" class="gmail_quote">{approval}</p>',
+    '<p hidden="" hidden="false">{approval}</p>',
+    '<p id="ordinary" id="divRplyFwdMsg">{approval}</p>',
+))
+def test_ambiguous_html_never_routes_on_either_turdus_surface(
+        monkeypatch, tmp_path, kind, wrapper):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    html = f"<body>{wrapper.format(approval=approval)}<blockquote>{token}</blockquote></body>"
+    posts, state, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind, {"body_html": html}, polls=2)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+    assert len([note for note in notices.sent if "could not be read yet" in note]) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+def test_open_details_summary_and_normal_styling_route(monkeypatch, tmp_path, kind):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    html = (f"<body><details open><summary>{approval}</summary></details>"
+            f"<blockquote>{token}</blockquote></body>")
+    posts, _, _ = _poll_authored_reply(monkeypatch, tmp_path, kind, {"body_html": html})
+    assert len(posts) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("tail", (
+    "I withdraw approval", "Name\nTitle\nLocation\nPhone\nExtra",
+    "Please approve later", "Release v1.2.3", "PR #7",
+))
+def test_ambiguous_signature_tail_stays_pending(monkeypatch, tmp_path, kind, tail):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    posts, state, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind,
+        {"body_text": f"{approval}\n-- \n{tail}"}, polls=2)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+    assert len([note for note in notices.sent if "could not be read yet" in note]) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+def test_benign_signature_still_routes(monkeypatch, tmp_path, kind):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    posts, _, _ = _poll_authored_reply(
+        monkeypatch, tmp_path, kind,
+        {"body_text": f"{approval}\n-- \nExample Name\nEngineer"})
+    assert len(posts) == 1
+
+
+def test_release_email_skip_correction_points_to_telegram(monkeypatch, tmp_path):
+    posts, state, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, "release", {"body_text": "skip v1.2.3"}, polls=2)
+    assert posts == []
+    assert state.get("processed_ids") == ["approval-1"]
+    assert len([note for note in notices.sent if "Telegram release command" in note]) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
 @pytest.mark.parametrize("property_name", ("color", "background"))
 @pytest.mark.parametrize("colour", (
     "#0000", "#fff0", "hsla(0,0%,0%,0)", "hwb(0 0% 0% / 0)",

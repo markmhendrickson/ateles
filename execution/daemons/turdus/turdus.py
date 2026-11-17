@@ -1071,7 +1071,20 @@ async def _maybe_handle_release_approval(msg: dict, notifier: Notifier) -> bool:
     if not _approval_target_matches(msg, notifier, version, body, release=True):
         return False
     if not _reply_approves_version(body, version):
-        _send_approval_correction(msg, notifier, version, f"approve {version}")
+        if re.fullmatch(rf"skip\s+{re.escape(version)}[.!]?", body.strip(), re.IGNORECASE):
+            if not msg.get("correction_notified"):
+                delivered = notifier.send(
+                    f"{DAEMON_NAME}: no approval was recorded for {version}. "
+                    f"To discard this release candidate, send `skip {version}` "
+                    "through the existing Telegram release command. Email replies "
+                    "cannot discard it.",
+                    priority=Priority.BLOCKER, handler=DAEMON_NAME,
+                    email_eligible=False,
+                )
+                if delivered:
+                    msg["correction_notified"] = True
+        else:
+            _send_approval_correction(msg, notifier, version, f"approve {version}")
         log.info(
             f"[{DAEMON_NAME}] operator reply to release {version} did not say "
             f"`approve {version}` — not publishing (a bare/other-version approve "

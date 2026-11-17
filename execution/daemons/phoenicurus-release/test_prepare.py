@@ -254,6 +254,10 @@ def test_agent_prompt_includes_email_step_when_configured(monkeypatch, tmp_path)
     assert "gws gmail +send" in p
     assert "op@example.com" in p
     assert "approve" in p.lower() and "skip" in p.lower()
+    email_step = p.split("11. Email the", 1)[-1].split("12. Send a Telegram", 1)[0]
+    assert "email replies cannot discard" in email_step
+    assert "Reply <code>approve &lt;TAG&gt;</code>" in email_step
+    assert "or <code>skip &lt;TAG&gt;</code> to discard" not in email_step
     # The swarm sender, when configured, is passed as --from.
     assert '--from "swarm@example.com"' in p
 

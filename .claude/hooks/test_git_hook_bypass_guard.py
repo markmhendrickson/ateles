@@ -808,6 +808,58 @@ def test_non_bash_tool_ignored():
     assert proc.returncode == 0 and proc.stdout.strip() == ""
 
 
+_PROTECTED_ENVIRONMENT = (
+    "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
+    "GIT_EXEC_PATH", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS",
+    "SSH_ASKPASS", "GIT_EXTERNAL_DIFF", "GIT_PAGER", "PAGER",
+    "EDITOR", "VISUAL", "GIT_EDITOR", "SHELL", "BASH_ENV",
+    "ENV", "IFS", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
+    "NODE_OPTIONS", "NODE_PATH", "RUBYOPT", "RUBYLIB",
+    "PERL5OPT", "PERL5LIB", "HOME", "XDG_CONFIG_HOME",
+)
+
+
+@pytest.mark.parametrize("name", _PROTECTED_ENVIRONMENT)
+@pytest.mark.parametrize("shape", (
+    "{name}=/tmp/bin git status", "{name}=/tmp/bin sh -c 'git status'",
+    "env {name}=/tmp/bin git status", "export {name}=/tmp/bin",
+    "sh -c '{name}=/tmp/bin git status'",
+))
+def test_program_lookup_environment_changes_are_refused(name, shape):
+    assert_refused(shape.format(name=name))
+
+
+@pytest.mark.parametrize("command", (
+    "env -i PATH=/tmp/bin git status", "env -S 'git status'",
+    "env -u PATH git status", "env --unset=LD_LIBRARY_PATH git status",
+    "command -p git status", "exec -a alternate git status",
+    "bash -c 'PATH=/tmp/bin git status'",
+))
+def test_wrapper_lookup_and_identity_options_are_refused(command):
+    assert_refused(command)
+
+
+@pytest.mark.parametrize("command", ("git status", "git -C src status"))
+def test_plain_git_inspection_remains_allowed(command):
+    assert_allowed(command)
+
+
+@pytest.mark.parametrize("tool", (None, 7, [], "", False))
+def test_missing_or_invalid_tool_discriminator_denies(tool):
+    payload = {"tool_input": {"command": "git status"}}
+    if tool is not None:
+        payload["tool_name"] = tool
+    proc = run_hook(payload)
+    assert proc.returncode == 2
+    assert "tool name is missing or malformed" in json.loads(proc.stdout)[
+        "hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_null_tool_discriminator_denies():
+    proc = run_hook({"tool_name": None, "tool_input": {"command": "git status"}})
+    assert proc.returncode == 2
+
+
 @pytest.mark.parametrize("raw", ["", "not json", "[]", "null"])
 def test_fail_closed_on_bad_input(raw):
     proc = run_hook(raw)

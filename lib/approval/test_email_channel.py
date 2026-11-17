@@ -52,6 +52,75 @@ def test_html_normal_mail_styles_and_terminal_quote_are_readable():
     assert ec._extract_authored_html(html)[0] == "APPROVE"
 
 
+@pytest.mark.parametrize("size", ("50%", ".5em", "smaller", "90%", ".9em"))
+def test_nested_relative_font_sizes_cannot_hide_approval(size):
+    html = "<body>" + f"<span style='font-size:{size}'>" * 20
+    html += "APPROVE" + "</span>" * 20 + "</body>"
+    assert ec._extract_authored_html(html)[0] == ""
+
+
+@pytest.mark.parametrize("style", (
+    "font-size:7px", "font-size:5pt", "font-size:60%",
+    "width:99999px", "height:99999px", "max-width:99999px",
+    "max-height:99999px", "min-width:99999px", "min-height:99999px",
+    "top:99999px", "left:99999px", "right:99999px", "bottom:99999px",
+    "inset:99999px", "text-indent:99999px", "letter-spacing:99999px",
+    "word-spacing:99999px", "line-height:99999px", "transform:translateX(99999px)",
+    "translate:99999px", "scale:0", "rotate:180deg", "zoom:0",
+    "float:right", "position:absolute", "position:relative;left:99999px",
+    "overflow:hidden", "overflow-x:hidden", "overflow-y:hidden",
+    "margin:calc(1px)", "padding:var(--space)",
+))
+def test_unbounded_or_conditional_layout_is_unreadable(style):
+    assert ec._extract_authored_html(f"<body><p style='{style}'>APPROVE</p></body>")[0] == ""
+
+
+@pytest.mark.parametrize("property_name", (
+    "margin", "padding", "margin-left", "margin-right", "margin-top",
+    "margin-bottom", "padding-left", "padding-right", "padding-top",
+    "padding-bottom",
+))
+@pytest.mark.parametrize("value", ("99999px", "101px", "76pt", "9em", "11%", "-1px"))
+def test_every_margin_and_padding_side_is_bounded(property_name, value):
+    assert ec._extract_authored_html(
+        f"<body><p style='{property_name}:{value}'>APPROVE</p></body>")[0] == ""
+
+
+@pytest.mark.parametrize("property_name", ("margin", "padding"))
+@pytest.mark.parametrize("value", ("0 99999px", "0 0 99999px", "0 0 0 99999px"))
+def test_each_shorthand_side_is_bounded(property_name, value):
+    assert ec._extract_authored_html(
+        f"<body><p style='{property_name}:{value}'>APPROVE</p></body>")[0] == ""
+
+
+@pytest.mark.parametrize("html", (
+    "<details><p>APPROVE</p></details>", "<dialog>APPROVE</dialog>",
+    "<menu>APPROVE</menu>", "<slot>APPROVE</slot>",
+    "<noembed>APPROVE</noembed>", "<map><area>APPROVE</map>",
+    "<object>APPROVE</object>", "<picture>APPROVE</picture>",
+    "<audio>APPROVE</audio>", "<video>APPROVE</video>",
+    "<frameset>APPROVE</frameset>",
+    '<p style="font-size:14px" style="font-size:0">APPROVE</p>',
+    '<p class="ordinary" class="gmail_quote">APPROVE</p>',
+    '<p hidden="" hidden="false">APPROVE</p>',
+    '<p id="ordinary" id="divRplyFwdMsg">APPROVE</p>',
+))
+def test_ambiguous_visibility_and_duplicate_attributes_are_unreadable(html):
+    assert ec._extract_authored_html(f"<body>{html}</body>")[0] == ""
+
+
+def test_open_details_summary_and_regular_mail_sizes_are_readable():
+    html = ("<body><details open><summary>APPROVE</summary></details>"
+            "<p style='font-size:14px;margin:8px;padding:4px'>ordinary</p></body>")
+    assert ec._extract_authored_html(html)[0].startswith("APPROVE")
+
+
+@pytest.mark.parametrize("size", ("14px", "small", "medium", "1em", "100%"))
+def test_normal_mail_font_sizes_remain_readable(size):
+    assert ec._extract_authored_html(
+        f"<body><p style='font-size:{size}'>APPROVE</p></body>")[0] == "APPROVE"
+
+
 @pytest.mark.parametrize("tail", (
     "From: Swarm <swarm@example.net>\nI withdraw approval",
     "From: Swarm <swarm@example.net>\n> old text\nI withdraw approval",
@@ -64,6 +133,19 @@ def test_plain_header_with_later_authored_text_is_unreadable(tail):
 def test_plain_terminal_header_and_signature_keep_safe_reply():
     assert ec._authored_plain_checked("APPROVE\nFrom: Swarm <swarm@example.net>\n> old") == ("APPROVE", True)
     assert ec._authored_plain_checked("APPROVE\n-- \nSignature") == ("APPROVE", True)
+
+
+@pytest.mark.parametrize("tail", (
+    "I withdraw approval", "One\nTwo\nThree\nFour\nFive",
+    "This line is deliberately more than eighty characters long and makes the signature boundary unsafe.",
+    "Manager, approve later", "Example v1.2.3", "Review PR #7",
+))
+def test_signature_tail_must_be_short_and_benign(tail):
+    assert ec._authored_plain_checked("APPROVE\n-- \n" + tail) == ("APPROVE", False)
+
+
+def test_benign_signature_after_affirmative_stays_readable():
+    assert ec._authored_plain_checked("APPROVE\n-- \nExample Name\nEngineer") == ("APPROVE", True)
 
 
 def test_html_bottom_post_after_quote_is_unreadable():

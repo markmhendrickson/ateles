@@ -30,7 +30,11 @@ with no hook-skipping option (`--no-verify`, `commit -n`,
 `--no-post-rewrite`), no `git config` write (reads stay allowed), no writes to
 git or Husky configuration locations, no tag
 creation, and no `GIT_*` or `HUSKY` variable set anywhere in the command.
-Git commands with inline `HOME` or `XDG_CONFIG_HOME` changes are also refused.
+Command-local, exported, wrapped, and nested assignments that change program
+lookup or loading are refused, including `PATH`, `LD_*`, `DYLD_*`, Git/SSH
+helpers, pager/editor variables, shell startup variables, language loader
+variables, `HOME`, and `XDG_CONFIG_HOME`. `env -S`, protected `env -u`,
+`command -p`, and `exec -a` are refused as well.
 Everything else around git is refused: wrappers (`env`, `xargs`, `timeout`),
 path-qualified or variable-named git binaries, other global options (`-c`,
 `--config-env`, `--git-dir`, `--work-tree`, `--exec-path`), aliases, command
@@ -40,6 +44,7 @@ An earlier denylist was bypassed in each of three review rounds, which is why
 the guard now allows a known surface instead. It is a tripwire, not a
 sandbox: the guarded command is not an operating-system confinement boundary.
 For Bash, Edit, Write and MultiEdit calls, malformed or empty hook input,
+or a missing, empty, or non-string `tool_name`,
 missing command or file path, and an internal judgement error are refused with
 exit 2 and a fixed denial reason. Other tool names pass through; the prepare
 daemon's `--settings` matcher invokes the guard only for those four tools.
@@ -193,7 +198,7 @@ and re-running it would be redundant or unsafe.
 ## Notification channels
 
 A prepared release candidate always gets a Telegram notification with the full
-rendered notes, RC PR link and `approve/skip` instruction. If valid, distinct
+rendered notes, RC PR link and `approve/skip` instruction via Telegram. If valid, distinct
 `OPERATOR_EMAIL` and `ATELES_SWARM_EMAIL` addresses and an existing
 `ATELES_SWARM_GWS_CONFIG_DIR` are configured, the prepare agent
 first sends the same notes via `gws gmail +send` (subject `🚀 Release <TAG> ready
@@ -210,13 +215,16 @@ only after the RC email was sent from the configured swarm mailbox.
 
 **Telegram** — the operator replies `approve <version>`; Ateles flips the
 `release_result` to `approved` and runs `python3 publish.py --version <version>`.
+The existing Telegram `skip <version>` command marks the candidate skipped.
 See the Ateles SOUL.md "Release approval" section.
 
-**Email reply** — after quoted text and signatures are removed, the entire
+**Email reply** — after provably quoted text and a short benign signature are removed, the entire
 operator-authored reply must contain exactly one instruction line:
 `approve <version>` (case-insensitive; the `v` prefix is optional). A final
 period or exclamation mark is allowed. The version must match the release in
-the subject. The routing mirrors the swarm PR-approve flow:
+the subject. Email `skip <version>` does not discard the candidate; Turdus
+responds with the Telegram discard instruction. The release email asks only
+for `approve <version>` by reply. The routing mirrors the swarm PR-approve flow:
 
 For a PR merge-ready email, the only instruction line is `APPROVE`, optionally
 followed by that notification's PR number (`7`, `#7`, or `owner/repo#7`). It
@@ -231,12 +239,24 @@ script, style, template, form values and other non-rendered elements do not
 count. A substantive plain-text part takes precedence over HTML. For HTML-only
 replies, every element in the text's ancestor chain must have only allowed inline
 style properties: font family, safe font size and line height, font weight/style,
-text alignment/decoration, margins, padding, white space, wrapping, direction,
-and inert borders. Text colour must be an explicit opaque dark 3- or 6-digit hex,
+text alignment/decoration, bounded margins and padding, white space, wrapping,
+direction, and inert borders. Relative font sizes are multiplied down the
+ancestor chain from a 16px base; a computed size below 8px or a relative
+scale below 0.7 is unreadable. Absolute sizes below 8px are unreadable.
+Every margin and padding side must be nonnegative and at most 100px, 75pt,
+8em/rem, or 10%. Layout dimensions, offsets, transforms, floats, and overflow
+that could hide or displace text are refused. Closed disclosure or conditional
+content (`details` outside its summary, closed `dialog`, `menu`, `slot`,
+`noembed`, `area`/`map`, `object`, `picture`, audio/video fallback, and
+`frameset`) cannot grant approval. Duplicate HTML attributes make the reply
+unreadable. Text colour must be an explicit opaque dark 3- or 6-digit hex,
 RGB(A) or supported dark name; backgrounds must be explicit opaque light colours
 or absent. Unparsed colours, transparency, images, gradients, hiding/layout CSS,
 variables and stylesheet declarations make the body unreadable. Quoted, forwarded,
-original-message and signature text never grants approval. A quote header is a
+original-message and signature text never grants approval. A signature is
+discarded only after an exact `-- ` or `--` line, with at most four nonblank
+lines of at most 80 characters and no approval/refusal vocabulary, PR number,
+or version string; any other tail makes the reply unreadable. A quote header is a
 boundary only when all following nonblank text is quoted or a header; unquoted
 text after it makes the reply unreadable. Bottom-posted HTML or plain-text replies
 are unreadable. Any second instruction, text before or

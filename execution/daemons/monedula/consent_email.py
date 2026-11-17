@@ -422,21 +422,18 @@ _MARKER_RE = re.compile(r"\[APPROVE-([0-9A-F]+)\]", re.IGNORECASE)
 
 def _operator_lines(text: str) -> list[str]:
     """Unquoted operator lines from a reply (subject + body)."""
-    up = text
-    body = up
-    for marker in ("\nOn ", "\nON ", "\n-----Original", "\n-----ORIGINAL", "\n________"):
-        idx = body.find(marker)
-        if idx > 0:
-            body = body[:idx]
-            break
+    from lib.approval.email_channel import _authored_plain_checked
+
+    body, safe = _authored_plain_checked(text)
+    if not safe:
+        return ["UNREADABLE OPERATOR REPLY"]
     lines: list[str] = []
-    for line in body.splitlines():
+    for index, line in enumerate(body.splitlines()):
         s = line.strip()
-        if not s or s.startswith(">"):
+        if not s:
             continue
-        if s.upper().startswith("RE:") or s.upper().startswith("[ATELES]"):
-            continue
-        if "JUST HIT REPLY" in s.upper() or "TO DECLINE" in s.upper():
+        if index == 0 and (s.upper().startswith("RE:") or
+                           s.upper().startswith("[ATELES]")):
             continue
         lines.append(s)
     return lines
@@ -734,6 +731,11 @@ def request_and_collect(
             result.blocked.add(key)
         result.reason_code = "consent_reply_read_failed"
         result.channel_ok = False
+        if outcome.detail == "reply_quote_boundary_unknown" and outcome.unreadable_replies:
+            _maybe_send_correction(
+                items, ["Unreadable operator reply"], path.parent,
+                no_reply_needed=settled | unknown,
+            )
         return result
 
     # kind == ok

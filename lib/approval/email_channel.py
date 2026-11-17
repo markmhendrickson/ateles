@@ -86,7 +86,8 @@ _FORWARD = re.compile(
 _NON_RENDERED = frozenset({
     "head", "title", "script", "style", "template", "noscript", "object",
     "iframe", "svg", "math", "canvas", "audio", "video", "select", "option",
-    "datalist", "textarea", "meta",
+    "datalist", "textarea", "meta", "menu", "slot", "noembed",
+    "picture", "frameset",
 })
 _RENDERED_PROSE = frozenset({
     "html", "body", "p", "div", "span", "blockquote", "a", "b", "strong",
@@ -95,6 +96,7 @@ _RENDERED_PROSE = frozenset({
     "h1", "h2", "h3", "h4", "h5", "h6", "font", "center", "pre", "code",
     "q", "cite", "address", "section", "article", "header", "footer", "main",
     "aside", "details", "summary", "dl", "dt", "dd",
+    "dialog",
 })
 _DARK_NAMES = {"black": (0, 0, 0), "navy": (0, 0, 128),
                "darkblue": (0, 0, 139), "midnightblue": (25, 25, 112),
@@ -104,6 +106,14 @@ _SAFE_STYLE = frozenset({"font-family", "font-size", "font-weight", "font-style"
                          "text-align", "text-decoration", "line-height", "white-space",
                          "word-wrap", "overflow-wrap", "direction", "color",
                          "background", "background-color"})
+_SIGNATURE_WORD = re.compile(
+    r"(?i)\b(?:approve|approved|yes|skip|attended|reject|cancel|hold|wait|"
+    r"stop|no|not|don't|do\s+not|later|unless|if|but|instead|change|"
+    r"revoke|withdraw|undo)\b"
+)
+_SIGNATURE_TARGET = re.compile(r"(?i)(?<!\w)(?:(?:[\w.-]+/[\w.-]+)?#\d+|v?\d+\.\d+\.\d+)\b")
+_LAYOUT_VALUE = re.compile(r"(0|\d+(?:\.\d+)?)(px|pt|em|rem|%)?")
+_LAYOUT_LIMITS = {"px": 100, "pt": 75, "em": 8, "rem": 8, "%": 10}
 
 
 def _rgba(value: str) -> tuple[int, int, int, float] | None:
@@ -137,41 +147,73 @@ def _safe_colour(value: str, *, background: bool) -> bool:
                  all(c <= 100 for c in rgba[:3])))
 
 
-def _safe_style(style: str) -> bool:
+def _safe_style(style: str, parent_px: float = 16, relative_scale: float = 1) -> tuple[bool, float, float]:
+    font_px = parent_px
+    scale = relative_scale
     if re.search(r"(?i)/\*|[{}]|(?:var|calc|env)\s*\(", style):
-        return False
+        return False, font_px, scale
     for declaration in style.split(";"):
         if not declaration.strip():
             continue
         if declaration.count(":") != 1:
-            return False
+            return False, font_px, scale
         name, value = (part.strip().lower() for part in declaration.split(":", 1))
         if not value or "!important" in value:
-            return False
+            return False, font_px, scale
         if name in {"color", "background", "background-color"}:
             if not _safe_colour(value, background=name != "color"):
-                return False
+                return False, font_px, scale
         elif name == "font-size":
+            keyword = {"small": 13, "medium": 16, "large": 18,
+                       "smaller": .8, "larger": 1.2}
             size = re.fullmatch(r"(\d+(?:\.\d+)?)(px|pt|em|rem|%)", value)
-            if not size or float(size.group(1)) < {"px": 8, "pt": 6, "em": .5,
-                                                   "rem": .5, "%": 50}[size.group(2)]:
-                return False
+            if value in {"smaller", "larger"}:
+                factor = keyword[value]
+                font_px *= factor
+                scale *= factor
+            elif value in {"small", "medium", "large"}:
+                font_px = keyword[value]
+            elif size:
+                amount = float(size.group(1))
+                unit = size.group(2)
+                if unit in {"em", "%"}:
+                    factor = amount if unit == "em" else amount / 100
+                    font_px *= factor
+                    scale *= factor
+                else:
+                    font_px = amount * {"px": 1, "pt": 4 / 3, "rem": 16}[unit]
+            else:
+                return False, font_px, scale
+            if font_px < 8 or scale < .7:
+                return False, font_px, scale
         elif name == "line-height":
-            if value != "normal" and not re.fullmatch(r"[1-9]\d*(?:\.\d+)?(?:px|pt|em|rem|%)?", value):
-                return False
-        elif name.startswith(("margin", "padding")):
-            if not re.fullmatch(r"(?:0|\d+(?:\.\d+)?(?:px|pt|em|rem|%))(?:\s+(?:0|\d+(?:\.\d+)?(?:px|pt|em|rem|%))){0,3}", value):
-                return False
+            if value != "normal":
+                measure = _LAYOUT_VALUE.fullmatch(value)
+                if not measure or not .7 <= float(measure.group(1)) * {
+                    None: 1, "px": 1 / font_px, "pt": 4 / (3 * font_px),
+                    "em": 1, "rem": 16 / font_px, "%": .01,
+                }[measure.group(2)] <= 3:
+                    return False, font_px, scale
+        elif name in {"margin", "padding"} or re.fullmatch(
+                r"(?:margin|padding)-(?:top|right|bottom|left)", name):
+            values = value.split()
+            if not 1 <= len(values) <= (4 if name in {"margin", "padding"} else 1):
+                return False, font_px, scale
+            for item in values:
+                measure = _LAYOUT_VALUE.fullmatch(item)
+                if not measure or float(measure.group(1)) > _LAYOUT_LIMITS.get(
+                        measure.group(2), 0):
+                    return False, font_px, scale
         elif name.startswith("border"):
             if value not in {"none", "0", "0px"}:
-                return False
+                return False, font_px, scale
         elif name not in _SAFE_STYLE:
-            return False
-    return True
+            return False, font_px, scale
+    return True, font_px, scale
 
 
 def _hiding_style(style: str) -> bool:
-    return not _safe_style(style)
+    return not _safe_style(style)[0]
 
 
 def _authored_plain_checked(text: str) -> tuple[str, bool]:
@@ -181,8 +223,12 @@ def _authored_plain_checked(text: str) -> tuple[str, bool]:
     saw_quote = False
     for index, line in enumerate(source):
         stripped = line.strip()
-        if stripped in ("--", "-- "):
-            break
+        if line in ("--", "-- "):
+            tail = [part.strip() for part in source[index + 1:] if part.strip()]
+            safe_tail = (len(tail) <= 4 and all(
+                len(part) <= 80 and not _SIGNATURE_WORD.search(part) and
+                not _SIGNATURE_TARGET.search(part) for part in tail))
+            return "\n".join(lines), safe_tail
         if _ATTRIBUTION.match(stripped) or _FORWARD.match(stripped) or _QUOTE_HEADER.match(stripped):
             safe_tail = all(not tail.strip() or tail.lstrip().startswith(">") or
                             _QUOTE_HEADER.match(tail.strip()) for tail in source[index + 1:])
@@ -217,18 +263,34 @@ class _AuthoredHTML(HTMLParser):
         self.terminal = False
         self.hr_at: int | None = None
         self.unsafe = False
+        self.font_stack: list[tuple[float, float]] = []
+        self.closed_dialog_stack: list[bool] = []
 
     _VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img",
                        "input", "link", "meta", "param", "source", "track", "wbr"})
     _MAX_STACK = 64
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        names = [name.lower() for name, _ in attrs]
+        if len(names) != len(set(names)):
+            self.unsafe = True
         attrs_by_name = dict(attrs)
+        parent_px, parent_scale = self.font_stack[-1] if self.font_stack else (16, 1)
+        style_safe, font_px, scale = _safe_style(
+            attrs_by_name.get("style") or "", parent_px, parent_scale)
+        if tag == "small":
+            font_px *= .8
+            scale *= .8
+        elif tag == "big":
+            font_px *= 1.2
+            scale *= 1.2
+        if font_px < 8 or scale < .7:
+            self.unsafe = True
         if tag not in _RENDERED_PROSE and tag not in _NON_RENDERED and tag not in self._VOID:
             self.unsafe = True
         if ("hidden" in attrs_by_name or
                 (attrs_by_name.get("aria-hidden") or "").strip().lower() == "true" or
-                _hiding_style(attrs_by_name.get("style") or "") or
+                not style_safe or
                 (tag == "link" and "stylesheet" in (attrs_by_name.get("rel") or "").lower().split())):
             self.unsafe = True
         for name in ("color", "text", "bgcolor"):
@@ -253,6 +315,8 @@ class _AuthoredHTML(HTMLParser):
             self.terminal = True
             self.boundary_seen = True
         if tag in self._VOID:
+            if tag == "area":
+                self.unsafe = True
             if tag == "hr" and self.quote_depth == 0 and not self.non_rendered_depth:
                 self.hr_at = len(self.parts)
                 self.parts.append("\n")
@@ -267,7 +331,12 @@ class _AuthoredHTML(HTMLParser):
             self.boundary_seen = True
         if tag in _NON_RENDERED:
             self.non_rendered_depth += 1
+        closed_dialog = tag == "dialog" and "open" not in attrs_by_name
+        if closed_dialog:
+            self.non_rendered_depth += 1
         self.stack.append((tag, quote))
+        self.font_stack.append((font_px, scale))
+        self.closed_dialog_stack.append(closed_dialog)
         if tag in ("p", "div", "li", "tr") and self.quote_depth == 0 and not self.non_rendered_depth:
             self.parts.append("\n")
 
@@ -284,9 +353,13 @@ class _AuthoredHTML(HTMLParser):
             self.unsafe = True
             return
         _, quote = self.stack.pop()
+        self.font_stack.pop()
+        closed_dialog = self.closed_dialog_stack.pop()
         if quote:
             self.quote_depth -= 1
         if tag in _NON_RENDERED:
+            self.non_rendered_depth -= 1
+        if closed_dialog:
             self.non_rendered_depth -= 1
         if tag == "body":
             self.body_depth -= 1
@@ -294,6 +367,13 @@ class _AuthoredHTML(HTMLParser):
             self.parts.append("\n")
 
     def handle_data(self, data: str) -> None:
+        tags = [tag for tag, _ in self.stack]
+        if data.strip() and (any(tag in {"menu", "slot", "noembed", "object",
+                                 "picture", "audio", "video", "frameset"}
+                                 for tag in tags) or
+                             ("details" in tags and "summary" not in tags) or
+                             "dialog" in tags):
+            self.unsafe = True
         if self.stack and self.stack[-1][0] == "style":
             # Empty rules cannot affect rendering. A rule with declarations
             # can affect any descendant through selectors and cascade.

@@ -165,6 +165,18 @@ _TAG_LIST_VALUE = frozenset({"--sort", "--format", "--contains", "--no-contains"
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 _SENSITIVE_NAME = re.compile(r"^(?:GIT_[A-Za-z0-9_]*|HUSKY[A-Za-z0-9_]*)$")
 _GIT_LOCATION_NAME = frozenset({"HOME", "XDG_CONFIG_HOME"})
+_LOADER_NAME = frozenset({
+    "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "GIT_EXEC_PATH", "GIT_SSH",
+    "GIT_SSH_COMMAND", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_EXTERNAL_DIFF",
+    "GIT_PAGER", "PAGER", "EDITOR", "VISUAL", "GIT_EDITOR", "SHELL",
+    "BASH_ENV", "ENV", "IFS", "PYTHONPATH", "PYTHONSTARTUP",
+    "PYTHONHOME", "NODE_OPTIONS", "NODE_PATH", "RUBYOPT", "RUBYLIB",
+    "PERL5OPT", "PERL5LIB", "HOME", "XDG_CONFIG_HOME",
+})
+
+
+def _protected_environment_name(name: str) -> bool:
+    return name in _LOADER_NAME or name.startswith("DYLD_") or bool(_SENSITIVE_NAME.match(name))
 # A word that names git: `git`, a path to it, a dashed builtin (git-commit), a
 # remote spec (git@host). Not `github`, `.gitignore` or `digit`.
 # A dashed word counts only when it is a git command (git-commit), so a path
@@ -835,8 +847,8 @@ def _assignment_violation(words: list[Word], *, command_mentions_git: bool = Fal
     for w in words:
         if _ASSIGNMENT.match(w.text):
             name = w.text.split("=", 1)[0].rstrip("+")
-            if _SENSITIVE_NAME.match(name):
-                return f"{name}=... (git and Husky variables may not be set)"
+            if _protected_environment_name(name):
+                return f"{name}=... (program lookup or git environment may not be changed)"
             if command_mentions_git and name in _GIT_LOCATION_NAME:
                 return f"{name}=... (git config location may not be changed)"
     return None
@@ -1484,19 +1496,34 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int =
     if base in _EXPORTERS:
         for w in rest[1:]:
             name = w.text.split("=", 1)[0].rstrip("+")
-            if _SENSITIVE_NAME.match(name) or (
+            if _protected_environment_name(name) or (
                     whole_mentions_git and name in _GIT_LOCATION_NAME):
-                return f"{base} {name} (git and Husky variables may not be set)"
+                return f"{base} {name} (program lookup or git environment may not be changed)"
         return None
     if base == "git" or base.startswith("git-"):
         if head.text != "git":
             return f"{head.text} (only a plain `git` is allowed)"
         return git_violation(rest[1:])
     if base in _WRAPPERS:
+        hit = _assignment_violation(rest[1:], command_mentions_git=whole_mentions_git)
+        if hit:
+            return f"{base} {hit}"
         if base == "env":
-            hit = _assignment_violation(rest[1:], command_mentions_git=whole_mentions_git)
-            if hit:
-                return f"env {hit}"
+            for index, word in enumerate(rest[1:], 1):
+                option = word.text
+                if option == "-S" or option.startswith("-S") or option.startswith("--split-string"):
+                    return "env split-string changes program lookup"
+                if option in {"-u", "--unset"} and index + 1 < len(rest):
+                    if _protected_environment_name(rest[index + 1].text):
+                        return "env unsets a protected environment variable"
+                if option.startswith("--unset=") and _protected_environment_name(option.partition("=")[2]):
+                    return "env unsets a protected environment variable"
+                if option.startswith("-u") and len(option) > 2 and _protected_environment_name(option[2:]):
+                    return "env unsets a protected environment variable"
+        if base == "command" and any(w.text == "-p" for w in rest[1:]):
+            return "command -p changes program lookup"
+        if base == "exec" and any(w.text == "-a" or w.text.startswith("-a") for w in rest[1:]):
+            return "exec -a changes program identity"
         if base == "command" and len(rest) > 1 and rest[1].text in ("-v", "-V"):
             return None
         if (own_mentions and not nested_checked) or (any_expanded and whole_mentions_git and not nested_checked):
@@ -1704,6 +1731,8 @@ def main() -> int:
     if not isinstance(payload, dict) or not payload:
         return deny(guidance("hook input could not be read"))
     tool = payload.get("tool_name")
+    if not isinstance(tool, str) or not tool:
+        return deny(guidance("tool name is missing or malformed"))
     if tool not in {"Bash", "Edit", "Write", "MultiEdit"}:
         return 0
     tool_input = payload.get("tool_input")

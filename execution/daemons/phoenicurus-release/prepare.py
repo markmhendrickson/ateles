@@ -955,8 +955,9 @@ def _build_agent_prompt(last_tag: str, commit_count: int) -> str:
     The email MUST still contain, as VISIBLE TEXT the operator (and their reply
     quote) will carry:
       (a) the subject starting 🚀 with the phrase "ready to approve" + the version;
-      (b) an approve/skip instruction, e.g. a line: Reply <code>approve &lt;TAG&gt;</code>
-          to publish, or <code>skip &lt;TAG&gt;</code> to discard;
+      (b) an approval instruction, e.g. a line: Reply <code>approve &lt;TAG&gt;</code>
+          to publish. To discard, use <code>skip &lt;TAG&gt;</code> through the
+          existing Telegram release command; email replies cannot discard;
       (c) a line reading exactly `release-approve: <TAG>` (real tag, e.g.
           `release-approve: v0.20.0`) — Turdus uses this token to discover replies
           in the mailbox and selects the target release from the reply subject.
