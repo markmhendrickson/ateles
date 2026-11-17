@@ -59,7 +59,8 @@ class ReadRepliesOutcome:
       - ``ok``              — transport succeeded; ``texts`` may be empty (no reply yet)
       - ``transport_error`` — ANY gws fetch in the sweep failed (triage, auth
                               metadata, or body); ``texts`` is always ``[]``,
-                              never a partial set
+                              never a partial set. ``replies`` may hold readable,
+                              authenticated messages for correction-only handling.
       - ``disabled``        — ``ATELES_NOTIFY_EMAIL`` is not armed
 
     Payment-consent callers MUST use this form and treat non-``ok`` as blocked
@@ -81,6 +82,54 @@ _FORWARD = re.compile(
     r"(?i)^(?:-{2,}\s*(?:original|forwarded) message\s*-{2,}|"
     r"begin forwarded message:|_{5,})"
 )
+
+_NON_RENDERED = frozenset({
+    "head", "title", "script", "style", "template", "noscript", "object",
+    "iframe", "svg", "math", "canvas", "audio", "video", "select", "option",
+    "datalist", "textarea", "meta",
+})
+_RENDERED_PROSE = frozenset({
+    "html", "body", "p", "div", "span", "blockquote", "a", "b", "strong",
+    "i", "em", "u", "s", "del", "ins", "mark", "small", "big", "sub", "sup",
+    "ul", "ol", "li", "table", "thead", "tbody", "tfoot", "tr", "td", "th",
+    "h1", "h2", "h3", "h4", "h5", "h6", "font", "center", "pre", "code",
+    "q", "cite", "address", "section", "article", "header", "footer", "main",
+    "aside", "details", "summary", "dl", "dt", "dd",
+})
+_HIDING_CSS = re.compile(
+    r"(?i)(?:^|[;{])\s*(?:display\s*:\s*none\b|"
+    r"visibility\s*:\s*(?:hidden|collapse)\b|"
+    r"(?:opacity|font-size|max-height|max-width|text-indent)\s*:\s*"
+    r"(?:0(?:px|pt|em|rem|%)?|-[1-9]\d{2,}(?:px|pt|em|rem)?)\b|"
+    r"mso-hide\s*:\s*all\b|(?:clip|clip-path|content-visibility)\s*:|"
+    r"(?:color|-webkit-text-fill-color)\s*:\s*transparent\b|"
+    r"line-height\s*:\s*0(?:px|pt|em|rem|%)?\b|"
+    r"filter\s*:\s*opacity\s*\(\s*0(?:%)?\s*\)|"
+    r"transform\s*:\s*(?:scale\s*\(\s*0\s*\)|translate[XY]?\s*\(\s*-?[1-9]\d{2,})|"
+    r"@media\b|@import\b)"
+)
+
+
+def _hiding_style(style: str) -> bool:
+    """Reject CSS that can conceal authored text without a renderer."""
+    css = re.sub(r"/\*.*?\*/", "", style, flags=re.DOTALL).lower()
+    if _HIDING_CSS.search(css):
+        return True
+    declarations = dict((name.strip(), value.strip().removesuffix("!important").strip())
+                        for name, value in re.findall(r"(?:^|[;{])\s*([\w-]+)\s*:\s*([^;{}]+)", css))
+    if (declarations.get("overflow") in {"hidden", "clip"} and
+            any(declarations.get(dim, "").startswith("0") for dim in ("height", "width"))):
+        return True
+    if declarations.get("position") in {"absolute", "fixed"} and any(
+            re.match(r"-[1-9]\d{2,}(?:px|pt|em|rem)?\b", declarations.get(side, ""))
+            for side in ("left", "top", "right", "bottom")):
+        return True
+    foreground = declarations.get("color")
+    background = declarations.get("background-color") or declarations.get("background")
+    if foreground and background and foreground == background:
+        return True
+    whites = {"white", "#fff", "#ffffff", "rgb(255,255,255)", "rgb(255, 255, 255)"}
+    return bool(foreground in whites and background in whites)
 
 
 def _authored_plain(text: str) -> str:
@@ -106,6 +155,9 @@ class _AuthoredHTML(HTMLParser):
         self.parts: list[str] = []
         self.stack: list[tuple[str, bool]] = []
         self.quote_depth = 0
+        self.non_rendered_depth = 0
+        self.structured = False
+        self.body_depth = 0
         self.boundary_seen = False
         self.terminal = False
         self.hr_at: int | None = None
@@ -117,9 +169,22 @@ class _AuthoredHTML(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attrs_by_name = dict(attrs)
+        if tag not in _RENDERED_PROSE and tag not in _NON_RENDERED and tag not in self._VOID:
+            self.unsafe = True
+        if ("hidden" in attrs_by_name or
+                (attrs_by_name.get("aria-hidden") or "").strip().lower() == "true" or
+                _hiding_style(attrs_by_name.get("style") or "") or
+                (tag == "link" and "stylesheet" in (attrs_by_name.get("rel") or "").lower().split())):
+            self.unsafe = True
+        if tag in {"html", "head", "body"}:
+            if not self.structured:
+                self.parts.clear()
+            self.structured = True
+        if tag == "body":
+            self.body_depth += 1
         classes = set((attrs_by_name.get("class") or "").lower().split())
         element_id = (attrs_by_name.get("id") or "").lower()
-        quote = (tag in ("blockquote", "script", "style")
+        quote = (tag == "blockquote"
                  or bool(classes & {"gmail_quote", "gmail_extra", "yahoo_quoted",
                                     "protonmail_quote", "msoquote", "outlookmessageheader"})
                  or element_id in {"divrplyfwdmsg", "appendonsend"}
@@ -129,10 +194,10 @@ class _AuthoredHTML(HTMLParser):
             self.terminal = True
             self.boundary_seen = True
         if tag in self._VOID:
-            if tag == "hr" and self.quote_depth == 0:
+            if tag == "hr" and self.quote_depth == 0 and not self.non_rendered_depth:
                 self.hr_at = len(self.parts)
                 self.parts.append("\n")
-            elif tag == "br" and self.quote_depth == 0:
+            elif tag == "br" and self.quote_depth == 0 and not self.non_rendered_depth:
                 self.parts.append("\n")
             return
         if len(self.stack) >= self._MAX_STACK:
@@ -141,8 +206,10 @@ class _AuthoredHTML(HTMLParser):
         if quote:
             self.quote_depth += 1
             self.boundary_seen = True
+        if tag in _NON_RENDERED:
+            self.non_rendered_depth += 1
         self.stack.append((tag, quote))
-        if tag in ("p", "div", "li", "tr") and self.quote_depth == 0:
+        if tag in ("p", "div", "li", "tr") and self.quote_depth == 0 and not self.non_rendered_depth:
             self.parts.append("\n")
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -160,11 +227,17 @@ class _AuthoredHTML(HTMLParser):
         _, quote = self.stack.pop()
         if quote:
             self.quote_depth -= 1
-        if tag in ("p", "div", "li", "tr") and self.quote_depth == 0:
+        if tag in _NON_RENDERED:
+            self.non_rendered_depth -= 1
+        if tag == "body":
+            self.body_depth -= 1
+        if tag in ("p", "div", "li", "tr") and self.quote_depth == 0 and not self.non_rendered_depth:
             self.parts.append("\n")
 
     def handle_data(self, data: str) -> None:
-        if self.terminal or self.quote_depth:
+        if self.stack and self.stack[-1][0] == "style" and _hiding_style(data):
+            self.unsafe = True
+        if self.terminal or self.quote_depth or self.non_rendered_depth or (self.structured and not self.body_depth):
             return
         if self.hr_at is not None and _QUOTE_HEADER.search(data.strip()):
             self.parts = self.parts[:self.hr_at]
@@ -743,6 +816,7 @@ def read_replies_with_status(
     if saw_transport_error:
         return ReadRepliesOutcome(
             kind="transport_error", texts=[], detail=transport_detail or "gws_failed",
+            replies=tuple(replies),
             rejected_replies=tuple(rejected_replies),
             unreadable_replies=tuple(unreadable_replies),
         )

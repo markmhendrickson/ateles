@@ -744,7 +744,7 @@ def _send_approval_correction(msg: dict, notifier: Notifier, target: str,
     delivered = notifier.send(
         f"{DAEMON_NAME}: no approval was recorded for {target}. Reply with "
         f"exactly `{exact_form}` on one line to approve it.",
-        priority=Priority.BLOCKER, handler=DAEMON_NAME,
+        priority=Priority.BLOCKER, handler=DAEMON_NAME, email_eligible=False,
     )
     if delivered:
         msg["correction_notified"] = True
@@ -768,7 +768,7 @@ def _approval_target_matches(msg: dict, notifier: Notifier, subject_target: str,
             f"{DAEMON_NAME}: no approval was recorded for {subject_target}. "
             f"The reply's correlation target is {token_label}; "
             "reply to the matching approval request instead.",
-            priority=Priority.BLOCKER, handler=DAEMON_NAME,
+            priority=Priority.BLOCKER, handler=DAEMON_NAME, email_eligible=False,
         )
         if delivered:
             msg["correction_notified"] = True
@@ -917,7 +917,7 @@ async def _maybe_handle_swarm_approval(msg: dict, notifier: Notifier) -> bool:
             f"{DAEMON_NAME}: email approval for {target} could not be accepted "
             "because the reply's sender could not be verified. Approve through "
             "the existing Telegram approval path.",
-            priority=Priority.BLOCKER, handler=DAEMON_NAME,
+            priority=Priority.BLOCKER, handler=DAEMON_NAME, email_eligible=False,
         )
         if delivered:
             msg["correction_notified"] = True
@@ -941,6 +941,9 @@ async def _maybe_handle_swarm_approval(msg: dict, notifier: Notifier) -> bool:
         )
         return False
 
+    if not msg.get("approval_allowed", True):
+        return False
+
     repository, pr_number = subject_token
     ok = await _post_email_approval(repository, pr_number, sender_addr)
     if ok:
@@ -948,7 +951,7 @@ async def _maybe_handle_swarm_approval(msg: dict, notifier: Notifier) -> bool:
             f"{DAEMON_NAME}: operator emailed APPROVE for {repository}#{pr_number} "
             "→ routed to Apis merge gate.",
             priority=Priority.BLOCKER,
-            handler=DAEMON_NAME,
+            handler=DAEMON_NAME, email_eligible=False,
         )
         log.info(f"[{DAEMON_NAME}] email-approve routed for {repository}#{pr_number}")
     return ok
@@ -1051,7 +1054,7 @@ async def _maybe_handle_release_approval(msg: dict, notifier: Notifier) -> bool:
             f"{DAEMON_NAME}: email approval for {version} could not be accepted "
             "because the reply's sender could not be verified. Approve through "
             "the existing Telegram approval path.",
-            priority=Priority.BLOCKER, handler=DAEMON_NAME,
+            priority=Priority.BLOCKER, handler=DAEMON_NAME, email_eligible=False,
         )
         if delivered:
             msg["correction_notified"] = True
@@ -1075,13 +1078,16 @@ async def _maybe_handle_release_approval(msg: dict, notifier: Notifier) -> bool:
         )
         return False
 
+    if not msg.get("approval_allowed", True):
+        return False
+
     ok = await _post_release_approval(version, sender_addr)
     if ok:
         notifier.send(
             f"{DAEMON_NAME}: operator emailed `approve {version}` → routed to the "
             "Apis release-publish gate.",
             priority=Priority.BLOCKER,
-            handler=DAEMON_NAME,
+            handler=DAEMON_NAME, email_eligible=False,
         )
         log.info(f"[{DAEMON_NAME}] release-approve routed for {version}")
     return ok
@@ -1133,7 +1139,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         delivered = notifier.send(
             f"{DAEMON_NAME}: email approval for {target} could not be read yet. "
             "Approve through Telegram instead.",
-            priority=Priority.BLOCKER, handler=DAEMON_NAME,
+            priority=Priority.BLOCKER, handler=DAEMON_NAME, email_eligible=False,
         )
         if delivered:
             unreadable_notice_ids.append(mid)
@@ -1145,9 +1151,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
     if outcome.kind in ("ok", "transport_error"):
         # A partial read cannot approve anything; rejected metadata can still
         # be reported once, using only the subject for the target name.
-        candidates = list(outcome.rejected_replies)
-        if outcome.kind == "ok":
-            candidates += list(outcome.replies)
+        candidates = list(outcome.rejected_replies) + list(outcome.replies)
         for reply in candidates:
             if reply.message_id in processed_id_set:
                 continue
@@ -1155,6 +1159,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
                    "subject": reply.subject, "body": reply.body,
                    "authenticated": reply.authenticated,
                    "correlation_target": reply.correlation_target,
+                   "approval_allowed": outcome.kind == "ok",
                    "correction_notified": reply.message_id in correction_id_set}
             try:
                 if await _maybe_handle_release_approval(msg, notifier) or await _maybe_handle_swarm_approval(msg, notifier):
@@ -1272,13 +1277,13 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         notifier.send(
             f"{DAEMON_NAME}: {invoice_count} invoice(s) → urgent task(s) created for monedula",
             priority=Priority.BLOCKER,
-            handler=DAEMON_NAME,
+            handler=DAEMON_NAME, email_eligible=False,
         )
     if actionable_count > 0:
         notifier.send(
             f"{DAEMON_NAME}: {actionable_count} actionable email(s) → tasks created",
             priority=Priority.INFO,
-            handler=DAEMON_NAME,
+            handler=DAEMON_NAME, email_eligible=False,
         )
 
     _save_state(state)
@@ -1320,7 +1325,7 @@ async def main() -> None:
     notifier.send(
         f"{DAEMON_NAME} started (Phase 4: email triage skeleton, dry_run={DRY_RUN})",
         priority=Priority.INFO,
-        handler=DAEMON_NAME,
+        handler=DAEMON_NAME, email_eligible=False,
     )
 
     # 4. Load persisted state
@@ -1340,7 +1345,7 @@ async def main() -> None:
             notifier.send(
                 f"{DAEMON_NAME} poll error: {exc}",
                 priority=Priority.BLOCKER,
-                handler=DAEMON_NAME,
+                handler=DAEMON_NAME, email_eligible=False,
             )
 
         await asyncio.sleep(POLL_INTERVAL)

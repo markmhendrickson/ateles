@@ -743,7 +743,7 @@ class TestPartialReadFailsClosed:
             out = ec.read_replies_with_status(["TOK"])
         assert out.kind == "transport_error"
         assert out.texts == []
-        assert out.replies == ()
+        assert [r.message_id for r in out.replies] == ["m1"]
         assert [(r.message_id, r.subject) for r in out.unreadable_replies] == [
             ("m2", "RE: x [APPROVE-TOK]")]
 

@@ -79,7 +79,7 @@ class _StubNotifier:
     def __init__(self):
         self.sent = []
 
-    def send(self, message, priority=None, handler=None):
+    def send(self, message, priority=None, handler=None, email_eligible=True):
         self.sent.append(message)
         return True
 
@@ -1052,6 +1052,10 @@ def test_approval_notices_use_real_notifier_and_retry_failed_delivery(
     monkeypatch.setattr(turdus, "_post_release_approval", post)
     monkeypatch.setattr(turdus, "_post_email_approval", post)
     notifier, transport = _real_notifier(monkeypatch, tmp_path, silence=True)
+    notifier._email_primary = True
+    email_calls = []
+    monkeypatch.setattr(notifier, "_deliver_email",
+                        lambda message: email_calls.append(message) or True)
     state = {"last_message_id": None}
     if case != "matching":
         transport.deliver = False
@@ -1063,6 +1067,7 @@ def test_approval_notices_use_real_notifier_and_retry_failed_delivery(
     state = _run(turdus.poll_once(notifier, state))
     state = _run(turdus.poll_once(notifier, state))
     assert len(transport.sent) == 1
+    assert email_calls == []
     if case == "matching":
         assert len(posts) == 1
         assert "synthetic-1" in state.get("processed_ids", [])
@@ -1119,3 +1124,184 @@ def test_multipart_prefers_authored_plain_then_html(monkeypatch, tmp_path, kind)
     posts, _, _ = _poll_authored_reply(monkeypatch, tmp_path / "second", kind, {
         "body_text": "> quoted text", "body_html": f"<p>{approval}</p>"})
     assert len(posts) == 1
+
+
+_NON_RENDERED_TAGS = (
+    "head", "title", "script", "style", "template", "noscript", "object",
+    "iframe", "svg", "math", "canvas", "audio", "video", "select", "option",
+    "datalist", "textarea",
+)
+_HIDING_ATTRIBUTES = (
+    "hidden", 'aria-hidden="true"', 'style="display:none"',
+    'style="visibility:hidden"', 'style="visibility:collapse"',
+    'style="opacity:0"', 'style="font-size:0"',
+    'style="font-size:0px"', 'style="font-size:0pt"',
+    'style="max-height:0"', 'style="max-width:0"',
+    'style="height:0;overflow:hidden"', 'style="width:0;overflow:hidden"',
+    'style="mso-hide:all"', 'style="position:absolute;left:-9999px"',
+    'style="position:fixed;top:-9999px"',
+    'style="text-indent:-9999px"',
+    'style="color:#fff;background-color:#fff"',
+    'style="color:white;background:white"', 'style="clip:rect(0,0,0,0)"',
+    'style="clip-path:inset(100%)"',
+    'style="content-visibility:hidden"',
+    'style="filter:opacity(0)"', 'style="transform:scale(0)"',
+    'style="color:transparent"',
+    'style="-webkit-text-fill-color:transparent"',
+    'style="line-height:0"', 'style="transform:translateX(9999px)"',
+)
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("tag", _NON_RENDERED_TAGS)
+def test_html_non_rendered_affirmative_is_unreadable(monkeypatch, tmp_path, kind, tag):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    if tag in {"head", "title"}:
+        html = f"<html><head><{tag}>{approval}</{tag}></head><body><blockquote>{token}</blockquote></body></html>"
+    else:
+        html = f"<body><{tag}>{approval}</{tag}><blockquote>{token}</blockquote></body>"
+    posts, state, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind, {"body_html": html}, polls=2)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+    assert len([m for m in notices.sent if "could not be read yet" in m]) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("attr", _HIDING_ATTRIBUTES)
+def test_html_hidden_affirmative_is_unreadable(monkeypatch, tmp_path, kind, attr):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    html = f"<body><div {attr}>{approval}</div><blockquote>{token}</blockquote></body>"
+    posts, state, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind, {"body_html": html}, polls=2)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+    assert len([m for m in notices.sent if "could not be read yet" in m]) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("css", (
+    ".hidden{display:none}", ".hidden{visibility:hidden}",
+    "@media screen{.hidden{display:none}}", ".hidden{clip-path:inset(100%)}",
+    "@import url('hidden.css');",
+))
+def test_html_stylesheet_hiding_is_unreadable(monkeypatch, tmp_path, kind, css):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    html = f"<html><head><style>{css}</style></head><body><div class='hidden'>{approval}</div><blockquote>{token}</blockquote></body></html>"
+    posts, state, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind, {"body_html": html}, polls=2)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+    assert len([m for m in notices.sent if "could not be read yet" in m]) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+def test_visible_styled_html_body_still_approves(monkeypatch, tmp_path, kind):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    html = f"<html><head><title>Reply</title></head><body><p style='color:#333'>{approval}</p><blockquote>{token}</blockquote></body></html>"
+    posts, state, _ = _poll_authored_reply(monkeypatch, tmp_path, kind, {"body_html": html})
+    assert len(posts) == 1
+    assert state.get("processed_ids") == ["approval-1"]
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("markup", (
+    "<html><head><meta content='{approval}'></head><body><blockquote>{token}</blockquote></body></html>",
+    "{approval}<html><body><blockquote>{token}</blockquote></body></html>",
+    "<html><body><blockquote>{token}</blockquote></body>{approval}</html>",
+    "<body><!-- {approval} --><blockquote>{token}</blockquote></body>",
+))
+def test_html_outside_body_and_metadata_do_not_approve(monkeypatch, tmp_path, kind, markup):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    posts, state, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind,
+        {"body_html": markup.format(approval=approval, token=token)}, polls=2)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+    assert len([m for m in notices.sent if "could not be read yet" in m]) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+def test_unknown_html_element_is_unreadable(monkeypatch, tmp_path, kind):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    posts, state, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind,
+        {"body_html": f"<body><x-unknown>{approval}</x-unknown><blockquote>{token}</blockquote></body>"},
+        polls=2)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+    assert len([m for m in notices.sent if "could not be read yet" in m]) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("readable", ("Thank you for the update.", "approval"))
+def test_partial_sweep_corrects_readable_but_never_approves(monkeypatch, tmp_path, kind, readable):
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(turdus, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setattr(turdus, "_STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(turdus, "_poll_gmail_messages", lambda *_: [])
+    monkeypatch.setattr(email_channel, "_gws", lambda: "/synthetic/gws")
+    monkeypatch.setattr(email_channel, "_fetch_auth_results", lambda _mid: [_AUTH_PASS])
+    subject = ("Re: Release v1.2.3 ready to approve" if kind == "release" else
+               "Re: [Ateles] PR o/r#7 is READY TO MERGE")
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    body = approval if readable == "approval" else readable
+    fail_read = True
+
+    def fake_gws(args, timeout=45):
+        if "+triage" in args:
+            query = args[args.index("--query") + 1]
+            if ("release-approve:" in query) == (kind == "release"):
+                return {"messages": [{"id": mid, "from": "Op <op@example.com>",
+                                      "subject": subject} for mid in ("readable", "unreadable")]}
+            return {"messages": []}
+        if "+read" in args:
+            mid = args[args.index("--id") + 1]
+            if mid == "unreadable" and fail_read:
+                return {"body_html": f"<body><div hidden>{approval}</div><blockquote>{token}</blockquote></body>"}
+            return {"body_text": f"{body if mid == 'readable' else 'hold'}\n> {token}"}
+        raise AssertionError(args)
+
+    posts = []
+
+    async def post(*args):
+        posts.append(args)
+        return True
+
+    monkeypatch.setattr(email_channel, "gws_json", fake_gws)
+    monkeypatch.setattr(turdus, "_post_release_approval", post)
+    monkeypatch.setattr(turdus, "_post_email_approval", post)
+    outcome = email_channel.read_replies_with_status(
+        ["release-approve:", "swarm-approve:"], require_enabled=False)
+    assert outcome.kind == "transport_error"
+    assert outcome.texts == []
+    assert [reply.message_id for reply in outcome.replies] == ["readable"]
+
+    state = {"last_message_id": None}
+    notices = []
+    for _ in range(2):
+        notifier = _StubNotifier()
+        state = _run(turdus.poll_once(notifier, state))
+        notices.extend(notifier.sent)
+    assert posts == []
+    assert "readable" not in state.get("processed_ids", [])
+    assert len([note for note in notices if "could not be read yet" in note]) == 1
+    if readable == "approval":
+        assert state.get("approval_correction_ids", []) == []
+    else:
+        assert state.get("approval_correction_ids") == ["readable"]
+        assert len([note for note in notices if "no approval was recorded" in note]) == 1
+
+    fail_read = False
+    state = _run(turdus.poll_once(_StubNotifier(), state))
+    assert len(posts) == (1 if readable == "approval" else 0)
+    assert ("readable" in state.get("processed_ids", [])) == (readable == "approval")

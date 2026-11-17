@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live check that the prepare agent's git-hook guard binds in the real Claude CLI.
+"""Pre-deploy live check that the prepare agent's git-hook guard binds in Claude CLI.
 
 Spawns `claude --print --dangerously-skip-permissions` exactly as prepare.py
 does (its --settings and its allowlisted child environment), in a scratch git
@@ -12,7 +12,9 @@ repository, twice:
 A run where the control does not land is reported as INCONCLUSIVE, never as a
 pass: a CLI that failed to start would otherwise look identical to a refusal.
 
-This is a script, not a pytest test, because the repository's test setup
+Run this on the credentialed prepare host before deploying a guard change.
+Hook CI tests do not replace this live binding check. It is a script, not a
+pytest test, because the repository's test setup
 strips credential-named variables, so the CLI cannot authenticate under
 pytest. Run it from the daemon's deployment checkout after a change to the
 guard or to `_agent_env`. It prints only commit counts, the CLI exit codes and
@@ -61,6 +63,7 @@ def _ask(prepare, repo: Path, command: str) -> int:
 
 
 def main() -> int:
+    print("PRE-DEPLOY LIVE BINDING CHECK: run on the credentialed prepare host; hook CI tests do not replace it")
     prepare = _load_prepare()
     repo = Path(tempfile.mkdtemp(prefix="prepare-guard-live-"))
     subprocess.run(["git", "init", "-q", str(repo)], check=True)

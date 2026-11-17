@@ -69,6 +69,10 @@ written script or an indirection it cannot inspect can still skip hooks. The
 binding controls are the allowlisted child environment plus the release checks
 that run after the agent.
 
+Before deploying a guard change, run `verify_guard_live.py` on the credentialed
+prepare host. It checks that the real Claude CLI loads and enforces the hook;
+hook CI tests do not replace this pre-deploy live-binding check.
+
 This split exists because release approval can take hours — a launchd daemon
 cannot block in-process that long (unlike Monedula's 120 s payment approval).
 Prepare runs and exits; publish fires later when the operator approves.
@@ -221,8 +225,13 @@ lines allowed are exact correlation lines for that target (`swarm-approve:
 owner/repo#7` or `release-approve: v1.2.3`). A line naming another target,
 including a different PR or version in a correlation line, is not approval.
 
-Only operator-authored text counts; quoted, forwarded, original-message and
-signature text never grants approval. Any second instruction, text before or
+Only text in known rendered prose elements inside the HTML body counts as
+authored text; unknown elements make the body unreadable. Head, title,
+script, style, template, form values and other non-rendered elements do not
+count. HTML with hidden elements, hiding inline CSS, or a stylesheet that can
+hide content is unreadable; a substantive plain-text part takes precedence over
+HTML. Quoted, forwarded, original-message and signature text never grants
+approval. Any second instruction, text before or
 after the affirmative, refusal, condition, question, longer sentence, or wrong
 target is a non-approval. For every readable, authenticated non-approval in an
 approval thread, Turdus sends one
@@ -238,6 +247,12 @@ a quote, or if an HTML-only copy of the notification has no identifiable quote
 boundary, Turdus leaves the reply pending, sends one Telegram unreadable notice
 naming the target, and retries on the next poll. A readable authentication
 failure is rejected and handled.
+If any reply in a sweep is unreadable or a fetch fails, no approval from that
+sweep is routed. Turdus still sends one Telegram correction for each readable,
+authenticated non-approval reply; an exact approval remains pending for a clean
+sweep. These operator notices go directly to Telegram even when email is the
+primary notification transport, and an ID is recorded as notified only after
+delivery succeeds. Monedula also holds consent on the same incomplete sweep.
 
 ```
 reply "approve <version>" to the RC email

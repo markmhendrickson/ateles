@@ -828,6 +828,72 @@ def test_consent_unmarked_html_request_is_unreadable(monkeypatch, tmp_path):
     assert result.reason_code == "consent_reply_read_failed"
 
 
+@pytest.mark.parametrize("wrapper", (
+    "<head>{text}</head>", "<title>{text}</title>",
+    "<script>{text}</script>", "<style>{text}</style>",
+    "<template>{text}</template>", "<noscript>{text}</noscript>",
+    "<object>{text}</object>", "<iframe>{text}</iframe>",
+    "<svg>{text}</svg>", "<math>{text}</math>",
+    "<canvas>{text}</canvas>", "<audio>{text}</audio>",
+    "<video>{text}</video>", "<select>{text}</select>",
+    "<option>{text}</option>", "<datalist>{text}</datalist>",
+    "<textarea>{text}</textarea>",
+))
+def test_consent_nonrendered_html_affirmative_holds(monkeypatch, tmp_path, wrapper):
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    tok = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0].token
+    _arm_email(monkeypatch)
+    html = f"<body>{wrapper.format(text='ATTENDED')}<blockquote>{subject_marker(tok)}</blockquote></body>"
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        tok, auth_by_id={"m1": [_GOOGLE_PASS]}, body_by_id={"m1": {"body_html": html}}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == set()
+    assert result.reason_code == "consent_reply_read_failed"
+
+
+@pytest.mark.parametrize("attr", (
+    "hidden", 'aria-hidden="true"', 'style="display:none"',
+    'style="visibility:hidden"', 'style="opacity:0"',
+    'style="font-size:0"', 'style="font-size:0px"', 'style="font-size:0pt"',
+    'style="max-height:0"', 'style="max-width:0"',
+    'style="height:0;overflow:hidden"', 'style="width:0;overflow:hidden"',
+    'style="mso-hide:all"', 'style="position:absolute;left:-9999px"',
+    'style="text-indent:-9999px"',
+    'style="color:#fff;background-color:#fff"',
+    'style="color:white;background:white"',
+    'style="clip:rect(0,0,0,0)"', 'style="clip-path:inset(100%)"',
+    'style="color:transparent"',
+    'style="-webkit-text-fill-color:transparent"',
+    'style="line-height:0"', 'style="transform:translateX(9999px)"',
+))
+def test_consent_hidden_html_affirmative_holds(monkeypatch, tmp_path, attr):
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    tok = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0].token
+    _arm_email(monkeypatch)
+    html = f"<body><p {attr}>ATTENDED</p><blockquote>{subject_marker(tok)}</blockquote></body>"
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        tok, auth_by_id={"m1": [_GOOGLE_PASS]}, body_by_id={"m1": {"body_html": html}}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == set()
+    assert result.reason_code == "consent_reply_read_failed"
+
+
+def test_consent_class_hidden_by_stylesheet_holds(monkeypatch, tmp_path):
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    tok = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0].token
+    _arm_email(monkeypatch)
+    html = ("<html><head><style>.hidden{display:none}</style></head>"
+            f"<body><p class='hidden'>ATTENDED</p><blockquote>{subject_marker(tok)}</blockquote></body></html>")
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        tok, auth_by_id={"m1": [_GOOGLE_PASS]}, body_by_id={"m1": {"body_html": html}}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == set()
+    assert result.reason_code == "consent_reply_read_failed"
+
+
 def test_real_read_unauthenticated_operator_attended_is_held(monkeypatch, tmp_path):
     h = _Handler("therapy", label="Studio Example", amount=60)
     items = consent_email.build_pending_items([(h, [{}])], "2026-09-22")
@@ -866,7 +932,7 @@ def test_real_read_partial_failure_holds_every_payment(monkeypatch, tmp_path, fa
     outcome = _ec.read_replies_with_status([tok])
     assert outcome.kind == "transport_error"
     assert outcome.texts == []
-    assert outcome.replies == ()
+    assert [reply.message_id for reply in outcome.replies] == ["m1"]
     assert [r.message_id for r in outcome.unreadable_replies] == ["m2"]
     result = consent_email.request_and_collect(
         [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
