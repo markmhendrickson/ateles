@@ -6,9 +6,12 @@ runs as a subprocess with real PreToolUse JSON on stdin, exactly as the Claude
 CLI runs it under prepare's --settings.
 """
 import json
+import io
 import os
 import subprocess
 import sys
+import tarfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -922,6 +925,41 @@ def test_archive_uninspectable_only_allowed_in_scratch(tmp_path):
     assert_refused("7z x missing.7z -osrc/out")
     assert_allowed(f"tar -xf missing.tar -C {tmp_path / 'out'}")
     assert_allowed(f"unzip missing.zip -d {tmp_path / 'out'}")
+
+
+@pytest.mark.parametrize("member", (".git/config", "../.husky/pre-commit",
+                                     "/tmp/.git/hooks/pre-commit"))
+def test_archive_members_are_judged_even_in_scratch(tmp_path, member):
+    archive = tmp_path / "members.tar"
+    with tarfile.open(archive, "w") as source:
+        payload = b"safe"
+        info = tarfile.TarInfo(member)
+        info.size = len(payload)
+        source.addfile(info, io.BytesIO(payload))
+    assert_refused(f"tar -xf {archive} -C {tmp_path / 'out'}")
+
+
+def test_zip_member_and_safe_archive(tmp_path):
+    archive = tmp_path / "members.zip"
+    with zipfile.ZipFile(archive, "w") as source:
+        source.writestr(".husky/pre-commit", "bad")
+    assert_refused(f"unzip {archive} -d {tmp_path / 'out'}")
+    safe = tmp_path / "safe.tar"
+    with tarfile.open(safe, "w") as source:
+        payload = b"safe"
+        info = tarfile.TarInfo("notes.txt")
+        info.size = len(payload)
+        source.addfile(info, io.BytesIO(payload))
+    assert_allowed(f"tar -xf {safe} -C {tmp_path / 'out'}")
+
+
+def test_tar_directories_are_resolved_in_order(tmp_path):
+    sys.path.insert(0, str(HOOK.parent))
+    import git_hook_bypass_guard as guard  # noqa: PLC0415
+    base = str(tmp_path / "first")
+    dirs = guard._tree_destinations(
+        "tar", ["-xf", "unknown.tar", "-C", base, "-C", "../second"])
+    assert dirs == [base, str(tmp_path / "second")]
 
 
 @pytest.mark.parametrize("command", (

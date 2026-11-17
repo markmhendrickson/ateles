@@ -918,32 +918,42 @@ def _archive_violation(base: str, args: list[str], destinations: list[str]) -> s
             return f"{base} extraction option can redirect archive members: {arg}"
         if base in {"tar", "gtar", "bsdtar"} and arg.startswith("-") and not arg.startswith("--") and "P" in arg[1:]:
             return f"{base} extraction preserves absolute archive member names"
-    if all(_scratch_destination(dest) for dest in destinations):
-        return None
+    scratch = all(_scratch_destination(dest) for dest in destinations)
     # For non-scratch destinations the archive must be readable and each member
     # confined. Formats without a safe local listing are denied here.
     archive = None
     for i, arg in enumerate(args[:-1]):
         if arg in ("-f", "--file", "-Z", "--archive"):
             archive = args[i + 1]
+        elif base in {"tar", "gtar", "bsdtar", "jar"} and re.fullmatch(r"-?[A-Za-z]+", arg) and "f" in arg:
+            archive = args[i + 1]
+    for arg in args:
+        if arg.startswith("--file=") or arg.startswith("--archive="):
+            archive = arg.split("=", 1)[1]
+        elif base in {"tar", "gtar", "bsdtar"}:
+            attached = re.fullmatch(r"-?[A-Za-z]*f(.+)", arg)
+            if attached:
+                archive = attached.group(1)
+    if archive is None and base == "ditto" and len(args) >= 2:
+        archive = args[-2]
     if archive is None and base in {"unzip", "7z"}:
         archive = next((a for a in args if not a.startswith("-")), None)
         if base == "7z" and archive in {"x", "e"}:
             archive = next((a for a in args[1:] if not a.startswith("-")), None)
     if not archive or archive == "-":
-        return f"{base} archive members cannot be inspected"
+        return None if scratch else f"{base} archive members cannot be inspected"
     try:
         if base in {"tar", "gtar", "bsdtar"}:
             with tarfile.open(archive) as source:
                 members = [(m.name, m.issym() or m.islnk()) for m in source]
-        elif base in {"unzip", "jar"}:
+        elif base in {"unzip", "jar", "ditto"}:
             with zipfile.ZipFile(archive) as source:
                 members = [(m.filename, (m.external_attr >> 16) & 0o170000 == 0o120000)
                            for m in source.infolist()]
         else:
-            return f"{base} archive members cannot be inspected"
+            return None if scratch else f"{base} archive members cannot be inspected"
     except (OSError, tarfile.TarError, zipfile.BadZipFile):
-        return f"{base} archive members cannot be inspected"
+        return None if scratch else f"{base} archive members cannot be inspected"
     for name, link in members:
         parts = Path(name).parts
         if link or os.path.isabs(name) or ".." in parts or any(
@@ -986,11 +996,23 @@ def _tree_destinations(base: str, args: list[str]) -> list[str]:
                          for arg in flags) or bool(
             args and re.fullmatch(r"[A-Za-z]+", args[0]) and "x" in args[0])
         if extracting:
-            dirs = [args[i + 1] for i, arg in enumerate(args[:-1])
-                    if arg in ("-C", "--directory")]
-            dirs += [arg.split("=", 1)[1] for arg in args
-                     if arg.startswith("--directory=")]
-            dirs += [arg[2:] for arg in args if arg.startswith("-C") and len(arg) > 2]
+            dirs: list[str] = []
+            current = "."
+            i = 0
+            while i < len(args):
+                arg = args[i]
+                directory = None
+                if arg in ("-C", "--directory") and i + 1 < len(args):
+                    directory = args[i + 1]
+                    i += 1
+                elif arg.startswith("--directory="):
+                    directory = arg.split("=", 1)[1]
+                elif arg.startswith("-C") and len(arg) > 2:
+                    directory = arg[2:]
+                if directory is not None:
+                    current = os.path.normpath(os.path.join(current, directory))
+                    dirs.append(current)
+                i += 1
             return dirs or ["."]
     if base == "unzip" and not any(a in ("-l", "-t", "-v", "-Z") for a in flags):
         return [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "-d"] or ["."]
