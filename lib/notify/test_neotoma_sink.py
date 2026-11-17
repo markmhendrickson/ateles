@@ -239,6 +239,57 @@ def test_new_usage_reset_clears_old_journal_key_and_resolves_sink(on, monkeypatc
     assert on.corrections()[0]["value"] == "resolved"
 
 
+def test_reset_spelling_migrates_open_sink_alert_without_a_new_send(
+    on, monkeypatch, tmp_path
+):
+    from datetime import datetime, timedelta, timezone
+    import sys
+    apis_dir = Path(__file__).resolve().parents[2] / "execution" / "daemons" / "apis"
+    if str(apis_dir) not in sys.path:
+        sys.path.insert(0, str(apis_dir))
+    import usage_alerts
+
+    usage_file = tmp_path / "usage.json"
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(usage_file))
+    notifier = Notifier(rubric=NO_SILENCE)
+    sends = []
+
+    def transport(*args, **kwargs):
+        sends.append(args[0])
+        return True
+
+    monkeypatch.setattr(notifier, "_deliver", transport)
+    reset = datetime.now(timezone.utc) + timedelta(days=2)
+    old_spelling = reset.astimezone(timezone(timedelta(hours=1))).isoformat()
+    canonical = reset.isoformat(timespec="seconds")
+    old_key = f"{usage_alerts.DEDUPE_PREFIX}:codex:weekly_all:{old_spelling}:50"
+    assert notifier.send("usage crossed", Priority.WARN, handler="apis", dedupe_key=old_key)
+    sink.flush()
+    assert len(on.stores()) == 1
+
+    def reading(value):
+        usage_file.write_text(json.dumps({"codex": {"windows": [{
+            "name": "weekly_all", "used_percent": 60, "resets_at": value,
+        }]}}))
+
+    reading(canonical)
+    assert usage_alerts.check_usage_thresholds("codex", notifier=notifier) == []
+    new_key = usage_alerts.dedupe_key("codex", "weekly_all", canonical, 50)
+    assert not notifier.is_dedupe_open(old_key)
+    assert notifier.is_dedupe_open(new_key)
+    assert len(sends) == 1
+    sink.flush()
+    assert on.corrections() == []
+    assert len(on.stores()) == 1
+
+    reading((reset + timedelta(days=7)).isoformat())
+    assert len(usage_alerts.check_usage_thresholds("codex", notifier=notifier)) == 1
+    sink.flush()
+    assert len(sends) == 2
+    assert on.corrections()[0]["entity_id"] == "ent_fake1"
+    assert on.corrections()[0]["value"] == "resolved"
+
+
 def test_clear_dedupe_after_a_restart_still_resolves(on):
     sink.record(message="gate failing", level="blocker", handler="apis", dedupe_key="apis:gate")
     sink.flush()

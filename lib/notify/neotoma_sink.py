@@ -533,6 +533,35 @@ def resolve(key: str) -> None:
         _warn_once("resolve-failed", f"{type(exc).__name__}: {exc}")
 
 
+def migrate_key(old_key: str, new_key: str) -> bool:
+    """Retain an open alert while its caller normalizes a dedupe key.
+
+    The existing entity and its generation stay open. A later resolve of the
+    canonical key then closes that same entity.
+    """
+    try:
+        m = mode()
+        if m == "off" or old_key == new_key:
+            return True
+        old = _one_line(scrub(old_key), KEY_MAX)
+        new = _one_line(scrub(new_key), KEY_MAX)
+        for path in list(sink_dir().glob(f"state-{m}-*.json")):
+            daemon = path.stem[len(f"state-{m}-"):]
+            with _state(m, daemon, path) as st:
+                for skey, entry in list(st["entries"].items()):
+                    if entry.get("key") != old or entry.get("status") != "open":
+                        continue
+                    canonical_skey = f"{entry['level']}\0{new}"
+                    if canonical_skey in st["entries"] and canonical_skey != skey:
+                        return False
+                    entry["key"] = new
+                    st["entries"][canonical_skey] = st["entries"].pop(skey)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _warn_once("migrate-failed", f"{type(exc).__name__}: {exc}")
+        return False
+
+
 def _resolve_job(daemon: str, e: dict[str, Any], why: str) -> dict[str, Any]:
     tags = None
     if why == "expired":

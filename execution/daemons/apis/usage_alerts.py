@@ -247,6 +247,7 @@ def check_usage_thresholds(
             probe = notifier if notifier is not None else journal
             prefix = f"{DEDUPE_PREFIX}:{provider}:{name}:"
             current_reset = reset_key or "no-reset"
+            migration_failed = False
             for old_key in probe.dedupe_keys_with_prefix(prefix):
                 old_reset, separator, threshold_text = old_key[len(prefix):].rpartition(":")
                 old_instant = _parse_iso(old_reset)
@@ -259,11 +260,13 @@ def check_usage_thresholds(
                     canonical_key = dedupe_key(provider, name, reset_key, int(threshold_text))
                     if old_key == canonical_key:
                         continue
-                    # Preserve a delivered alert written by an older offset
-                    # spelling before retiring its noncanonical journal key.
-                    if _already_reported(probe, old_key):
-                        _mark_reported(probe, canonical_key)
-                    probe.clear_dedupe(old_key)
+                    # This is the same open condition, so move both the
+                    # journal key and sink reference without resolving it.
+                    migrator = getattr(probe, "migrate_dedupe", None)
+                    if not callable(migrator) or not migrator(old_key, canonical_key):
+                        migration_failed = True
+            if migration_failed:
+                continue  # retain the old key and retry migration next check
             if resets_at is None:
                 # No reset time means no per-window key: the key is reused
                 # across windows, so a threshold usage has fallen back under
@@ -323,10 +326,13 @@ def check_usage_thresholds(
 
                     result: list[bool] = []
                     def handoff() -> None:
-                        result.append(bool(notifier.send(
-                            message, priority=Priority.WARN, handler="apis",
-                            dedupe_key=send_key, retryable=True,
-                        )))
+                        try:
+                            result.append(bool(notifier.send(
+                                message, priority=Priority.WARN, handler="apis",
+                                dedupe_key=send_key, retryable=True,
+                            )))
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("[apis] usage alert handoff failed: %s", exc)
                     sender = threading.Thread(target=handoff, daemon=True)
                     sender.start()
                     sender.join(ALERT_SEND_TIMEOUT_SECONDS)
@@ -409,5 +415,3 @@ def _mark_reported(notifier, key: str) -> None:
             marker(key, "apis")
         except Exception:  # noqa: BLE001
             pass
-
-

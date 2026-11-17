@@ -504,6 +504,7 @@ def test_dedupe_key_journal_survives_a_new_notifier_instance(tmp_path):
 
 def test_retryable_alert_recovers_pending_after_interrupted_handoff(tmp_path):
     from datetime import timedelta
+    import pytest
 
     sent = []
     first = _notifier(tmp_path, NO_SILENCE, sent)

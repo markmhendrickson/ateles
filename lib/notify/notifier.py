@@ -798,6 +798,23 @@ class Notifier:
         """Where this notifier's dedupe journal lives (for a sidecar lock)."""
         return self._dedupe_path
 
+    def migrate_dedupe(self, old_key: str, new_key: str) -> bool:
+        """Rename one open condition without resolving its sink alert."""
+        if old_key == new_key:
+            return True
+        with self._notification_lock:
+            journal = self._dedupe_journal
+            if old_key not in journal:
+                return True
+            if not neotoma_sink.migrate_key(old_key, new_key):
+                return False
+            if new_key not in journal:
+                journal[new_key] = journal[old_key]
+            del journal[old_key]
+            self._persist_dedupe_journal(journal)
+            persisted = self._dedupe_journal
+            return old_key not in persisted and new_key in persisted
+
     def clear_dedupe(self, key: str) -> None:
         """Clear a dedupe key once its condition has resolved.
 
