@@ -538,6 +538,9 @@ def test_a_send_that_raises_is_retried_on_the_next_check(
 
 def test_a_held_alert_drains_once_without_another_usage_check(monkeypatch, tmp_path, ledger) -> None:
     """The held queue delivers a crossing even if usage is never refreshed again."""
+    from lib.notify import neotoma_sink
+
+    monkeypatch.setattr(neotoma_sink, "record", lambda **kwargs: None)
     _usage_file(monkeypatch, tmp_path, "cursor", [_window(80)])
     spy = _SpyNotifier(silenced=True)
     spy.inner._digest_path = tmp_path / "held.json"
@@ -560,8 +563,9 @@ def test_concurrent_ordinary_write_preserves_delivered_usage_key(
 ) -> None:
     import threading
 
-    from lib.notify import Priority
+    from lib.notify import Priority, neotoma_sink
 
+    monkeypatch.setattr(neotoma_sink, "record", lambda **kwargs: None)
     window = _window(50)
     _usage_file(monkeypatch, tmp_path, "cursor", [window])
     usage = _SpyNotifier()

@@ -515,6 +515,7 @@ def test_each_journal_mutation_preserves_a_concurrent_instances_key(
     first = _notifier(tmp_path, NO_SILENCE, [])
     second = _notifier(tmp_path, NO_SILENCE, [])
     first._mark_dedupe_notified("target")
+    monkeypatch.setattr(neotoma_sink, "resolve", lambda key: None)
     monkeypatch.setattr(neotoma_sink, "migrate_key", lambda old, new: True)
     entered = threading.Event()
     release = threading.Event()
