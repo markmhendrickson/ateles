@@ -6117,7 +6117,12 @@ async def run_review_prompt(
                 log.debug("[apis] review attempt attribution unavailable: %s", exc)
             return result
 
-    token = model_tiering.bind_attribution(model_tiering.resolve_attribution(pr=pr))
+    process_kind, process_name = model_tiering.process_caller()
+    token = model_tiering.bind_attribution(model_tiering.resolve_attribution(
+        caller=process_name or role,
+        caller_kind=process_kind or model_tiering.CALLER_KIND_DAEMON,
+        pr=pr,
+    ))
     try:
         return await _run_provider_attempts(
             role,

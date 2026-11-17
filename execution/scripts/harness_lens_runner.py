@@ -2980,6 +2980,8 @@ async def run_one(
                 cwd=str(worktree.path),
                 timeout=timeout,
                 task_entity_id=target.task_entity_id,
+                caller="harness_lens_runner",
+                caller_kind="daemon",
                 # Spend attribution (ent_e5259618cae6cafd4be120e0): the ledger
                 # row names the pull request this lens reviewed.
                 pr=f"{target.repo}#{target.pr}",
@@ -3232,7 +3234,7 @@ async def run_compare(
 
 def main(argv: list[str] | None = None) -> int:
     model_tiering.set_process_caller(
-        "interactive", os.environ.get(model_tiering.SESSION_ID_ENV)
+        "daemon", "harness_lens_runner"
     )
     parser = argparse.ArgumentParser(
         prog="harness_lens_runner",

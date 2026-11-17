@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import sys
 import tempfile
 import time
@@ -88,6 +89,32 @@ def email_queue_path(main: Path) -> Path:
 
 def budget_path(main: Path) -> Path:
     return main.with_name(f"{main.stem}-email-budget.json")
+
+
+def recovery_path(main: Path) -> Path:
+    return main.with_name(f"{main.stem}-recovery.json")
+
+
+def recovery_lock_path(main: Path) -> Path:
+    return main.with_name(f"{main.stem}-recovery.json.lock")
+
+
+def read_recovery(main: Path) -> list[dict]:
+    try:
+        records = json.loads(read_text_nofollow(recovery_path(main)))
+    except FileNotFoundError:
+        return []
+    if not isinstance(records, list) or any(
+        not isinstance(row, dict) or not isinstance(row.get("key"), str)
+        or not isinstance(row.get("time"), str) or not isinstance(row.get("cause"), str)
+        for row in records
+    ):
+        raise ValueError("unconfirmed alert recovery file is malformed")
+    return records
+
+
+def write_recovery(main: Path, records: list[dict]) -> None:
+    atomic_write(recovery_path(main), json.dumps(records[-50:]))
 
 
 def journal_path() -> Path:
@@ -249,10 +276,29 @@ def summary(main: Path | None = None) -> dict:
         m = _HANDLER_RE.match(notice_text(item))
         counts[m.group(1) if m else "other"] += 1
     fp = hashlib.sha256(json.dumps(items).encode()).hexdigest() if items else ""
-    return {"total": len(items), "by_handler": dict(counts), "fingerprint": fp}
+    try:
+        recovery = read_recovery(main or queue_path())
+    except Exception:
+        recovery = [{"key": "unreadable", "time": "", "cause": "unreadable"}]
+    recovery_fp = hashlib.sha256(json.dumps(recovery).encode()).hexdigest() if recovery else ""
+    return {"total": len(items), "by_handler": dict(counts), "fingerprint": fp,
+            "unconfirmed": len(recovery), "unconfirmed_fingerprint": recovery_fp}
 
 
 def _print_notices(main: Path, show_all: bool) -> int:
+    try:
+        recovery = read_recovery(main)
+    except Exception as exc:
+        recovery = []
+        print(f"RECOVERY REQUIRED: unconfirmed alert file unreadable: {exc}")
+    if recovery:
+        print(f"# {len(recovery)} unconfirmed alerts (transport outcome unknown):")
+        for row in recovery:
+            print(f"- key={row['key']!r} window={row.get('window', '')!r} "
+                  f"time={row['time']!r} cause={row['cause']!r}")
+            print("  Clear only after deciding to resend: python3 "
+                  "lib/notify/held_view.py --clear-unconfirmed "
+                  f"{shlex.quote(row['key'])}")
     unreadable = []
     for path in (main, email_queue_path(main)):
         try:
@@ -385,9 +431,70 @@ def _clear(main: Path) -> int:
     return 0
 
 
+def _clear_unconfirmed(main: Path, key: str) -> int:
+    journal_file = journal_path()
+    with file_lock(queue_lock_path(main), fail_open=False) as queue_locked:
+        if not queue_locked:
+            return 1
+        with file_lock(journal_file.with_name(journal_file.name + ".lock"),
+                       fail_open=False) as journal_locked:
+            if not journal_locked:
+                return 1
+            with file_lock(recovery_lock_path(main), fail_open=False) as recovery_locked:
+                if not recovery_locked:
+                    return 1
+                written: list[Path] = []
+                queues: dict[Path, list[str | dict]] = {}
+                try:
+                    records = read_recovery(main)
+                    if not any(row["key"] == key for row in records):
+                        print(f"No unconfirmed alert for {key!r}.")
+                        return 1
+                    journal = json.loads(read_text_nofollow(journal_file))
+                    if not isinstance(journal, dict):
+                        raise ValueError("dedupe journal is not an object")
+                    entry = journal.get(key)
+                    if not isinstance(entry, dict) or entry.get("state") not in (
+                        "sending", "delivered_unconfirmed"
+                    ):
+                        raise ValueError("key is no longer in an uncertain state")
+                    paths = (main, email_queue_path(main))
+                    queues = {path: read_queue(path) for path in paths}
+                    kept = {path: [item for item in items if not (
+                        isinstance(item, dict) and key in item["keys"]
+                    )] for path, items in queues.items()}
+                    for path in paths:
+                        if kept[path] != queues[path]:
+                            write_queue(path, kept[path])
+                            written.append(path)
+                    del journal[key]
+                    try:
+                        atomic_write(journal_file, json.dumps(journal))
+                        write_recovery(main, [row for row in records if row["key"] != key])
+                    except Exception:
+                        atomic_write(journal_file, json.dumps({**journal, key: entry}))
+                        raise
+                except Exception as exc:
+                    for path in written:
+                        try:
+                            write_queue(path, queues[path])
+                        except Exception:
+                            print(f"queue rollback failed at {path}; recovery remains visible", file=sys.stderr)
+                    print(f"could not clear unconfirmed alert: {exc}", file=sys.stderr)
+                    return 1
+    print(f"Cleared unconfirmed alert {key!r}; its key can be sent again.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     path = queue_path()
+    if "--clear-unconfirmed" in args:
+        index = args.index("--clear-unconfirmed")
+        if index + 1 >= len(args):
+            print("--clear-unconfirmed needs a key", file=sys.stderr)
+            return 2
+        return _clear_unconfirmed(path, args[index + 1])
     if "--clear" in args:
         return _clear(path)
     return _print_notices(path, "--all" in args)

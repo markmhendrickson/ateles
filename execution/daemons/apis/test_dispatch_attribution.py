@@ -619,9 +619,7 @@ def test_a_send_that_raises_is_retried_on_the_next_check(
     spy.inner._deliver = spy._transport
     usage_alerts._retry_after.clear()  # past the backoff
     key = spy.sent[0][2]
-    entry = spy.inner._dedupe_journal[key]
-    entry["attempt_at"] = (spy.inner._now_local() - timedelta(minutes=1)).isoformat()
-    _replace_journal_entry(spy.inner, key, entry)
+    assert spy.inner._dedupe_journal[key]["state"] == "pending"
     assert len(usage_alerts.check_usage_thresholds("cursor", notifier=spy)) == 1
 
 

@@ -4089,6 +4089,7 @@ def test_run_one_passes_task_entity_id_to_dispatch_for_neotoma_monitoring(
         agent="pavo",
         task_entity_id="ent_898998f41372ce24369fb365",
     )
+    monkeypatch.delenv("ATELES_DISPATCH_SESSION_ID", raising=False)
 
     guarded = hlr.HarnessSandbox(
         provider="codex",
@@ -4150,6 +4151,9 @@ def test_run_one_passes_task_entity_id_to_dispatch_for_neotoma_monitoring(
     )
 
     assert seen["task_entity_id"] == "ent_898998f41372ce24369fb365"
+    assert seen["caller_kind"] == "daemon"
+    assert seen["caller"] == "harness_lens_runner"
+    assert seen["pr"] == "markmhendrickson/ateles#1234"
 
 
 def test_lens_target_task_entity_id_defaults_to_empty_string():
@@ -4793,7 +4797,7 @@ def test_model_selector_contract_preserves_omission_and_valid_identifiers(model)
 def test_run_one_passes_the_repo_qualified_pr_to_dispatch(
     monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
 ):
-    """Spend attribution (ent_e5259618cae6cafd4be120e0): the interactive lens
+    """Spend attribution (ent_e5259618cae6cafd4be120e0): the lens
     route hands ``owner/repo#N`` to ``dispatch_role.dispatch``, which records it
     as ``pr`` on the tier-ledger rows (test_dispatch_attribution covers that
     leg)."""
@@ -4819,7 +4823,7 @@ def test_run_one_passes_the_repo_qualified_pr_to_dispatch(
     assert seen[0]["pr"] == f"{target.repo}#{target.pr}"
 
 
-def test_main_without_session_id_records_interactive_ledger_row(
+def test_main_without_session_id_records_daemon_ledger_row(
     monkeypatch, tmp_path, brief_file
 ):
     ledger = tmp_path / "tier-ledger.jsonl"
@@ -4839,5 +4843,5 @@ def test_main_without_session_id_records_interactive_ledger_row(
         "--lens", "pm", "--provider", "codex", "--brief", str(brief_file),
     ]) == 0
     row = json.loads(ledger.read_text().splitlines()[0])
-    assert row["caller_kind"] == "interactive"
-    assert row["caller"] is None
+    assert row["caller_kind"] == "daemon"
+    assert row["caller"] == "harness_lens_runner"

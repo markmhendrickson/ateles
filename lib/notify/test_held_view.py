@@ -1,6 +1,8 @@
 """Tests for lib/notify/held_view.py, the stdlib-only held-notice viewer."""
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -11,6 +13,21 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from lib.notify import held_view  # noqa: E402
+
+
+def test_unconfirmed_alert_appears_in_session_hook(tmp_path, queue):
+    record = {"key": "usage:weekly:50", "window": "weekly",
+              "time": "2026-11-17T00:00:00Z", "cause": "receipt unknown"}
+    held_view.write_recovery(queue, [record])
+    hook = _REPO_ROOT / ".claude" / "hooks" / "user_prompt_submit.py"
+    env = {**os.environ, "HOME": str(tmp_path),
+           "CLAUDE_PROJECT_DIR": str(tmp_path), "ATELES_DIGEST_QUEUE_PATH": str(queue)}
+    run = subprocess.run([sys.executable, str(hook)], input='{"session_id":"synthetic"}',
+                         text=True, capture_output=True, env=env, timeout=10)
+    assert run.returncode == 0
+    assert "[unconfirmed alerts] 1 alert outcome(s) are unknown" in run.stdout
+    assert "--clear-unconfirmed <key>" in run.stdout
+    assert "usage:weekly:50" not in run.stdout
 
 
 @pytest.fixture

@@ -565,9 +565,7 @@ def test_each_journal_mutation_preserves_a_concurrent_instances_key(
     assert "other" in second._dedupe_journal
 
 
-def test_retryable_alert_recovers_ambiguous_sending_after_interrupted_handoff(tmp_path):
-    import pytest
-
+def test_retryable_alert_recovers_transport_refusal_before_acceptance(tmp_path):
     sent = []
     first = _notifier(tmp_path, NO_SILENCE, sent)
     key = "usage:weekly:50"
@@ -578,13 +576,9 @@ def test_retryable_alert_recovers_ambiguous_sending_after_interrupted_handoff(tm
     first._deliver = interrupted
     assert not first.send("usage crossed", Priority.WARN, handler="apis",
                           dedupe_key=key, retryable=True)
-    assert first._dedupe_journal[key]["state"] == "sending"
+    assert first._dedupe_journal[key]["state"] == "pending"
 
     second = _notifier(tmp_path, NO_SILENCE, sent)
-    assert not second.send("usage crossed", Priority.WARN, handler="apis",
-                           dedupe_key=key, retryable=True)
-    original_now = second._now_local
-    second._now_local = lambda: original_now() + timedelta(seconds=6)
     assert second.send("usage crossed", Priority.WARN, handler="apis",
                        dedupe_key=key, retryable=True)
     assert second._dedupe_journal[key]["state"] == "delivered"
@@ -977,34 +971,159 @@ def test_changed_reading_replaces_queued_notice_after_receipt_failure(tmp_path, 
     assert sent == ["⚠ [apis] 55%"]
 
 
+@pytest.mark.parametrize("held", [False, True])
 @pytest.mark.parametrize("restart", [False, True])
-def test_successful_transport_with_failed_receipt_is_suppressed_then_retried(
-    tmp_path, monkeypatch, restart, caplog
+def test_successful_transport_with_failed_receipt_never_resends(
+    tmp_path, monkeypatch, restart, held, caplog
 ):
     from lib.notify.notifier import SendResult
+    from lib.notify import held_view
 
     sent = []
     n = _notifier(tmp_path, NO_SILENCE, sent)
     key = "usage:weekly:50"
     original = n._mark_dedupe_delivered_many
     monkeypatch.setattr(n, "_mark_dedupe_delivered_many", lambda *args: False)
-    assert n.send("crossed", Priority.WARN, handler="apis", dedupe_key=key,
-                  retryable=True) is SendResult.DELIVERED_RECEIPT_UNKNOWN
-    assert "delivered, receipt unknown" in caplog.text
+    if held:
+        n._in_silence_window = lambda: True
+        assert not n.send("crossed", Priority.WARN, handler="apis", dedupe_key=key,
+                          retryable=True)
+        n._in_silence_window = lambda: False
+        assert not n.flush_digest()
+    else:
+        assert n.send("crossed", Priority.WARN, handler="apis", dedupe_key=key,
+                      retryable=True) is SendResult.DELIVERED_RECEIPT_UNKNOWN
+    assert "receipt unknown" in caplog.text
     assert n._dedupe_journal[key]["state"] == "sending"
+    assert held_view.read_recovery(n._digest_path)[0]["key"] == key
     if restart:
         n = _notifier(tmp_path, NO_SILENCE, sent)
+        n._recover_sending_entries()
     else:
         monkeypatch.setattr(n, "_mark_dedupe_delivered_many", original)
     assert not n.send("crossed", Priority.WARN, handler="apis", dedupe_key=key,
                       retryable=True)
-    assert len(sent) == 1
+    assert len([message for message in sent if "crossed" in message]) == 1
     original_now = n._now_local
     n._now_local = lambda: original_now() + timedelta(seconds=6)
+    assert not n.send("crossed", Priority.WARN, handler="apis", dedupe_key=key,
+                      retryable=True)
+    n.flush_digest()
+    assert len([message for message in sent if "crossed" in message]) == 1
+    assert len([message for message in sent if message.startswith("Unconfirmed alert")]) == 1
+    assert n._dedupe_journal[key]["state"] == "sending"
+
+
+@pytest.mark.parametrize("attempt", [None, "bad", 42, "2999-01-01T00:00:00+00:00"])
+def test_unreadable_sending_attempt_is_visible_and_suppressing(tmp_path, attempt):
+    from lib.notify import held_view
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    key = "usage:weekly:50"
+    assert n._mark_dedupe_sending((key,), "apis")
+    journal = n._dedupe_journal
+    journal[key]["attempt_at"] = attempt
+    n._persist_dedupe_journal(journal)
+    assert n.is_dedupe_open(key)
+    assert n._dedupe_journal[key]["state"] == "delivered_unconfirmed"
+    assert held_view.read_recovery(n._digest_path)[0]["key"] == key
+    assert not n.send("crossed", Priority.WARN, handler="apis", dedupe_key=key,
+                      retryable=True)
+    assert not any("crossed" in message for message in sent)
+
+
+@pytest.mark.parametrize("failure", [None, "queue", "journal"])
+def test_held_key_migration_moves_receipt_and_notice_together(tmp_path, monkeypatch, failure):
+    from lib.notify import held_view, neotoma_sink
+    monkeypatch.setattr(neotoma_sink, "migrate_key", lambda *args: True)
+    sent = []
+    n = _notifier(tmp_path, ALWAYS_SILENT, sent)
+    n.should_flush_digest = lambda: False
+    old, new = "usage:weekly:old:50", "usage:weekly:new:50"
+    assert not n.send("crossed", Priority.WARN, handler="apis", dedupe_key=old,
+                      retryable=True)
+    original_queue = n._persist_queue
+    original_journal = n._persist_dedupe_journal
+    if failure == "queue":
+        monkeypatch.setattr(n, "_persist_queue", lambda *args: False)
+    if failure == "journal":
+        monkeypatch.setattr(n, "_persist_dedupe_journal", lambda *args: False)
+    assert n.migrate_dedupe(old, new) is (failure is None)
+    monkeypatch.setattr(n, "_persist_queue", original_queue)
+    monkeypatch.setattr(n, "_persist_dedupe_journal", original_journal)
+    queue = held_view.read_queue(n._digest_path)
+    assert len(queue) == 1
+    expected = new if failure is None else old
+    assert held_view.notice_identity(queue[0]) == (expected,)
+    assert expected in n._dedupe_journal
+    if failure is None:
+        assert old not in n._dedupe_journal
+    n._in_silence_window = lambda: False
+    assert n.flush_digest()
+    assert len([message for message in sent if "crossed" in message]) == 1
+
+
+def test_unconfirmed_recovery_view_clear_and_direct_notice(tmp_path, monkeypatch, capsys):
+    from lib.notify import held_view
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    key = "usage:weekly:reset:50"
+    monkeypatch.setattr(n, "_mark_dedupe_delivered_many", lambda *args: False)
+    n.send("crossed", Priority.WARN, handler="apis", dedupe_key=key, retryable=True)
+    records = held_view.read_recovery(n._digest_path)
+    assert len(records) == 1 and records[0]["noticed"] is True
+    assert len([message for message in sent if message.startswith("Unconfirmed alert")]) == 1
+    held_view.main([])
+    assert "unconfirmed alerts" in capsys.readouterr().out
+    assert held_view.main(["--clear-unconfirmed", key]) == 0
+    assert held_view.read_recovery(n._digest_path) == []
+    assert key not in n._dedupe_journal
+
+
+def test_operator_clear_of_uncertain_held_notice_allows_one_resend(tmp_path, monkeypatch):
+    from lib.notify import held_view
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    sent = []
+    n = _notifier(tmp_path, ALWAYS_SILENT, sent)
+    key = "usage:weekly:reset:50"
+    assert not n.send("crossed", Priority.WARN, handler="apis", dedupe_key=key,
+                      retryable=True)
+    original = n._mark_dedupe_delivered_many
+    n._mark_dedupe_delivered_many = lambda *args: False
+    n._in_silence_window = lambda: False
+    assert not n.flush_digest()
+    n._mark_dedupe_delivered_many = original
+    assert len(held_view.read_queue(n._digest_path)) == 1
+    assert held_view.main(["--clear-unconfirmed", key]) == 0
+    assert held_view.read_queue(n._digest_path) == []
     assert n.send("crossed", Priority.WARN, handler="apis", dedupe_key=key,
                   retryable=True)
-    assert len(sent) == 2
-    assert n._dedupe_journal[key]["state"] == "delivered"
+    assert len([message for message in sent if "crossed" in message]) == 2
+
+
+def test_window_roll_expires_uncertain_held_notice_without_resend(tmp_path):
+    from lib.notify import held_view
+    sent = []
+    n = _notifier(tmp_path, ALWAYS_SILENT, sent)
+    key = "usage:weekly:old:50"
+    assert not n.send("crossed", Priority.WARN, handler="apis", dedupe_key=key,
+                      retryable=True)
+    n._mark_dedupe_delivered_many = lambda *args: False
+    n._in_silence_window = lambda: False
+    assert not n.flush_digest()
+    assert len([message for message in sent if "crossed" in message]) == 1
+    n.clear_dedupe(key)
+    assert held_view.read_queue(n._digest_path) == []
+    assert held_view.read_recovery(n._digest_path) == []
+    assert key not in n._dedupe_journal
+    assert held_view.read_queue(held_view.backup_path(n._digest_path)) == [
+        _keyed_notice(key, "⚠ [apis] crossed")
+    ]
+    n.flush_digest()
+    assert len([message for message in sent if "crossed" in message]) == 1
 
 
 @pytest.mark.parametrize("restart", [False, True])
@@ -1026,11 +1145,12 @@ def test_failed_transport_remains_retryable(tmp_path, restart):
 
 
 def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
-    """Every short operation walk preserves identities, delivery, and bytes."""
+    """Every three-step walk preserves queue, receipt and delivery invariants."""
     from . import held_view
 
-    operations = ("send50", "send55", "drain", "clear", "restart",
-                  "receipt_fail", "transport_fail", "interrupted_send")
+    operations = ("send", "drain", "held_receipt_fail", "direct_receipt_fail",
+                  "transport_refuse", "crash_pending", "crash_sending", "restart",
+                  "migrate", "operator_clear", "window_roll")
     for length in range(1, 4):
         for index, sequence in enumerate(product(operations, repeat=length)):
             root = tmp_path / f"walk-{length}-{index}"
@@ -1040,56 +1160,79 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
             sent = []
             n = _notifier(root, ALWAYS_SILENT, sent)
             n.should_flush_digest = lambda: False
-            key = "usage:weekly:50"
-            notice = "⚠ [apis] usage crossed"
-            ever_sent = False
-            cleared = False
+            key = "usage:weekly:reset0:50"
+            clear_allowance: dict[str, int] = {}
             for operation in sequence:
                 before = held_view.read_queue(n._digest_path)
-                if operation in ("send50", "send55", "receipt_fail"):
-                    ever_sent = True
-                    if operation == "receipt_fail":
+                if operation in ("send", "held_receipt_fail", "direct_receipt_fail"):
+                    n._in_silence_window = lambda direct=operation == "direct_receipt_fail": not direct
+                    if operation == "held_receipt_fail":
                         original = n._mark_dedupe_held
                         n._mark_dedupe_held = lambda *args: False
-                    assert not n.send("55%" if operation == "send55" else "50%",
-                                      Priority.WARN, handler="apis", dedupe_key=key,
-                                      retryable=True)
-                    if operation == "receipt_fail":
+                    if operation == "direct_receipt_fail":
+                        original = n._mark_dedupe_delivered_many
+                        n._mark_dedupe_delivered_many = lambda *args: False
+                    n.send(f"crossed {key}", Priority.WARN, handler="apis",
+                           dedupe_key=key, retryable=True)
+                    if operation == "held_receipt_fail":
                         n._mark_dedupe_held = original
+                    if operation == "direct_receipt_fail":
+                        n._mark_dedupe_delivered_many = original
+                    n._in_silence_window = lambda: True
                 elif operation == "drain":
                     n._in_silence_window = lambda: False
                     n.flush_digest()
                     n._in_silence_window = lambda: True
-                elif operation == "clear":
-                    assert held_view.main([]) == 0
-                    assert held_view.main(["--clear"]) == 0
-                    cleared |= bool(before)
                 elif operation == "restart":
                     n = _notifier(root, ALWAYS_SILENT, sent)
                     n.should_flush_digest = lambda: False
-                elif operation == "interrupted_send":
-                    if not before and not sent:
-                        assert n._mark_dedupe_sending((key,), "apis")
-                        n._now_local = lambda original=n._now_local: original() + timedelta(seconds=6)
-                else:
+                    n._recover_sending_entries()
+                elif operation in ("crash_pending", "crash_sending"):
+                    if key not in n._dedupe_journal:
+                        if operation == "crash_pending":
+                            assert n._mark_dedupe_pending(key, "apis")
+                        else:
+                            assert n._mark_dedupe_sending((key,), "apis")
+                            n._recover_sending_entries()
+                elif operation == "migrate":
+                    moved = key.replace(":50", ":corrected:50")
+                    if n.migrate_dedupe(key, moved):
+                        key = moved
+                elif operation == "operator_clear":
+                    recovery = held_view.read_recovery(n._digest_path)
+                    if any(row["key"] == key for row in recovery):
+                        assert held_view.main(["--clear-unconfirmed", key]) == 0
+                        clear_allowance[key] = clear_allowance.get(key, 0) + 1
+                    elif before:
+                        assert held_view.main([]) == 0
+                        assert held_view.main(["--clear"]) == 0
+                        clear_allowance[key] = clear_allowance.get(key, 0) + 1
+                elif operation == "window_roll":
+                    n.clear_dedupe(key)
+                    key = key.replace("reset0", "reset1")
+                elif operation == "transport_refuse":
                     n._in_silence_window = lambda: False
                     original = n._deliver
                     n._deliver = lambda *args, **kwargs: False
-                    n.send("50%", Priority.WARN, handler="apis", dedupe_key=key,
-                           retryable=True)
+                    n.send(f"crossed {key}", Priority.WARN, handler="apis",
+                           dedupe_key=key, retryable=True)
                     n._deliver = original
                     n._in_silence_window = lambda: True
                 after = held_view.read_queue(n._digest_path)
-                assert sum(held_view.notice_identity(item) == (key,) for item in after) <= 1, sequence
-                entry = n._dedupe_journal.get(key, {})
-                assert entry.get("state") != "held" or bool(after), sequence
-                assert len(sent) <= 1 or "interrupted_send" in sequence, sequence
-                if before and not after:
-                    assert operation in ("drain", "clear"), sequence
-            if ever_sent and not cleared and not sent:
-                n._in_silence_window = lambda: False
-                n.flush_digest()
-                assert sent or n._dedupe_journal.get(key, {}).get("state") == "sending", sequence
+                assert len({held_view.notice_identity(item) for item in after}) == len(after), sequence
+                recovery_keys = {row["key"] for row in held_view.read_recovery(n._digest_path)}
+                for journal_key, entry in n._dedupe_journal.items():
+                    if entry.get("state") == "held":
+                        assert any(journal_key in item["keys"] for item in after if isinstance(item, dict)) \
+                            or journal_key in recovery_keys, sequence
+                    if entry.get("state") in ("sending", "delivered_unconfirmed"):
+                        assert journal_key in recovery_keys, sequence
+                delivered = [message.rsplit(" ", 1)[-1] for message in sent
+                             if message.startswith("⚠ [apis] crossed ")]
+                for delivered_key in set(delivered):
+                    assert delivered.count(delivered_key) <= 1 + clear_allowance.get(delivered_key, 0), sequence
+                if len(after) < len(before):
+                    assert operation in ("drain", "operator_clear", "window_roll"), sequence
     capsys.readouterr()
 
 
