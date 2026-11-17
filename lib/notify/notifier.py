@@ -38,6 +38,7 @@ All times are in the rubric's configured timezone (default: Europe/Madrid).
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import math
 import os
@@ -285,11 +286,29 @@ class Notifier:
         Returns True if sent immediately, False if held, dropped, suppressed
         as a duplicate, or undelivered.
         """
+        if retryable and dedupe_key:
+            # The sender thread owns this lock through the transport outcome.
+            # A timed-out caller cannot make a live pending send retryable.
+            with held_view.file_lock(
+                self._dedupe_owner_lock_path(dedupe_key), blocking=False,
+                fail_open=False,
+            ) as owned:
+                if not owned:
+                    return False
+                with self._notification_lock:
+                    return self._send_locked(
+                        message, priority, handler, bypass_silence, dedupe_key,
+                        email_eligible, retryable,
+                    )
         with self._notification_lock:
             return self._send_locked(
                 message, priority, handler, bypass_silence, dedupe_key, email_eligible,
                 retryable,
             )
+
+    def _dedupe_owner_lock_path(self, key: str) -> Path:
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        return self._dedupe_path.with_name(f"{self._dedupe_path.name}.{digest}.lock")
 
     def _send_locked(
         self,
@@ -318,7 +337,7 @@ class Notifier:
         except Exception:  # noqa: BLE001
             pass
 
-        if dedupe_key and self._is_duplicate(dedupe_key):
+        if dedupe_key and self._is_duplicate(dedupe_key, pending_owned=retryable):
             log.info(
                 "[notify] suppressing repeat notification for open condition "
                 "%r (call clear_dedupe() once it resolves): %r",
@@ -723,18 +742,22 @@ class Notifier:
             # pre-existing behaviour, not a new failure mode.
             log.error("[notify] could not persist dedupe journal (%s)", exc)
 
-    def _is_duplicate(self, key: str) -> bool:
+    def _is_duplicate(self, key: str, *, pending_owned: bool = False) -> bool:
         with self._notification_lock:
             entry = self._dedupe_journal.get(key)
             if entry is None:
                 return False
             if entry.get("state") != "pending":
                 return True
-            try:
-                started = datetime.fromisoformat(entry["pending_at"]).timestamp()
-                return datetime.now().timestamp() - started < 5
-            except (KeyError, TypeError, ValueError):
+            if pending_owned:
                 return False
+            # A free owner lock means the previous process died or its send
+            # finished without marking delivery. Age is not evidence of that.
+            with held_view.file_lock(
+                self._dedupe_owner_lock_path(key), blocking=False,
+                fail_open=False,
+            ) as available:
+                return not available
 
     def _mark_dedupe_pending(self, key: str, handler: str = "") -> None:
         with self._notification_lock:

@@ -503,7 +503,6 @@ def test_dedupe_key_journal_survives_a_new_notifier_instance(tmp_path):
 
 
 def test_retryable_alert_recovers_pending_after_interrupted_handoff(tmp_path):
-    from datetime import timedelta
     import pytest
 
     sent = []
@@ -517,10 +516,7 @@ def test_retryable_alert_recovers_pending_after_interrupted_handoff(tmp_path):
     with pytest.raises(RuntimeError, match="interrupted"):
         first.send("usage crossed", Priority.WARN, handler="apis",
                    dedupe_key=key, retryable=True)
-    entry = first._dedupe_journal[key]
-    assert entry["state"] == "pending"
-    entry["pending_at"] = (first._now_local() - timedelta(minutes=1)).isoformat()
-    first._persist_dedupe_journal({key: entry})
+    assert first._dedupe_journal[key]["state"] == "pending"
 
     second = _notifier(tmp_path, NO_SILENCE, sent)
     assert second.send("usage crossed", Priority.WARN, handler="apis",
@@ -529,6 +525,57 @@ def test_retryable_alert_recovers_pending_after_interrupted_handoff(tmp_path):
     assert not second.send("usage crossed", Priority.WARN, handler="apis",
                            dedupe_key=key, retryable=True)
     assert len(sent) == 1
+
+
+def test_retryable_pending_has_one_live_owner_and_recovers_abandonment(tmp_path):
+    import threading
+    from . import held_view
+
+    sent = []
+    first = _notifier(tmp_path, NO_SILENCE, sent)
+    second = _notifier(tmp_path, NO_SILENCE, sent)
+    key = "usage:weekly:50"
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_transport(message, force=False, email_eligible=True):
+        entered.set()
+        assert release.wait(timeout=2)
+        sent.append(message)
+        return True
+
+    first._deliver = slow_transport
+    worker = threading.Thread(target=lambda: first.send(
+        "usage crossed", Priority.WARN, handler="apis",
+        dedupe_key=key, retryable=True,
+    ))
+    worker.start()
+    try:
+        assert entered.wait(timeout=2)
+        assert second.is_dedupe_open(key)
+        assert not second.send("usage crossed", Priority.WARN, handler="apis",
+                               dedupe_key=key, retryable=True)
+        assert sent == []
+    finally:
+        release.set()
+        worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert not second.send("usage crossed", Priority.WARN, handler="apis",
+                           dedupe_key=key, retryable=True)
+    assert len(sent) == 1
+
+    # Model a process dying after it wrote pending: the OS releases its lock
+    # without a delivered journal entry.
+    second._mark_dedupe_pending(key, "apis")
+    with held_view.file_lock(second._dedupe_owner_lock_path(key), fail_open=False) as held:
+        assert held
+        assert second.is_dedupe_open(key)
+        assert not second.send("usage crossed", Priority.WARN, handler="apis",
+                               dedupe_key=key, retryable=True)
+    assert not second.is_dedupe_open(key)
+    assert second.send("usage crossed", Priority.WARN, handler="apis",
+                       dedupe_key=key, retryable=True)
+    assert len(sent) == 2
 
 
 def test_clear_dedupe_lets_a_genuine_recurrence_notify_again(tmp_path):

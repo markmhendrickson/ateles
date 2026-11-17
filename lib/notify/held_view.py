@@ -97,7 +97,7 @@ def snapshot_path(main: Path) -> Path:
 
 
 @contextlib.contextmanager
-def file_lock(lock_path: Path, blocking: bool = True):
+def file_lock(lock_path: Path, blocking: bool = True, fail_open: bool = True):
     """flock a sidecar file; yields True to proceed, False if busy.
 
     Fail-open: any locking error yields True, because a notification must
@@ -132,7 +132,7 @@ def file_lock(lock_path: Path, blocking: bool = True):
                 log.warning(
                     "[notify] could not lock %s (%s) — proceeding unlocked", lock_path, exc
                 )
-        yield not busy
+        yield not busy and (held or fail_open)
     finally:
         if fd is not None:
             if held:
