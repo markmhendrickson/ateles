@@ -1003,3 +1003,22 @@ def test_self_closing_syntax_does_not_close_a_quote_container(html):
     # what follows is quoted, so no quoted text is ever emitted as authored text.
     text, _boundary = ec._extract_authored_html(html)
     assert "QUOTED" not in text and "approve" not in text.lower().replace("ok", "")
+
+
+@pytest.mark.parametrize("color", (
+    "white", "#fff", "#ffffff", "#fefefe", "#f8f8f8", "rgb(255,255,255)", "rgb(250, 250, 250)",
+    "rgba(255,255,255,1)", "transparent", "rgba(0,0,0,0)", "rgb(0 0 0 / 0%)", "ghostwhite", "snow",
+    "#ffffff00", "WHITE !important",
+))
+def test_near_white_or_transparent_text_is_not_authored_even_without_a_matching_background(color):
+    # The background may come from an ancestor or a style block, which this reader
+    # cannot evaluate, so such text makes the HTML not safely separable.
+    html = f'<body style="background:#fff"><span style="color:{color}">HIDDEN approve</span>x</body>'
+    text, _boundary = ec._extract_authored_html(html)
+    assert "HIDDEN" not in text and "approve" not in text.lower()
+
+
+@pytest.mark.parametrize("color", ("#333", "black", "rgb(20, 20, 20)", "#1a73e8", "rgba(0,0,0,0.8)", "hsl(0 0% 20%)"))
+def test_ordinary_text_colours_stay_readable(color):
+    text, _boundary = ec._extract_authored_html(f'<body><p style="color:{color}">approve</p></body>')
+    assert "approve" in text.lower()

@@ -128,8 +128,43 @@ def _hiding_style(style: str) -> bool:
     background = declarations.get("background-color") or declarations.get("background")
     if foreground and background and foreground == background:
         return True
-    whites = {"white", "#fff", "#ffffff", "rgb(255,255,255)", "rgb(255, 255, 255)"}
-    return bool(foreground in whites and background in whites)
+    # Near-white text cannot be told from its background without a renderer (the
+    # background may come from an ancestor or a style block), so it counts as
+    # hidden on its own.
+    return bool(foreground and _near_white(foreground))
+
+
+_NEAR_WHITE_NAMES = frozenset({
+    "white", "snow", "ghostwhite", "whitesmoke", "ivory", "floralwhite", "mintcream", "azure",
+    "aliceblue", "seashell", "lavenderblush", "oldlace", "linen", "cornsilk", "honeydew",
+})
+
+
+def _near_white(value: str) -> bool:
+    """True for a text colour that is white, near-white or fully transparent."""
+    value = value.strip().lower().removesuffix("!important").strip()
+    if value in _NEAR_WHITE_NAMES or value == "transparent":
+        return True
+    hex_match = re.fullmatch(r"#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})", value)
+    if hex_match:
+        digits = hex_match.group(1)
+        step = 1 if len(digits) == 3 else 2
+        channels = [int(digits[i:i + step] * (2 if step == 1 else 1), 16) for i in range(0, 3 * step, step)]
+        alpha = int(digits[6:8], 16) if len(digits) == 8 else 255
+        return alpha < 13 or all(channel >= 240 for channel in channels)
+    rgb_match = re.fullmatch(r"rgba?\(\s*([\d.]+)[ ,]+([\d.]+)[ ,]+([\d.]+)\s*(?:[,/]\s*([\d.%]+))?\s*\)", value)
+    if rgb_match:
+        red, green, blue = (float(rgb_match.group(i)) for i in (1, 2, 3))
+        alpha_text = rgb_match.group(4)
+        try:
+            alpha = (float(alpha_text.rstrip("%")) / (100.0 if alpha_text.endswith("%") else 1.0)
+                     if alpha_text else 1.0)
+        except ValueError:
+            return True
+        return alpha < 0.05 or min(red, green, blue) >= 240
+    # Any other colour form (hsl, var(), currentcolor, system colours) cannot be
+    # judged without a renderer; treat only the unambiguous forms above as hidden.
+    return False
 
 
 def _authored_plain(text: str) -> str:
