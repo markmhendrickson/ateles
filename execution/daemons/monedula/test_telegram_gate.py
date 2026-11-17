@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import monedula  # noqa: E402
 import consent_email  # noqa: E402
 import payment_journal  # noqa: E402
+from test_payment_approval import env  # noqa: E402,F401 - shared payment fixture
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -403,6 +404,38 @@ def test_timeout_blocks_payment_and_escalates(
     assert ok is False
     assert len(escalation_posts) == 1
     assert "monedula_consent_channel_failure" in escalation_posts[0][0]["tags"]
+
+
+def test_telegram_timeout_preserves_pending_session_and_reprompts(
+    env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timed-out consent request must be retried before settling the session."""
+    w, _ = env
+    monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", "telegram")
+    previews: list[str] = []
+    polls: list[int] = []
+    monkeypatch.setattr(monedula, "telegram_send", previews.append)
+
+    def timeout(**kwargs):
+        polls.append(kwargs["timeout_sec"])
+        return monedula.TelegramPollResult(kind="timeout")
+
+    monkeypatch.setattr(monedula, "telegram_poll_approval", timeout)
+
+    assert w.tick() is False
+    assert len(previews) == len(polls) == 1
+    assert "preview" in previews[0]
+    assert payment_journal.session_state(w.journal, "yoga:evt-1") == "pending"
+    assert not monedula.STATE_FILE.exists()
+    assert w.handler.execute_calls == []
+
+    assert w.tick(minutes=15) is False
+    assert len(previews) == len(polls) == 2
+    assert previews[1] == previews[0]
+    assert polls == [120, 120]
+    assert payment_journal.session_state(w.journal, "yoga:evt-1") == "pending"
+    assert not monedula.STATE_FILE.exists()
+    assert w.handler.execute_calls == []
 
 
 def test_consent_channel_failure_notify_carries_dedupe_key_and_email_eligible(
