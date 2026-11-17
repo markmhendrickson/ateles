@@ -1808,14 +1808,6 @@ def main() -> bool:
     handler_names = list(dict.fromkeys([h.name for h, _ in triggered]))
     summaries = _pending_summaries(triggered)
 
-    if channel == "telegram" and calendar_fetch_ok:
-        # Break-glass polls in the same tick — the request is raised exactly
-        # once, so resolve these sessions now (email path defers this until
-        # consent is terminal).
-        if not profile_load_degraded:
-            _mark_ran_today()
-        _resolve_sessions(triggered, "settled")
-
     if channel in ("email", "payment_approval"):
         import payment_journal
         from consent_email import (
@@ -2092,6 +2084,62 @@ def main() -> bool:
         return not strandings
 
     # channel == "telegram" — break-glass path (unchanged attendance phrases)
+    import payment_journal
+    from consent_email import build_pending_items, journal_path
+
+    jpath = journal_path()
+
+    def _telegram_journal_failure(detail: str) -> bool:
+        log.error(f"payment_journal_unreadable — payments held: {detail}")
+        _notify(
+            "monedula: payment journal could not be read or written "
+            "(payment_journal_unreadable). No further payment will execute "
+            "until it is readable. Inspect the journal before anything is paid.",
+            priority="blocker",
+            dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
+            email_eligible=True,
+        )
+        return False
+
+    # An earlier transfer with no recorded outcome must never be converted
+    # into a skipped session by a later Telegram reply (including "no").
+    try:
+        journal = payment_journal.load(jpath)
+    except payment_journal.JournalError as exc:
+        return _telegram_journal_failure(str(exc))
+    # Reuse the email route's per-match identity, including its fallback for
+    # multiple matches without calendar event ids.
+    pending_items = build_pending_items(triggered, yesterday_str)
+    item_by_match = {id(item.match): item for item in pending_items}
+    held_unknown: list[str] = []
+    eligible: list[tuple] = []
+    for handler, matches in triggered:
+        remaining = []
+        for match in matches:
+            item = item_by_match[id(match)]
+            state = payment_journal.obligation_state(journal, item.obligation)
+            if state == payment_journal.STATE_DONE:
+                _resolve_sessions([(handler, [match])], "settled")
+            elif state == payment_journal.STATE_INTENT:
+                held_unknown.append(f"{handler.name}:{item.match_id or 'solo'}")
+            else:
+                remaining.append(match)
+        if remaining:
+            eligible.append((handler, remaining))
+    if held_unknown:
+        _notify_unknown_outcome(held_unknown, yesterday_str)
+    triggered = eligible
+    if not triggered:
+        if (
+            calendar_fetch_ok
+            and not profile_load_degraded
+            and not _has_pending_sessions()
+        ):
+            _mark_ran_today()
+        return not strandings and not held_unknown
+    handler_names = list(dict.fromkeys(h.name for h, _ in triggered))
+    summaries = _pending_summaries(triggered)
+
     preview_msg = _build_preview_message(triggered, yesterday_str, due_tasks=due_tasks)
     log.info("Sending payment preview to Telegram...")
     telegram_send(preview_msg)
@@ -2157,34 +2205,81 @@ def main() -> bool:
 
     if not approved:
         log.info(f"No payments approved (reply={reply!r}) — skipping all.")
+        _resolve_sessions(triggered, "skipped")
+        if (
+            calendar_fetch_ok
+            and not profile_load_degraded
+            and not _has_pending_sessions()
+        ):
+            _mark_ran_today()
         telegram_send(f"⏭️ Monedula: skipped all payments for {yesterday_str}.")
-        return not strandings
+        return not strandings and not held_unknown
 
     log.info(f"Approved handlers: {approved}")
 
     # Execute approved payments
     all_results = []
+    unknown: list[str] = list(held_unknown)
     for handler, matches in triggered:
         if handler.name not in approved:
             log.info(f"Skipping {handler.name} (not approved).")
+            _resolve_sessions([(handler, matches)], "skipped")
             continue
         for match in matches:
+            item = item_by_match[id(match)]
+            obligation = item.obligation
+            label = f"{handler.name}:{item.match_id or 'solo'}"
+            try:
+                journal = payment_journal.load(jpath)
+            except payment_journal.JournalError as exc:
+                return _telegram_journal_failure(str(exc))
+            state = payment_journal.obligation_state(journal, obligation)
+            if state == payment_journal.STATE_DONE:
+                _resolve_sessions([(handler, [match])], "settled")
+                continue
+            if state == payment_journal.STATE_INTENT:
+                log.error(f"payment_outcome_unknown {label} — holding, not retrying.")
+                unknown.append(label)
+                _notify_unknown_outcome(unknown, yesterday_str)
+                continue
+            token = f"telegram:{obligation}"
+            try:
+                payment_journal.record_intent(jpath, obligation, token, generation=0)
+            except payment_journal.JournalError as exc:
+                return _telegram_journal_failure(str(exc))
             log.info(f"Executing {handler.name} payment...")
             _job = _activity.started(f"executing {handler.name} payment") if _activity else None
             try:
                 result = handler.execute(match)
-                all_results.append((handler, result))
-                log.info(f"{handler.name} result: {result}")
-                if _job:
-                    # Keep summary generic — no amounts, IBANs, or memos.
-                    _job.finished(f"{handler.name} payment executed")
             except Exception as _exc:
                 if _job:
                     _job.failed(f"{handler.name} payment error: {type(_exc).__name__}")
+                _notify_unknown_outcome([label], yesterday_str)
                 raise
+            status = (
+                str(result.get("status") or "unreported")
+                if isinstance(result, dict)
+                else "unreported"
+            )
+            try:
+                payment_journal.record_outcome(jpath, obligation, status)
+            except payment_journal.JournalError as exc:
+                _notify_unknown_outcome([label], yesterday_str)
+                return _telegram_journal_failure(str(exc))
+            _resolve_sessions([(handler, [match])], "settled")
+            all_results.append((handler, result))
+            log.info(f"{handler.name} result: {result}")
+            if _job:
+                # Keep summary generic — no amounts, IBANs, or memos.
+                _job.finished(f"{handler.name} payment executed")
+
+    if calendar_fetch_ok and not profile_load_degraded and not _has_pending_sessions():
+        _mark_ran_today()
 
     # Send confirmation
     if not all_results:
+        if unknown:
+            return False
         telegram_send(f"⚠️ Monedula: no payments executed for {yesterday_str}.")
         return not strandings
 
@@ -2201,7 +2296,7 @@ def main() -> bool:
     log.info("Sending confirmation to Telegram...")
     telegram_send(confirmation_msg)
     log.info("Monedula run complete.")
-    return not strandings
+    return not strandings and not unknown
 
 
 def _alert_ref(message: str) -> str:

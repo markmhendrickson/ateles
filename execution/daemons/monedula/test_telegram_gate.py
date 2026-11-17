@@ -30,6 +30,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 
 import monedula  # noqa: E402
+import consent_email  # noqa: E402
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -85,6 +86,7 @@ class _RecordingHandler:
 def sent_messages(tmp_path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Neutralise every outbound effect of `main()` except Telegram sends."""
     monkeypatch.setattr(monedula, "STATE_FILE", tmp_path / ".monedula_last_run")
+    monkeypatch.setattr(consent_email, "STATE_FILE", tmp_path / "consent.json")
     monkeypatch.setattr(
         monedula, "GATE_HEALTH_FILE", tmp_path / ".monedula_gate_health"
     )
