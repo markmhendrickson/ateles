@@ -154,6 +154,8 @@ class LensRecord:
     cleared: bool  # an explicit clear (sign_off_is_warranted), nothing else
     verdict: str = ""  # the lens's own verdict token, "" when unreadable
     url: str = ""
+    created_at: str = ""  # GitHub comment creation time, for round ordering
+    blocking: bool = False  # includes unreadable verdicts and [BLOCKING] findings
 
 
 def carry_candidate(

@@ -4308,6 +4308,11 @@ def lens_records(comments: list[dict]) -> dict[str, list[review_carry.LensRecord
                 cleared=sign_off_is_warranted(body, lens_agent=known.agent),
                 verdict=lens_own_verdict(body, lens_agent=known.agent) or "",
                 url=str(comment.get("html_url") or ""),
+                created_at=str(comment.get("created_at") or ""),
+                blocking=(
+                    not sign_off_is_warranted(body, lens_agent=known.agent)
+                    and lens_own_verdict(body, lens_agent=known.agent) != "comment"
+                ) or bool(lens_explicit_objection(body, lens_agent=known.agent)),
             )
         )
     return out

@@ -23,7 +23,7 @@ import base64
 import json
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -96,10 +96,13 @@ def _lens_comment_identities(monkeypatch):
 
 
 def _comment(id_: int, body: str, *, author: str | None = SWARM_LOGIN) -> dict:
+    timestamp = (datetime(2026, 11, 17, tzinfo=timezone.utc) + timedelta(seconds=id_)).isoformat()
     row = {
         "id": id_,
         "body": body,
         "html_url": f"https://github.com/{REPO}/pull/{PR}#issuecomment-{id_}",
+        "created_at": timestamp,
+        "updated_at": timestamp,
     }
     if author is not None:
         row["user"] = {"login": author}
@@ -379,7 +382,7 @@ def _install_app_mint(monkeypatch, *, token: str | None = "fake-installation-tok
 
 def _all_clear_comments(lenses: list[str], *, author: str = SWARM_LOGIN) -> list[dict]:
     return [
-        _comment(i, _lens_comment_body(lens, target.LENS_AGENTS[lens]), author=author)
+        _comment(1000 + i, _lens_comment_body(lens, target.LENS_AGENTS[lens]), author=author)
         for i, lens in enumerate(lenses)
     ]
 
@@ -4885,7 +4888,7 @@ class TestOneLensWording:
 
 # ── Operator ruling 2026-10-27: three build/review/correct rounds, then split ──
 #
-# A round is a distinct head that received a lens verdict. Each test below was
+# A round begins at a reviewed head after blocking findings. Each test below was
 # run red against the tool without the cap (the PR body records what each looked
 # like red). The synthetic threads below carry the swarm's own marker comments.
 
@@ -4893,11 +4896,12 @@ ROUND_HEADS = ["1" * 40, "2" * 40, "3" * 40]
 
 
 def _cap_round_comments(heads: list[str], *, author: str = SWARM_LOGIN, start: int = 100) -> list[dict]:
-    """Every lens in ALL_FOUR posting a SIGNED_OFF verdict at each of *heads*."""
+    """Every head receives a blocking pm verdict, then the other lenses clear."""
     out: list[dict] = []
     for h, head in enumerate(heads):
         for i, lens in enumerate(ALL_FOUR):
-            body = _lens_comment_body(lens, target.LENS_AGENTS[lens], head=head)
+            body = _lens_comment_body(lens, target.LENS_AGENTS[lens], head=head,
+                                      verdict="REQUEST_CHANGES" if lens == "pm" else "SIGNED_OFF")
             out.append(_comment(start + h * 10 + i, body, author=author))
     return out
 
@@ -4963,12 +4967,81 @@ class TestRoundCap:
         code, client = await self._run(monkeypatch, comments)
         assert code == 0 and len(client.posted) == 1
 
-    async def test_the_cap_is_per_head_not_per_comment(self, monkeypatch):
-        # Many comments on the same two earlier heads are still two rounds.
+    async def test_the_cap_is_per_blocking_head_not_per_comment(self, monkeypatch):
+        # Many comments on the same two blocking heads are still two rounds.
         comments = _cap_round_comments(ROUND_HEADS[:1]) * 1 + _cap_round_comments(ROUND_HEADS[:1], start=500)
         comments += _cap_round_comments(ROUND_HEADS[1:2], start=600) + _all_clear_comments(ALL_FOUR)
         code, client = await self._run(monkeypatch, comments)
         assert code == 0
+
+    async def test_sites_private_replay_many_clear_reviewed_heads_stay_round_two(self, monkeypatch, capsys):
+        heads = [f"{i:x}" * 40 for i in range(1, 21)]
+        comments = _cap_round_comments(heads[:1])
+        for i, head in enumerate(heads[1:], 1):
+            for j, lens in enumerate(ALL_FOUR):
+                comments.append(_comment(200 + i * 10 + j,
+                    _lens_comment_body(lens, target.LENS_AGENTS[lens], head=head)))
+        comments += _all_clear_comments(ALL_FOUR)
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 0 and len(client.posted) == 1
+        assert "round 2 of 3" in capsys.readouterr().out
+
+
+def _operator_override(id_=1200, *, author=None, reason="The review has exceeded the cap for a documented reason.",
+                       edited=False, other_pr=False, bot=False):
+    author = author or swarm_dispatch._OPERATOR_LOGIN
+    row = _comment(id_, f"/override-round-cap\n{reason}", author=author)
+    row["user"]["type"] = "Bot" if bot else "User"
+    row["author_association"] = "MEMBER" if author != swarm_dispatch._OPERATOR_LOGIN else "OWNER"
+    if edited:
+        row["updated_at"] = "2026-11-18T10:00:00+00:00"
+    if other_pr:
+        row["html_url"] = f"https://github.com/{REPO}/pull/99#issuecomment-{id_}"
+    return row
+
+
+@pytest.mark.asyncio
+class TestRoundCapOverride:
+    _run = TestRoundCap._run
+    async def test_operator_comment_overrides_only_cap_and_reports_evidence(self, monkeypatch, capsys):
+        override = _operator_override()
+        code, client = await self._run(monkeypatch,
+            _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override])
+        out = capsys.readouterr().out
+        assert code == 0 and len(client.posted) == 1
+        assert "round 4 of 3" in out
+        assert f"OVERRIDDEN by the operator ({override['html_url']})" in out
+        assert override["body"] in out and override["created_at"] in out
+        assert swarm_dispatch._OPERATOR_LOGIN in out
+
+    @pytest.mark.parametrize("override", [
+        _operator_override(author=OTHER_LOGIN),
+        _operator_override(author="other-org-member"),
+        _operator_override(bot=True),
+        _operator_override(edited=True),
+        _operator_override(reason=""),
+        _operator_override(reason="too short"),
+        _operator_override(other_pr=True),
+    ])
+    async def test_invalid_override_refused(self, monkeypatch, override):
+        code, client = await self._run(monkeypatch,
+            _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override])
+        assert code == 1 and client.posted == []
+
+    async def test_flag_and_environment_cannot_grant_override(self, monkeypatch):
+        monkeypatch.setenv("ATELES_OVERRIDE_ROUND_CAP", "1")
+        code, client = await self._run(monkeypatch,
+            _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR))
+        assert code == 1 and client.posted == []
+        with pytest.raises(TypeError):
+            await target.run(REPO, PR, ALL_FOUR, apply=False, override_round_cap=True)
+
+    async def test_override_does_not_lift_blocking_lens(self, monkeypatch):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        comments += [_operator_override(), _comment(1100,
+            _lens_comment_body("pm", target.LENS_AGENTS["pm"], verdict="BLOCKED"))]
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 1 and client.posted == []
 
 
 # ── Approval tool fails closed on an unreadable review scope (ateles#1674) ──
