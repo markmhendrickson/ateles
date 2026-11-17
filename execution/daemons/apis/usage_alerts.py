@@ -83,7 +83,8 @@ _MINUTES_NAME = re.compile(r"^window_(\d+)m$")
 # the whole send path on every dispatch. Process-local on purpose: nothing new
 # is persisted, a restarted or separate process retries at once, and the
 # dedupe journal stays the only record of what was delivered.
-RETRY_BACKOFF_SECONDS = 600.0
+RETRY_BACKOFF_SECONDS = 5.0
+ALERT_SEND_TIMEOUT_SECONDS = 30.0
 _retry_after: dict[str, float] = {}
 
 
@@ -320,10 +321,16 @@ def check_usage_thresholds(
                 try:
                     from lib.notify import Priority
 
-                    delivered = bool(notifier.send(
-                        message, priority=Priority.WARN, handler="apis",
-                        dedupe_key=send_key,
-                    ))
+                    result: list[bool] = []
+                    def handoff() -> None:
+                        result.append(bool(notifier.send(
+                            message, priority=Priority.WARN, handler="apis",
+                            dedupe_key=send_key, retryable=True,
+                        )))
+                    sender = threading.Thread(target=handoff, daemon=True)
+                    sender.start()
+                    sender.join(ALERT_SEND_TIMEOUT_SECONDS)
+                    delivered = bool(result) and result[0]
                 except Exception as exc:  # noqa: BLE001 — retried next check
                     log.warning(f"[apis] usage alert send raised (non-fatal): {exc}")
                 if delivered:
@@ -332,9 +339,8 @@ def check_usage_thresholds(
                         _mark_reported(notifier, keys[t])
                     delivered_keys.extend(keys[t] for t in pending)
                 else:
-                    # send() journals the key before routing; undo that so an
-                    # undelivered alert is retried, not suppressed.
-                    _release(notifier, send_key)
+                    # A pending journal entry survives a failed or interrupted
+                    # handoff and becomes retryable after its short bound.
                     _retry_after[retry_key] = time.monotonic() + RETRY_BACKOFF_SECONDS
                 log.info(
                     "[apis] usage alert "
@@ -405,10 +411,3 @@ def _mark_reported(notifier, key: str) -> None:
             pass
 
 
-def _release(notifier, key: str) -> None:
-    releaser = getattr(notifier, "release_dedupe", None)
-    if callable(releaser):
-        try:
-            releaser(key)
-        except Exception:  # noqa: BLE001
-            pass

@@ -607,6 +607,7 @@ def refresh_usage_if_stale(
     env: Mapping[str, str],
     now_wall: float | None = None,
     force: bool = False,
+    alert_in_background: bool = True,
     run=subprocess.run,
 ) -> dict[str, str]:
     """Refresh each gated provider's reading when it is older than the refresh age.
@@ -649,11 +650,11 @@ def refresh_usage_if_stale(
             outcomes[provider] = f"error: {type(exc).__name__}"
             continue
         if outcomes[provider] == "refreshed":
-            _alert_on_new_reading(provider)
+            _alert_on_new_reading(provider, background=alert_in_background)
     return outcomes
 
 
-def _alert_on_new_reading(provider: str) -> None:
+def _alert_on_new_reading(provider: str, *, background: bool = True) -> None:
     """Alert a 50%/75% crossing as soon as the reading that shows it is written.
 
     Provider spend governance (ent_e5259618cae6cafd4be120e0): the dispatch path
@@ -665,7 +666,10 @@ def _alert_on_new_reading(provider: str) -> None:
     try:
         import usage_alerts
 
-        usage_alerts.check_after_usage_write(provider)
+        if background:
+            usage_alerts.schedule_dispatch_check(provider)
+        else:
+            usage_alerts.check_after_usage_write(provider)
     except Exception as exc:  # noqa: BLE001 - an alert never breaks a refresh
         log.warning(f"[apis] usage threshold check after refresh failed: {exc}")
 

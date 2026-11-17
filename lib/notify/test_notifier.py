@@ -502,6 +502,34 @@ def test_dedupe_key_journal_survives_a_new_notifier_instance(tmp_path):
     assert sent == ["[monedula] consent channel failed"]
 
 
+def test_retryable_alert_recovers_pending_after_interrupted_handoff(tmp_path):
+    from datetime import timedelta
+
+    sent = []
+    first = _notifier(tmp_path, NO_SILENCE, sent)
+    key = "usage:weekly:50"
+
+    def interrupted(*args, **kwargs):
+        raise RuntimeError("interrupted before transport return")
+
+    first._deliver = interrupted
+    with pytest.raises(RuntimeError, match="interrupted"):
+        first.send("usage crossed", Priority.WARN, handler="apis",
+                   dedupe_key=key, retryable=True)
+    entry = first._dedupe_journal[key]
+    assert entry["state"] == "pending"
+    entry["pending_at"] = (first._now_local() - timedelta(minutes=1)).isoformat()
+    first._persist_dedupe_journal({key: entry})
+
+    second = _notifier(tmp_path, NO_SILENCE, sent)
+    assert second.send("usage crossed", Priority.WARN, handler="apis",
+                       dedupe_key=key, retryable=True)
+    assert second._dedupe_journal[key]["state"] == "delivered"
+    assert not second.send("usage crossed", Priority.WARN, handler="apis",
+                           dedupe_key=key, retryable=True)
+    assert len(sent) == 1
+
+
 def test_clear_dedupe_lets_a_genuine_recurrence_notify_again(tmp_path):
     sent = []
     n = _notifier(tmp_path, NO_SILENCE, sent)

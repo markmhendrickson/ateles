@@ -215,7 +215,9 @@ def _refresh_providers() -> int:
         "CURSOR_API_KEY",
     }
     env = {key: value for key, value in os.environ.items() if key not in metered}
-    outcome = usage_probe.refresh_usage_if_stale(binaries, env=env, force=True)
+    outcome = usage_probe.refresh_usage_if_stale(
+        binaries, env=env, force=True, alert_in_background=False,
+    )
     print(json.dumps(outcome, indent=2))
     print(
         "note: this ran under YOUR login and environment; the daemon refreshes under "

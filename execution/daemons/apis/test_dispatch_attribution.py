@@ -428,13 +428,16 @@ def test_a_failed_delivery_is_retried_on_the_next_check(
     assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
     key = spy.sent[0][2]
     assert key.endswith(":50")
-    assert not spy.is_dedupe_open(key)
+    assert spy.inner._dedupe_journal[key]["state"] == "pending"
     # The same process backs off before retrying...
     spy.deliver = True
     assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
     assert len(spy.sent) == 1
     # ...and retries once the backoff has passed.
     usage_alerts._retry_after.clear()
+    entry = spy.inner._dedupe_journal[key]
+    entry["pending_at"] = (spy.inner._now_local() - timedelta(minutes=1)).isoformat()
+    spy.inner._persist_dedupe_journal({key: entry})
     assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == [key]
     assert len(spy.delivered) == 1
     assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
@@ -454,6 +457,10 @@ def test_a_send_that_raises_is_retried_on_the_next_check(
     assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
     spy.inner._deliver = spy._transport
     usage_alerts._retry_after.clear()  # past the backoff
+    key = spy.sent[0][2]
+    entry = spy.inner._dedupe_journal[key]
+    entry["pending_at"] = (spy.inner._now_local() - timedelta(minutes=1)).isoformat()
+    spy.inner._persist_dedupe_journal({key: entry})
     assert len(usage_alerts.check_usage_thresholds("cursor", notifier=spy)) == 1
 
 
@@ -568,6 +575,7 @@ def test_a_refresh_with_no_later_dispatch_alerts_the_crossing(
 
     outcome = usage_probe.refresh_usage_if_stale(
         {"claude": "/bin/claude"}, env={"PATH": "/usr/bin"}, force=True, run=run,
+        alert_in_background=False,
     )
     assert outcome == {"claude": "refreshed"}
     assert dispatched == []
@@ -590,6 +598,31 @@ def test_the_usage_command_alerts_the_crossing_it_records(
     assert harness_usage.main(["usage", "codex", "--window", f"weekly=77@{resets}"]) == 0
     assert len(spy.delivered) == 1
     assert "(crossed 50% and 75%)" in spy.delivered[0]
+
+
+def test_cli_exit_leaves_failed_alert_pending_for_next_process(
+    monkeypatch, tmp_path, ledger
+) -> None:
+    sys.path.insert(0, str(_DAEMON_DIR.parent.parent / "scripts"))
+    import harness_usage
+
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "headroom.json"))
+    spy = _SpyNotifier(deliver=False)
+    monkeypatch.setattr(usage_alerts, "_default_journal_factory", lambda: spy)
+    monkeypatch.setattr(usage_alerts, "_default_notifier_factory", lambda: spy)
+    resets = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    assert harness_usage.main(["usage", "codex", "--window", f"weekly=60@{resets}"]) == 0
+    key = spy.sent[0][2]
+    assert spy.inner._dedupe_journal[key]["state"] == "pending"
+    entry = spy.inner._dedupe_journal[key]
+    entry["pending_at"] = (spy.inner._now_local() - timedelta(minutes=1)).isoformat()
+    spy.inner._persist_dedupe_journal({key: entry})
+    usage_alerts._retry_after.clear()
+    spy.deliver = True
+    assert usage_alerts.check_usage_thresholds("codex", notifier=spy) == [key]
+    assert len(spy.delivered) == 1
+    assert usage_alerts.check_usage_thresholds("codex", notifier=spy) == []
 
 
 def test_a_new_window_alerts_again(monkeypatch, tmp_path, ledger) -> None:
@@ -736,6 +769,51 @@ def test_slow_alert_delivery_does_not_delay_dispatch(
     finally:
         release.set()
     assert delivered.wait(timeout=2)
+
+
+def test_refreshed_reading_does_not_wait_for_slow_alert(monkeypatch, tmp_path, ledger) -> None:
+    import subprocess
+    import threading
+    import time
+
+    import usage_probe
+
+    resets = int((datetime.now(timezone.utc) + timedelta(days=3)).timestamp())
+    shape = json.dumps({
+        "type": "rate_limit_event", "rate_limit_info": {
+            "status": "allowed_warning", "resetsAt": resets,
+            "rateLimitType": "seven_day", "utilization": 0.6,
+            "isUsingOverage": False,
+        },
+    })
+    monkeypatch.setenv("APIS_USAGE_GATE", "on")
+    monkeypatch.setenv("APIS_USAGE_PROBE", "on")
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "headroom.json"))
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude")
+    spy = _SpyNotifier()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_transport(*args, **kwargs):
+        entered.set()
+        release.wait(timeout=2)
+        return True
+
+    spy.inner._deliver = slow_transport
+    monkeypatch.setattr(usage_alerts, "_default_journal_factory", lambda: spy)
+    monkeypatch.setattr(usage_alerts, "_default_notifier_factory", lambda: spy)
+    started = time.monotonic()
+    try:
+        outcome = usage_probe.refresh_usage_if_stale(
+            {"claude": "/bin/claude"}, env={"PATH": "/usr/bin"}, force=True,
+            run=lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, shape, ""),
+        )
+        assert outcome == {"claude": "refreshed"}
+        assert time.monotonic() - started < 0.5
+        assert entered.wait(timeout=2)
+    finally:
+        release.set()
 
 
 def test_window_span_names() -> None:

@@ -257,6 +257,7 @@ class Notifier:
         bypass_silence: bool = False,
         dedupe_key: str | None = None,
         email_eligible: bool = True,
+        retryable: bool = False,
     ) -> bool:
         """
         Route a notification by priority.
@@ -286,7 +287,8 @@ class Notifier:
         """
         with self._notification_lock:
             return self._send_locked(
-                message, priority, handler, bypass_silence, dedupe_key, email_eligible
+                message, priority, handler, bypass_silence, dedupe_key, email_eligible,
+                retryable,
             )
 
     def _send_locked(
@@ -297,6 +299,7 @@ class Notifier:
         bypass_silence: bool,
         dedupe_key: str | None = None,
         email_eligible: bool = True,
+        retryable: bool = False,
     ) -> bool:
         prio = Priority(priority) if isinstance(priority, str) else priority
         tag = f"[{handler}] " if handler else ""
@@ -339,21 +342,29 @@ class Notifier:
         # operator never received. No current caller pairs dedupe_key with
         # INFO; this keeps that from becoming a silent footgun.
         if dedupe_key and prio != Priority.INFO:
-            self._mark_dedupe_notified(dedupe_key)
+            if retryable:
+                self._mark_dedupe_pending(dedupe_key, handler)
+            else:
+                self._mark_dedupe_notified(dedupe_key, handler)
+
+        def delivered(result: bool) -> bool:
+            if result and retryable and dedupe_key:
+                self._mark_dedupe_delivered(dedupe_key, handler)
+            return result
 
         # Drain any prior held actionable notices before handling this send.
         self._maybe_flush_digest()
 
         if prio == Priority.CRITICAL:
             # Critical always fires immediately, even in silence window
-            return self._deliver(full_message, force=True, email_eligible=email_eligible)
+            return delivered(self._deliver(full_message, force=True, email_eligible=email_eligible))
 
         if prio == Priority.BLOCKER:
             if self._in_silence_window() and not bypass_silence:
                 log.info(
                     "[notify] Blocker in silence window — delivering anyway (blocker policy)"
                 )
-            return self._deliver(full_message, force=True, email_eligible=email_eligible)
+            return delivered(self._deliver(full_message, force=True, email_eligible=email_eligible))
 
         if prio == Priority.OPERATOR_DECISION:
             if self._in_silence_window() and not bypass_silence:
@@ -362,17 +373,17 @@ class Notifier:
                 )
                 self._queue_digest(f"⚠️ {full_message}", email_eligible)
                 return False
-            return self._deliver(
+            return delivered(self._deliver(
                 f"⚠️ {full_message}", force=False, email_eligible=email_eligible
-            )
+            ))
 
         if prio == Priority.WARN:
             if self._in_silence_window() and not bypass_silence:
                 self._queue_digest(f"⚠ {full_message}", email_eligible)
                 return False
-            return self._deliver(
+            return delivered(self._deliver(
                 f"⚠ {full_message}", force=False, email_eligible=email_eligible
-            )
+            ))
 
         # INFO — never email, never queue, never flush later as a digest.
         log.debug("[notify] Dropping routine INFO (no digest): %r", full_message)
@@ -714,7 +725,34 @@ class Notifier:
 
     def _is_duplicate(self, key: str) -> bool:
         with self._notification_lock:
-            return key in self._dedupe_journal
+            entry = self._dedupe_journal.get(key)
+            if entry is None:
+                return False
+            if entry.get("state") != "pending":
+                return True
+            try:
+                started = datetime.fromisoformat(entry["pending_at"]).timestamp()
+                return datetime.now().timestamp() - started < 5
+            except (KeyError, TypeError, ValueError):
+                return False
+
+    def _mark_dedupe_pending(self, key: str, handler: str = "") -> None:
+        with self._notification_lock:
+            journal = self._dedupe_journal
+            journal[key] = {
+                "state": "pending", "pending_at": self._now_local().isoformat(),
+                "handler": handler,
+            }
+            self._persist_dedupe_journal(journal)
+
+    def _mark_dedupe_delivered(self, key: str, handler: str = "") -> None:
+        with self._notification_lock:
+            journal = self._dedupe_journal
+            journal[key] = {
+                "state": "delivered", "notified_at": self._now_local().isoformat(),
+                "handler": handler,
+            }
+            self._persist_dedupe_journal(journal)
 
     def _mark_dedupe_notified(self, key: str, handler: str = "") -> None:
         """Record that ``key`` has been reported. Never raises."""
