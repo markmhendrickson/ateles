@@ -86,6 +86,7 @@ def test_sent_result_writes_one_payment_event_with_identity(env, monkeypatch):
     assert entity["session_keys"] == ["yoga:evt-1"]
     assert entity["primary_session_key"] == "yoga:evt-1"
     assert entity["payment_date"] == "2026-11-11"
+    assert entity["obligation_key"] == w.journal["consumed_tokens"][next(iter(w.journal["consumed_tokens"]))]
     assert entity["status"] == "sent"
     assert entity["amount_eur"] == 10
     # A later tick neither pays nor records again.
@@ -222,7 +223,12 @@ def test_store_error_leaves_journal_and_alert_identical(monkeypatch, tmp_path):
     (entry,) = obligations.values()
     assert entry["state"] == "done" and entry["outcome_status"] == "sent"
     assert any("payment_outcome" in repr(a) for a in alerts)
-    assert obligations == baseline[1]
+    assert entry["payment_event_state"] == "queued"
+    baseline_entry = next(iter(baseline[1].values()))
+    assert baseline_entry["payment_event_state"] == "stored"
+    assert {k: v for k, v in entry.items() if k != "payment_event_state"} == {
+        k: v for k, v in baseline_entry.items() if k != "payment_event_state"
+    }
     assert [a for a in alerts if "payment_outcome" in repr(a)] == [
         a for a in baseline[2] if "payment_outcome" in repr(a)
     ]
@@ -267,6 +273,58 @@ def test_store_error_retries_record_only_then_resumes(monkeypatch, tmp_path):
     assert len(events) == 2
     assert json.loads((tmp_path / "pending.json").read_text())["entries"] == []
     assert sum("halt cleared" in repr(a) for a in alerts) == 1
+
+
+def test_first_queue_write_failure_halts_next_tick_until_outcome_is_stored(
+    monkeypatch, tmp_path
+):
+    w, neo = _world(monkeypatch, tmp_path)
+    events = _capture_events(neo, monkeypatch)
+    alerts = _capture_alerts(monkeypatch)
+    _two_approved(w, neo)
+    approval_writes = neo.writes
+    pending_file = tmp_path / "pending.json"
+    original_save = monedula._save_pending_payment_events
+    missed: list[dict] = []
+    fail = {"on": True}
+
+    def unavailable(data):
+        if fail["on"]:
+            missed.extend(data["entries"])
+            raise OSError("synthetic pending-file creation failure")
+        original_save(data)
+
+    monkeypatch.setattr(monedula, "_save_pending_payment_events", unavailable)
+    assert w.tick(minutes=15) is False
+    assert len(w.handler.execute_calls) == 1
+    assert not pending_file.exists()
+    assert next(iter(w.journal["obligations"].values()))["payment_event_state"] == "unrecorded"
+
+    assert w.tick(minutes=15) is False
+    assert len(w.handler.execute_calls) == 1
+    assert neo.writes == approval_writes
+    assert w.sends == []
+    assert not pending_file.exists()
+    assert any("payment outcome could not be recorded" in repr(a) for a in alerts)
+
+    fail["on"] = False
+    assert monedula._queue_payment_event(missed[0]) is True
+    assert w.tick(minutes=15) is True
+    assert len(w.handler.execute_calls) == 2
+    assert len(events) == 2
+    assert all(
+        row["payment_event_state"] == "stored"
+        for row in w.journal["obligations"].values()
+        if row.get("state") == "done"
+    )
+
+
+def test_no_outstanding_journal_outcome_leaves_normal_tick_unaffected(monkeypatch, tmp_path):
+    w, neo = _world(monkeypatch, tmp_path)
+    _capture_events(neo, monkeypatch)
+    assert w.tick() is True
+    assert w.handler.execute_calls == []
+    assert neo.writes == 1
 
 
 def test_each_halt_announces_its_own_recovery(monkeypatch, tmp_path):

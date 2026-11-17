@@ -186,7 +186,8 @@ def test_session_paid_under_the_old_obligation_key_is_never_raised_again(env, st
     jpath = consent_email.journal_path()
     payment_journal.record_intent(jpath, old_key, "old-token", generation=1)
     if state == "done":
-        payment_journal.record_outcome(jpath, old_key, "sent")
+        payment_journal.record_outcome(jpath, old_key, "sent", event_queued=True)
+        payment_journal.mark_payment_event_stored(jpath, old_key)
     w.tick()
     w.tick(minutes=15)
     assert neo.writes == 0, "a payment_approval was raised for an already-paid session"
@@ -200,7 +201,8 @@ def test_multi_match_legacy_index_key_is_also_recognised(env):
     old_key = consent_email.obligation_key(w.handler, "2026-11-11", "1")
     jpath = consent_email.journal_path()
     payment_journal.record_intent(jpath, old_key, "old-token", generation=1)
-    payment_journal.record_outcome(jpath, old_key, "sent")
+    payment_journal.record_outcome(jpath, old_key, "sent", event_queued=True)
+    payment_journal.mark_payment_event_stored(jpath, old_key)
     w.tick()
     # the session that was match index 1 is settled; the other is still raised
     assert payment_journal.session_state(w.journal, "yoga:evt-2") == "settled"
