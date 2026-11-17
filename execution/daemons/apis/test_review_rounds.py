@@ -36,7 +36,7 @@ def test_cap_stays_three():
 
 def test_clear_repushes_and_sites_private_shape_spend_only_second_round():
     comments = [_verdict("pm", H1, verdict="REQUEST_CHANGES", n=0)]
-    heads = [f"{i:x}" * 40 for i in range(2, 22)]
+    heads = [f"{i:040x}" for i in range(2, 22)]
     comments += [_verdict("pm", head, n=i + 1) for i, head in enumerate(heads)]
     status = _status(comments, heads[-1])
     assert status.round_number == 2 and not status.refused

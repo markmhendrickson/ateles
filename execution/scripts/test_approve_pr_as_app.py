@@ -4975,7 +4975,7 @@ class TestRoundCap:
         assert code == 0
 
     async def test_sites_private_replay_many_clear_reviewed_heads_stay_round_two(self, monkeypatch, capsys):
-        heads = [f"{i:x}" * 40 for i in range(1, 21)]
+        heads = [f"{i:040x}" for i in range(1, 21)]
         comments = _cap_round_comments(heads[:1])
         for i, head in enumerate(heads[1:], 1):
             for j, lens in enumerate(ALL_FOUR):
