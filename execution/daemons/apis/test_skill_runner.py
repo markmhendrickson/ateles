@@ -1554,6 +1554,162 @@ class TestHarnessEventEmptyToken:
         )
 
 
+class TestHarnessEventIdentity:
+    """Every harness_event carries all three schema identity fields.
+
+    The schema's identity is session_id + event_type + event_at. A dispatch
+    with no agent session used to send no session_id, so its events resolved
+    to one shared entity whose snapshot showed whichever write landed last.
+    """
+
+    def _call(self, **overrides) -> None:
+        kwargs = dict(
+            task_entity_id="ent_abc",
+            role="cicada",
+            agent_sub="cicada@ateles-swarm",
+            event_type="subprocess",
+            tool_name="claude:cicada",
+            success="true",
+            event_at="2026-11-17T00:00:00+00:00",
+        )
+        kwargs.update(overrides)
+        skill_runner._write_harness_event(**kwargs)
+
+    @staticmethod
+    def _sent_entities(mock_urlopen) -> list[dict]:
+        return [
+            json.loads(c.args[0].data)["entities"][0]
+            for c in mock_urlopen.call_args_list
+            if c.args[0].get_method() == "POST"
+        ]
+
+    @staticmethod
+    def _cm():
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=None)
+        cm.__exit__ = MagicMock(return_value=False)
+        return cm
+
+    def test_sessionless_dispatches_store_distinct_session_ids(self, monkeypatch) -> None:
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-bearer-xyz")
+        with patch("skill_runner.urllib.request.urlopen", return_value=self._cm()) as mock_urlopen:
+            self._call(dispatch_id="d1")
+            self._call(dispatch_id="d2")
+            # A direct caller with no id at all still gets an identity.
+            self._call()
+            self._call()
+        sent = self._sent_entities(mock_urlopen)
+        session_ids = [entity.get("session_id") for entity in sent]
+        assert session_ids[:2] == ["dispatch:d1", "dispatch:d2"]
+        assert all(session_ids), session_ids
+        assert len(set(session_ids)) == 4, session_ids
+        for entity in sent:
+            assert entity["event_type"] == "subprocess"
+            assert entity["event_at"] == "2026-11-17T00:00:00+00:00"
+
+    def test_agent_session_id_is_kept(self, monkeypatch) -> None:
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-bearer-xyz")
+        with patch("skill_runner.urllib.request.urlopen", return_value=self._cm()) as mock_urlopen:
+            self._call(agent_session_id="ent_session", dispatch_id="d1")
+        (entity,) = self._sent_entities(mock_urlopen)
+        assert entity["session_id"] == "ent_session"
+
+    def _readback(self, monkeypatch, caplog, snapshot_session_id: str) -> list[str]:
+        import logging as _logging
+
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-bearer-xyz")
+
+        class _Response:
+            def __init__(self, body): self.body = json.dumps(body).encode()
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def read(self): return self.body
+
+        responses = iter([
+            _Response({"entities": [{"entity_type": "harness_event", "entity_id": "ent_event"}]}),
+            _Response({"snapshot": {"task_entity_id": "ent_abc", "session_id": snapshot_session_id}}),
+            _Response({"relationships": [
+                {"source_entity_id": "ent_event", "target_entity_id": "ent_abc",
+                 "relationship_type": "REFERS_TO"},
+            ]}),
+        ])
+        with (
+            patch("skill_runner.urllib.request.urlopen",
+                  side_effect=lambda *_a, **_k: next(responses)),
+            caplog.at_level(_logging.WARNING, logger="apis.skill_runner"),
+        ):
+            self._call(dispatch_id="d1")
+        return [m for m in caplog.messages if "readback mismatch" in m]
+
+    def test_readback_compares_the_sent_session_id(self, monkeypatch, caplog) -> None:
+        # Same task, another dispatch's session_id: the row read back is not
+        # the row this write produced.
+        mismatches = self._readback(monkeypatch, caplog, "dispatch:other")
+        assert len(mismatches) == 1
+        assert "session_id=dispatch:d1" in mismatches[0]
+
+    def test_readback_accepts_the_sent_session_id(self, monkeypatch, caplog) -> None:
+        assert self._readback(monkeypatch, caplog, "dispatch:d1") == []
+
+    def test_emit_mints_dispatch_id_before_queueing(self) -> None:
+        captured: list[dict] = []
+        with patch("skill_runner._write_harness_event", side_effect=lambda **kw: captured.append(kw)):
+            asyncio.run(skill_runner._emit_harness_event(
+                task_entity_id="ent_abc", role="cicada", agent_sub="",
+                event_type="provider_failover", tool_name="claude:cicada", success="false",
+            ))
+            asyncio.run(skill_runner._emit_harness_event(
+                task_entity_id="ent_abc", role="cicada", agent_sub="",
+                event_type="subprocess", tool_name="claude:cicada", success="true",
+                agent_session_id="ent_session",
+            ))
+        assert captured[0]["dispatch_id"]
+        assert "dispatch_id" not in captured[1]
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_each_dispatch_writes_its_own_dispatch_id(self, MockLoader, mock_write_harness) -> None:
+        skill_runner._agent_def_cache.clear()
+        instance = _loader_with_no_policies()
+        instance.load.return_value = _make_def(prompt_markdown="Role: worker.")
+        MockLoader.return_value = instance
+
+        async def fake_exec(*cmd, **kwargs):
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        per_dispatch: list[set] = []
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill content"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            for _ in range(2):
+                mock_write_harness.reset_mock()
+                result = asyncio.run(skill_runner.run_skill(
+                    "cicada", "work prompt", role="cicada",
+                    task_entity_id="ent_abc",
+                ))
+                assert result.ok
+                assert mock_write_harness.call_count >= 2  # start + completion
+                per_dispatch.append({
+                    c.kwargs.get("dispatch_id") for c in mock_write_harness.call_args_list
+                })
+        # One id shared by every event of a dispatch, different across dispatches.
+        assert all(len(ids) == 1 and "" not in ids and None not in ids for ids in per_dispatch)
+        assert per_dispatch[0] != per_dispatch[1]
+
+
 # ── ateles#109 — github_token injection ──────────────────────────────────────
 
 

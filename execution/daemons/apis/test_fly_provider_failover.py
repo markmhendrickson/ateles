@@ -34,8 +34,10 @@ def loop(fly_env, seam, monkeypatch, tmp_path):  # noqa: F811 -- pytest fixtures
     spawned, fake_exec = seam
     # Claude runs per job; codex and cursor are login providers. Codex has its
     # login machine, so what refuses it is the Neotoma-tools check (the case
-    # seen in production); cursor has none.
+    # seen in production, before codex got the signing proxy); cursor has
+    # none. The proxy is withheld from codex here to keep that refusal.
     monkeypatch.setattr(fly_runner, "LOGIN_PROVIDERS", frozenset({"codex", "cursor"}))
+    monkeypatch.setattr(fly_runner, "FLY_NEOTOMA_PROXY_PROVIDERS", frozenset({"claude"}))
     monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
     monkeypatch.delenv("APIS_FLY_CURSOR_MACHINE_ID", raising=False)
     # _run_skill_once looks up the provider binary before the Fly path, so a

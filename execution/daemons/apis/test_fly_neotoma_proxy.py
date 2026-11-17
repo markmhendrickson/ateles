@@ -10,9 +10,11 @@ import http.client
 import importlib.util
 import io
 import json
+import logging
 import sys
 import threading
 import time
+from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -143,6 +145,7 @@ def proxy_port(upstream, sign_calls):
         sign,
         connect=lambda: http.client.HTTPConnection("127.0.0.1", upstream.port, timeout=10),
         allow_any_peer_for_tests=True,
+        allow_all_tools=True,
     )
     port = proxy.start()
     yield port
@@ -157,13 +160,221 @@ def _lower(headers):
     return {k.lower(): v for k, v in headers.items()}
 
 
+def _in_memory_mcp_request(body, allowed_tools, *, http_method="POST", session_id=None, path="/mcp"):
+    sign_calls, upstream_requests = [], []
+
+    class Connection:
+        def request(self, method, path, *, body, headers):
+            upstream_requests.append((method, path, body, headers))
+
+        def getresponse(self):
+            response = http.client.HTTPResponse(_MemorySocket(
+                b'HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{"ok":true}'
+            ))
+            response.begin()
+            return response
+
+        def close(self):
+            pass
+
+    def sign(method, url, body, content_type):
+        sign_calls.append((method, url, body, content_type))
+        return dict(SIGNATURE)
+
+    proxy = neotoma_proxy.NeotomaSigningProxy(
+        UPSTREAM_BASE, sign, connect=Connection, allow_any_peer_for_tests=True,
+        allowed_tools=allowed_tools, allow_all_tools=allowed_tools is None,
+    )
+    handler = neotoma_proxy._ProxyHandler.__new__(neotoma_proxy._ProxyHandler)
+    handler.proxy = proxy
+    handler.command = http_method
+    handler.path = path
+    handler.headers = Message()
+    handler.headers["Content-Length"] = str(len(body))
+    handler.headers["Content-Type"] = "application/json"
+    if session_id is not None:
+        handler.headers["Mcp-Session-Id"] = session_id
+    handler.rfile = io.BytesIO(body)
+    handler.wfile = io.BytesIO()
+    handler.request_version = "HTTP/1.1"
+    handler.requestline = f"{http_method} {path} HTTP/1.1"
+    handler.close_connection = False
+    handler._handle()
+    response = http.client.HTTPResponse(_MemorySocket(handler.wfile.getvalue()))
+    response.begin()
+    return response.status, response.read(), sign_calls, upstream_requests
+
+
+def test_proxy_constructor_preserves_tool_grant():
+    proxy = neotoma_proxy.NeotomaSigningProxy(
+        UPSTREAM_BASE, lambda *args: {}, allowed_tools=("store",),
+        allow_any_peer_for_tests=True,
+    )
+    assert proxy.allowed_tools == frozenset({"store"})
+
+
+def test_granted_tool_is_signed_and_forwarded():
+    body = b'{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"store","arguments":{}}}'
+    status, _, sign_calls, upstream_requests = _in_memory_mcp_request(body, ("retrieve_entities", "store"))
+    assert status == 200
+    assert sign_calls == [("POST", UPSTREAM_BASE + "/mcp", body, "application/json")]
+    assert upstream_requests[0][2] == body
+    assert upstream_requests[0][3]["signature"] == SIGNATURE["signature"]
+
+
+@pytest.mark.parametrize("body,request_id", [
+    (b'{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"delete_all"}}', 7),
+    (b'{"jsonrpc":"2.0","id":"case","method":"tools/call","params":{"name":"Store"}}', "case"),
+    (b'{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"store "}}', 9),
+    (b'{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{}}', 10),
+    (b'{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":42}}', 11),
+    (b'[{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"store"}}]', None),
+    (b'not-json', None),
+    (b'{"jsonrpc":"2.0","id":13}', 13),
+    (b'{"jsonrpc":"2.0","id":14,"method":null}', 14),
+    (b'{"jsonrpc":"2.0","id":15,"method":42}', 15),
+    (b'{"jsonrpc":"2.0","id":16,"method":"\\u0069nitialize\\u200b"}', 16),
+])
+def test_disallowed_or_unreadable_request_never_reaches_signer_or_upstream(
+    body, request_id, caplog
+):
+    caplog.set_level(logging.INFO, logger="neotoma_proxy")
+    status, payload, sign_calls, upstream_requests = _in_memory_mcp_request(
+        body, ("retrieve_entities", "store"))
+    assert status == 403
+    error = json.loads(payload)
+    assert error["jsonrpc"] == "2.0" and error["id"] == request_id
+    assert error["error"]["code"] == -32003
+    assert upstream_requests == [] and sign_calls == []
+    assert f"neotoma proxy POST /mcp 403 in={len(body)} out=" in caplog.text
+    assert body.decode() not in caplog.text
+
+
+@pytest.mark.parametrize("method", [
+    "initialize", "ping", "tools/list", "notifications/initialized", "notifications/cancelled",
+])
+def test_non_call_methods_are_forwarded_with_allowlist(method):
+    request = {"jsonrpc": "2.0", "method": method}
+    if not method.startswith("notifications/"):
+        request["id"] = 1
+    body = json.dumps(request).encode()
+    status, _, sign_calls, upstream_requests = _in_memory_mcp_request(body, ("store",))
+    assert status == 200
+    assert sign_calls == [("POST", UPSTREAM_BASE + "/mcp", body, "application/json")]
+    assert upstream_requests[0][2] == body
+    assert upstream_requests[0][3]["signature"] == SIGNATURE["signature"]
+
+
+def test_method_match_uses_decoded_json_value():
+    body = b'{"jsonrpc":"2.0","id":1,"method":"\\u0069nitialize"}'
+    status, _, sign_calls, upstream_requests = _in_memory_mcp_request(body, ("store",))
+    assert status == 200
+    assert sign_calls == [("POST", UPSTREAM_BASE + "/mcp", body, "application/json")]
+    assert upstream_requests[0][2] == body
+
+
+@pytest.mark.parametrize("method", [
+    "resources/list", "resources/read", "resources/templates/list", "resources/subscribe",
+    "resources/unsubscribe", "prompts/list", "prompts/get", "completion/complete",
+    "logging/setLevel", "sampling/createMessage", "elicitation/create", "unknown/method",
+    "Initialize", "initialize ", "tools/List", "tools/list ", "іnitialize",
+])
+def test_ungranted_rpc_methods_never_reach_signer_or_upstream(method):
+    body = json.dumps({"jsonrpc": "2.0", "id": 21, "method": method}).encode()
+    status, payload, sign_calls, upstream_requests = _in_memory_mcp_request(body, ("store",))
+    assert status == 403
+    assert json.loads(payload) == {
+        "jsonrpc": "2.0", "id": 21,
+        "error": {"code": -32003, "message": "Neotoma tool not granted"},
+    }
+    assert sign_calls == [] and upstream_requests == []
+
+
+@pytest.mark.parametrize(("http_method", "session_id", "allowed"), [
+    ("GET", None, False),
+    ("GET", "existing-session", False),
+    ("DELETE", None, False),
+    ("DELETE", "existing-session", True),
+])
+def test_allowlist_http_verbs_are_scoped(http_method, session_id, allowed):
+    status, payload, sign_calls, upstream_requests = _in_memory_mcp_request(
+        b"", ("store",), http_method=http_method, session_id=session_id,
+    )
+    if not allowed:
+        assert status == 403
+        assert json.loads(payload)["error"]["code"] == -32003
+        assert sign_calls == [] and upstream_requests == []
+    else:
+        assert status == 200
+        assert sign_calls == [("DELETE", UPSTREAM_BASE + "/mcp", None, "application/json")]
+        assert upstream_requests[0][0:3] == ("DELETE", "/mcp", None)
+        assert upstream_requests[0][3]["mcp-session-id"] == session_id
+
+
+@pytest.mark.parametrize("raw_id", ("1e999", "-1e999", "1E400", "[1]", '{"a":1}', "true", "null", '"abc"', "7", "1.5"))
+def test_denial_response_is_always_valid_json(raw_id):
+    body = ('{"jsonrpc":"2.0","id":' + raw_id + ',"method":"resources/read","params":{}}').encode()
+    status, payload, sign_calls, upstream_requests = _in_memory_mcp_request(body, ("store",))
+    assert status == 403
+    parsed = json.loads(payload, parse_constant=lambda name: pytest.fail(f"non-JSON constant {name}"))
+    assert parsed["error"]["code"] == -32003
+    assert sign_calls == [] and upstream_requests == []
+    expected = {"1e999": None, "-1e999": None, "1E400": None, "[1]": None, '{"a":1}': None,
+                "true": None, "null": None, '"abc"': "abc", "7": 7, "1.5": 1.5}[raw_id]
+    assert parsed["id"] == expected
+
+
+def test_granted_job_is_refused_the_uploaded_file_route():
+    # A file's bytes are a data read no tool grant covers.
+    status, payload, sign_calls, upstream_requests = _in_memory_mcp_request(
+        b"", ("store",), http_method="GET", path=SOURCE_PATH,
+    )
+    assert status == 403
+    assert json.loads(payload)["error"]["code"] == -32003
+    assert sign_calls == [] and upstream_requests == []
+
+
+def test_no_allowlist_still_forwards_the_uploaded_file_route():
+    status, _, sign_calls, upstream_requests = _in_memory_mcp_request(
+        b"", None, http_method="GET", path=SOURCE_PATH,
+    )
+    assert status == 200
+    assert sign_calls == [("GET", UPSTREAM_BASE + SOURCE_PATH, None, "application/json")]
+    assert upstream_requests[0][0:3] == ("GET", SOURCE_PATH, None)
+
+
+def test_no_allowlist_keeps_ungranted_tool_forwarding():
+    body = b'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"delete_all"}}'
+    status, _, sign_calls, upstream_requests = _in_memory_mcp_request(body, None)
+    assert status == 200
+    assert len(sign_calls) == 1 and upstream_requests[0][2] == body
+
+
+def test_no_allowlist_keeps_resource_method_forwarding():
+    body = b'{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"private"}}'
+    status, _, sign_calls, upstream_requests = _in_memory_mcp_request(body, None)
+    assert status == 200
+    assert sign_calls == [("POST", UPSTREAM_BASE + "/mcp", body, "application/json")]
+    assert upstream_requests[0][2] == body
+
+
 def test_requires_a_peer_uid_unless_testing():
     with pytest.raises(ValueError):
         neotoma_proxy.NeotomaSigningProxy(UPSTREAM_BASE, lambda *a: {})
     with pytest.raises(ValueError):
-        neotoma_proxy.NeotomaSigningProxy(UPSTREAM_BASE + "/", lambda *a: {}, allowed_peer_uid=10001)
-    proxy = neotoma_proxy.NeotomaSigningProxy(UPSTREAM_BASE, lambda *a: {}, allowed_peer_uid=10001)
+        neotoma_proxy.NeotomaSigningProxy(UPSTREAM_BASE + "/", lambda *a: {}, allowed_peer_uid=10001,
+                                          allow_all_tools=True)
+    proxy = neotoma_proxy.NeotomaSigningProxy(UPSTREAM_BASE, lambda *a: {}, allowed_peer_uid=10001,
+                                              allow_all_tools=True)
     assert proxy.allowed_peer_uid == 10001
+
+
+def test_proxy_without_explicit_tool_mode_refuses():
+    with pytest.raises(ValueError, match="choose an allowed_tools list"):
+        neotoma_proxy.NeotomaSigningProxy(UPSTREAM_BASE, lambda *a: {}, allowed_peer_uid=10001)
+    with pytest.raises(ValueError, match="choose an allowed_tools list"):
+        neotoma_proxy.NeotomaSigningProxy(UPSTREAM_BASE, lambda *a: {}, allowed_peer_uid=10001,
+                                          allowed_tools=("store",), allow_all_tools=True)
 
 
 def test_post_forwards_exact_body_with_signature_and_strips_client_credentials(upstream, sign_calls, proxy_port):
@@ -465,7 +676,8 @@ def test_oversized_body_gets_413(upstream, sign_calls, proxy_port):
 
 def test_unreachable_upstream_gets_502():
     proxy = neotoma_proxy.NeotomaSigningProxy(
-        UPSTREAM_BASE, lambda *a: {}, connect=lambda: _Refusing(), allow_any_peer_for_tests=True
+        UPSTREAM_BASE, lambda *a: {}, connect=lambda: _Refusing(),
+        allow_any_peer_for_tests=True, allow_all_tools=True,
     )
     port = proxy.start()
     try:
@@ -598,6 +810,7 @@ def uid_checked_proxy_port(upstream, sign_calls):
         sign,
         connect=lambda: http.client.HTTPConnection("127.0.0.1", upstream.port, timeout=10),
         allowed_peer_uid=4242,
+        allow_all_tools=True,
     )
     port = proxy.start()
     yield port

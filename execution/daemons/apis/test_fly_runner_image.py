@@ -491,13 +491,16 @@ class _FakeProxyModule:
 
     def __init__(self, health=None, port=43210):
         self.health, self.port = health, port
-        self.constructed, self.stopped, self.signs = [], [], []
+        self.constructed, self.stopped, self.signs, self.allowed_tools = [], [], [], []
+        self.allow_all_tools = []
         module = self
 
         class Proxy:
             def __init__(self, upstream_base, sign, *, allowed_peer_uid=None, **kw):
                 module.constructed.append((upstream_base, allowed_peer_uid))
                 module.signs.append(sign)
+                module.allowed_tools.append(kw.get("allowed_tools"))
+                module.allow_all_tools.append(kw.get("allow_all_tools"))
 
             def start(self):
                 return module.port
@@ -666,6 +669,57 @@ def _assert_role_signed(request: dict, jwk: dict, authority: str) -> None:
 
 
 class TestNeotomaProxyJob:
+    @pytest.mark.parametrize("grant,expected", [
+        (["retrieve_entities", "store"], ("retrieve_entities", "store")),
+        ("all", None),
+    ])
+    def test_job_grant_is_carried_to_proxy_constructor(self, tmp_path, monkeypatch, grant, expected):
+        job_dir = tmp_path / "job"
+        spec = {"neotoma_mcp": "proxy", "provider": "codex"}
+        spec["neotoma_tool_allowlist"] = grant
+        _write_job(job_dir, secrets={"NEOTOMA_AAUTH_PRIVATE_JWK": "synthetic-key"}, spec=spec)
+        job = run_job.load_job(job_dir)
+        module = _FakeProxyModule()
+        _use_proxy(monkeypatch, module)
+        monkeypatch.setattr(run_job, "_role_signer", lambda job: type(
+            "Signer", (), {"sign_headers": lambda self, **kw: {}})())
+        proxy, port, problem = run_job.start_neotoma_proxy(job, _CHILD_IDENT)
+        assert problem == "" and port == module.port and proxy is not None
+        assert module.allowed_tools == [expected]
+        assert module.allow_all_tools == [grant == "all"]
+        proxy.stop()
+
+    def test_codex_proxy_job_without_grant_is_refused_before_proxy_start(self, tmp_path, monkeypatch):
+        job_dir = tmp_path / "job"
+        _write_job(job_dir, secrets={"NEOTOMA_AAUTH_PRIVATE_JWK": "synthetic-key"},
+                   spec={"neotoma_mcp": "proxy", "provider": "codex"})
+        starts = []
+        monkeypatch.setattr(run_job, "_neotoma_proxy", lambda: starts.append(True))
+        with pytest.raises(run_job.JobError, match="explicit tool grant"):
+            run_job.load_job(job_dir)
+        assert starts == []
+
+    def test_claude_proxy_job_without_grant_keeps_whole_server_access(self, proxy_job, monkeypatch):
+        job = run_job.load_job(proxy_job)
+        module = _FakeProxyModule()
+        _use_proxy(monkeypatch, module)
+        monkeypatch.setattr(run_job, "_role_signer", lambda job: type(
+            "Signer", (), {"sign_headers": lambda self, **kw: {}})())
+        proxy, port, problem = run_job.start_neotoma_proxy(job, _CHILD_IDENT)
+        assert problem == "" and port == module.port and proxy is not None
+        assert module.allowed_tools == [None]
+        assert module.allow_all_tools == [True]
+        proxy.stop()
+
+    @pytest.mark.parametrize("grant", [None, "ALL", {}, {"all": True}, 1])
+    def test_codex_proxy_job_rejects_malformed_whole_server_marker(self, tmp_path, grant):
+        job_dir = tmp_path / "job"
+        _write_job(job_dir, secrets={"NEOTOMA_AAUTH_PRIVATE_JWK": "synthetic-key"},
+                   spec={"neotoma_mcp": "proxy", "provider": "codex",
+                         "neotoma_tool_allowlist": grant})
+        with pytest.raises(run_job.JobError, match="neotoma_tool_allowlist"):
+            run_job.load_job(job_dir)
+
     def test_a_request_through_the_configured_url_reaches_neotoma_role_signed(
             self, tmp_path, monkeypatch):
         """The job's own proxy start and CLI config, end to end: a request sent
@@ -875,6 +929,39 @@ class TestNeotomaProxyJob:
             run_job._main(proxy_job, lambda *a: True, broken_runner, time.monotonic(),
                           time.time() + 600, "")  # fmt: skip
         assert module.stopped == [True]
+
+    _CODEX_ARGV = ["codex", "exec", "-c", run_job.MCP_CONFIG_PLACEHOLDER,
+                   "-c", "mcp_servers.mcpsrv_neotoma.required=true",
+                   "-c", 'mcp_servers.mcpsrv_neotoma.default_tools_approval_mode="prompt"',
+                   "--ephemeral", "-"]  # fmt: skip
+
+    def _codex_proxy_job(self, tmp_path):
+        job_dir = tmp_path / "job"
+        _write_job(job_dir, secrets={"NEOTOMA_AAUTH_PRIVATE_JWK": json.dumps(_test_jwk())},
+                   spec={"neotoma_mcp": "proxy", "provider": "codex",
+                         "neotoma_tool_allowlist": ["retrieve_entities"]},
+                   argv=list(self._CODEX_ARGV))  # fmt: skip
+        home = tmp_path / "home"
+        home.mkdir()
+        return run_job.load_job(job_dir), home
+
+    def test_a_codex_proxy_job_gets_the_loopback_proxy_as_a_config_override(self, tmp_path):
+        pytest.importorskip("cryptography")
+        job, home = self._codex_proxy_job(tmp_path)
+        argv, env = run_job.prepare_child(job, home, {"PATH": "/usr/bin"},
+                                          neotoma_proxy_port=48123)  # fmt: skip
+        assert argv == ["codex", "exec",
+                        "-c", 'mcp_servers.mcpsrv_neotoma.url="http://127.0.0.1:48123/mcp"',
+                        *self._CODEX_ARGV[4:]]  # fmt: skip
+        assert not any("Bearer" in a or "bearer" in a for a in argv)
+        assert not any("Bearer" in str(v) for v in env.values())
+
+    def test_a_codex_proxy_job_with_no_running_proxy_gets_no_neotoma_server(self, tmp_path):
+        pytest.importorskip("cryptography")
+        job, home = self._codex_proxy_job(tmp_path)
+        argv, _ = run_job.prepare_child(job, home, {"PATH": "/usr/bin"},
+                                        neotoma_proxy_port=None)  # fmt: skip
+        assert argv == ["codex", "exec", "--ephemeral", "-"]
 
     def test_the_legacy_token_job_still_gets_its_bearer_config(self, tmp_path):
         job_dir = tmp_path / "job"

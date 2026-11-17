@@ -557,10 +557,10 @@ class TestDispatcherSelectionReadsTheThread:
                     return _R({}, 404)
                 if "/compare/" in url:
                     sha = url.rsplit("...", 1)[1]
-                    files = [{"filename": "a.txt", "patch": "+x\n", "changes": 1}]
+                    files = [{"filename": "a.txt", "status": "modified", "patch": "+x\n", "changes": 1}]
                     if sha == NEW:
                         files.append(
-                            {"filename": TEST_FILE, "patch": "+y\n", "changes": 1}
+                            {"filename": TEST_FILE, "status": "modified", "patch": "+y\n", "changes": 1}
                         )
                     return _R({"files": files})
                 page = (params or {}).get("page", 1)
