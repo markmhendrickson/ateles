@@ -1032,8 +1032,8 @@ def test_approval_notices_use_real_notifier_and_retry_failed_delivery(
     approval = "approve v1.2.3" if kind == "release" else "approve"
     body = "Thank you for the update." if case == "ordinary" else approval
     reply = email_channel.ApprovalReply("synthetic-1", subject, body,
-                                        authenticated=case != "unauthenticated",
-                                        correlation_target=target)
+                                        authenticated=case != "unauthenticated")
+    object.__setattr__(reply, "correlation_target", target)
     if case == "unreadable":
         outcome = email_channel.ReadRepliesOutcome(
             kind="transport_error", texts=[], unreadable_replies=(reply,))
