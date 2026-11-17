@@ -215,6 +215,7 @@ class Word:
 class SimpleCommand:
     words: list[Word] = field(default_factory=list)
     stdin: list[str] = field(default_factory=list)  # heredoc bodies, here-strings
+    redirects: list[tuple[str, Word]] = field(default_factory=list)
     pipe_in: bool = False
 
 
@@ -470,7 +471,7 @@ class _Lexer:
 
         def finish(pipe: bool = False) -> None:
             nonlocal cur, pipe_next
-            if cur.words or cur.stdin:
+            if cur.words or cur.stdin or cur.redirects:
                 commands.append(cur)
             cur = SimpleCommand(pipe_in=pipe)
             pipe_next = pipe
@@ -521,6 +522,8 @@ class _Lexer:
                     pending.append((target.text, op == "<<-", cur))
                 elif op == "<<<":
                     cur.stdin.append(target.text)
+                else:
+                    cur.redirects.append((op, target))
                 continue
             if c in ";&|()":
                 j = i + 1
@@ -689,6 +692,8 @@ def git_violation(args: list[Word]) -> str | None:
             break
         if w.braced:
             return f"git {sub} with a brace expansion (write each argument literally)"
+        if sub in _HOOK_SUBCOMMANDS and w.globbed:
+            return f"git {sub} with a glob argument (write each argument literally)"
         option = _forbidden_long(w.text)
         if option:
             return f"git {sub} {option}"
@@ -800,6 +805,50 @@ _GIT_WORD_READERS = frozenset({"echo", "printf", "which", "type", "whereis", "gr
                                "[", "[[", "cat", "ls", "head", "tail", "wc", "sed"})
 
 
+def _protected_path(path: str) -> bool:
+    """Paths that can redirect or disable the prepare checkout's hooks."""
+    normalized = os.path.normpath(os.path.expanduser(path))
+    return bool(
+        re.search(r"(?:^|/)\.git/config$", normalized)
+        or re.search(r"(?:^|/)\.git/hooks(?:/|$)", normalized)
+        or re.search(r"(?:^|/)\.git/worktrees/[^/]+/config$", normalized)
+        or re.search(r"(?:^|/)\.gitconfig$", normalized)
+        or re.search(r"(?:^|/)\.config/(?:git|husky)(?:/|$)", normalized)
+        or re.search(r"(?:^|/)\.husky(?:/|$)", normalized)
+    )
+
+
+def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None:
+    for op, target in cmd.redirects:
+        if ">" in op and _protected_path(target.text):
+            return f"shell redirection writing protected hook or git config path {target.text}"
+    if not words:
+        return None
+    base = os.path.basename(words[0].text)
+    args = [w.text for w in words[1:]]
+    targets: list[str] = []
+    if base == "tee":
+        targets = [arg for arg in args if not arg.startswith("-")]
+    elif base == "sed" and any(
+        arg == "-i" or (arg.startswith("-i") and len(arg) > 2)
+        or arg.startswith("--in-place") for arg in args
+    ):
+        targets = args
+    elif base in {"cp", "mv", "ln", "install"}:
+        targets = args[-1:] + [args[i + 1] for i, arg in enumerate(args[:-1])
+                               if arg in ("-t", "--target-directory")]
+        if base == "mv":
+            targets += args  # moving a protected source also changes it
+    elif base in {"rm", "touch", "truncate", "chmod", "chown", "mkdir"}:
+        targets = args
+    elif base == "dd":
+        targets = [arg[3:] for arg in args if arg.startswith("of=")]
+    for target in targets:
+        if _protected_path(target):
+            return f"{base} writing protected hook or git config path {target}"
+    return None
+
+
 def _is_git_binary_word(text: str) -> bool:
     base = os.path.basename(text)
     return base == "git" or bool(re.fullmatch(rf"git-(?:{_GIT_DASHED})", base))
@@ -807,6 +856,9 @@ def _is_git_binary_word(text: str) -> bool:
 
 def command_violation(cmd: SimpleCommand, whole_mentions_git: bool) -> str | None:
     words = list(cmd.words)
+    hit = _direct_write_violation(cmd, words)
+    if hit:
+        return hit
     while words and not words[0].expanded and words[0].text in _RESERVED_START:
         words.pop(0)
     i = 0
@@ -978,7 +1030,13 @@ def main() -> int:
     if not payload:
         log("FAIL-OPEN: empty or malformed hook input; nothing was judged")
         return 0
-    if payload.get("tool_name") != "Bash":
+    tool = payload.get("tool_name")
+    if tool in {"Edit", "Write", "MultiEdit"}:
+        path = (payload.get("tool_input") or {}).get("file_path")
+        if isinstance(path, str) and _protected_path(path):
+            return deny(guidance(f"{tool} writing protected hook or git config path {path}"))
+        return 0
+    if tool != "Bash":
         return 0
     command = (payload.get("tool_input") or {}).get("command")
     if not isinstance(command, str):

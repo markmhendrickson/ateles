@@ -444,7 +444,7 @@ def test_agent_settings_loads_the_bypass_guard():
     import json as _json
     settings = _json.loads(prepare._agent_settings())
     (entry,) = settings["hooks"]["PreToolUse"]
-    assert entry["matcher"] == "Bash"
+    assert entry["matcher"] == "Bash|Edit|Write|MultiEdit"
     command = entry["hooks"][0]["command"]
     assert str(prepare.HOOK_BYPASS_GUARD) in command
     assert prepare.HOOK_BYPASS_GUARD.is_file()
@@ -462,6 +462,19 @@ def test_agent_settings_guard_refuses_no_verify():
                    capture_output=True, text=True, timeout=30)
     assert proc.returncode == 2
     assert _json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_agent_settings_guard_refuses_file_tool_config_write():
+    import json as _json
+    import shlex as _shlex
+    import subprocess as _sp
+    entry = _json.loads(prepare._agent_settings())["hooks"]["PreToolUse"][0]
+    assert set(entry["matcher"].split("|")) == {"Bash", "Edit", "Write", "MultiEdit"}
+    for tool in ("Edit", "Write", "MultiEdit"):
+        payload = _json.dumps({"tool_name": tool, "tool_input": {"file_path": ".git/config"}})
+        proc = _sp.run(_shlex.split(entry["hooks"][0]["command"]), input=payload,
+                       capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 2, (tool, proc.stdout, proc.stderr)
 
 
 def test_spawn_passes_settings_to_claude(monkeypatch, tmp_path):

@@ -1,4 +1,4 @@
-"""Tests for git_hook_bypass_guard.py (PreToolUse: Bash), the allowlist guard
+"""Tests for git_hook_bypass_guard.py (PreToolUse: Bash and file-write tools), the guard
 loaded into the Phoenicurus release prepare agent.
 
 Every refusal and allowance is driven through the hook entry point: the hook
@@ -407,6 +407,70 @@ def test_unlisted_subcommand_refusal_lists_the_allowlist():
 def test_assembled_argument_refusal_says_what_to_change():
     reason = assert_refused("git push origin \"$BRANCH\"")["permissionDecisionReason"]
     assert "$BRANCH" in reason and "literally" in reason
+
+
+@pytest.mark.parametrize("subcommand", ("commit", "push", "merge"))
+@pytest.mark.parametrize("pattern", (
+    "--no-ver*", "--no-v?rify", "--no-verif[y]",
+    "-*", "-?", "-[n]",
+))
+def test_globbed_hook_skip_argument_refused(subcommand, pattern):
+    assert_refused(f"git {subcommand} {pattern}")
+
+
+@pytest.mark.parametrize("subcommand", ("commit", "push", "merge"))
+def test_glob_after_double_dash_is_pathspec(subcommand):
+    assert_allowed(f"git {subcommand} -- --no-ver*")
+
+
+PROTECTED_PATHS = (
+    ".git/config",
+    ".git/hooks/pre-commit",
+    "repo/.git/worktrees/linked/config",
+    "~/.gitconfig",
+    "~/.config/git/config",
+    ".husky/pre-commit",
+    "~/.config/husky/init.sh",
+)
+
+
+@pytest.mark.parametrize("path", PROTECTED_PATHS)
+@pytest.mark.parametrize("writer", (
+    "printf x > {path}",
+    "printf x >> {path}",
+    "printf x | tee {path}",
+    "sed -i s/a/b/ {path}",
+    "cp source {path}",
+    "mv source {path}",
+    "ln -s source {path}",
+    "install source {path}",
+    "dd if=source of={path}",
+))
+def test_direct_write_to_hook_or_config_refused(path, writer):
+    assert_refused(writer.format(path=path))
+
+
+@pytest.mark.parametrize("path", PROTECTED_PATHS)
+def test_plain_read_of_hook_or_config_allowed(path):
+    assert_allowed(f"cat {path}")
+
+
+@pytest.mark.parametrize("tool", ("Edit", "Write", "MultiEdit"))
+@pytest.mark.parametrize("path", PROTECTED_PATHS)
+def test_file_tool_refuses_hook_or_config_path(tool, path):
+    payload = {"tool_name": tool, "tool_input": {"file_path": path},
+               "hook_event_name": "PreToolUse"}
+    proc = run_hook(payload)
+    assert proc.returncode == 2, (tool, path, proc.stdout, proc.stderr)
+    assert json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize("tool", ("Edit", "Write", "MultiEdit"))
+def test_file_tool_allows_ordinary_repository_file(tool):
+    payload = {"tool_name": tool, "tool_input": {"file_path": "src/release.py"},
+               "hook_event_name": "PreToolUse"}
+    proc = run_hook(payload)
+    assert proc.returncode == 0 and proc.stdout.strip() == ""
 
 
 def test_non_bash_tool_ignored():

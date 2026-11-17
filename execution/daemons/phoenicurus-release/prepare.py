@@ -1104,7 +1104,7 @@ HOOK_BYPASS_GUARD = PROJECT_ROOT / ".claude" / "hooks" / "git_hook_bypass_guard.
 
 
 def _agent_settings() -> str:
-    """--settings JSON for the prepare agent: the git-hook bypass guard on Bash."""
+    """--settings JSON for the prepare agent's Bash and file-write tools."""
     command = f"{shlex.quote(sys.executable)} {shlex.quote(str(HOOK_BYPASS_GUARD))}"
     # local_provider renders the repo's complete validated guard set; prepare
     # intentionally injects this one release-only guard, so sharing that
@@ -1112,7 +1112,8 @@ def _agent_settings() -> str:
     return json.dumps({
         "hooks": {
             "PreToolUse": [
-                {"matcher": "Bash", "hooks": [{"type": "command", "command": command}]}
+                {"matcher": "Bash|Edit|Write|MultiEdit",
+                 "hooks": [{"type": "command", "command": command}]}
             ]
         }
     })
