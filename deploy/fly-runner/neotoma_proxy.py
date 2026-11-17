@@ -279,16 +279,19 @@ class NeotomaSigningProxy:
         connect: Optional[Callable[[], http.client.HTTPConnection]] = None,
         allowed_peer_uid: Optional[int] = None,
         allowed_tools: Optional[Sequence[str]] = None,
+        allow_all_tools: bool = False,
         allow_any_peer_for_tests: bool = False,
     ) -> None:
         parts = _parse_upstream_base(upstream_base)
         if allowed_peer_uid is None and not allow_any_peer_for_tests:
             raise ValueError("allowed_peer_uid is required")
+        if not isinstance(allow_all_tools, bool) or (allowed_tools is None) == (not allow_all_tools):
+            raise ValueError("choose an allowed_tools list or allow_all_tools=True")
         self.upstream_base = upstream_base
         self.upstream_url = upstream_base + MCP_PATH
         self._sign = sign
         self.allowed_peer_uid = allowed_peer_uid
-        self.allowed_tools = frozenset(allowed_tools) if allowed_tools is not None else None
+        self.allowed_tools = None if allow_all_tools else frozenset(allowed_tools)
         if connect is None:
             host, port = parts.hostname, parts.port
 

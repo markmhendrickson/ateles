@@ -227,7 +227,7 @@ class Job:
     claude_token_file: str = ""
     delivery: "DeliverySpec | None" = None
     neotoma_mcp: str = ""
-    neotoma_tool_allowlist: tuple[str, ...] | None = None
+    neotoma_tool_allowlist: tuple[str, ...] | str | None = None
 
 
 @dataclass(frozen=True)
@@ -366,11 +366,15 @@ def load_job(job_dir: Path) -> Job:
     if neotoma_mcp == "proxy" and not jwk_name:
         raise JobError("the Neotoma proxy needs the role's AAuth key")
     tool_allowlist = spec.get("neotoma_tool_allowlist")
-    if tool_allowlist is not None and (
-        neotoma_mcp != "proxy" or not isinstance(tool_allowlist, list)
-        or not all(isinstance(name, str) for name in tool_allowlist)
+    if (neotoma_mcp == "proxy" and spec.get("provider") != "claude"
+            and "neotoma_tool_allowlist" not in spec):
+        raise JobError("a non-Claude Neotoma proxy job needs an explicit tool grant")
+    if "neotoma_tool_allowlist" in spec and (
+        neotoma_mcp != "proxy"
+        or not (tool_allowlist == "all" or isinstance(tool_allowlist, list)
+                and all(isinstance(name, str) for name in tool_allowlist))
     ):
-        raise JobError("neotoma_tool_allowlist must be a list of names for a proxy job")
+        raise JobError("neotoma_tool_allowlist must be a list of names or 'all' for a proxy job")
     if "timeout_seconds" not in spec:
         raise JobError("timeout_seconds is missing")
     timeout_seconds = spec["timeout_seconds"]
@@ -427,7 +431,8 @@ def load_job(job_dir: Path) -> Job:
         child_user=str(spec.get("child_user") or "agent"),
         delivery=delivery,
         neotoma_mcp=neotoma_mcp,
-        neotoma_tool_allowlist=tuple(tool_allowlist) if tool_allowlist is not None else None,
+        neotoma_tool_allowlist=(tuple(tool_allowlist) if isinstance(tool_allowlist, list)
+                                else tool_allowlist),
     )
 
 
@@ -1121,6 +1126,8 @@ def start_neotoma_proxy(job: Job, ident: tuple[int, int] | None):
     # role's key and talk to the proxy as if it were the runner.
     if ident is None or ident[0] == 0 or ident[0] == _parent_euid():
         return None, None, "the Neotoma proxy needs a separate child uid"
+    if job.provider != "claude" and job.neotoma_tool_allowlist is None:
+        return None, None, "a non-Claude Neotoma proxy job needs an explicit tool grant"
     try:
         module = _neotoma_proxy()
         signer = _role_signer(job)
@@ -1132,9 +1139,12 @@ def start_neotoma_proxy(job: Job, ident: tuple[int, int] | None):
 
     proxy = None
     try:
-        proxy = module.NeotomaSigningProxy(job.neotoma_base_url, sign,
-                                           allowed_peer_uid=ident[0],
-                                           allowed_tools=job.neotoma_tool_allowlist)  # fmt: skip
+        grant = job.neotoma_tool_allowlist
+        proxy = module.NeotomaSigningProxy(
+            job.neotoma_base_url, sign, allowed_peer_uid=ident[0],
+            allowed_tools=grant if isinstance(grant, tuple) else None,
+            allow_all_tools=grant is None or grant == "all",
+        )
         port = proxy.start()
         reason = module.health_check(job.neotoma_base_url, sign)
     except Exception as exc:  # noqa: BLE001 — never echo key material

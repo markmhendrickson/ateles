@@ -130,6 +130,7 @@ def proxy_port(upstream, sign_calls):
         sign,
         connect=lambda: http.client.HTTPConnection("127.0.0.1", upstream.port, timeout=10),
         allow_any_peer_for_tests=True,
+        allow_all_tools=True,
     )
     port = proxy.start()
     yield port
@@ -167,8 +168,8 @@ def _in_memory_mcp_request(body, allowed_tools):
 
     proxy = neotoma_proxy.NeotomaSigningProxy(
         UPSTREAM_BASE, sign, connect=Connection, allow_any_peer_for_tests=True,
+        allowed_tools=allowed_tools, allow_all_tools=allowed_tools is None,
     )
-    proxy.allowed_tools = frozenset(allowed_tools) if allowed_tools is not None else None
     handler = neotoma_proxy._ProxyHandler.__new__(neotoma_proxy._ProxyHandler)
     handler.proxy = proxy
     handler.command = "POST"
@@ -245,9 +246,19 @@ def test_requires_a_peer_uid_unless_testing():
     with pytest.raises(ValueError):
         neotoma_proxy.NeotomaSigningProxy(UPSTREAM_BASE, lambda *a: {})
     with pytest.raises(ValueError):
-        neotoma_proxy.NeotomaSigningProxy(UPSTREAM_BASE + "/", lambda *a: {}, allowed_peer_uid=10001)
-    proxy = neotoma_proxy.NeotomaSigningProxy(UPSTREAM_BASE, lambda *a: {}, allowed_peer_uid=10001)
+        neotoma_proxy.NeotomaSigningProxy(UPSTREAM_BASE + "/", lambda *a: {}, allowed_peer_uid=10001,
+                                          allow_all_tools=True)
+    proxy = neotoma_proxy.NeotomaSigningProxy(UPSTREAM_BASE, lambda *a: {}, allowed_peer_uid=10001,
+                                              allow_all_tools=True)
     assert proxy.allowed_peer_uid == 10001
+
+
+def test_proxy_without_explicit_tool_mode_refuses():
+    with pytest.raises(ValueError, match="choose an allowed_tools list"):
+        neotoma_proxy.NeotomaSigningProxy(UPSTREAM_BASE, lambda *a: {}, allowed_peer_uid=10001)
+    with pytest.raises(ValueError, match="choose an allowed_tools list"):
+        neotoma_proxy.NeotomaSigningProxy(UPSTREAM_BASE, lambda *a: {}, allowed_peer_uid=10001,
+                                          allowed_tools=("store",), allow_all_tools=True)
 
 
 def test_post_forwards_exact_body_with_signature_and_strips_client_credentials(upstream, sign_calls, proxy_port):
@@ -436,7 +447,8 @@ def test_oversized_body_gets_413(upstream, sign_calls, proxy_port):
 
 def test_unreachable_upstream_gets_502():
     proxy = neotoma_proxy.NeotomaSigningProxy(
-        UPSTREAM_BASE, lambda *a: {}, connect=lambda: _Refusing(), allow_any_peer_for_tests=True
+        UPSTREAM_BASE, lambda *a: {}, connect=lambda: _Refusing(),
+        allow_any_peer_for_tests=True, allow_all_tools=True,
     )
     port = proxy.start()
     try:
@@ -569,6 +581,7 @@ def uid_checked_proxy_port(upstream, sign_calls):
         sign,
         connect=lambda: http.client.HTTPConnection("127.0.0.1", upstream.port, timeout=10),
         allowed_peer_uid=4242,
+        allow_all_tools=True,
     )
     port = proxy.start()
     yield port

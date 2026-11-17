@@ -2102,7 +2102,7 @@ class FlyJob:
     # "proxy" when the CLI's Neotoma MCP server is the runner's loopback
     # signing proxy (run_job.py signs each request with the role's key).
     neotoma_mcp: str = ""
-    neotoma_tool_allowlist: tuple[str, ...] | None = None
+    neotoma_tool_allowlist: tuple[str, ...] | str | None = None
     probe_env_names: list[str] = field(default_factory=list)
     # Claude's system prompt, shipped as a job file instead of an argument.
     system_prompt: str = field(repr=False, default="")
@@ -2609,7 +2609,8 @@ def build_job(
         neotoma_tools_unavailable=bool(neotoma_tools_granted and not own_token
                                        and not neotoma_mcp),
         neotoma_mcp=neotoma_mcp,
-        neotoma_tool_allowlist=codex_tools if codex_proxy else None,
+        neotoma_tool_allowlist=(codex_tools if codex_tools is not None else "all"
+                               ) if codex_proxy else None,
         probe_env_names=probe,
         system_prompt=system_prompt,
         delivery=delivery,
