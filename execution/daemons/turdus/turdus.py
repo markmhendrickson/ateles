@@ -849,10 +849,23 @@ async def _maybe_handle_swarm_approval(msg: dict, notifier: Notifier) -> bool:
     subject = msg.get("subject", "") or ""
     if _MERGE_READY_SUBJECT_MARKER not in subject:
         return False
-    if not _approval_sender_authenticated(msg.get("id", "")):
-        return False
-
-    body = _read_message_body(msg.get("id", ""))
+    body = msg.get("body") if "body" in msg else _read_message_body(msg.get("id", ""))
+    authenticated = msg.get("authenticated")
+    if authenticated is None:
+        authenticated = _approval_sender_authenticated(msg.get("id", ""))
+    if not authenticated:
+        token = (_parse_approve_token(body) or _parse_approve_token(subject))
+        if not token:
+            match = re.search(r"\bPR\s+([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)#(\d+)", subject)
+            token = (match.group(1), int(match.group(2))) if match else None
+        target = f"{token[0]}#{token[1]}" if token else "this PR"
+        notifier.send(
+            f"{DAEMON_NAME}: email approval for {target} could not be accepted "
+            "because the reply's sender could not be verified. Approve through "
+            "the existing Telegram approval path.",
+            priority=Priority.BLOCKER, handler=DAEMON_NAME,
+        )
+        return True
     token = _parse_approve_token(body) or _parse_approve_token(subject)
     if not token:
         log.info(
@@ -870,7 +883,6 @@ async def _maybe_handle_swarm_approval(msg: dict, notifier: Notifier) -> bool:
     repository, pr_number = token
     ok = await _post_email_approval(repository, pr_number, sender_addr)
     if ok:
-        _label_gmail_message(msg.get("id", ""), "Turdus/processed")
         notifier.send(
             f"{DAEMON_NAME}: operator emailed APPROVE for {repository}#{pr_number} "
             "→ routed to Apis merge gate.",
@@ -977,10 +989,23 @@ async def _maybe_handle_release_approval(msg: dict, notifier: Notifier) -> bool:
     subject = msg.get("subject", "") or ""
     if _RELEASE_READY_SUBJECT_MARKER.lower() not in subject.lower():
         return False
-    if not _approval_sender_authenticated(msg.get("id", "")):
-        return False
-
-    body = _read_message_body(msg.get("id", ""))
+    body = msg.get("body") if "body" in msg else _read_message_body(msg.get("id", ""))
+    authenticated = msg.get("authenticated")
+    if authenticated is None:
+        authenticated = _approval_sender_authenticated(msg.get("id", ""))
+    if not authenticated:
+        version = (_parse_release_approve_token(body)
+                   or _parse_release_approve_token(subject))
+        if not version:
+            match = re.search(r"\bRelease\s+(v[0-9][\w.+-]*)", subject, re.IGNORECASE)
+            version = match.group(1) if match else "this release"
+        notifier.send(
+            f"{DAEMON_NAME}: email approval for {version} could not be accepted "
+            "because the reply's sender could not be verified. Approve through "
+            "the existing Telegram approval path.",
+            priority=Priority.BLOCKER, handler=DAEMON_NAME,
+        )
+        return True
     version = _parse_release_approve_token(body) or _parse_release_approve_token(
         subject
     )
@@ -1000,7 +1025,6 @@ async def _maybe_handle_release_approval(msg: dict, notifier: Notifier) -> bool:
 
     ok = await _post_release_approval(version, sender_addr)
     if ok:
-        _label_gmail_message(msg.get("id", ""), "Turdus/processed")
         notifier.send(
             f"{DAEMON_NAME}: operator emailed `approve {version}` → routed to the "
             "Apis release-publish gate.",

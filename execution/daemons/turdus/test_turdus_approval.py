@@ -157,8 +157,11 @@ def test_approval_authentication_failure_never_posts(monkeypatch, kind, evidence
     ))
     handler = (turdus._maybe_handle_swarm_approval if kind == "swarm"
                else turdus._maybe_handle_release_approval)
-    assert _run(handler(msg, _StubNotifier())) is False
+    notifier = _StubNotifier()
+    assert _run(handler(msg, notifier)) is True
     assert posted == []
+    assert len(notifier.sent) == 1
+    assert "Telegram" in notifier.sent[0]
     assert "sender authentication missing, failed, or unreadable" in caplog.text
 
 
