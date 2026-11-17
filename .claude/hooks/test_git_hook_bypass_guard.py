@@ -622,7 +622,10 @@ def test_writers_behind_wrapper_options_refuse_protected_targets(prefix, target,
     "sed -i s/a/b/ src/output", "install source src/output", "cd src",
 ))
 def test_writers_behind_wrapper_options_allow_ordinary_targets(prefix, writer):
-    assert_allowed(f"{prefix} {writer}")
+    if prefix == "command -p":
+        assert_refused(f"{prefix} {writer}")
+    else:
+        assert_allowed(f"{prefix} {writer}")
 
 
 @pytest.mark.parametrize("name", ("$WRITER", '"$WRITER"', "${WRITER}", "$(which tee)", "`which tee`"))

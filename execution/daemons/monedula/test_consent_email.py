@@ -972,7 +972,8 @@ def test_consent_normal_styled_html_approves(monkeypatch, tmp_path):
 ))
 def test_ambiguous_html_holds_calendar_and_oneoff_payment(
         monkeypatch, tmp_path, calendar, wrapper):
-    h = _Handler("therapy" if calendar else "oneoff", label="Example", amount=60)
+    h = _Handler("therapy" if calendar else "oneoff", label="Example", amount=60,
+                 calendar=calendar)
     item = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0]
     _arm_email(monkeypatch)
     html = (f"<body>{wrapper.format(verb='ATTENDED' if calendar else 'APPROVE')}"
@@ -993,7 +994,8 @@ def test_ambiguous_html_holds_calendar_and_oneoff_payment(
     "From: old request\n> quoted\nI changed my mind",
 ))
 def test_ambiguous_plain_tail_holds_payment(monkeypatch, tmp_path, calendar, tail):
-    h = _Handler("therapy" if calendar else "oneoff", label="Example", amount=60)
+    h = _Handler("therapy" if calendar else "oneoff", label="Example", amount=60,
+                 calendar=calendar)
     item = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0]
     _arm_email(monkeypatch)
     separator = "\n" if tail.startswith("From:") else "\n-- \n"
@@ -1009,7 +1011,8 @@ def test_ambiguous_plain_tail_holds_payment(monkeypatch, tmp_path, calendar, tai
 
 @pytest.mark.parametrize("calendar", (True, False))
 def test_benign_signature_still_approves_payment(monkeypatch, tmp_path, calendar):
-    h = _Handler("therapy" if calendar else "oneoff", label="Example", amount=60)
+    h = _Handler("therapy" if calendar else "oneoff", label="Example", amount=60,
+                 calendar=calendar)
     item = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0]
     _arm_email(monkeypatch)
     body = ("ATTENDED" if calendar else "APPROVE") + "\n-- \nExample Name\nEngineer"

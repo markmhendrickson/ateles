@@ -224,7 +224,8 @@ def _authored_plain_checked(text: str) -> tuple[str, bool]:
     for index, line in enumerate(source):
         stripped = line.strip()
         if line in ("--", "-- "):
-            tail = [part.strip() for part in source[index + 1:] if part.strip()]
+            tail = [part.strip() for part in source[index + 1:]
+                    if part.strip() and not part.lstrip().startswith(">")]
             safe_tail = (len(tail) <= 4 and all(
                 len(part) <= 80 and not _SIGNATURE_WORD.search(part) and
                 not _SIGNATURE_TARGET.search(part) for part in tail))

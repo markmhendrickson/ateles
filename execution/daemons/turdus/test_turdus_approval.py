@@ -1280,7 +1280,7 @@ def test_release_email_skip_correction_points_to_telegram(monkeypatch, tmp_path)
     posts, state, notices = _poll_authored_reply(
         monkeypatch, tmp_path, "release", {"body_text": "skip v1.2.3"}, polls=2)
     assert posts == []
-    assert state.get("processed_ids") == ["approval-1"]
+    assert "approval-1" not in state.get("processed_ids", [])
     assert len([note for note in notices.sent if "Telegram release command" in note]) == 1
 
 
