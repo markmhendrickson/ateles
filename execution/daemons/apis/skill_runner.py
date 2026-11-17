@@ -5908,7 +5908,7 @@ async def _run_provider_attempts(
 
 
 async def run_review_prompt(
-    *, role: str, prompt: str, timeout: int = 180
+    *, role: str, prompt: str, timeout: int = 180, pr: str | None = None
 ) -> SkillResult:
     """Route an inference-only review without granting any publisher authority.
 
@@ -6094,10 +6094,14 @@ async def run_review_prompt(
                 log.debug("[apis] review attempt attribution unavailable: %s", exc)
             return result
 
-    return await _run_provider_attempts(
-        role,
-        attempt,
-        binaries=binaries,
-        role=role,
-        retry_safe=True,
-    )
+    token = model_tiering.bind_attribution(model_tiering.resolve_attribution(pr=pr))
+    try:
+        return await _run_provider_attempts(
+            role,
+            attempt,
+            binaries=binaries,
+            role=role,
+            retry_safe=True,
+        )
+    finally:
+        model_tiering.reset_attribution(token)

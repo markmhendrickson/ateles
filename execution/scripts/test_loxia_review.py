@@ -156,7 +156,7 @@ def test_call_review_preserves_requested_role(monkeypatch):
         return types.SimpleNamespace(ok=True, stdout="Verdict: APPROVE", provider="codex", attempted_providers=("claude", "codex"))
     monkeypatch.setitem(sys.modules, "skill_runner", types.SimpleNamespace(run_review_prompt=run))
     assert lx.call_review("role-specific input", role="monedula") == "Verdict: APPROVE"
-    assert calls == [{"role":"monedula", "prompt":"role-specific input"}]
+    assert calls == [{"role":"monedula", "prompt":"role-specific input", "pr": f"{lx.REPO}#{lx.PR_NUMBER}"}]
 
 
 def test_main_sets_process_caller_before_review(monkeypatch, capsys):
@@ -164,9 +164,11 @@ def test_main_sets_process_caller_before_review(monkeypatch, capsys):
     monkeypatch.syspath_prepend(str(daemon_dir))
     import model_tiering
 
-    monkeypatch.setenv(model_tiering.SESSION_ID_ENV, "review-session")
+    monkeypatch.setenv("GITHUB_RUN_ID", "321")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
     monkeypatch.setattr(model_tiering, "_PROCESS_CALLER", (None, None))
     monkeypatch.setattr(lx, "PR_NUMBER", "87")
+    monkeypatch.setattr(lx, "REPO", "owner/repo")
     monkeypatch.setattr(lx, "get_pr_diff", lambda: "diff")
     monkeypatch.setattr(lx, "get_changed_files", lambda: ["f.py"])
     monkeypatch.setattr(lx, "select_reviewers", lambda files: [lx.LOXIA])
@@ -183,8 +185,68 @@ def test_main_sets_process_caller_before_review(monkeypatch, capsys):
     monkeypatch.setattr(lx, "call_review", call_review)
     monkeypatch.setattr(lx, "run_reviewer", reviewer)
     lx.main()
-    assert seen[0]["caller_kind"] == "interactive"
-    assert seen[0]["caller"] == "review-session"
+    assert seen[0]["caller_kind"] == "daemon"
+    assert seen[0]["caller"] == "loxia owner/repo#87 run 321/2"
+
+
+def test_workflow_shaped_loxia_main_attributes_both_rows_and_alert(monkeypatch, tmp_path):
+    """The workflow's run and PR environment reaches real ledger writes."""
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    daemon_dir = Path(__file__).resolve().parents[1] / "daemons" / "apis"
+    monkeypatch.syspath_prepend(str(daemon_dir))
+    import model_tiering
+    import skill_runner
+    import usage_alerts
+
+    ledger = tmp_path / "ledger.jsonl"
+    monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(ledger))
+    monkeypatch.setenv("GITHUB_RUN_ID", "321")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    monkeypatch.setenv("APIS_REVIEW_MODELS", '{"codex":"qualified-model"}')
+    monkeypatch.setattr(model_tiering, "_PROCESS_CALLER", (None, None))
+    monkeypatch.setattr(lx, "REPO", "owner/repo")
+    monkeypatch.setattr(lx, "PR_NUMBER", "87")
+    monkeypatch.setattr(lx, "DRY_RUN", True)
+    monkeypatch.setattr(lx, "get_pr_diff", lambda: "diff")
+    monkeypatch.setattr(lx, "get_changed_files", lambda: ["f.py"])
+    monkeypatch.setattr(lx, "select_reviewers", lambda _: [lx.LOXIA])
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"codex": "fake-codex"})
+    monkeypatch.setattr(usage_alerts, "schedule_dispatch_check", lambda *a, **k: None)
+
+    async def one_attempt(skill, attempt, **kwargs):
+        return await attempt("codex")
+
+    async def no_event(**kwargs):
+        return None
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self, input=None):
+            return b"Verdict: APPROVE", b"tokens used: 12"
+
+    async def spawn(*cmd, **kwargs):
+        return Process()
+
+    monkeypatch.setattr(skill_runner, "_run_provider_attempts", one_attempt)
+    monkeypatch.setattr(skill_runner, "_emit_harness_event", no_event)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    lx.main()
+    rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+    assert [row["event"] for row in rows] == ["dispatch", "usage"]
+    assert all(row["caller_kind"] == "daemon" for row in rows)
+    assert all(row["caller"] == "loxia owner/repo#87 run 321/2" for row in rows)
+    assert all(row["pr"] == "owner/repo#87" for row in rows)
+    callers = model_tiering.top_callers(
+        since=datetime.now(timezone.utc) - timedelta(hours=1), provider="codex", limit=3,
+    )
+    message = usage_alerts.build_message(
+        provider="codex", window="weekly", used_percent=75,
+        thresholds=[50, 75], resets_at=None, callers=callers, span_known=True,
+    )
+    assert "loxia owner/repo#87 run 321/2" in message
 
 
 def test_capacity_failure_does_not_publish_review(monkeypatch):

@@ -178,7 +178,9 @@ def call_review(prompt: str, *, role: str) -> str:
         sys.path.insert(0, str(daemon_dir))
     from skill_runner import run_review_prompt
 
-    result = asyncio.run(run_review_prompt(role=role, prompt=prompt))
+    result = asyncio.run(run_review_prompt(
+        role=role, prompt=prompt, pr=f"{REPO}#{PR_NUMBER}",
+    ))
     print(f"[{role}] provider={result.provider or 'none'}; attempts={','.join(result.attempted_providers) or 'none'}")
     if not result.ok or not result.stdout.strip():
         retry_at = getattr(result, "cooled_until", "")
@@ -579,8 +581,10 @@ def main() -> None:
         sys.path.insert(0, str(daemon_dir))
     import model_tiering
 
+    run_id = os.environ.get("GITHUB_RUN_ID", "unknown-run")
+    attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "1")
     model_tiering.set_process_caller(
-        "interactive", os.environ.get(model_tiering.SESSION_ID_ENV)
+        "daemon", f"loxia {REPO}#{PR_NUMBER} run {run_id}/{attempt}"
     )
     if not PR_NUMBER:
         print("[loxia] LOXIA_PR_NUMBER not set — nothing to review", file=sys.stderr)
