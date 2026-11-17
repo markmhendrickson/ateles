@@ -78,6 +78,7 @@ from foundation import (  # noqa: E402
 )
 import local_provider  # noqa: E402
 import model_tiering  # noqa: E402
+import usage_alerts  # noqa: E402
 import fly_runner  # noqa: E402
 from harness_router import (  # noqa: E402
     FRONTIER_PROVIDERS,
@@ -3969,6 +3970,13 @@ async def _run_skill_once(
             model=resolved_model, dispatch_id=_ledger_dispatch_id,
         )
     )
+    # Alert reads, notifier configuration and transport I/O run independently
+    # of the provider launch. The worker retains the notifier's journal lock
+    # and dedupe handling across concurrent processes.
+    try:
+        usage_alerts.schedule_dispatch_check(provider, notifier=notifier)
+    except Exception as exc:  # noqa: BLE001
+        log.debug(f"[apis] usage threshold check raised (ignored): {exc}")
 
     # ── Stage 2: harness_event at dispatch start ───────────────────────────────
     try:
@@ -4901,6 +4909,46 @@ def _local_fallback_refusal(provider: str, *, pinned: bool) -> str | None:
     return provider_exclusion_reason(provider, _provider_binaries())
 
 
+def _with_dispatch_attribution(func):
+    """Bind who launched a dispatch (and for which task/PR) around ``run_skill``.
+
+    Adds three optional keyword arguments to ``run_skill`` without touching its
+    body: ``caller`` (a daemon name or interactive session id), ``caller_kind``
+    (``daemon`` / ``interactive``) and ``pr``. With ``task_entity_id`` they are
+    resolved by ``model_tiering.resolve_attribution`` (explicit value, then the
+    process's declared caller, then ``ATELES_DISPATCH_SESSION_ID``) and bound
+    in a context variable for the whole dispatch, so every ledger row the
+    dispatch writes (``record_dispatch`` / ``record_dispatch_usage``, including
+    the one appended from a worker thread) carries them. Unknown fields are
+    written as ``null``. Resolution can never fail a dispatch.
+    """
+    import functools
+
+    @functools.wraps(func)
+    async def wrapper(*args, caller: str | None = None, caller_kind: str | None = None,
+                      pr: object = None, **kwargs):
+        token = None
+        try:
+            token = model_tiering.bind_attribution(
+                model_tiering.resolve_attribution(
+                    caller=caller,
+                    caller_kind=caller_kind,
+                    task_entity_id=kwargs.get("task_entity_id") or "",
+                    pr=pr,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — attribution is reporting only
+            log.warning(f"[apis] dispatch attribution unavailable (non-fatal): {exc}")
+        try:
+            return await func(*args, **kwargs)
+        finally:
+            if token is not None:
+                model_tiering.reset_attribution(token)
+
+    return wrapper
+
+
+@_with_dispatch_attribution
 async def run_skill(
     skill: str,
     prompt: str,
@@ -4936,6 +4984,10 @@ async def run_skill(
     exclude_providers: tuple[str, ...] = (),
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
+
+    Also accepts ``caller``, ``caller_kind`` and ``pr`` (keyword-only), added by
+    ``_with_dispatch_attribution``: who launched this dispatch and for which
+    pull request, recorded with ``task_entity_id`` on every tier-ledger row.
 
     ``agent_git_identity``: True for a fix round (a run that commits and
     pushes to an existing pull request). The child commits as the configured
@@ -5879,7 +5931,7 @@ async def _run_provider_attempts(
 
 
 async def run_review_prompt(
-    *, role: str, prompt: str, timeout: int = 180
+    *, role: str, prompt: str, timeout: int = 180, pr: str | None = None
 ) -> SkillResult:
     """Route an inference-only review without granting any publisher authority.
 
@@ -5927,6 +5979,19 @@ async def run_review_prompt(
     async def attempt(provider: str) -> SkillResult:
         binary = binaries[provider]
         model = model_tiering.validate_model_selector(models[provider].strip())
+        dispatch_id = model_tiering.new_dispatch_id()
+        log.info(
+            "[apis] %s via %s: %s",
+            role, provider,
+            model_tiering.record_dispatch(
+                skill=role, provider=provider, resolved=None, model=model,
+                dispatch_id=dispatch_id,
+            ),
+        )
+        try:
+            usage_alerts.schedule_dispatch_check(provider)
+        except Exception as exc:  # noqa: BLE001 — alerting cannot stop a review
+            log.debug("[apis] review usage alert check failed: %s", exc)
         with tempfile.TemporaryDirectory(prefix="ateles-review-") as workdir:
             if provider == "claude":
                 cmd = [
@@ -6027,6 +6092,15 @@ async def run_review_prompt(
                     error=f"{provider} launch failed: {exc}",
                     provider=provider,
                 )
+            model_tiering.record_dispatch_usage(
+                dispatch_id=dispatch_id, skill=role, provider=provider,
+                resolved=None, requested_model=model,
+                usage=parse_dispatch_usage(
+                    provider, result.stdout, requested_model=model,
+                    stderr=result.stderr,
+                ),
+                ok=result.ok,
+            )
             try:
                 await _emit_harness_event(
                     task_entity_id="",
@@ -6043,10 +6117,19 @@ async def run_review_prompt(
                 log.debug("[apis] review attempt attribution unavailable: %s", exc)
             return result
 
-    return await _run_provider_attempts(
-        role,
-        attempt,
-        binaries=binaries,
-        role=role,
-        retry_safe=True,
-    )
+    process_kind, process_name = model_tiering.process_caller()
+    token = model_tiering.bind_attribution(model_tiering.resolve_attribution(
+        caller=process_name or role,
+        caller_kind=process_kind or model_tiering.CALLER_KIND_DAEMON,
+        pr=pr,
+    ))
+    try:
+        return await _run_provider_attempts(
+            role,
+            attempt,
+            binaries=binaries,
+            role=role,
+            retry_safe=True,
+        )
+    finally:
+        model_tiering.reset_attribution(token)

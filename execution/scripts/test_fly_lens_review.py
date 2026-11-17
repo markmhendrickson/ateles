@@ -162,8 +162,29 @@ def test_dispatch_command_line(monkeypatch, tmp_path):
     f.dispatch_once(python="py", dispatch_script=Path("d.py"), role="pavo", lens="pm",
                     repo="o/r", task_entity_id="ent_x", task_file=tmp_path / "b.md")
     c = seen["cmd"]
-    for a in ("--runner", "fly", "--github-read", "lens_review:pm", "ent_x", "2700"):
+    for a in ("--runner", "fly", "--github-read", "lens_review:pm", "ent_x", "2700",
+              "--caller", "fly_lens_review", "--caller-kind", "daemon"):
         assert a in c
+
+
+def test_local_eval_dispatch_names_its_launcher(monkeypatch, tmp_path):
+    import importlib.util
+
+    path = Path(__file__).resolve().parent.parent / "local_llm" / "eval_lean_prompt.py"
+    spec = importlib.util.spec_from_file_location("eval_lean_prompt", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    seen = {}
+
+    class P:
+        stdout, stderr = '{"ok": true}', ""
+
+    monkeypatch.setattr(module.subprocess, "run", lambda cmd, **kw: seen.update(cmd=cmd) or P())
+    assert module._dispatch("cicada", "test", cwd=tmp_path,
+                            work_class="worktree_hygiene", timeout=1)["ok"]
+    assert seen["cmd"][seen["cmd"].index("--caller") + 1] == "eval_lean_prompt"
+    assert seen["cmd"][seen["cmd"].index("--caller-kind") + 1] == "daemon"
 
 
 def test_bad_task_id_is_usage_error(tmp_path):
@@ -548,6 +569,22 @@ def test_unreadable_list_runs_every_requirable_lens_the_runner_has():
     assert "legal" in got
 
 
+def test_main_passes_the_repo_qualified_pr_to_dispatch_role(monkeypatch, tmp_path):
+    """Spend attribution (ent_e5259618cae6cafd4be120e0): the natural call path
+    (main -> run_lens -> dispatch_once -> dispatch_role.py) carries
+    ``--pr owner/repo#N``, so the tier-ledger rows name the reviewed PR."""
+    seen = []
+
+    class P:
+        returncode, stdout, stderr = 0, json.dumps(ok_env()), ""
+
+    monkeypatch.setattr(f.subprocess, "run", lambda cmd, **kw: seen.append(cmd) or P())
+    rc = f.main(["--repo", "o/r", "--pr", "7", "--lens", "pm", "--task-entity-id",
+                 "ent_x", "--out-dir", str(tmp_path)],
+                head_resolver=lambda r, p: HEAD, poster=lambda **kw: (True, "posted"))
+    assert rc == 0 and len(seen) == 1
+    cmd = seen[0]
+    assert cmd[cmd.index("--pr") + 1] == "o/r#7"
 # --------------------------------------------------------------------------
 # Colon-separated header from a Fly lens run (2026-11-16)
 # --------------------------------------------------------------------------

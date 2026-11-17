@@ -413,6 +413,26 @@ def test_refresh_is_skipped_while_reading_is_fresh() -> None:
     assert outcome == {"claude": "fresh"} and calls == []
 
 
+@pytest.mark.parametrize("gated", [False, True])
+def test_fresh_provider_is_probed_once_regardless_of_gate(monkeypatch, gated) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "cursor" if gated else "claude")
+    calls: list = []
+    run = _fake_run('{"type":"result","result":"ok"}', calls)
+    available = {"cursor": "/bin/cursor"}
+    assert usage_probe.refresh_usage_if_stale(available, env={}, now_wall=NOW, run=run) == {
+        "cursor": "refreshed"
+    }
+    assert usage_probe.refresh_usage_if_stale(available, env={}, now_wall=NOW + 1, run=run) == {
+        "cursor": "fresh"
+    }
+    assert len(calls) == 1
+    assert usage_probe.refresh_usage_if_stale(available, env={}, now_wall=NOW + 3600, run=run) == {
+        "cursor": "refreshed"
+    }
+    assert len(calls) == 2
+
+
 def test_refresh_replaces_an_aged_reading() -> None:
     _record(5.0, observed=time.time() - 3600, resets=time.time() + 3 * 86400)
     calls: list = []

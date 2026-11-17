@@ -607,9 +607,10 @@ def refresh_usage_if_stale(
     env: Mapping[str, str],
     now_wall: float | None = None,
     force: bool = False,
+    alert_in_background: bool = True,
     run=subprocess.run,
 ) -> dict[str, str]:
-    """Refresh each gated provider's reading when it is older than the refresh age.
+    """Refresh each active provider's reading when it is older than the refresh age.
 
     Returns ``{provider: outcome}`` for the providers it looked at (``fresh``,
     ``refreshed``, or a failure detail).  Never raises: a failed refresh is
@@ -618,10 +619,10 @@ def refresh_usage_if_stale(
     """
     if os.environ.get("APIS_USAGE_PROBE", "on").strip().lower() in ("off", "0", "false", "no"):
         return {}
-    if not harness_router.usage_gate_enabled():
-        return {}
     outcomes: dict[str, str] = {}
-    for provider in harness_router.usage_gated_providers():
+    for provider in harness_router.configured_providers():
+        if provider not in PROBE_ADAPTERS:
+            continue
         if provider not in available:
             continue
         binary = available.get(provider)
@@ -647,7 +648,32 @@ def refresh_usage_if_stale(
         except Exception as exc:  # noqa: BLE001 - feeding must never break dispatch
             log.error(f"[apis] usage refresh for {provider} failed: {exc}")
             outcomes[provider] = f"error: {type(exc).__name__}"
+            continue
+        if outcomes[provider] == "refreshed":
+            _alert_on_new_reading(provider, background=alert_in_background)
     return outcomes
+
+
+def _alert_on_new_reading(provider: str, *, background: bool = True) -> None:
+    """Alert a 50%/75% crossing as soon as the reading that shows it is written.
+
+    Provider spend governance (ent_e5259618cae6cafd4be120e0): the dispatch path
+    also checks, but a crossing seen by a refresh no dispatch follows would
+    otherwise never be alerted. ``usage_alerts`` is imported here, not at
+    module top, so the probe keeps no import-time dependency on the notifier.
+    Never raises.
+    """
+    try:
+        import usage_alerts
+
+        if background:
+            usage_alerts.schedule_dispatch_check(provider)
+        else:
+            usage_alerts.check_after_usage_write(provider)
+    except Exception as exc:  # noqa: BLE001 - an alert never breaks a refresh
+        import sys
+        print(f"[apis] ERROR: usage threshold check after refresh failed: {exc}", file=sys.stderr)
+        log.error("[apis] usage threshold check after refresh failed: %s", exc)
 
 
 def _observed_age(provider: str, moment: float) -> float | None:
@@ -655,8 +681,13 @@ def _observed_age(provider: str, moment: float) -> float | None:
     if not isinstance(entry, dict):
         return None
     probe = entry.get("probe")
+    probe_observed = (
+        probe.get("observed_at")
+        if isinstance(probe, dict) and probe.get("status") in ("available", "exhausted")
+        else None
+    )
     observed = harness_router._wall_from_iso(
-        probe.get("observed_at") if isinstance(probe, dict) else entry.get("observed_at")
+        probe_observed or entry.get("observed_at")
     )
     return None if observed is None else moment - observed
 
@@ -685,15 +716,7 @@ def _refresh_provider(
 
     def is_fresh() -> bool:
         age = _observed_age(provider, moment)
-        gate = harness_router.usage_gate(provider, now_wall=moment)
-        # A reading that is young but malformed still needs replacing.
-        return (
-            not force
-            and age is not None
-            and 0 <= age <= threshold
-            and gate is not None
-            and gate.code in (harness_router.GATE_OK, harness_router.GATE_PACED)
-        )
+        return not force and age is not None and 0 <= age <= threshold
 
     def in_backoff() -> str | None:
         until = _backoff_until(provider)

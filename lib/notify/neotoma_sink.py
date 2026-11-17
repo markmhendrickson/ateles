@@ -327,12 +327,13 @@ def _warn_once(condition: str, detail: str) -> None:
     log.warning("[notify-sink] %s: %s (further occurrences handled silently)", condition, detail)
 
 
-def _spool(record: dict[str, Any], condition: str, detail: str) -> None:
+def _spool(record: dict[str, Any], condition: str, detail: str) -> bool:
     _warn_once(condition, detail)
     try:
-        _append("spool", {**record, "spool_reason": condition})
+        return _append("spool", {**record, "spool_reason": condition})
     except Exception as exc:  # noqa: BLE001 — never raise into the caller
         _warn_once("spool-unwritable", str(exc))
+        return False
 
 
 # ── persisted per-daemon state ───────────────────────────────────────────────
@@ -367,10 +368,12 @@ def _state(m: str, daemon: str, path: Path | None = None) -> Iterator[dict[str, 
                 time.sleep(0.01)
         try:
             st = json.loads(path.read_text())
-            if not isinstance(st, dict) or not isinstance(st.get("entries"), dict):
-                raise ValueError
-        except (OSError, ValueError):
+        except FileNotFoundError:
             st = {"entries": {}, "hour": 0, "hour_count": 0}
+        from .held_view import sink_state_problem
+
+        if sink_state_problem(st):
+            raise ValueError("sink state unreadable")
         yield st
         skip = st.pop("_skip_save", False)
         jobs = st.pop("_jobs", [])
@@ -511,26 +514,67 @@ def record(*, message: str, level: str, handler: str = "", dedupe_key: str | Non
         _warn_once("record-failed", f"{type(exc).__name__}: {exc}")
 
 
-def resolve(key: str) -> None:
+def resolve(key: str) -> bool:
     """Resolve every open entity this host stored for ``key`` (any process, any
-    daemon, survives restarts through the state files). Never raises."""
+    daemon, survives restarts through the state files). Return False on an
+    unreadable projection or write failure; never raise into the caller."""
     try:
         m = mode()
         if m == "off" or not key:
-            return
+            return True
         k = _one_line(scrub(key), KEY_MAX)
         for path in list(sink_dir().glob(f"state-{m}-*.json")):
             daemon = path.stem[len(f"state-{m}-"):]
             jobs = []
             with _state(m, daemon, path) as st:
                 for skey, e in st["entries"].items():
-                    if e.get("key") == k and e.get("status") == "open":
+                    if e.get("key") == k and (
+                        e.get("status") == "open" or e.get("resolve_pending")
+                    ):
                         e["status"] = "resolved"
+                        e["resolve_pending"] = True
                         jobs.append(_resolve_job(daemon, e, "resolved"))
             for job in jobs:
-                _emit_resolve(m, job)
+                if not _emit_resolve(m, job):
+                    return False
+            if jobs:
+                with _state(m, daemon, path) as st:
+                    for e in st["entries"].values():
+                        if e.get("key") == k and e.get("resolve_pending"):
+                            e.pop("resolve_pending", None)
+        return True
     except Exception as exc:  # noqa: BLE001
         _warn_once("resolve-failed", f"{type(exc).__name__}: {exc}")
+        return False
+
+
+def migrate_key(old_key: str, new_key: str) -> bool:
+    """Retain an open alert while its caller normalizes a dedupe key.
+
+    The existing entity and its generation stay open. A later resolve of the
+    canonical key then closes that same entity.
+    """
+    try:
+        m = mode()
+        if m == "off" or old_key == new_key:
+            return True
+        old = _one_line(scrub(old_key), KEY_MAX)
+        new = _one_line(scrub(new_key), KEY_MAX)
+        for path in list(sink_dir().glob(f"state-{m}-*.json")):
+            daemon = path.stem[len(f"state-{m}-"):]
+            with _state(m, daemon, path) as st:
+                for skey, entry in list(st["entries"].items()):
+                    if entry.get("key") != old or entry.get("status") != "open":
+                        continue
+                    canonical_skey = f"{entry['level']}\0{new}"
+                    if canonical_skey in st["entries"] and canonical_skey != skey:
+                        return False
+                    entry["key"] = new
+                    st["entries"][canonical_skey] = st["entries"].pop(skey)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _warn_once("migrate-failed", f"{type(exc).__name__}: {exc}")
+        return False
 
 
 def _resolve_job(daemon: str, e: dict[str, Any], why: str) -> dict[str, Any]:
@@ -555,11 +599,10 @@ def _resolve_job(daemon: str, e: dict[str, Any], why: str) -> dict[str, Any]:
     }
 
 
-def _emit_resolve(m: str, job: dict[str, Any]) -> None:
+def _emit_resolve(m: str, job: dict[str, Any]) -> bool:
     if m == "shadow":
-        _append("shadow", job)
-    else:
-        _enqueue(job)
+        return _append("shadow", job)
+    return _enqueue(job)
 
 
 def _expire_stale(daemon: str, now: float) -> None:
@@ -595,7 +638,7 @@ def flush(timeout: float = EXIT_FLUSH_SECONDS) -> bool:
 # ── worker ───────────────────────────────────────────────────────────────────
 
 
-def _enqueue(rec: dict[str, Any]) -> None:
+def _enqueue(rec: dict[str, Any]) -> bool:
     global _worker, _atexit_registered
     with _lock:
         if _worker is None or not _worker.is_alive():
@@ -606,8 +649,9 @@ def _enqueue(rec: dict[str, Any]) -> None:
             _atexit_registered = True
     try:
         _queue.put_nowait(rec)
+        return True
     except queue.Full:
-        _spool(rec, "queue-full", f"more than {QUEUE_MAX} writes waiting")
+        return _spool(rec, "queue-full", f"more than {QUEUE_MAX} writes waiting")
 
 
 def _drain_at_exit() -> None:

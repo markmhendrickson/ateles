@@ -94,8 +94,14 @@ def test_line_never_contains_notice_text(tmp_path):
 
 
 def test_fails_open_on_corrupt_queue_file(tmp_path):
+    # An unreadable queue file never crashes the hook (it still exits cleanly),
+    # and it is no longer silent: the operator is told to read the held view and
+    # repair the preserved file before clearing or draining notices.
     (tmp_path / "q.json").write_text("{not json")
-    assert _run(tmp_path) == ""
+    out = _run(tmp_path)
+    assert "[held-queue] 1 held notice queue file(s) are unreadable" in out
+    assert "python3 lib/notify/held_view.py" in out
+    assert "Traceback" not in out and "{not json" not in out
 
 
 def test_fails_open_when_the_viewer_cannot_load(tmp_path, monkeypatch, capsys):
