@@ -570,6 +570,8 @@ def overlay_verdicts(
                 ):
                     _flag(line)
 
+    if unrecognized:
+        return states, True
     for key, state in decisions.items():
         states[key] = state
     return states, unrecognized

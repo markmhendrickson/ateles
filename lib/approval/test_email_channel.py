@@ -52,6 +52,32 @@ def test_html_normal_mail_styles_and_terminal_quote_are_readable():
     assert ec._extract_authored_html(html)[0] == "APPROVE"
 
 
+@pytest.mark.parametrize("html", (
+    "I withdraw<html><body><p>APPROVE</p></body></html>",
+    "<html><body><p>APPROVE</p></body>I withdraw</html>",
+    "<html><body><p>APPROVE</p></body></html>I withdraw",
+    "<p>APPROVE</p>I withdraw<blockquote>quoted</blockquote>",
+))
+def test_html_text_outside_accounted_container_is_unreadable(html):
+    assert ec._extract_authored_html(html)[0] == ""
+
+
+@pytest.mark.parametrize("tag", ("body", "table", "td"))
+def test_html_background_attribute_is_unreadable(tag):
+    html = f"<{tag} background='image.png'>APPROVE</{tag}>"
+    assert ec._extract_authored_html(html)[0] == ""
+
+
+@pytest.mark.parametrize("attribute", (
+    "bgcolor='#fff'", "color='#222'", "text='#222'", "link='#222'",
+    "vlink='#222'", "alink='#222'", "face='Arial'", "size='14'",
+    "hidden", "aria-hidden='false'", "class='ordinary'", "id='ordinary'",
+    "data-style='display:block'", "stylex='color:#222'", "dir='rtl'",
+))
+def test_html_unaccounted_presentational_attribute_is_unreadable(attribute):
+    assert ec._extract_authored_html(f"<body><p {attribute}>APPROVE</p></body>")[0] == ""
+
+
 @pytest.mark.parametrize("size", ("50%", ".5em", "smaller", "90%", ".9em"))
 def test_nested_relative_font_sizes_cannot_hide_approval(size):
     html = "<body>" + f"<span style='font-size:{size}'>" * 20
@@ -438,6 +464,23 @@ class TestReadReplies:
         with _mock_inbox(side_effect=fake_gws_json):
             outcome = ec.read_replies_with_status(["TOK"])
         assert outcome.kind == "transport_error"
+
+    @pytest.mark.parametrize("html", ("", " \n ", "<p></p>"))
+    def test_present_empty_html_disagrees_with_plain_approval(self, monkeypatch, html):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+
+        def fake_gws_json(args, timeout=45):
+            if "+triage" in args:
+                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                                      "from": "op@example.com"}]}
+            return {"body_text": "APPROVE", "body_html": html}
+
+        with _mock_inbox(side_effect=fake_gws_json):
+            outcome = ec.read_replies_with_status(["TOK"])
+        assert outcome.kind == "transport_error"
+        assert outcome.texts == []
+        assert [reply.message_id for reply in outcome.unreadable_replies] == ["m1"]
         assert outcome.detail == "reply_quote_boundary_unknown"
         assert outcome.texts == []
         assert len(outcome.unreadable_replies) == 1

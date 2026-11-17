@@ -99,6 +99,12 @@ _RENDERED_PROSE = frozenset({
     "aside", "details", "summary", "dl", "dt", "dd",
     "dialog",
 })
+_HTML_ATTRS = frozenset({"style", "dir", "class", "id", "type", "href", "open"})
+_QUOTE_CLASSES = frozenset({
+    "gmail_quote", "gmail_extra", "yahoo_quoted", "protonmail_quote",
+    "msoquote", "outlookmessageheader", "gmail_attr", "moz-cite-prefix",
+})
+_QUOTE_IDS = frozenset({"divrplyfwdmsg", "appendonsend"})
 _DARK_NAMES = {"black": (0, 0, 0), "navy": (0, 0, 128),
                "darkblue": (0, 0, 139), "midnightblue": (25, 25, 112),
                "darkslategray": (47, 79, 79), "dimgray": (105, 105, 105)}
@@ -297,6 +303,19 @@ class _AuthoredHTML(HTMLParser):
         if len(names) != len(set(names)):
             self.unsafe = True
         attrs_by_name = dict(attrs)
+        classes = set((attrs_by_name.get("class") or "").lower().split())
+        element_id = (attrs_by_name.get("id") or "").lower()
+        if (set(names) - _HTML_ATTRS or
+                ("dir" in attrs_by_name and
+                 (attrs_by_name["dir"] or "").lower() != "ltr") or
+                ("class" in attrs_by_name and
+                 (not classes or not classes <= _QUOTE_CLASSES)) or
+                ("id" in attrs_by_name and element_id not in _QUOTE_IDS) or
+                ("type" in attrs_by_name and
+                 (tag != "div" or (attrs_by_name["type"] or "").lower() != "cite")) or
+                ("href" in attrs_by_name and tag != "a") or
+                ("open" in attrs_by_name and tag not in {"details", "dialog"})):
+            self.unsafe = True
         parent_px, parent_scale = self.font_stack[-1] if self.font_stack else (16, 1)
         style_safe, font_px, scale = _safe_style(
             attrs_by_name.get("style") or "", parent_px, parent_scale)
@@ -310,32 +329,19 @@ class _AuthoredHTML(HTMLParser):
             self.unsafe = True
         if tag not in _RENDERED_PROSE and tag not in _NON_RENDERED and tag not in self._VOID:
             self.unsafe = True
-        if ("hidden" in attrs_by_name or
-                (attrs_by_name.get("aria-hidden") or "").strip().lower() == "true" or
-                not style_safe or
-                ("face" in attrs_by_name and tag == "font" and
-                 not _safe_font_family(attrs_by_name.get("face") or "")) or
+        if (not style_safe or
                 (tag == "link" and "stylesheet" in (attrs_by_name.get("rel") or "").lower().split())):
             self.unsafe = True
-        for name in ("color", "text", "bgcolor"):
-            if name in attrs_by_name and not _safe_colour(
-                attrs_by_name[name] or "", background=name == "bgcolor"):
-                self.unsafe = True
         if tag in {"html", "head", "body"}:
-            if not self.structured:
-                self.parts.clear()
             self.structured = True
         if tag == "body":
             self.body_depth += 1
-        classes = set((attrs_by_name.get("class") or "").lower().split())
-        element_id = (attrs_by_name.get("id") or "").lower()
         quote = (tag == "blockquote"
-                 or bool(classes & {"gmail_quote", "gmail_extra", "yahoo_quoted",
-                                    "protonmail_quote", "msoquote", "outlookmessageheader"})
-                 or element_id in {"divrplyfwdmsg", "appendonsend"}
+                 or bool(classes & (_QUOTE_CLASSES - {"gmail_attr", "moz-cite-prefix"}))
+                 or element_id in _QUOTE_IDS
                  or (tag == "div" and (attrs_by_name.get("type") or "").lower() == "cite"))
         if ("gmail_attr" in classes or "moz-cite-prefix" in classes
-                or element_id in {"divrplyfwdmsg", "appendonsend"}):
+                or element_id in _QUOTE_IDS):
             self.terminal = True
             self.boundary_seen = True
         if tag in self._VOID:
@@ -390,6 +396,11 @@ class _AuthoredHTML(HTMLParser):
             self.parts.append("\n")
 
     def handle_data(self, data: str) -> None:
+        if data.strip() and (not self.stack or
+                             (self.structured and not self.body_depth and
+                              not self.non_rendered_depth)):
+            self.unsafe = True
+            return
         tags = [tag for tag, _ in self.stack]
         if data.strip() and (any(tag in {"menu", "slot", "noembed", "object",
                                  "picture", "audio", "video", "frameset"}
@@ -953,8 +964,7 @@ def read_replies_with_status(
             targets = set(re.findall(token_pattern, raw_source, re.IGNORECASE))
             correlation_target = next(iter(targets)) if len(targets) == 1 else None
             html_body = ""
-            html_present = raw_html is not None and (
-                not isinstance(raw_html, str) or bool(raw_html.strip()))
+            html_present = raw_html is not None
             if isinstance(raw_html, str) and html_present:
                 html_body, boundary_seen = _extract_authored_html(raw_html)
                 if html_body and not boundary_seen and _unmarked_notification_copy(html_body):

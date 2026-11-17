@@ -1125,6 +1125,50 @@ def test_consent_parts_and_quote_boundaries(
         assert result.reason_code == "consent_reply_unrecognized"
 
 
+@pytest.mark.parametrize("batch", (False, True))
+@pytest.mark.parametrize("shape", (
+    "before", "after_body", "after_html", "between",
+    "empty_html", "whitespace_html", "markup_empty_html",
+    "body_background", "table_background", "td_background", "unknown_class",
+))
+def test_unaccounted_or_empty_html_holds_payment_consent(monkeypatch, tmp_path, batch, shape):
+    handlers = [_Handler("session", label="Example", amount=60)]
+    if batch:
+        handlers.append(_Handler("invoice", label="Invoice", amount=25, calendar=False))
+    triggered = [(handler, [{}]) for handler in handlers]
+    items = consent_email.build_pending_items(triggered, "2026-09-22")
+    affirmative = "\n".join(
+        f"{'ATTENDED' if item.is_calendar else 'APPROVE'} {subject_marker(item.token)}"
+        for item in items)
+    html_lines = "".join(f"<p>{line}</p>" for line in affirmative.splitlines())
+    token = subject_marker(items[0].token)
+    html = {
+        "before": f"I withdraw<html><body>{html_lines}</body></html>",
+        "after_body": f"<html><body>{html_lines}</body>I withdraw</html>",
+        "after_html": f"<html><body>{html_lines}</body></html>I withdraw",
+        "between": f"<p>{affirmative.splitlines()[0]}</p>I withdraw<blockquote>{token}</blockquote>",
+        "empty_html": "",
+        "whitespace_html": " \n ",
+        "markup_empty_html": "<p></p>",
+        "body_background": f"<body background='image.png'>{html_lines}</body>",
+        "table_background": f"<table background='image.png'><tr><td>{html_lines}</td></tr></table>",
+        "td_background": f"<table><tr><td background='image.png'>{html_lines}</td></tr></table>",
+        "unknown_class": f"<p class='ordinary'>{affirmative}</p>",
+    }[shape]
+    payload = {"body_text": affirmative, "body_html": html}
+    _arm_email(monkeypatch)
+    sends = []
+    monkeypatch.setattr(consent_email, "send_request", lambda *args: sends.append(args) or True)
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        items[0].token, auth_by_id={"m1": [_GOOGLE_PASS]}, body_by_id={"m1": payload}))
+    result = consent_email.request_and_collect(
+        triggered, "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == set()
+    assert result.reason_code == "consent_reply_read_failed"
+    assert all(result.states[consent_email.match_key(item)] == "blocked" for item in items)
+    assert len([body for subject, body in sends if "correction" in subject]) == 1
+
+
 @pytest.mark.parametrize("calendar", (True, False))
 @pytest.mark.parametrize("markup", (
     "<p style='font-family:Wingdings'>{verb}</p>",
@@ -1199,6 +1243,37 @@ def test_consent_reply_invalid_verb_holds_whole_reply(calendar, invalid_first):
     states, flagged = consent_email.overlay_verdicts(items, [text])
     assert flagged is True
     assert states[consent_email.match_key(items[0])] == "awaiting_approval"
+
+
+@pytest.mark.parametrize("batch,invalid", (
+    (False, "HOLD"), (False, "I withdraw approval"), (False, "SKIP"),
+    (True, "HOLD"), (True, "I withdraw approval"),
+))
+@pytest.mark.parametrize("invalid_first", (False, True))
+def test_earlier_approval_cannot_survive_later_hold_or_withdrawal(
+        monkeypatch, tmp_path, batch, invalid, invalid_first):
+    handlers = [_Handler("session", label="Example", amount=60)]
+    if batch:
+        handlers.append(_Handler("invoice", label="Invoice", amount=25, calendar=False))
+    _email_env(monkeypatch)
+    _install(monkeypatch, handlers, tmp_path)
+    _quiet_main(monkeypatch)
+    monkeypatch.setattr(consent_email, "send_request", lambda *args: True)
+
+    def read(tokens, **kwargs):
+        approvals = [
+            f"RE: {subject_marker(token)}\n"
+            f"{'ATTENDED' if index == 0 else 'APPROVE'} {subject_marker(token)}"
+            for index, token in enumerate(tokens)
+        ]
+        other = f"RE: {subject_marker(tokens[0])}\n{invalid} {subject_marker(tokens[0])}"
+        texts = ([other, *approvals] if invalid_first else [*approvals, other])
+        return ReadRepliesOutcome(kind="ok", texts=texts)
+
+    monkeypatch.setattr(consent_email, "read_replies_with_status", read)
+    for _ in range(2):
+        monedula.main()
+        assert all(handler.execute_calls == [] for handler in handlers)
 
 
 def test_consent_multi_item_reply_is_atomic_and_valid_reply_approves_both():

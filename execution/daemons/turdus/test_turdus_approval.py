@@ -1449,6 +1449,58 @@ def test_html_outside_body_and_metadata_do_not_approve(monkeypatch, tmp_path, ki
 
 
 @pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("location", ("before", "after_body", "after_html", "between"))
+def test_html_unaccounted_text_holds_approval(monkeypatch, tmp_path, kind, location):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    body = f"<p>{approval}</p><blockquote>{token}</blockquote>"
+    html = {
+        "before": f"I withdraw<html><body>{body}</body></html>",
+        "after_body": f"<html><body>{body}</body>I withdraw</html>",
+        "after_html": f"<html><body>{body}</body></html>I withdraw",
+        "between": f"<p>{approval}</p>I withdraw<blockquote>{token}</blockquote>",
+    }[location]
+    posts, state, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind, {"body_html": html}, polls=2)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+    assert len([m for m in notices.sent if "could not be read yet" in m]) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("html", ("", " \n ", "<p></p>"))
+def test_present_empty_html_holds_plain_approval(monkeypatch, tmp_path, kind, html):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    posts, state, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind,
+        {"body_text": approval, "body_html": html}, polls=2)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+    assert len([m for m in notices.sent if "could not be read yet" in m]) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("tag,attribute", (
+    ("body", "background='image.png'"),
+    ("table", "background='image.png'"),
+    ("td", "background='image.png'"),
+    ("p", "class='ordinary'"),
+    ("p", "bgcolor='#fff'"),
+))
+def test_unaccounted_html_attribute_holds_approval(
+        monkeypatch, tmp_path, kind, tag, attribute):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    html = (f"<{tag} {attribute}>{approval}</{tag}>"
+            f"<blockquote>{token}</blockquote>")
+    posts, state, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind, {"body_html": html}, polls=2)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+    assert len([m for m in notices.sent if "could not be read yet" in m]) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
 def test_unknown_html_element_is_unreadable(monkeypatch, tmp_path, kind):
     approval = "approve v1.2.3" if kind == "release" else "APPROVE"
     token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
