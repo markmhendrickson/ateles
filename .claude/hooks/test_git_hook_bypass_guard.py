@@ -231,6 +231,29 @@ FORBIDDEN_FLAGS = [
     "git status # harmless\ngit commit -n -m x",
 ]
 
+
+@pytest.mark.parametrize("command", (
+    "git -C $WT commit -m x",
+    "git -C ${WT} status",
+    "git -C $(printf /tmp/wt) status",
+    "git -C prefix$WT status",
+    "git commit -m $MESSAGE",
+    "git commit --message=$MESSAGE",
+    "git push origin prefix$REF",
+    "git fetch origin $REF",
+))
+def test_unquoted_git_argument_expansion_refused(command):
+    assert_refused(command)
+
+
+@pytest.mark.parametrize("command", (
+    'git -C "$WT" status',
+    'git -C "${WT}" commit -m x',
+    'git commit -m "$MESSAGE"',
+))
+def test_quoted_git_argument_expansion_allowed(command):
+    assert_allowed(command)
+
 # Input the guard cannot read fully, around git.
 UNREADABLE = [
     "git commit --no-verify -m 'oops",

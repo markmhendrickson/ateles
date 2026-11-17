@@ -41,8 +41,8 @@ on ``;``, ``&&``, ``||``, ``|``, ``&`` and newlines. Every git invocation must:
     ``command``, ``exec``, ``xargs``, ``nice``, ``timeout``, ``setsid``,
     ``find -exec`` and any wrapper not named here); commands that only print,
     search or locate the word are exempt
-  - use only allowlisted global options; ``-C <path>`` may take a quoted or
-    expanded path; ``-c``, ``--config-env``, ``--exec-path``, ``--git-dir``,
+  - use only allowlisted global options; ``-C <path>`` may take a literal or
+    quoted expanded path; ``-c``, ``--config-env``, ``--exec-path``, ``--git-dir``,
     ``--work-tree`` and every other global option are refused
   - name an allowlisted subcommand (so an alias, ``git stash``, ``git hook``
     and ``git rebase`` are refused)
@@ -52,7 +52,8 @@ on ``;``, ``&&``, ``||``, ``|``, ``&`` and newlines. Every git invocation must:
     program (``--upload-pack``, ``--receive-pack``, ``--exec``,
     ``ls-remote -u``); no argument may be a brace expansion, and on commit,
     push and merge no argument may start with an expansion (it could expand
-    to an option), except the value of ``-m``/``-F`` and the ``-C`` path
+    to an option), except a quoted expanded value of ``-m``/``-F`` or ``-C``;
+    unquoted expansions in git arguments are refused because they can split
   - not write config: ``git config`` is allowed only as a read (``--get``,
     ``--get-all``, ``--get-regexp``, ``--list``, ``get``, ``list``, or one key
     with ``--show-origin`` and similar modifiers)
@@ -197,6 +198,7 @@ class Unreadable(Exception):
 class Word:
     text: str = ""
     expanded: bool = False        # contains a parameter, command or arithmetic expansion
+    unquoted_expansion: bool = False  # shell field splitting can add arguments
     lead_expansion: bool = False  # the expansion is at the very start
     unquoted: str = ""            # the unquoted characters, for brace and glob checks
 
@@ -371,7 +373,7 @@ class _Lexer:
         self.s = s
         self.subs: list[str] = []
 
-    def _expansion(self, word: Word, i: int) -> int:
+    def _expansion(self, word: Word, i: int, *, quoted: bool = False) -> int:
         """s[i] == '$' (unquoted or in double quotes). Returns the next index."""
         s = self.s
         nxt = s[i + 1] if i + 1 < len(s) else ""
@@ -394,15 +396,17 @@ class _Lexer:
         if not word.text:
             word.lead_expansion = True
         word.expanded = True
+        word.unquoted_expansion |= not quoted
         word.text += s[start:end]
         return end
 
-    def _backtick(self, word: Word, i: int) -> int:
+    def _backtick(self, word: Word, i: int, *, quoted: bool = False) -> int:
         end = _read_backtick(self.s, i + 1)
         self.subs.append(self.s[i + 1:end - 1])
         if not word.text:
             word.lead_expansion = True
         word.expanded = True
+        word.unquoted_expansion |= not quoted
         word.text += self.s[i:end]
         return end
 
@@ -447,9 +451,9 @@ class _Lexer:
                             word.text += s[i + 1]
                         i += 2
                     elif d == "$":
-                        i = self._expansion(word, i)
+                        i = self._expansion(word, i, quoted=True)
                     elif d == "`":
-                        i = self._backtick(word, i)
+                        i = self._backtick(word, i, quoted=True)
                     else:
                         word.text += d
                         i += 1
@@ -671,7 +675,9 @@ def git_violation(args: list[Word]) -> str | None:
         if w.text == "-C" and not w.expanded:
             if i + 1 >= len(args):
                 return "git -C without a path"
-            i += 2  # the path may be quoted or expanded
+            if args[i + 1].unquoted_expansion:
+                return "git -C path with an unquoted expansion"
+            i += 2
             continue
         if w.expanded or w.braced:
             return "git global option or subcommand assembled by the shell"
@@ -689,6 +695,8 @@ def git_violation(args: list[Word]) -> str | None:
                 f"{', '.join(sorted(ALLOWED_SUBCOMMANDS))})")
     rest = args[i + 1:]
     for w in rest:
+        if w.unquoted_expansion:
+            return f"git {sub} with an unquoted expansion"
         if w.text == "--" and not w.expanded:
             break
         if w.braced:
