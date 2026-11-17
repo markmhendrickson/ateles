@@ -409,7 +409,7 @@ def _clear_if_reported(notifier, key: str) -> None:
 
 
 def _mark_reported(notifier, key: str) -> None:
-    marker = getattr(notifier, "_mark_dedupe_notified", None)
+    marker = getattr(notifier, "_mark_dedupe_delivered", None)
     if callable(marker):
         try:
             marker(key, "apis")

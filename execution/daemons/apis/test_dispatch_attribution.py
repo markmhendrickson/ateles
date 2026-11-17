@@ -444,6 +444,28 @@ def test_a_failed_delivery_is_retried_on_the_next_check(
     assert len(spy.sent) == 2
 
 
+def test_combined_delivery_marks_an_earlier_pending_threshold_delivered(
+    monkeypatch, tmp_path, ledger
+) -> None:
+    window = _window(60)
+    _usage_file(monkeypatch, tmp_path, "cursor", [window])
+    spy = _SpyNotifier(deliver=False)
+    assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
+    first_key = spy.sent[0][2]
+    assert spy.inner._dedupe_journal[first_key]["state"] == "pending"
+
+    spy.deliver = True
+    window["used_percent"] = 80
+    _usage_file(monkeypatch, tmp_path, "cursor", [window])
+    keys = usage_alerts.check_usage_thresholds("cursor", notifier=spy)
+    assert sorted(key.rsplit(":", 1)[1] for key in keys) == ["50", "75"]
+    assert len(spy.delivered) == 1
+    assert "crossed 50% and 75%" in spy.delivered[0]
+    assert all(spy.inner._dedupe_journal[key]["state"] == "delivered" for key in keys)
+    assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
+    assert len(spy.sent) == 2
+
+
 def test_a_send_that_raises_is_retried_on_the_next_check(
     monkeypatch, tmp_path, ledger
 ) -> None:
