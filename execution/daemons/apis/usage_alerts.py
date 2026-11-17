@@ -315,6 +315,7 @@ def check_usage_thresholds(
                         delivered = bool(sender_notifier.send(
                             message, priority=Priority.WARN, handler="apis",
                             dedupe_key=keys[max(pending)], retryable=True,
+                            email_eligible=False,
                             related_dedupe_keys=tuple(
                                 keys[t] for t in pending if t != max(pending)
                             ),

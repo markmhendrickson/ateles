@@ -348,6 +348,7 @@ class _SpyNotifier:
         self.deliver = deliver
         self.silenced = silenced
         self.sent: list[tuple[str, str, str | None]] = []
+        self.email_flags: list[bool] = []
         self.delivered: list[str] = []
         self.inner._deliver = self._transport
         self.inner._in_silence_window = lambda: self.silenced
@@ -362,8 +363,90 @@ class _SpyNotifier:
 
     def send(self, message, priority="info", handler="", dedupe_key=None, **kw):
         self.sent.append((message, str(getattr(priority, "value", priority)), dedupe_key))
+        self.email_flags.append(kw.get("email_eligible", True))
         return self.inner.send(message, priority=priority, handler=handler,
                                dedupe_key=dedupe_key, **kw)
+
+
+def test_usage_warning_is_not_email_eligible(monkeypatch, tmp_path, ledger) -> None:
+    _usage_file(monkeypatch, tmp_path, "cursor", [_window(52)])
+    spy = _SpyNotifier()
+    assert len(usage_alerts.check_usage_thresholds("cursor", notifier=spy)) == 1
+    assert spy.email_flags == [False]
+
+
+def test_evicted_usage_warning_is_sent_again_once(monkeypatch, tmp_path, ledger) -> None:
+    from lib.notify import Priority, neotoma_sink, notifier as notifier_mod
+
+    monkeypatch.setattr(neotoma_sink, "record", lambda **kwargs: None)
+    monkeypatch.setattr(notifier_mod, "HELD_QUEUE_MAX", 1)
+    window = _window(52)
+    _usage_file(monkeypatch, tmp_path, "cursor", [window])
+    spy = _SpyNotifier(silenced=True)
+    spy.inner._digest_path = tmp_path / "held.json"
+    spy.inner.should_flush_digest = lambda: False
+    key = usage_alerts.dedupe_key("cursor", window["name"], window["resets_at"], 50)
+
+    assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
+    assert spy.inner._dedupe_journal[key]["state"] == "held"
+    spy.send("other warning", priority=Priority.WARN, handler="other",
+             dedupe_key="other:warning", retryable=True)
+    assert key not in spy.inner._dedupe_journal
+
+    assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
+    assert len(spy.sent) == 3
+    assert spy.inner._dedupe_journal[key]["state"] == "held"
+    assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
+    assert len(spy.sent) == 3
+
+
+def test_unreadable_held_queue_is_not_overwritten_by_new_usage_warning(
+    monkeypatch, tmp_path, ledger
+) -> None:
+    from lib.notify import neotoma_sink
+
+    monkeypatch.setattr(neotoma_sink, "record", lambda **kwargs: None)
+    window = _window(52)
+    _usage_file(monkeypatch, tmp_path, "cursor", [window])
+    spy = _SpyNotifier(silenced=True)
+    spy.inner._digest_path = tmp_path / "held.json"
+    spy.inner.should_flush_digest = lambda: False
+    usage_alerts.check_usage_thresholds("cursor", notifier=spy)
+    retained = spy.inner._digest_path.read_text()
+    key = usage_alerts.dedupe_key("cursor", window["name"], window["resets_at"], 50)
+
+    spy.inner._digest_path.write_text("unreadable queue")
+    window["used_percent"] = 76
+    _usage_file(monkeypatch, tmp_path, "cursor", [window])
+    usage_alerts.check_usage_thresholds("cursor", notifier=spy)
+    assert spy.inner._digest_path.read_text() == "unreadable queue"
+    assert spy.inner._dedupe_journal[key]["state"] == "held"
+
+    spy.inner._digest_path.write_text(retained)
+    assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
+    assert spy.inner._digest_queue[0] == "⚠ [apis] " + spy.sent[0][0]
+
+
+def test_missing_held_notice_allows_one_new_usage_warning(
+    monkeypatch, tmp_path, ledger
+) -> None:
+    from lib.notify import neotoma_sink
+
+    monkeypatch.setattr(neotoma_sink, "record", lambda **kwargs: None)
+    window = _window(52)
+    _usage_file(monkeypatch, tmp_path, "cursor", [window])
+    spy = _SpyNotifier(silenced=True)
+    spy.inner._digest_path = tmp_path / "held.json"
+    spy.inner.should_flush_digest = lambda: False
+    usage_alerts.check_usage_thresholds("cursor", notifier=spy)
+    key = usage_alerts.dedupe_key("cursor", window["name"], window["resets_at"], 50)
+    spy.inner._digest_path.unlink()
+
+    usage_alerts.check_usage_thresholds("cursor", notifier=spy)
+    assert len(spy.sent) == 2
+    assert spy.inner._dedupe_journal[key]["state"] == "held"
+    usage_alerts.check_usage_thresholds("cursor", notifier=spy)
+    assert len(spy.sent) == 2
 
 
 def test_no_alert_below_fifty_percent(monkeypatch, tmp_path, ledger) -> None:

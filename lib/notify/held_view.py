@@ -181,7 +181,9 @@ def read_queue(path: Path) -> list[str]:
         raw = json.loads(read_text_nofollow(path))
     except FileNotFoundError:
         return []
-    return [str(x) for x in raw] if isinstance(raw, list) else []
+    if not isinstance(raw, list):
+        raise ValueError(f"held queue {path} is not a list")
+    return [str(x) for x in raw]
 
 
 def write_queue(path: Path, items: list[str]) -> None:

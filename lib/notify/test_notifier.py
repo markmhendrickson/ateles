@@ -633,6 +633,48 @@ def test_retryable_pending_has_one_live_owner_and_recovers_abandonment(tmp_path)
     assert len(sent) == 2
 
 
+def test_drain_between_queue_write_and_held_mark_settles_delivered(
+    tmp_path, monkeypatch
+):
+    sent = []
+    holder = _notifier(tmp_path, ALWAYS_SILENT, sent)
+    holder.should_flush_digest = lambda: False
+    drainer = _notifier(tmp_path, NO_SILENCE, sent)
+    key = "usage:weekly:50"
+    entered = threading.Event()
+    release = threading.Event()
+    original = holder._mark_dedupe_held
+
+    def paused_mark(keys, handler, message):
+        entered.set()  # queue lock is held; drain may now attempt its read
+        assert release.wait(timeout=3)
+        return original(keys, handler, message)
+
+    monkeypatch.setattr(holder, "_mark_dedupe_held", paused_mark)
+    sender = threading.Thread(target=lambda: holder.send(
+        "usage crossed", Priority.WARN, handler="apis",
+        dedupe_key=key, retryable=True,
+    ))
+    sender.start()
+    try:
+        assert entered.wait(timeout=3)
+        drain = threading.Thread(target=drainer.flush_digest)
+        drain.start()
+        drain.join(timeout=0.1)
+        assert drain.is_alive()
+    finally:
+        release.set()
+        sender.join(timeout=3)
+    drain.join(timeout=3)
+    assert not sender.is_alive() and not drain.is_alive()
+    assert sent == ["⚠ [apis] usage crossed"]
+    assert drainer._digest_queue == []
+    assert drainer._dedupe_journal[key]["state"] == "delivered"
+    assert not drainer.send("usage crossed", Priority.WARN, handler="apis",
+                            dedupe_key=key, retryable=True)
+    assert len(sent) == 1
+
+
 def test_clear_dedupe_lets_a_genuine_recurrence_notify_again(tmp_path):
     sent = []
     n = _notifier(tmp_path, NO_SILENCE, sent)
