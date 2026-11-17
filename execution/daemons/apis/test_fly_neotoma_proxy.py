@@ -14,6 +14,7 @@ import logging
 import sys
 import threading
 import time
+from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -145,7 +146,7 @@ def _lower(headers):
     return {k.lower(): v for k, v in headers.items()}
 
 
-def _in_memory_mcp_request(body, allowed_tools):
+def _in_memory_mcp_request(body, allowed_tools, *, http_method="POST", session_id=None):
     sign_calls, upstream_requests = [], []
 
     class Connection:
@@ -172,13 +173,17 @@ def _in_memory_mcp_request(body, allowed_tools):
     )
     handler = neotoma_proxy._ProxyHandler.__new__(neotoma_proxy._ProxyHandler)
     handler.proxy = proxy
-    handler.command = "POST"
+    handler.command = http_method
     handler.path = "/mcp"
-    handler.headers = {"Content-Length": str(len(body)), "Content-Type": "application/json"}
+    handler.headers = Message()
+    handler.headers["Content-Length"] = str(len(body))
+    handler.headers["Content-Type"] = "application/json"
+    if session_id is not None:
+        handler.headers["Mcp-Session-Id"] = session_id
     handler.rfile = io.BytesIO(body)
     handler.wfile = io.BytesIO()
     handler.request_version = "HTTP/1.1"
-    handler.requestline = "POST /mcp HTTP/1.1"
+    handler.requestline = f"{http_method} /mcp HTTP/1.1"
     handler.close_connection = False
     handler._handle()
     response = http.client.HTTPResponse(_MemorySocket(handler.wfile.getvalue()))
@@ -211,6 +216,10 @@ def test_granted_tool_is_signed_and_forwarded():
     (b'{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":42}}', 11),
     (b'[{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"store"}}]', None),
     (b'not-json', None),
+    (b'{"jsonrpc":"2.0","id":13}', 13),
+    (b'{"jsonrpc":"2.0","id":14,"method":null}', 14),
+    (b'{"jsonrpc":"2.0","id":15,"method":42}', 15),
+    (b'{"jsonrpc":"2.0","id":16,"method":"\\u0069nitialize\\u200b"}', 16),
 ])
 def test_disallowed_or_unreadable_request_never_reaches_signer_or_upstream(
     body, request_id, caplog
@@ -227,12 +236,65 @@ def test_disallowed_or_unreadable_request_never_reaches_signer_or_upstream(
     assert body.decode() not in caplog.text
 
 
-@pytest.mark.parametrize("method", ["initialize", "tools/list"])
+@pytest.mark.parametrize("method", [
+    "initialize", "ping", "tools/list", "notifications/initialized", "notifications/cancelled",
+])
 def test_non_call_methods_are_forwarded_with_allowlist(method):
-    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method}).encode()
+    request = {"jsonrpc": "2.0", "method": method}
+    if not method.startswith("notifications/"):
+        request["id"] = 1
+    body = json.dumps(request).encode()
     status, _, sign_calls, upstream_requests = _in_memory_mcp_request(body, ("store",))
     assert status == 200
-    assert len(sign_calls) == 1 and upstream_requests[0][2] == body
+    assert sign_calls == [("POST", UPSTREAM_BASE + "/mcp", body, "application/json")]
+    assert upstream_requests[0][2] == body
+    assert upstream_requests[0][3]["signature"] == SIGNATURE["signature"]
+
+
+def test_method_match_uses_decoded_json_value():
+    body = b'{"jsonrpc":"2.0","id":1,"method":"\\u0069nitialize"}'
+    status, _, sign_calls, upstream_requests = _in_memory_mcp_request(body, ("store",))
+    assert status == 200
+    assert sign_calls == [("POST", UPSTREAM_BASE + "/mcp", body, "application/json")]
+    assert upstream_requests[0][2] == body
+
+
+@pytest.mark.parametrize("method", [
+    "resources/list", "resources/read", "resources/templates/list", "resources/subscribe",
+    "resources/unsubscribe", "prompts/list", "prompts/get", "completion/complete",
+    "logging/setLevel", "sampling/createMessage", "elicitation/create", "unknown/method",
+    "Initialize", "initialize ", "tools/List", "tools/list ", "іnitialize",
+])
+def test_ungranted_rpc_methods_never_reach_signer_or_upstream(method):
+    body = json.dumps({"jsonrpc": "2.0", "id": 21, "method": method}).encode()
+    status, payload, sign_calls, upstream_requests = _in_memory_mcp_request(body, ("store",))
+    assert status == 403
+    assert json.loads(payload) == {
+        "jsonrpc": "2.0", "id": 21,
+        "error": {"code": -32003, "message": "Neotoma tool not granted"},
+    }
+    assert sign_calls == [] and upstream_requests == []
+
+
+@pytest.mark.parametrize(("http_method", "session_id", "allowed"), [
+    ("GET", None, False),
+    ("GET", "existing-session", False),
+    ("DELETE", None, False),
+    ("DELETE", "existing-session", True),
+])
+def test_allowlist_http_verbs_are_scoped(http_method, session_id, allowed):
+    status, payload, sign_calls, upstream_requests = _in_memory_mcp_request(
+        b"", ("store",), http_method=http_method, session_id=session_id,
+    )
+    if not allowed:
+        assert status == 403
+        assert json.loads(payload)["error"]["code"] == -32003
+        assert sign_calls == [] and upstream_requests == []
+    else:
+        assert status == 200
+        assert sign_calls == [("DELETE", UPSTREAM_BASE + "/mcp", None, "application/json")]
+        assert upstream_requests[0][0:3] == ("DELETE", "/mcp", None)
+        assert upstream_requests[0][3]["mcp-session-id"] == session_id
 
 
 def test_no_allowlist_keeps_ungranted_tool_forwarding():
@@ -240,6 +302,14 @@ def test_no_allowlist_keeps_ungranted_tool_forwarding():
     status, _, sign_calls, upstream_requests = _in_memory_mcp_request(body, None)
     assert status == 200
     assert len(sign_calls) == 1 and upstream_requests[0][2] == body
+
+
+def test_no_allowlist_keeps_resource_method_forwarding():
+    body = b'{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"private"}}'
+    status, _, sign_calls, upstream_requests = _in_memory_mcp_request(body, None)
+    assert status == 200
+    assert sign_calls == [("POST", UPSTREAM_BASE + "/mcp", body, "application/json")]
+    assert upstream_requests[0][2] == body
 
 
 def test_requires_a_peer_uid_unless_testing():

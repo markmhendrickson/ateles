@@ -39,6 +39,16 @@ MCP_PATH = "/mcp"
 MAX_BODY_BYTES = 8 * 1024 * 1024
 READ_CHUNK = 65536
 ALLOWED_METHODS = ("GET", "POST", "DELETE")
+# A tool-scoped job needs only MCP startup, tool use, and these client
+# notifications. Resource, prompt, and other RPC methods bypass tool grants.
+TOOL_GRANT_RPC_METHODS = frozenset({
+    "initialize",
+    "ping",
+    "tools/list",
+    "tools/call",
+    "notifications/initialized",
+    "notifications/cancelled",
+})
 DEFAULT_CONTENT_TYPE = "application/json"
 
 # Request headers the agent may pass through. Everything else is dropped,
@@ -385,6 +395,11 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             return self._reject(400, method, path)
         if method not in ALLOWED_METHODS:
             return self._reject(405, method, path, extra={"Allow": ", ".join(ALLOWED_METHODS)})
+        if self.proxy.allowed_tools is not None:
+            # GET opens an unscoped server event stream. DELETE is only needed
+            # to terminate a session that the client can identify.
+            if method == "GET" or (method == "DELETE" and not self.headers.get("Mcp-Session-Id")):
+                return self._reject_rpc(method, path, None, 0)
 
         length_header = self.headers.get("Content-Length")
         if length_header is None:
@@ -411,7 +426,10 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 request = None
             if not isinstance(request, dict):
                 return self._reject_rpc(method, path, None, len(body))
-            if request.get("method") == "tools/call":
+            rpc_method = request.get("method")
+            if not isinstance(rpc_method, str) or rpc_method not in TOOL_GRANT_RPC_METHODS:
+                return self._reject_rpc(method, path, request.get("id"), len(body))
+            if rpc_method == "tools/call":
                 params = request.get("params")
                 name = params.get("name") if isinstance(params, dict) else None
                 if not isinstance(name, str) or name not in self.proxy.allowed_tools:
