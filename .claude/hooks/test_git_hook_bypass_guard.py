@@ -63,13 +63,17 @@ def test_tree_writers_refuse_protected_ancestors_and_assembled_destinations(writ
 ))
 @pytest.mark.parametrize("target", ("src/out/", "/tmp/ateles-guard-out/"))
 def test_tree_writers_allow_unprotected_destinations(writer, target):
-    assert_allowed(writer.format(target=target))
+    command = writer.format(target=target)
+    if writer.startswith(("tar ", "unzip ", "cpio ")):
+        assert_refused(command)  # an unreadable archive is not a safe write
+    else:
+        assert_allowed(command)
 
 
 def test_archive_default_destination_and_list_only():
     assert_refused("tar -xf archive.tar")
     assert_allowed("tar -tf archive.tar")
-    assert_allowed("tar -xf archive.tar -C src/out")
+    assert_refused("tar -xf archive.tar -C src/out")
 
 
 @pytest.mark.parametrize("shell", ("sh", "bash", "zsh", "dash", "ksh"))
@@ -847,7 +851,10 @@ def test_piped_programs_and_old_style_tar_refused(command):
     "awk '{print $1}' notes.txt", "awk '{print}' .git/config",
 ))
 def test_piped_programs_and_tar_without_protected_targets_allowed(command):
-    assert_allowed(command)
+    if command == "tar xf a.tar -C /tmp/out":
+        assert_allowed(command)
+    else:
+        assert_allowed(command)
 
 
 @pytest.mark.parametrize("runner", ("bash", "sh", "zsh -e", "bash -x"))
@@ -868,8 +875,7 @@ def test_shell_script_file_with_ordinary_writes_allowed(tmp_path, runner):
 
 def test_assembled_shell_script_refused_and_missing_one_allowed(tmp_path):
     assert_refused("bash $SCRIPT")
-    # bash cannot run a script it cannot read either, so nothing runs.
-    assert_allowed(f"bash {tmp_path / 'missing.sh'}")
+    assert_refused(f"bash {tmp_path / 'missing.sh'}")
 
 
 @pytest.mark.parametrize("body", ("open('.git/config', 'w')", "x = '--no-verify'",
@@ -885,3 +891,96 @@ def test_interpreter_script_without_protected_names_allowed(tmp_path):
     script.write_text("print('hello')\n")
     assert_allowed(f"python3 {script}")
     assert_allowed("python3 -m pytest -q")
+
+
+@pytest.mark.parametrize("command", (
+    "tar -Pxf missing.tar -C {scratch}",
+    "bsdtar -xPf missing.tar -C {scratch}",
+    "tar -xf missing.tar -C {scratch} -C .git/hooks",
+    "tar -xf missing.tar -C {scratch} --directory=.husky",
+    "tar -xf missing.tar --transform=s/a/.git\/config/ -C {scratch}",
+    "tar -xf missing.tar --keep-directory-symlink -C {scratch}",
+    "cpio -i -D {scratch}", "pax -r -D {scratch}",
+    "unzip missing.zip -d .git/hooks", "ditto -x missing.zip .husky",
+    "jar xf missing.jar", "7z x missing.7z -o.git/hooks",
+    "env tar -Pxf missing.tar -C {scratch}",
+    "xargs tar -Pxf missing.tar -C {scratch}",
+    "find . -exec tar -Pxf missing.tar -C {scratch} ;",
+    "sh -c 'tar -Pxf missing.tar -C {scratch}'",
+))
+def test_archive_extraction_that_can_escape_is_refused(tmp_path, command):
+    assert_refused(command.format(scratch=tmp_path / "out"))
+
+
+def test_archive_uninspectable_only_allowed_in_scratch(tmp_path):
+    assert_refused("tar -xf missing.tar -C src/out")
+    assert_refused("unzip missing.zip -d src/out")
+    assert_refused("7z x missing.7z -osrc/out")
+    assert_allowed(f"tar -xf missing.tar -C {tmp_path / 'out'}")
+    assert_allowed(f"unzip missing.zip -d {tmp_path / 'out'}")
+
+
+@pytest.mark.parametrize("command", (
+    "printf Y3AgcyAuZ2l0L2NvbmZpZw== | base64 -d | sh",
+    "xxd -r payload.hex | bash", "openssl enc -d -in payload | zsh",
+    "gzip -dc payload.gz | sh", "zcat payload.gz | sh",
+    "tr a-z A-Z < payload | sh", "rev payload | sh", "sed s/a/b/ payload | sh",
+    "python3 -c 'print(1)' | sh", "echo benign | base64 -d | sh",
+    "sh <(base64 -d payload)", "sh -s < payload",
+    "source /dev/stdin < payload", "bash /dev/stdin < payload",
+    "eval \"$(base64 -d payload)\"", "eval $(cat payload)",
+    "sh <<< \"$PROGRAM\"", "sh <<EOF\n$PROGRAM\nEOF",
+    "printf 'safe' > {script}; sh {script}",
+))
+def test_invisible_programs_refused(tmp_path, command):
+    assert_refused(command.format(script=tmp_path / "created.sh"))
+
+
+@pytest.mark.parametrize("literal", (
+    "echo 'git status' | sh", "printf 'echo safe' | sh",
+    "cat <<'EOF' | sh\necho safe\nEOF",
+))
+def test_literal_programs_are_inspected_and_allowed(literal):
+    assert_allowed(literal)
+
+
+@pytest.mark.parametrize("form", (
+    "awk -f {good} -f {bad}", "gawk --file {good} --file {bad}",
+    "sed -f {good} -f {bad}", "sed --file {good} --file {bad}",
+    "node -e 'console.log(1)' -r {bad}",
+    "ruby -e 'puts 1' -r {bad}",
+    "sh -c 'source {bad}'",
+))
+def test_every_program_file_operand_is_judged(tmp_path, form):
+    good = tmp_path / "good.awk"
+    bad = tmp_path / "bad.awk"
+    good.write_text("print 1\n")
+    bad.write_text("git commit --no-verify -m x\n")
+    assert_refused(form.format(good=good, bad=bad))
+
+
+def test_every_inline_program_operand_is_judged(tmp_path):
+    bad = "git commit --no-verify -m x"
+    assert_refused(f"perl -e 'print 1' -e '{bad}'")
+    assert_refused(f"gawk -e 'BEGIN {{print 1}}' -e '{bad}'")
+    assert_refused(f"python3 -c 'print(1)' -m '{bad}'")
+    assert_refused(f"node -e 'console.log(1)' -e '{bad}'")
+    assert_refused(f"ruby -e 'puts 1' -e '{bad}'")
+
+
+def test_awk_include_is_judged(tmp_path):
+    good = tmp_path / "main.awk"
+    bad = tmp_path / "included.awk"
+    good.write_text('@include "included.awk"\n')
+    bad.write_text("git commit --no-verify -m x\n")
+    assert_refused(f"awk -f {good}")
+
+
+def test_all_benign_program_operands_allowed(tmp_path):
+    good = tmp_path / "good.awk"
+    other = tmp_path / "other.awk"
+    good.write_text("print 1\n")
+    other.write_text("print 2\n")
+    assert_allowed(f"awk -f {good} -f {other}")
+    assert_allowed(f"sed -f {good} -f {other}")
+    assert_allowed("perl -e 'print 1' -e 'print 2'")

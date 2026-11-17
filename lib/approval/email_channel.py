@@ -589,37 +589,24 @@ def read_replies_with_status(
                 continue
             body_data = gws_json(["gmail", "+read", "--id", mid, "--headers",
                                   "--format", "json"], timeout=30)
-            if not isinstance(body_data, dict) or not any(
-                isinstance(body_data.get(key), str) and body_data[key].strip()
-                for key in ("body_text", "body", "text", "plain", "body_html", "snippet")
-            ):
+            if not isinstance(body_data, dict):
                 saw_transport_error = True
                 transport_detail = "gws_read_failed"
                 unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
-            body = ""
-            if isinstance(body_data, dict):
-                # Prefer plaintext (where the operator's verdict + the quoted
-                # token live). Fall back to the HTML part only if that is all gws
-                # returns — an HTML-only reply must not read as an empty body and
-                # silently drop the approval (the ateles#286 failure mode: a live
-                # release approval was lost because the reader missed the
-                # plaintext key).
-                body = str(body_data.get("body_text")
-                           or body_data.get("body")
-                           or body_data.get("text")
-                           or body_data.get("plain") or "")
-                if not body:
-                    # HTML-only: strip tags so the verb leads its line, otherwise
-                    # parse_verdict (which keys off the FIRST word of a line) sees
-                    # "<p>approve" and returns None — a non-empty-but-unparseable
-                    # body would still drop the approval. Tag-strip makes an
-                    # HTML-only `approve <version>` reply actually register.
-                    raw_html = str(body_data.get("body_html") or "")
-                    if raw_html:
-                        body = _strip_html(raw_html)
-                    else:
-                        body = str(body_data.get("snippet") or "")
+            # A triage snippet, subject, preview, or header can contain both
+            # verdict and token, but none proves that the full reply was read.
+            body = next((value for key in ("body_text", "body", "text", "plain")
+                         if isinstance((value := body_data.get(key)), str)
+                         and value.strip()), "")
+            if not body:
+                raw_html = body_data.get("body_html")
+                body = _strip_html(raw_html) if isinstance(raw_html, str) else ""
+            if not body.strip():
+                saw_transport_error = True
+                transport_detail = "gws_read_failed"
+                unreadable_replies.append(ApprovalReply(mid, subject))
+                continue
             if on_reply_message is not None:
                 try:
                     on_reply_message(token, mid)

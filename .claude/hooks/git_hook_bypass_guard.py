@@ -70,9 +70,9 @@ Commands that neither invoke git nor write protected paths are allowed;
 text that merely mentions a flag (a
 commit message, PR body, grep pattern, a heredoc written to a file) is data.
 
-This is a tripwire against accidental bypass, not a sandbox. A script written
-to disk and then run, or an alias defined outside the command can still reach
-git unseen. The real controls are the prepare child's
+This is a tripwire against accidental bypass, not a sandbox. A program created
+and run in one command is refused when its bytes cannot be inspected. An alias
+defined outside the command can still reach git unseen. The real controls are the prepare child's
 allowlisted environment and the release checks that run after the agent.
 
 There is no override. Skipping hooks has no approved form: the approved way to
@@ -87,6 +87,9 @@ import json
 import os
 import re
 import sys
+import tempfile
+import tarfile
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -203,6 +206,7 @@ class Word:
     lead_expansion: bool = False  # the expansion is at the very start
     unquoted: str = ""            # the unquoted characters, for brace and glob checks
     write_glob: bool = False  # glob met outside single quotes, even within double quotes
+    quoted: bool = False
 
     @property
     def braced(self) -> bool:
@@ -222,6 +226,7 @@ class SimpleCommand:
     stdin: list[str] = field(default_factory=list)  # heredoc bodies, here-strings
     redirects: list[tuple[str, Word]] = field(default_factory=list)
     pipe_in: bool = False
+    stdin_dynamic: bool = False
 
 
 # --- lexer ------------------------------------------------------------------
@@ -428,6 +433,7 @@ class _Lexer:
                 word.text += s[i + 1] if i + 1 < len(s) else ""
                 i += 2
             elif c == "'":
+                word.quoted = True
                 end = _skip_single(s, i + 1)
                 word.text += s[i + 1:end - 1]
                 i = end
@@ -440,6 +446,7 @@ class _Lexer:
                 word.text += _decode_ansi_c(s[i + 2:j])
                 i = j + 1
             elif c == '"':
+                word.quoted = True
                 i += 1
                 while True:
                     if i >= len(s):
@@ -531,8 +538,10 @@ class _Lexer:
                     raise Unreadable(f"redirection {op} without a target")
                 if op in ("<<", "<<-"):
                     pending.append((target.text, op == "<<-", cur))
+                    cur.stdin_dynamic |= not target.quoted
                 elif op == "<<<":
                     cur.stdin.append(target.text)
+                    cur.stdin_dynamic |= target.expanded
                 else:
                     cur.redirects.append((op, target))
                 continue
@@ -874,7 +883,71 @@ def _enters_protected_dir(path: str) -> bool:
 
 _DIRECT_WRITERS = frozenset({"tee", "sed", "cp", "mv", "ln", "install", "rsync",
                              "rm", "touch", "truncate", "chmod", "chown", "mkdir", "dd",
-                             "tar", "bsdtar", "gtar", "unzip", "ditto", "cpio", "pax", "jar"})
+                             "tar", "bsdtar", "gtar", "unzip", "ditto", "cpio", "pax", "jar", "7z"})
+
+_ARCHIVE_TOOLS = frozenset({"tar", "bsdtar", "gtar", "unzip", "ditto", "cpio", "pax", "jar", "7z"})
+_ARCHIVE_UNSAFE_OPTIONS = frozenset({
+    "-P", "--absolute-names", "--keep-directory-symlink", "--dereference",
+    "--transform", "--strip-components", "-s", "--substitute", "--follow-symlinks",
+})
+
+
+def _scratch_destination(path: str) -> bool:
+    """Only an absolute directory inside the host's temporary tree is scratch."""
+    if not os.path.isabs(path) or _tree_write_target(path):
+        return False
+    resolved = Path(path).resolve(strict=False)
+    roots = {Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve(),
+             Path("/private/tmp").resolve()}
+    return any(root in resolved.parents for root in roots)
+
+
+def _archive_violation(base: str, args: list[str], destinations: list[str]) -> str | None:
+    if base not in _ARCHIVE_TOOLS or not destinations:
+        return None
+    if base in {"cpio", "pax"}:
+        return f"{base} extraction may write absolute member paths"
+    for i, arg in enumerate(args):
+        if arg in _ARCHIVE_UNSAFE_OPTIONS or any(
+            arg.startswith(option + "=") for option in _ARCHIVE_UNSAFE_OPTIONS
+        ) or (base in {"tar", "gtar", "bsdtar"} and arg.startswith("--transform")):
+            return f"{base} extraction option can redirect archive members: {arg}"
+        if base in {"tar", "gtar", "bsdtar"} and arg.startswith("-") and not arg.startswith("--") and "P" in arg[1:]:
+            return f"{base} extraction preserves absolute archive member names"
+    if all(_scratch_destination(dest) for dest in destinations):
+        return None
+    # For non-scratch destinations the archive must be readable and each member
+    # confined. Formats without a safe local listing are denied here.
+    archive = None
+    for i, arg in enumerate(args[:-1]):
+        if arg in ("-f", "--file", "-Z", "--archive"):
+            archive = args[i + 1]
+    if archive is None and base in {"unzip", "7z"}:
+        archive = next((a for a in args if not a.startswith("-")), None)
+        if base == "7z" and archive in {"x", "e"}:
+            archive = next((a for a in args[1:] if not a.startswith("-")), None)
+    if not archive or archive == "-":
+        return f"{base} archive members cannot be inspected"
+    try:
+        if base in {"tar", "gtar", "bsdtar"}:
+            with tarfile.open(archive) as source:
+                members = [(m.name, m.issym() or m.islnk()) for m in source]
+        elif base in {"unzip", "jar"}:
+            with zipfile.ZipFile(archive) as source:
+                members = [(m.filename, (m.external_attr >> 16) & 0o170000 == 0o120000)
+                           for m in source.infolist()]
+        else:
+            return f"{base} archive members cannot be inspected"
+    except (OSError, tarfile.TarError, zipfile.BadZipFile):
+        return f"{base} archive members cannot be inspected"
+    for name, link in members:
+        parts = Path(name).parts
+        if link or os.path.isabs(name) or ".." in parts or any(
+            _tree_write_target(os.path.join(dest, name)) or
+            _protected_path(os.path.join(dest, name)) for dest in destinations
+        ):
+            return f"{base} archive member may write outside the destination"
+    return None
 
 
 def _tree_write_target(path: str) -> bool:
@@ -909,11 +982,12 @@ def _tree_destinations(base: str, args: list[str]) -> list[str]:
                          for arg in flags) or bool(
             args and re.fullmatch(r"[A-Za-z]+", args[0]) and "x" in args[0])
         if extracting:
-            return ([args[i + 1] for i, arg in enumerate(args[:-1])
-                     if arg in ("-C", "--directory")]
-                    or [arg.split("=", 1)[1] for arg in args
-                        if arg.startswith("--directory=")]
-                    or ["."])
+            dirs = [args[i + 1] for i, arg in enumerate(args[:-1])
+                    if arg in ("-C", "--directory")]
+            dirs += [arg.split("=", 1)[1] for arg in args
+                     if arg.startswith("--directory=")]
+            dirs += [arg[2:] for arg in args if arg.startswith("-C") and len(arg) > 2]
+            return dirs or ["."]
     if base == "unzip" and not any(a in ("-l", "-t", "-v", "-Z") for a in flags):
         return [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "-d"] or ["."]
     if base in {"cpio", "pax"} and any(
@@ -924,6 +998,8 @@ def _tree_destinations(base: str, args: list[str]) -> list[str]:
         return [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "-D"] or ["."]
     if base == "jar" and args and "x" in args[0]:
         return ["."]
+    if base == "7z" and args and args[0] in {"x", "e"}:
+        return [arg[2:] for arg in args if arg.startswith("-o") and len(arg) > 2] or ["."]
     return []
 
 
@@ -969,9 +1045,13 @@ def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None
                for w in words[1:]):
             return f"{base} target assembled by shell expansion"
     args = [w.text for w in words[1:]]
-    for target in _tree_destinations(base, args):
+    destinations = _tree_destinations(base, args)
+    for target in destinations:
         if _tree_write_target(target):
             return f"{base} writing a tree containing protected hook or git config path {target}"
+    hit = _archive_violation(base, args, destinations)
+    if hit:
+        return hit
     targets: list[str] = []
     if base == "tee":
         targets = [arg for arg in args if not arg.startswith("-")]
@@ -1071,34 +1151,84 @@ def _script_operand(tail: list[Word], is_shell: bool) -> Word | None:
 def _script_file_violation(runner: str, tail: list[Word], is_shell: bool,
                            depth: int) -> tuple[bool, str | None]:
     """Judge the program a shell, interpreter or awk takes as an operand."""
-    if _AWKS.match(runner):
-        files = [tail[i + 1] for i, w in enumerate(tail[:-1]) if w.text == "-f"]
-        if files:
-            script = files[0]
-        else:
-            program = _script_operand(tail, False)
-            if program is None:
-                return False, None
-            if program.expanded or program.globbed or program.braced:
-                return True, f"{runner} program assembled by the shell"
-            if _mentions_protected_text(program.text) or _HOOK_BYPASS_TEXT.search(program.text):
-                return True, f"{runner} program names a protected path or hook bypass"
-            return True, None
-    else:
-        script = _script_operand(tail, is_shell)
+    script = _script_operand(tail, is_shell)
     if script is None:
         return False, None
     if script.expanded or script.globbed or script.braced:
         return True, f"{runner} script assembled by the shell"
+    if _AWKS.match(runner):
+        return True, _inline_program_violation(runner, script.text, depth)
+    return True, _program_file_violation(runner, script, depth, is_shell)
+
+
+def _inline_program_violation(runner: str, body: str, depth: int) -> str | None:
+    if _SHELLS.match(runner):
+        return _judge_program_body(body, depth)
+    if _mentions_protected_text(body) or _HOOK_BYPASS_TEXT.search(body) or mentions_git(body):
+        return f"{runner} program names a protected path or hook bypass"
+    return None
+
+
+def _program_file_violation(runner: str, script: Word, depth: int,
+                            is_shell: bool = False) -> str | None:
+    if depth >= _MAX_DEPTH:
+        return "nested program exceeds inspection depth"
+    if script.expanded or script.globbed or script.braced:
+        return f"{runner} program file assembled by the shell"
+    if _protected_path(script.text):
+        return f"{runner} program file names a protected path"
     try:
         text = Path(os.path.expanduser(script.text)).read_text()
     except (OSError, UnicodeError):
-        return True, None  # the runner cannot read it either; nothing runs
+        return f"{runner} program file cannot be read"
+    if _AWKS.match(runner):
+        for include in re.findall(r'@include\s+["\']([^"\']+)["\']', text):
+            child = Path(script.text).parent / include
+            hit = _program_file_violation(runner, Word(str(child)), depth + 1)
+            if hit:
+                return hit
     if is_shell:
-        return True, _judge_program_body(text, depth)
-    if _mentions_protected_text(text) or _HOOK_BYPASS_TEXT.search(text):
-        return True, f"{runner} script names a protected path or hook bypass"
-    return True, None
+        return _judge_program_body(text, depth)
+    return _inline_program_violation(runner, text, depth)
+
+
+def _multi_program_violation(runner: str, tail: list[Word], depth: int) -> str | None:
+    """Inspect every program source, including repeated and mixed options."""
+    if runner.startswith(("python", "pypy")) and any(w.text == "-c" for w in tail) and any(
+        w.text == "-m" for w in tail
+    ):
+        return f"{runner} has multiple program modes"
+    file_options = ({"-f", "--file", "-i", "--include", "-l", "--load"}
+                    if _AWKS.match(runner) else
+                    {"-f", "--file", "-e", "--expression"} if runner == "sed" else
+                    {"-r", "--require"} if runner in {"node", "nodejs", "ruby"} else set())
+    inline_options = ({"-e", "--source"} if _AWKS.match(runner) else
+                      {"-e", "--expression"} if runner == "sed" else
+                      {"-e", "-E", "--eval", "-p", "--print"} if runner in {"perl", "node", "nodejs", "ruby"} else
+                      {"-c"} if runner.startswith(("python", "pypy")) else set())
+    # sed -e is inline, unlike awk -e. Keep it out of file operands.
+    if runner == "sed":
+        file_options = {"-f", "--file"}
+    i = 0
+    while i < len(tail):
+        option = tail[i].text
+        kind = "file" if option in file_options else "inline" if option in inline_options else ""
+        if kind:
+            if i + 1 >= len(tail):
+                return f"{runner} program operand missing"
+            value = tail[i + 1]
+            if kind == "file":
+                hit = _program_file_violation(runner, value, depth)
+            elif value.expanded or value.globbed or value.braced:
+                hit = f"{runner} program assembled by the shell"
+            else:
+                hit = _inline_program_violation(runner, value.text, depth)
+            if hit:
+                return hit
+            i += 2
+            continue
+        i += 1
+    return None
 
 
 def _judge_program_body(body: str, depth: int) -> str | None:
@@ -1134,13 +1264,19 @@ def _nested_program_violation(cmd: SimpleCommand, rest: list[Word], depth: int) 
     if base in _WRAPPERS or base == "find":
         starts += [i for i, w in enumerate(rest[1:], 1)
                    if _SHELLS.match(os.path.basename(w.text)) or
-                   _INTERPRETERS.match(os.path.basename(w.text))]
+                   _INTERPRETERS.match(os.path.basename(w.text)) or
+                   os.path.basename(w.text) == "sed"]
     for start in starts:
         runner = os.path.basename(rest[start].text)
         is_shell = bool(_SHELLS.match(runner))
-        if not is_shell and not _INTERPRETERS.match(runner):
+        if not is_shell and not _INTERPRETERS.match(runner) and runner != "sed":
             continue
         tail = rest[start + 1:]
+        hit = _multi_program_violation(runner, tail, depth)
+        if hit:
+            return True, hit
+        if runner == "sed":
+            continue
         for i, option in enumerate(tail):
             name = option.text
             # A shell's only program option is -c (alone or bundled); its -e
@@ -1156,9 +1292,7 @@ def _nested_program_violation(cmd: SimpleCommand, rest: list[Word], depth: int) 
                 return True, "nested program body assembled by the shell"
             if is_shell:
                 return True, _judge_program_body(body.text, depth)
-            if _mentions_protected_text(body.text) or mentions_git(body.text):
-                return True, f"{runner} inline program names a protected path or git"
-            return True, None
+            return True, _inline_program_violation(runner, body.text, depth)
         if is_shell and cmd.stdin and _reads_program_from_stdin(rest[start:]):
             return True, next((hit for body in cmd.stdin
                                if (hit := _judge_program_body(body, depth))), None)
@@ -1169,7 +1303,8 @@ def _nested_program_violation(cmd: SimpleCommand, rest: list[Word], depth: int) 
 
 
 def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int = 0,
-                      whole_mentions_protected: bool = False) -> str | None:
+                      whole_mentions_protected: bool = False,
+                      pipe_program: str | None = None) -> str | None:
     words = list(cmd.words)
     stripped = _strip_command_prefix(words, wrappers=True)
     hit = _direct_write_violation(cmd, stripped) or _wrapped_write_violation(cmd, stripped)
@@ -1189,6 +1324,35 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int =
     base = os.path.basename(head.text)
     own_mentions = _words_mention_git(rest[1:], cmd.stdin)
     any_expanded = any(w.expanded for w in rest[1:])
+
+    candidates = rest if base in _WRAPPERS or base == "find" else rest[:1]
+    runner = next((os.path.basename(w.text) for w in candidates
+                   if _SHELLS.match(os.path.basename(w.text)) or
+                   _INTERPRETERS.match(os.path.basename(w.text)) or
+                   os.path.basename(w.text) in _EVALUATORS), "")
+    if runner:
+        start = next(i for i, w in enumerate(rest)
+                     if os.path.basename(w.text) == runner)
+        tail = rest[start:]
+        stdin_program = (runner in {"source", "."} and len(tail) > 1 and
+                         tail[1].text in {"/dev/stdin", "/dev/fd/0", "-"}) or (
+            runner not in _EVALUATORS and _reads_program_from_stdin(tail))
+        if stdin_program and (cmd.stdin or cmd.pipe_in or cmd.redirects):
+            if cmd.stdin_dynamic or any(op.startswith("<") for op, _ in cmd.redirects):
+                return "program text cannot be inspected"
+            if cmd.stdin:
+                for body in cmd.stdin:
+                    hit = _judge_program_body(body, depth)
+                    if hit:
+                        return hit
+            elif pipe_program is None:
+                return "program text cannot be inspected"
+            else:
+                hit = _judge_program_body(pipe_program, depth)
+                if hit:
+                    return hit
+        elif stdin_program:
+            return "program text cannot be inspected"
 
     nested_checked, nested_hit = _nested_program_violation(cmd, rest, depth)
     if nested_hit:
@@ -1231,14 +1395,6 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int =
                              else _program_word_expanded(rest, is_shell))
         if program_assembled and whole_mentions_git:
             return f"{base} running an assembled program in a command that mentions git"
-        # A heredoc or here-string program was judged above as own text; a
-        # pipe can carry git from anywhere earlier in the line.
-        if base not in _EVALUATORS and cmd.pipe_in and not cmd.stdin and (
-                _reads_program_from_stdin(rest)) and whole_mentions_git:
-            return f"{base} reading a program from a pipe in a command that mentions git"
-        if base not in _EVALUATORS and cmd.pipe_in and not cmd.stdin and (
-                _reads_program_from_stdin(rest)) and whole_mentions_protected:
-            return f"{base} reading a program from a pipe in a command that names a protected path"
         return None
     # Any other command carrying git as a word may be a wrapper this guard
     # does not know (setsid, arch, ionice, chroot ...): git must be the
@@ -1296,12 +1452,52 @@ def _judge(command: str, depth: int, in_substitution: bool) -> str | None:
         hit = _judge(body, depth + 1, True)
         if hit:
             return hit
-    for cmd in commands:
+    written_files: set[str] = set()
+    for index, cmd in enumerate(commands):
         if in_substitution and _is_git_invocation(cmd):
             return "command or process substitution around git"
-        hit = command_violation(cmd, whole, depth, whole_protected)
+        stripped = _strip_command_prefix(cmd.words, wrappers=True)
+        if stripped:
+            runner = os.path.basename(stripped[0].text)
+            if runner in _EVALUATORS and len(stripped) > 1:
+                script = stripped[1]
+            elif _SHELLS.match(runner) or _INTERPRETERS.match(runner):
+                script = _script_operand(stripped[1:], bool(_SHELLS.match(runner)))
+            else:
+                script = None
+            if script and os.path.abspath(os.path.expanduser(script.text)) in written_files:
+                return "program text cannot be inspected"
+        producer = commands[index - 1] if cmd.pipe_in and index else None
+        pipe_program = _literal_pipe_program(producer) if producer else None
+        hit = command_violation(cmd, whole, depth, whole_protected, pipe_program)
         if hit:
             return hit
+        for op, target in cmd.redirects:
+            if ">" in op:
+                written_files.add(os.path.abspath(os.path.expanduser(target.text)))
+        if stripped and os.path.basename(stripped[0].text) in {"tee", "cp", "mv", "install"}:
+            for target in stripped[1:]:
+                if not target.text.startswith("-"):
+                    written_files.add(os.path.abspath(os.path.expanduser(target.text)))
+    return None
+
+
+def _literal_pipe_program(cmd: SimpleCommand) -> str | None:
+    """Recover program text only from inert, literal text emitters."""
+    words = _strip_command_prefix(cmd.words)
+    if not words or cmd.pipe_in or cmd.redirects or cmd.stdin_dynamic:
+        return None
+    if any(w.expanded or w.globbed or w.braced for w in words):
+        return None
+    base = os.path.basename(words[0].text)
+    if base == "cat" and len(words) == 1 and cmd.stdin:
+        return "\n".join(cmd.stdin)
+    if cmd.stdin:
+        return None
+    if base == "echo" and len(words) > 1 and not any(w.text.startswith("-") for w in words[1:]):
+        return " ".join(w.text for w in words[1:]) + "\n"
+    if base == "printf" and len(words) > 1 and "%" not in words[1].text and "\\" not in words[1].text:
+        return words[1].text
     return None
 
 

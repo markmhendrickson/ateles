@@ -35,10 +35,10 @@ Everything else around git is refused: wrappers (`env`, `xargs`, `timeout`),
 path-qualified or variable-named git binaries, other global options (`-c`,
 `--config-env`, `--git-dir`, `--work-tree`, `--exec-path`), aliases, command
 and process substitution, and inline interpreter programs, heredocs or pipes
-that feed git to a shell. Commands that do not involve git are not inspected.
+that feed git to a shell. Program text the guard cannot inspect is refused.
 An earlier denylist was bypassed in each of three review rounds, which is why
 the guard now allows a known surface instead. It is a tripwire, not a
-sandbox: a script written to disk and run can still reach git.
+sandbox: the guarded command is not an operating-system confinement boundary.
 
 The agent's cwd is the Neotoma checkout, so this repository's own
 `.claude/settings.json` does not reach it; `--settings` is the only way the
@@ -51,8 +51,9 @@ format.
 only the Claude authentication/configuration and gws configuration the prepare
 child needs. Unknown ambient variables, Neotoma storage/target selectors, git
 configuration overrides and unrelated vendor credentials never pass by
-inheritance. The RC email goes out as the swarm mailbox: when
-`ATELES_SWARM_GWS_CONFIG_DIR` is set, the shared mapping in
+inheritance. The RC email goes out as the swarm mailbox only when valid,
+distinct `OPERATOR_EMAIL` and `ATELES_SWARM_EMAIL` addresses and an existing
+`ATELES_SWARM_GWS_CONFIG_DIR` are set. The shared mapping in
 `lib/approval/email_channel.py` (`gws_config_dir_env`) makes it the child's
 `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` only when the swarm directory exists.
 The ambient Workspace directory is never passed to the prepare child.
@@ -177,19 +178,20 @@ and re-running it would be redundant or unsafe.
 | `NEOTOMA_SANDBOX_URL` | Sandbox host to verify (default `https://neotoma-sandbox.fly.dev`). |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram push (via shared `send.mjs`). |
 | `TELEGRAM_TOPIC_PHOENICURUS` | Optional Telegram topic/thread id for release messages. |
-| `OPERATOR_EMAIL` | Where release RC notifications are emailed when the swarm mailbox directory exists. Unset → email is skipped, Telegram only. |
-| `ATELES_SWARM_GWS_CONFIG_DIR` | Existing gws configuration directory for the swarm mailbox. Missing → no RC email or email approval. |
-| `ATELES_SWARM_EMAIL` | Optional `From:` for release email (the shared swarm address, matching the other daemons). |
+| `OPERATOR_EMAIL` | Required valid operator address for RC email and email approval. Missing or invalid → Telegram only. |
+| `ATELES_SWARM_GWS_CONFIG_DIR` | Required existing gws configuration directory signed in as the swarm mailbox. Missing or invalid → Telegram only. |
+| `ATELES_SWARM_EMAIL` | Required valid swarm mailbox address for RC email and email approval; must differ from `OPERATOR_EMAIL`. Missing, invalid, or the same address → Telegram only. |
 
 ## Notification channels
 
 A prepared release candidate always gets a Telegram notification with the full
-rendered notes, RC PR link and `approve/skip` instruction. If `OPERATOR_EMAIL`
-and an existing `ATELES_SWARM_GWS_CONFIG_DIR` are configured, the prepare agent
+rendered notes, RC PR link and `approve/skip` instruction. If valid, distinct
+`OPERATOR_EMAIL` and `ATELES_SWARM_EMAIL` addresses and an existing
+`ATELES_SWARM_GWS_CONFIG_DIR` are configured, the prepare agent
 first sends the same notes via `gws gmail +send` (subject `🚀 Release <TAG> ready
 to approve`) from the swarm mailbox. When that email is delivered, the
 Telegram notification offers approval by email reply or through Telegram.
-When the mailbox is not configured or delivery fails, the notification says
+When any mailbox prerequisite is missing or invalid, or delivery fails, the notification says
 email approval is unavailable and offers Telegram only. The release is never
 blocked on email.
 

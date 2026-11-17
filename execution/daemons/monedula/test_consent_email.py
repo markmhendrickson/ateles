@@ -754,7 +754,7 @@ def _fake_gws(tok: str, *, auth_by_id: dict, body_by_id: dict):
         if "+read" in args:
             mid = args[args.index("--id") + 1]
             body = body_by_id.get(mid)
-            return None if body is None else {"body_text": body}
+            return None if body is None else body if isinstance(body, dict) else {"body_text": body}
         return None
     return fake
 
@@ -793,7 +793,8 @@ def test_real_read_unauthenticated_operator_attended_is_held(monkeypatch, tmp_pa
     assert key not in result.approved
 
 
-@pytest.mark.parametrize("failure", ("metadata", "body_missing", "body_empty"))
+@pytest.mark.parametrize("failure", ("metadata", "body_missing", "body_empty",
+                                     "snippet_only", "preview_only", "html_empty"))
 def test_real_read_partial_failure_holds_every_payment(monkeypatch, tmp_path, failure):
     """m1 (authenticated ATTENDED) loads; m2 fails. Monedula must hold, not act
     on the half it could read."""
@@ -807,7 +808,12 @@ def test_real_read_partial_failure_holds_every_payment(monkeypatch, tmp_path, fa
         auth_by_id={"m1": [_GOOGLE_PASS],
                     "m2": None if failure == "metadata" else [_GOOGLE_PASS]},
         body_by_id={"m1": "ATTENDED",
-                    "m2": {} if failure == "body_empty" else None}))
+                    "m2": ({"snippet": "ATTENDED", "subject": "ATTENDED"}
+                           if failure == "snippet_only" else
+                           {"preview": "ATTENDED"} if failure == "preview_only" else
+                           {"body_html": "<style>ATTENDED</style>"}
+                           if failure == "html_empty" else
+                           {} if failure == "body_empty" else None)}))
     outcome = _ec.read_replies_with_status([tok])
     assert outcome.kind == "transport_error"
     assert outcome.texts == []

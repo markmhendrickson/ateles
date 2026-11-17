@@ -652,7 +652,8 @@ def test_approval_message_recorded_for_dedup(monkeypatch):
     assert [m for m in notifier.sent if "invoice(s)" in m] == []
 
 
-@pytest.mark.parametrize("failure", ("metadata", "body_none", "body_empty", "body_missing"))
+@pytest.mark.parametrize("failure", ("metadata", "body_none", "body_empty", "body_missing",
+                                     "snippet_only", "preview_only", "html_empty"))
 @pytest.mark.parametrize("kind", ("release", "pr"))
 def test_unreadable_authenticated_reply_notices_once_then_routes_once(
     monkeypatch, tmp_path, kind, failure
@@ -689,7 +690,11 @@ def test_unreadable_authenticated_reply_notices_once_then_routes_once(
             read_attempts.append(args)
             if len(read_attempts) == 1:
                 return {"body_none": None, "body_empty": {},
-                        "body_missing": {"id": "approval-1"}}.get(failure, {"body_text": body})
+                        "body_missing": {"id": "approval-1"},
+                        "snippet_only": {"snippet": body},
+                        "preview_only": {"preview": body},
+                        "html_empty": {"body_html": "<div><style>approve</style></div>"}
+                        }.get(failure, {"body_text": body})
             return {"body_text": body}
         raise AssertionError(args)
 
