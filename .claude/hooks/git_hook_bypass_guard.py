@@ -201,6 +201,7 @@ class Word:
     unquoted_expansion: bool = False  # shell field splitting can add arguments
     lead_expansion: bool = False  # the expansion is at the very start
     unquoted: str = ""            # the unquoted characters, for brace and glob checks
+    write_glob: bool = False  # glob met outside single quotes, even within double quotes
 
     @property
     def braced(self) -> bool:
@@ -456,6 +457,8 @@ class _Lexer:
                         i = self._backtick(word, i, quoted=True)
                     else:
                         word.text += d
+                        if d in "*?[":
+                            word.write_glob = True
                         i += 1
             elif c == "$":
                 i = self._expansion(word, i)
@@ -464,6 +467,8 @@ class _Lexer:
             else:
                 word.text += c
                 word.unquoted += c
+                if c in "*?[":
+                    word.write_glob = True
                 i += 1
         return (word if started else None), i
 
@@ -868,11 +873,18 @@ def _enters_protected_dir(path: str) -> bool:
 
 def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None:
     for op, target in cmd.redirects:
-        if ">" in op and _protected_path(target.text):
+        if ">" in op and (target.expanded or target.write_glob
+                         or _protected_path(target.text)):
             return f"shell redirection writing protected hook or git config path {target.text}"
     if not words:
         return None
     base = os.path.basename(words[0].text)
+    writers = {"tee", "sed", "cp", "mv", "ln", "install", "rsync",
+               "rm", "touch", "truncate", "chmod", "chown", "mkdir", "dd"}
+    if base in writers or base in {"cd", "pushd"}:
+        if any(w.expanded or w.write_glob
+               for w in words[1:]):
+            return f"{base} target assembled by shell expansion"
     args = [w.text for w in words[1:]]
     targets: list[str] = []
     if base == "tee":

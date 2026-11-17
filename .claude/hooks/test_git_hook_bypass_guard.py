@@ -517,6 +517,35 @@ def test_copy_into_protected_directory_refused(command):
     assert_refused(command)
 
 
+@pytest.mark.parametrize("writer", ("cp source {target}", "mv source {target}",
+                                     "tee {target}", "printf x > {target}"))
+@pytest.mark.parametrize("target", (
+    ".git/ho*", '"ordinary*"', '"ordinary["', '"$TARGET"', "$TARGET", "$(printf .git/config)",
+    "${TARGET}",
+))
+def test_shell_assembled_write_target_refused(writer, target):
+    assert_refused(writer.format(target=target))
+
+
+@pytest.mark.parametrize("command", (
+    "cd .git/ho* && printf x > config",
+    'cd "$TARGET" && printf x > config',
+    "pushd $(printf .git/hooks)",
+))
+def test_shell_assembled_working_directory_refused(command):
+    assert_refused(command)
+
+
+@pytest.mark.parametrize("writer", ("cp source {target}", "mv source {target}",
+                                     "tee {target}", "printf x > {target}"))
+def test_single_quoted_literal_glob_is_not_expanded(writer):
+    assert_allowed(writer.format(target="'ordinary*literal'"))
+
+
+def test_literal_non_protected_write_allowed():
+    assert_allowed("cp source ordinary.txt")
+
+
 @pytest.mark.parametrize("command", (
     "printf x > .GIT/config",
     "printf x > .HUSKY/pre-commit",
