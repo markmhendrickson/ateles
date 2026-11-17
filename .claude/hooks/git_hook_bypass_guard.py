@@ -894,6 +894,39 @@ _ARCHIVE_UNSAFE_OPTIONS = frozenset({
 })
 
 
+# A tar extraction is judged against an explicit set of options that cannot
+# keep absolute member names, run a program, rewrite member names or follow
+# links; every other option, in any spelling (old-style bundle without a dash,
+# bundled short letters, an abbreviated long name), is refused. Blacklisting
+# options missed `tar xPf`, `--abs` and the options that execute a command.
+_TAR_SAFE_LONG = frozenset({
+    "--extract", "--get", "--file", "--directory", "--verbose", "--gzip", "--gunzip",
+    "--ungzip", "--bzip2", "--xz", "--zstd", "--lzma", "--auto-compress", "--keep-old-files",
+    "--skip-old-files", "--no-same-owner", "--no-same-permissions", "--touch",
+    "--preserve-permissions", "--same-permissions", "--to-stdout", "--numeric-owner",
+})
+_TAR_SAFE_SHORT = frozenset("xvfzjJCkmpaoO")
+
+
+def _tar_option_violation(args: list[str]) -> str | None:
+    for i, arg in enumerate(args):
+        if arg == "--":
+            return None
+        if arg.startswith("--"):
+            if arg.split("=", 1)[0] not in _TAR_SAFE_LONG:
+                return f"uses an option outside the safe extraction set: {arg.split('=', 1)[0]}"
+            continue
+        dashed = arg.startswith("-") and len(arg) > 1
+        if not dashed and i != 0:
+            continue
+        for ch in arg[1:] if dashed else arg:
+            if ch not in _TAR_SAFE_SHORT:
+                return f"uses an option letter outside the safe extraction set: {ch}"
+            if dashed and ch in "fC":
+                break  # the rest of a dashed bundle is that option's value
+    return None
+
+
 def _scratch_destination(path: str) -> bool:
     """Only an absolute directory inside the host's temporary tree is scratch."""
     if not os.path.isabs(path) or _tree_write_target(path):
@@ -911,6 +944,10 @@ def _archive_violation(base: str, args: list[str], destinations: list[str]) -> s
         return None
     if base in {"cpio", "pax"}:
         return f"{base} extraction may write absolute member paths"
+    if base in {"tar", "gtar", "bsdtar"}:
+        reason = _tar_option_violation(args)
+        if reason:
+            return f"{base} extraction {reason}"
     for i, arg in enumerate(args):
         if arg in _ARCHIVE_UNSAFE_OPTIONS or any(
             arg.startswith(option + "=") for option in _ARCHIVE_UNSAFE_OPTIONS
@@ -1187,9 +1224,27 @@ def _script_file_violation(runner: str, tail: list[Word], is_shell: bool,
     return True, _program_file_violation(runner, script, depth, is_shell)
 
 
+# Primitives that decode or evaluate program text at run time. An inline or
+# standard-input program for an interpreter that uses one can build any path or
+# command after the guard has read it, so it is refused rather than guessed at.
+_RUNTIME_EVAL_TEXT = re.compile(
+    r"\b(?:eval|exec|execfile|compile|__import__|importlib|marshal|codecs|b64decode|"
+    r"base64|decode_base64|atob|unhexlify|fromhex|fromCharCode)\b|Buffer\s*\.\s*from")
+
+
+def _stdin_program_violation(runner: str, body: str, depth: int) -> str | None:
+    """A program read from standard input: a shell parses it as shell, an
+    interpreter reads it as that language's code."""
+    if _SHELLS.match(runner) or runner in _EVALUATORS:
+        return _judge_program_body(body, depth)
+    return _inline_program_violation(runner, body, depth)
+
+
 def _inline_program_violation(runner: str, body: str, depth: int) -> str | None:
     if _SHELLS.match(runner):
         return _judge_program_body(body, depth)
+    if not _AWKS.match(runner) and _RUNTIME_EVAL_TEXT.search(body):
+        return f"{runner} program decodes or evaluates program text at run time"
     if _AWKS.match(runner):
         for include in re.findall(r'@include\s+["\']([^"\']+)["\']', body):
             hit = _program_file_violation(runner, Word(include), depth + 1)
@@ -1392,13 +1447,13 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int =
                 return "program text cannot be inspected"
             if cmd.stdin:
                 for body in cmd.stdin:
-                    hit = _judge_program_body(body, depth)
+                    hit = _stdin_program_violation(runner, body, depth)
                     if hit:
                         return hit
             elif pipe_program is None:
                 return "program text cannot be inspected"
             else:
-                hit = _judge_program_body(pipe_program, depth)
+                hit = _stdin_program_violation(runner, pipe_program, depth)
                 if hit:
                     return hit
         elif stdin_program:
@@ -1480,6 +1535,13 @@ def _code_mentions_git(text: str, depth: int) -> bool:
     return any(_code_mentions_git(body, depth + 1) for body in lexer.subs)
 
 
+# An unreadable command line that names a shell, an interpreter, an evaluator,
+# or a process substitution could run a program the guard never saw.
+_UNREADABLE_RUNNER = re.compile(
+    r"(?<![\w./-])(?:sh|bash|zsh|dash|ksh|mksh|fish|tcsh|csh|busybox|eval|source|python[\d.]*|"
+    r"perl|ruby|node|nodejs|deno|bun|awk|gawk|mawk|php|lua|osascript)(?![\w-])|<\(|>\(")
+
+
 def _judge(command: str, depth: int, in_substitution: bool) -> str | None:
     lexer = _Lexer(command)
     try:
@@ -1487,6 +1549,8 @@ def _judge(command: str, depth: int, in_substitution: bool) -> str | None:
     except Unreadable as exc:
         if mentions_git(command) or re.search(r"GIT_|HUSKY", command):
             return f"a git command the guard cannot read fully ({exc})"
+        if _UNREADABLE_RUNNER.search(command):
+            return f"a command line that runs a program the guard cannot read fully ({exc})"
         return None
     # Whether the command line names git anywhere a shell could act on it:
     # its words and substitutions, not heredoc data written to a file.

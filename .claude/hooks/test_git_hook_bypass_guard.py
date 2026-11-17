@@ -1050,3 +1050,48 @@ def test_all_benign_program_operands_allowed(tmp_path):
     assert_allowed(f"awk -f {good} -f {other}")
     assert_allowed(f"sed -f {good} -f {other}")
     assert_allowed("perl -e 'print 1' -e 'print 2'")
+
+
+@pytest.mark.parametrize("command", (
+    "tar xPf missing.tar -C {scratch}", "tar Pxf missing.tar -C {scratch}",
+    "tar xfP missing.tar -C {scratch}", "tar xvPf missing.tar -C {scratch}",
+    "bsdtar xPf missing.tar -C {scratch}", "gtar xPf missing.tar -C {scratch}",
+    "tar xf missing.tar -C {scratch} --abs",
+    "tar xf missing.tar -C {scratch} --to-command=sh",
+    "tar xf missing.tar -C {scratch} --checkpoint-action=exec=sh",
+    "tar xf missing.tar -C {scratch} --use-compress-program=sh",
+    "tar xf missing.tar -C {scratch} -I sh", "tar -xf missing.tar -C {scratch} -Ish",
+    "tar -xf missing.tar -C {scratch} -T names", "tar -xf missing.tar -C {scratch} -h",
+))
+def test_tar_extraction_uses_an_explicit_safe_option_set(tmp_path, command):
+    assert_refused(command.format(scratch=tmp_path / "out"))
+
+
+@pytest.mark.parametrize("command", (
+    "tar -xf missing.tar -C {scratch}", "tar xf missing.tar -C {scratch}",
+    "tar -xzf missing.tgz -C {scratch}", "tar xzvf missing.tgz -C {scratch}",
+    "tar -C {scratch} -xf missing.tar", "tar --extract --file=missing.tar --directory={scratch}",
+    "tar -xf missing.tar -C {scratch} --no-same-owner", "tar -tf missing.tar",
+))
+def test_tar_extraction_with_safe_options_allowed_in_scratch(tmp_path, command):
+    assert_allowed(command.format(scratch=tmp_path / "out"))
+
+
+@pytest.mark.parametrize("command", (
+    "sh < <(printf Zm9v | base64 -d)", "bash < <(base64 -d program.b64)",
+    "python3 - <<'E'\nopen('.git/config', 'w')\nE",
+    "python3 -c \"import base64; exec(base64.b64decode('Zm9v'))\"",
+    "perl -MMIME::Base64 -e 'eval decode_base64(\"Zm9v\")'",
+    "node -e \"eval(Buffer.from('Zm9v', 'base64').toString())\"",
+    "ruby -rbase64 -e 'eval Base64.decode64(\"Zm9v\")'",
+))
+def test_programs_the_guard_cannot_read_or_that_decode_themselves_are_refused(command):
+    assert_refused(command)
+
+
+@pytest.mark.parametrize("command", (
+    "python3 -c 'print(1)'", "echo hello | bash -s --", "cat <<'E' | sh\ntrue\nE",
+    "python3 - <<'E'\nprint('hello')\nE",
+))
+def test_literal_ordinary_programs_still_allowed(command):
+    assert_allowed(command)
