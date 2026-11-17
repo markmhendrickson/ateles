@@ -1051,7 +1051,7 @@ def test_authored_withdrawal_holds_payment(monkeypatch, tmp_path, calendar, tail
 @pytest.mark.parametrize("calendar", (True, False))
 @pytest.mark.parametrize("quote", (
     "On Tuesday Example wrote:\n> old request",
-    "-----Original Message-----\nFrom: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\nold request",
+    "-----Original Message-----\nFrom: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\n> old request",
 ))
 def test_proven_bottom_quote_can_approve_payment(monkeypatch, tmp_path, calendar, quote):
     h = _Handler("therapy" if calendar else "oneoff", label="Example", amount=60,
@@ -1065,6 +1065,64 @@ def test_proven_bottom_quote_can_approve_payment(monkeypatch, tmp_path, calendar
     result = consent_email.request_and_collect(
         [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
     assert result.approved == {consent_email.match_key(item)}
+
+
+@pytest.mark.parametrize("batch", (False, True))
+@pytest.mark.parametrize("shape,approved,unreadable", (
+    ("unquoted_tail", False, True),
+    ("quoted_tail", True, False),
+    ("unseparated_headers", False, False),
+    ("plain_approves", False, True),
+    ("html_approves", False, True),
+    ("matching", True, False),
+    ("plain_only", True, False),
+    ("html_only", True, False),
+))
+def test_consent_parts_and_quote_boundaries(
+        monkeypatch, tmp_path, batch, shape, approved, unreadable):
+    handlers = [_Handler("session", label="Example", amount=60)]
+    if batch:
+        handlers.append(_Handler("invoice", label="Invoice", amount=25, calendar=False))
+    triggered = [(handler, [{}]) for handler in handlers]
+    items = consent_email.build_pending_items(triggered, "2026-09-22")
+    lines = [
+        f"{'ATTENDED' if item.is_calendar else 'APPROVE'} {subject_marker(item.token)}"
+        for item in items
+    ]
+    affirmative = "\n".join(lines)
+    headers = "From: Example\nSent: Tuesday\nTo: Operator\nSubject: Request"
+    payload = {"body_text": affirmative}
+    if shape == "unquoted_tail":
+        payload["body_text"] += f"\n-----Original Message-----\n{headers}\nI withdraw"
+    elif shape == "quoted_tail":
+        payload["body_text"] += f"\n-----Original Message-----\n{headers}\n> old"
+    elif shape == "unseparated_headers":
+        payload["body_text"] += f"\n{headers}\n> old"
+    elif shape == "plain_approves":
+        payload["body_html"] = "<p>hold</p>"
+    elif shape == "html_approves":
+        payload["body_text"] = "hold"
+        payload["body_html"] = "<p>" + "</p><p>".join(lines) + "</p>"
+    elif shape in {"matching", "html_only"}:
+        payload["body_html"] = "<p>" + "</p><p>".join(lines) + "</p>"
+        if shape == "html_only":
+            del payload["body_text"]
+    sends = []
+    _arm_email(monkeypatch)
+    monkeypatch.setattr(consent_email, "send_request", lambda *args: sends.append(args) or True)
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        items[0].token, auth_by_id={"m1": [_GOOGLE_PASS]}, body_by_id={"m1": payload}))
+    result = consent_email.request_and_collect(
+        triggered, "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == ({consent_email.match_key(item) for item in items} if approved else set())
+    if unreadable:
+        assert result.reason_code == "consent_reply_read_failed"
+        corrections = [body for subject, body in sends if "correction" in subject]
+        assert len(corrections) == 1
+        for item in items:
+            assert consent_email.accepted_reply_form(item) in corrections[0]
+    elif shape == "unseparated_headers":
+        assert result.reason_code == "consent_reply_unrecognized"
 
 
 @pytest.mark.parametrize("calendar", (True, False))

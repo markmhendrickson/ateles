@@ -1126,14 +1126,27 @@ def test_malformed_html_quote_is_unreadable_on_both_routes(
 
 
 @pytest.mark.parametrize("kind", ("release", "pr"))
-def test_multipart_prefers_authored_plain_then_html(monkeypatch, tmp_path, kind):
+def test_multipart_requires_agreement(monkeypatch, tmp_path, kind):
     approval = "approve v1.2.3" if kind == "release" else "APPROVE"
-    posts, _, _ = _poll_authored_reply(monkeypatch, tmp_path, kind, {
-        "body_text": "hold", "body_html": f"<p>{approval}</p>"})
-    assert posts == []
-    posts, _, _ = _poll_authored_reply(monkeypatch, tmp_path / "second", kind, {
-        "body_text": "> quoted text", "body_html": f"<p>{approval}</p>"})
-    assert len(posts) == 1
+    for name, plain, html in (
+        ("plain_approves", approval, "hold"),
+        ("html_approves", "hold", approval),
+        ("plain_blank", "> quoted text", approval),
+    ):
+        posts, state, notices = _poll_authored_reply(
+            monkeypatch, tmp_path / name, kind,
+            {"body_text": plain, "body_html": f"<p>{html}</p>"}, polls=2)
+        assert posts == []
+        assert "approval-1" not in state.get("processed_ids", [])
+        assert len([note for note in notices.sent if "could not be read yet" in note]) == 1
+        assert any(f"`{approval.lower()}`" in note.lower() for note in notices.sent)
+    for name, payload in (
+        ("matching", {"body_text": approval, "body_html": f"<p>{approval}</p>"}),
+        ("plain_only", {"body_text": approval}),
+        ("html_only", {"body_html": f"<p>{approval}</p>"}),
+    ):
+        posts, _, _ = _poll_authored_reply(monkeypatch, tmp_path / name, kind, payload)
+        assert len(posts) == 1
 
 
 _NON_RENDERED_TAGS = (
@@ -1345,11 +1358,22 @@ def test_header_followed_by_authored_withdrawal_never_routes(monkeypatch, tmp_pa
 @pytest.mark.parametrize("kind", ("release", "pr"))
 def test_unproven_header_and_signature_never_route(monkeypatch, tmp_path, kind):
     approval = "approve v1.2.3" if kind == "release" else "APPROVE"
-    for suffix in ("From: Swarm <swarm@example.net>\n> old message", "-- \nOperator"):
-        posts, _, _ = _poll_authored_reply(
-            monkeypatch, tmp_path / str(len(suffix)), kind,
-            {"body_text": f"{approval}\n{suffix}"})
+    headers = "From: Example\nSent: Tuesday\nTo: Operator\nSubject: Request"
+    for index, suffix in enumerate((
+        "From: Swarm <swarm@example.net>\n> old message",
+        "-- \nOperator",
+        f"{headers}\n> old message",
+        f"-----Original Message-----\n{headers}\nI withdraw",
+        f"Begin forwarded message:\n{headers}\nI withdraw",
+    )):
+        posts, state, notices = _poll_authored_reply(
+            monkeypatch, tmp_path / str(index), kind,
+            {"body_text": f"{approval}\n{suffix}"}, polls=2)
         assert posts == []
+        assert "approval-1" not in state.get("processed_ids", [])
+        if "I withdraw" in suffix:
+            assert len([note for note in notices.sent if "could not be read yet" in note]) == 1
+            assert any(f"`{approval.lower()}`" in note.lower() for note in notices.sent)
 
 
 @pytest.mark.parametrize("kind", ("release", "pr"))
@@ -1372,7 +1396,8 @@ def test_authored_withdrawal_never_routes(monkeypatch, tmp_path, kind, tail):
 @pytest.mark.parametrize("kind", ("release", "pr"))
 @pytest.mark.parametrize("quote", (
     "On Tuesday Example wrote:\n> original",
-    "-----Original Message-----\nFrom: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\noriginal",
+    "-----Original Message-----\nFrom: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\n> original",
+    "Begin forwarded message:\nFrom: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\n> original",
 ))
 def test_proven_bottom_quote_still_routes(monkeypatch, tmp_path, kind, quote):
     approval = "approve v1.2.3" if kind == "release" else "approve"

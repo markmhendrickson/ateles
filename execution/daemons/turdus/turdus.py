@@ -1155,9 +1155,12 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
             target = match.group(1) if match else "this PR"
         if target is None:
             continue
+        exact_form = (f"approve {target}" if _RELEASE_READY_SUBJECT_MARKER.lower()
+                      in subject.lower() else "approve")
         delivered = notifier.send(
             f"{DAEMON_NAME}: email approval for {target} could not be read yet. "
-            "Approve through Telegram instead.",
+            f"To retry by email, reply with exactly `{exact_form}` "
+            "on one line. Approve through Telegram instead.",
             priority=Priority.BLOCKER, handler=DAEMON_NAME, email_eligible=False,
         )
         if delivered:

@@ -139,6 +139,17 @@ def test_unproven_header_and_signature_are_authored():
         "APPROVE\n--\nSignature", True)
 
 
+@pytest.mark.parametrize("separator", ("-----Original Message-----", "Begin forwarded message:"))
+def test_header_boundary_requires_quoted_tail(separator):
+    headers = "From: Example\nSent: Tuesday\nTo: Operator\nSubject: Request"
+    assert ec._authored_plain_checked(f"APPROVE\n{separator}\n{headers}\n> old") == (
+        "APPROVE", True)
+    assert ec._authored_plain_checked(f"APPROVE\n{separator}\n{headers}\nI withdraw") == (
+        "APPROVE", False)
+    assert ec._authored_plain_checked(f"APPROVE\n{headers}\n> old") == (
+        f"APPROVE\n{headers}", True)
+
+
 @pytest.mark.parametrize("tail", (
     "I withdraw approval", "One\nTwo\nThree\nFour\nFive",
     "This line is deliberately more than eighty characters long and makes the signature boundary unsafe.",
@@ -171,8 +182,7 @@ def test_unproven_quote_shapes_preserve_authored_withdrawal(tail):
     "On Tuesday Example wrote:\n> old request",
     "Le mardi Exemple a écrit :\n> ancienne demande",
     "El martes Ejemplo escribió:\n> solicitud anterior",
-    "-----Original Message-----\nFrom: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\nold request",
-    "From: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\n> old request",
+    "-----Original Message-----\nFrom: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\n> old request",
 ))
 def test_proven_bottom_quote_is_removed(quote):
     assert ec._authored_plain_checked("approve\n" + quote) == ("approve", True)
@@ -395,9 +405,7 @@ class TestReadReplies:
         with _mock_inbox(None):
             assert ec.read_replies(["TOK"]) == []
 
-    def test_prefers_body_text_over_html(self, monkeypatch):
-        # The operator's verdict + quoted token live in the plaintext part; the
-        # HTML part must never win when plaintext is present (ateles#286).
+    def test_multipart_requires_matching_authored_text(self, monkeypatch):
         monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
         monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
 
@@ -405,12 +413,34 @@ class TestReadReplies:
             if "+triage" in args:
                 return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
                                       "from": "op@example.com"}]}
-            return {"body_text": "approve v0.20.0", "body_html": "<p>ignored</p>"}
+            return {"body_text": "approve v0.20.0", "body_html": "<p>APPROVE v0.20.0</p>"}
 
         with _mock_inbox(side_effect=fake_gws_json):
             texts = ec.read_replies(["TOK"])
         assert "approve v0.20.0" in texts[0]
-        assert "ignored" not in texts[0]
+
+    @pytest.mark.parametrize("plain,html", (
+        ("APPROVE", "<p>hold</p>"),
+        ("hold", "<p>APPROVE</p>"),
+        ("APPROVE", "<p hidden>APPROVE</p>"),
+        ("APPROVE", {"unexpected": "shape"}),
+    ))
+    def test_multipart_disagreement_is_unreadable(self, monkeypatch, plain, html):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+
+        def fake_gws_json(args, timeout=45):
+            if "+triage" in args:
+                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                                      "from": "op@example.com"}]}
+            return {"body_text": plain, "body_html": html}
+
+        with _mock_inbox(side_effect=fake_gws_json):
+            outcome = ec.read_replies_with_status(["TOK"])
+        assert outcome.kind == "transport_error"
+        assert outcome.detail == "reply_quote_boundary_unknown"
+        assert outcome.texts == []
+        assert len(outcome.unreadable_replies) == 1
 
     def test_falls_back_to_body_html_when_no_plaintext(self, monkeypatch):
         # An HTML-only reply must not read as an empty body and silently drop the

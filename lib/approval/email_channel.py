@@ -246,16 +246,16 @@ def _authored_plain_checked(text: str) -> tuple[str, bool]:
                 not tail.strip() or tail.lstrip().startswith(">")
                 for tail in source[index + 1:]):
             return "\n".join(lines), True
-        header_start = index + 1 if _FORWARD.fullmatch(stripped) else index
-        headers = source[header_start:header_start + len(_OUTLOOK_HEADERS)]
-        if (len(headers) == len(_OUTLOOK_HEADERS) and
-                all(header.strip().casefold().startswith(name) and
-                    header.strip()[len(name):].strip()
-                    for header, name in zip(headers, _OUTLOOK_HEADERS)) and
-                (header_start != index or all(
-                    not tail.strip() or tail.lstrip().startswith(">")
-                    for tail in source[header_start + len(_OUTLOOK_HEADERS):]))):
-            return "\n".join(lines), True
+        if _FORWARD.fullmatch(stripped):
+            headers = source[index + 1:index + 1 + len(_OUTLOOK_HEADERS)]
+            if (len(headers) == len(_OUTLOOK_HEADERS) and
+                    all(header.strip().casefold().startswith(name) and
+                        header.strip()[len(name):].strip()
+                        for header, name in zip(headers, _OUTLOOK_HEADERS))):
+                tail = source[index + 1 + len(_OUTLOOK_HEADERS):]
+                if all(not part.strip() or part.lstrip().startswith(">") for part in tail):
+                    return "\n".join(lines), True
+                return "\n".join(lines), False
         if stripped.startswith(">"):
             saw_quote = True
             continue
@@ -952,15 +952,23 @@ def read_replies_with_status(
                              r"swarm-approve:\s*([A-Za-z0-9._-]+/[A-Za-z0-9._-]+#\d+)")
             targets = set(re.findall(token_pattern, raw_source, re.IGNORECASE))
             correlation_target = next(iter(targets)) if len(targets) == 1 else None
-            if not plain_safe:
+            html_body = ""
+            html_present = raw_html is not None and (
+                not isinstance(raw_html, str) or bool(raw_html.strip()))
+            if isinstance(raw_html, str) and html_present:
+                html_body, boundary_seen = _extract_authored_html(raw_html)
+                if html_body and not boundary_seen and _unmarked_notification_copy(html_body):
+                    html_body = ""
+            if not plain_safe or (plain and html_present and
+                                  (not html_body.strip() or
+                                   [line.casefold() for line in body.splitlines()] !=
+                                   [line.casefold() for line in html_body.splitlines()])):
                 saw_transport_error = True
                 transport_detail = "reply_quote_boundary_unknown"
                 unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
-            if not body and isinstance(raw_html, str):
-                body, boundary_seen = _extract_authored_html(raw_html)
-                if body and not boundary_seen and _unmarked_notification_copy(body):
-                    body = ""
+            if not plain:
+                body = html_body
             # A blank authored reply above a recognizable quote is readable:
             # it is a non-approval, so Turdus owes a correction.
             blank_quoted_reply = bool(plain and not body and
