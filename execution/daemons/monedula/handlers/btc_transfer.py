@@ -49,6 +49,16 @@ _METERED_CREDENTIALS = (
 _CREDIT_BALANCE_TOO_LOW = "Credit balance is too low"
 
 
+class PaymentOutcomeUnknown(RuntimeError):
+    """The transfer may or may not have been sent.
+
+    Raised rather than returned, so the payment loop takes its unknown-outcome
+    path: the journal keeps the intent with no outcome, the operator is told
+    the outcome is unknown, and later ticks hold the obligation rather than
+    closing or retrying it until a rail read settles it.
+    """
+
+
 class BtcTransferHandler(PaymentHandler):
     """Generic BTC transfer handler parameterised by a PaymentProfile."""
 
@@ -136,18 +146,14 @@ class BtcTransferHandler(PaymentHandler):
         if payment_result is None and _CREDIT_BALANCE_TOO_LOW in (
             output + (result.stderr or "")
         ):
-            # Named in the error so the operator sees why, but with no
-            # pre_submission claim: a wallet call before the refusal cannot be
-            # ruled out, so the chain is checked before any manual payment.
+            # A wallet call before the refusal cannot be ruled out, so this is
+            # the unknown case, not a failure: the chain is checked before any
+            # retry or manual payment.
             log.error(f"[{self.name}] claude CLI refused: {_CREDIT_BALANCE_TOO_LOW}")
-            return {
-                "status": "failed",
-                "handler": self.name,
-                "error": (
-                    f"claude CLI refused ({_CREDIT_BALANCE_TOO_LOW}); outcome unknown, "
-                    "check the chain before any retry or manual payment"
-                ),
-            }
+            raise PaymentOutcomeUnknown(
+                f"{self.name}: claude CLI refused ({_CREDIT_BALANCE_TOO_LOW}); "
+                "outcome unknown, check the chain before any retry or manual payment"
+            )
         if payment_result is None:
             log.error(
                 f"[{self.name}] No PAYMENT_RESULT line found in output:\n{output[:1000]}"

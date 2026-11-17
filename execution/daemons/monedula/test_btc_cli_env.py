@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 from handlers import btc_transfer
 from handlers.payment_profile import PaymentProfile
+from test_payment_approval import env  # noqa: F401 - pytest fixture
 
 SKILL_RUNNER = Path(__file__).resolve().parents[1] / "apis" / "skill_runner.py"
 
@@ -76,23 +77,56 @@ def test_credit_balance_output_is_an_unknown_outcome(fake_cli):
     _, reply = fake_cli
     reply["stdout"] = "Credit balance is too low\n"
 
-    result = _handler().execute({"summary": "Yoga"})
-
-    assert result["status"] == "failed"
-    assert "failure_stage" not in result
-    assert "Credit balance is too low" in result["error"]
-    assert "outcome unknown" in result["error"]
+    with pytest.raises(btc_transfer.PaymentOutcomeUnknown, match="outcome unknown"):
+        _handler().execute({"summary": "Yoga"})
 
 
 def test_credit_balance_on_stderr_is_an_unknown_outcome(fake_cli):
     _, reply = fake_cli
     reply["stderr"] = "Credit balance is too low\n"
 
-    result = _handler().execute({"summary": "Yoga"})
+    with pytest.raises(btc_transfer.PaymentOutcomeUnknown, match="Credit balance is too low"):
+        _handler().execute({"summary": "Yoga"})
 
-    assert result["status"] == "failed"
-    assert "failure_stage" not in result
-    assert "outcome unknown" in result["error"]
+
+def test_credit_refusal_holds_the_obligation_as_unknown(env, monkeypatch):
+    """Through the payment loop, with the real handler and a CLI that prints
+    only the refusal: the journal keeps the intent with no outcome, and the
+    next tick neither closes nor re-executes it."""
+    import payment_journal
+
+    w, neo = env
+    real = _handler()
+    w.tick()
+    key = neo.only["payment_key"]
+    neo.resolve(key, "approved", "attended yoga")
+
+    def refusing_cli(args, **kwargs):
+        return subprocess.CompletedProcess(
+            args, 0, stdout="Credit balance is too low\n", stderr=""
+        )
+
+    def refuse(match):
+        w.handler.execute_calls.append(match)
+        # The fake CLI is scoped to the handler call; the loop's own
+        # subprocesses are left alone.
+        with monkeypatch.context() as m:
+            m.setattr(btc_transfer, "_find_claude", lambda: "/usr/bin/claude")
+            m.setattr(btc_transfer.subprocess, "run", refusing_cli)
+            return real.execute({"summary": "Yoga"})
+
+    monkeypatch.setattr(w.handler, "execute", refuse)
+    try:
+        w.tick(minutes=15)
+    except btc_transfer.PaymentOutcomeUnknown:
+        pass
+    assert payment_journal.obligation_state(w.journal, key) == "intent"
+    try:
+        w.tick(minutes=15)
+    except btc_transfer.PaymentOutcomeUnknown:
+        pass
+    assert len(w.handler.execute_calls) == 1
+    assert payment_journal.obligation_state(w.journal, key) == "intent"
 
 
 def test_payment_result_wins_over_credit_balance_text(fake_cli):
