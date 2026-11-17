@@ -311,6 +311,19 @@ def test_allowlist_http_verbs_are_scoped(http_method, session_id, allowed):
         assert upstream_requests[0][3]["mcp-session-id"] == session_id
 
 
+@pytest.mark.parametrize("raw_id", ("1e999", "-1e999", "1E400", "[1]", '{"a":1}', "true", "null", '"abc"', "7", "1.5"))
+def test_denial_response_is_always_valid_json(raw_id):
+    body = ('{"jsonrpc":"2.0","id":' + raw_id + ',"method":"resources/read","params":{}}').encode()
+    status, payload, sign_calls, upstream_requests = _in_memory_mcp_request(body, ("store",))
+    assert status == 403
+    parsed = json.loads(payload, parse_constant=lambda name: pytest.fail(f"non-JSON constant {name}"))
+    assert parsed["error"]["code"] == -32003
+    assert sign_calls == [] and upstream_requests == []
+    expected = {"1e999": None, "-1e999": None, "1E400": None, "[1]": None, '{"a":1}': None,
+                "true": None, "null": None, '"abc"': "abc", "7": 7, "1.5": 1.5}[raw_id]
+    assert parsed["id"] == expected
+
+
 def test_granted_job_is_refused_the_uploaded_file_route():
     # A file's bytes are a data read no tool grant covers.
     status, payload, sign_calls, upstream_requests = _in_memory_mcp_request(

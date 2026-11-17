@@ -29,6 +29,7 @@ import http.client
 import ipaddress
 import json
 import logging
+import math
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -536,12 +537,20 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         log.info("neotoma proxy %s %s %d in=%d out=%d", method, path, status, bytes_in, bytes_out)
 
     def _reject_rpc(self, method: str, path: str, request_id, bytes_in: int) -> None:
+        # The id is echoed back only when it is a valid JSON-RPC id that serializes
+        # to valid JSON: a string, an integer or a finite number. Anything else
+        # (a boolean, a container, 1e999 parsed as infinity, NaN) answers null.
         if isinstance(request_id, bool) or not isinstance(request_id, (str, int, float, type(None))):
             request_id = None
-        payload = json.dumps({
-            "jsonrpc": "2.0", "id": request_id,
-            "error": {"code": -32003, "message": "Neotoma tool not granted"},
-        }, separators=(",", ":")).encode()
+        if isinstance(request_id, float) and not math.isfinite(request_id):
+            request_id = None
+        body = {"jsonrpc": "2.0", "id": request_id,
+                "error": {"code": -32003, "message": "Neotoma tool not granted"}}
+        try:
+            payload = json.dumps(body, separators=(",", ":"), allow_nan=False).encode()
+        except (ValueError, OverflowError):
+            body["id"] = None
+            payload = json.dumps(body, separators=(",", ":"), allow_nan=False).encode()
         self.close_connection = True
         self.send_response(403)
         self.send_header("Content-Type", DEFAULT_CONTENT_TYPE)
