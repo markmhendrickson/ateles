@@ -1,0 +1,47 @@
+{
+  "entity_type": "payment_event",
+  "schema_version": "2.0",
+  "schema_definition": {
+    "canonical_name_fields": [
+      {"composite": ["approval_id", "payment_date"]},
+      {"composite": ["primary_session_key", "payment_date"]}
+    ],
+    "canonical_name_strict": true,
+    "fields": {
+      "label": {"type": "string", "description": "Human label for the payment (handler or profile label)."},
+      "payment_type": {"type": "string", "description": "Rail: btc or wise."},
+      "amount_eur": {"type": "number", "description": "Amount in euros."},
+      "amount_btc": {"type": "string", "description": "Amount in BTC, for BTC payments."},
+      "btc_address": {"type": "string", "description": "Destination address. Payee detail, never identity: many payments share one address."},
+      "txid": {"type": "string", "description": "On-chain transaction id, for BTC payments."},
+      "status": {"type": "string", "description": "Outcome status reported by the rail (e.g. sent, failed)."},
+      "payment_date": {"type": "date", "description": "Date the payment was made. Part of every identity rule."},
+      "memo_policy": {"type": "string", "description": "Memo/OP_RETURN policy applied (BTC payments carry none)."},
+      "network": {"type": "string", "description": "Network the payment ran on."},
+      "fee_sats": {"type": "number", "description": "Network fee in satoshis."},
+      "notes": {"type": "string", "description": "Free-text notes."},
+      "approval_id": {"type": "string", "description": "Entity id of the payment_approval record that authorized this payment. Primary identity with payment_date."},
+      "session_keys": {"type": "array", "description": "Calendar session keys (handler:event_id) this payment covers."},
+      "primary_session_key": {"type": "string", "description": "First entry of session_keys. Scalar copy so it can sit in the fallback identity rule with payment_date when there is no approval_id."}
+    }
+  },
+  "reducer_config": {
+    "merge_policies": {
+      "label": {"strategy": "last_write"},
+      "payment_type": {"strategy": "last_write"},
+      "amount_eur": {"strategy": "last_write"},
+      "amount_btc": {"strategy": "last_write"},
+      "btc_address": {"strategy": "last_write"},
+      "txid": {"strategy": "last_write"},
+      "status": {"strategy": "last_write"},
+      "payment_date": {"strategy": "last_write"},
+      "memo_policy": {"strategy": "last_write"},
+      "network": {"strategy": "last_write"},
+      "fee_sats": {"strategy": "last_write"},
+      "notes": {"strategy": "last_write"},
+      "approval_id": {"strategy": "last_write"},
+      "session_keys": {"strategy": "last_write"},
+      "primary_session_key": {"strategy": "last_write"}
+    }
+  }
+}

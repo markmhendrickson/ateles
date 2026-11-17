@@ -388,9 +388,11 @@ class TestDispatcherReadersIgnoreNonSwarmAuthors:
                     # No scope file on the base branch: the default area rule.
                     return _R({}, 404)
                 if "/compare/" in url:
-                    files = [{"filename": "a.txt", "patch": "+x\n", "changes": 1}]
+                    files = [{"filename": "a.txt", "status": "modified",
+                              "patch": "+x\n", "changes": 1}]
                     if url.rsplit("...", 1)[1] == NEW:
-                        files.append({"filename": TEST_FILE, "patch": "+y\n", "changes": 1})
+                        files.append({"filename": TEST_FILE, "status": "modified",
+                                      "patch": "+y\n", "changes": 1})
                     return _R({"files": files})
                 page = (params or {}).get("page", 1)
                 return _R(comments if page == 1 else [])

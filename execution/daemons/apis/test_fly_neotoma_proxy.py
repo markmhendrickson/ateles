@@ -24,6 +24,9 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _RUNNER_DIR = _REPO_ROOT / "deploy" / "fly-runner"
 
 UPSTREAM_BASE = "https://neotoma.example"
+SOURCE_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+SOURCE_PATH = f"/sources/{SOURCE_ID}/content"
+SOURCE_BYTES = b"%PDF-1.4 synthetic upload \x00\x01\xff"
 SIGNATURE = {"signature": "sig1=:AAAA:", "signature-input": "sig1=()", "signature-key": "sig1=jwt"}
 
 
@@ -81,7 +84,18 @@ class _Upstream:
 
             def do_GET(self):
                 self._record()
+                if self.path.startswith("/sources/"):
+                    self._reply(SOURCE_BYTES, content_type="application/pdf")
+                    return
                 self._reply(b"data: hello\n\n", content_type="text/event-stream")
+
+            def do_PUT(self):
+                self._record()
+                self._reply(b"")
+
+            def do_PATCH(self):
+                self._record()
+                self._reply(b"")
 
             def do_DELETE(self):
                 self._record()
@@ -146,7 +160,7 @@ def _lower(headers):
     return {k.lower(): v for k, v in headers.items()}
 
 
-def _in_memory_mcp_request(body, allowed_tools, *, http_method="POST", session_id=None):
+def _in_memory_mcp_request(body, allowed_tools, *, http_method="POST", session_id=None, path="/mcp"):
     sign_calls, upstream_requests = [], []
 
     class Connection:
@@ -174,7 +188,7 @@ def _in_memory_mcp_request(body, allowed_tools, *, http_method="POST", session_i
     handler = neotoma_proxy._ProxyHandler.__new__(neotoma_proxy._ProxyHandler)
     handler.proxy = proxy
     handler.command = http_method
-    handler.path = "/mcp"
+    handler.path = path
     handler.headers = Message()
     handler.headers["Content-Length"] = str(len(body))
     handler.headers["Content-Type"] = "application/json"
@@ -183,7 +197,7 @@ def _in_memory_mcp_request(body, allowed_tools, *, http_method="POST", session_i
     handler.rfile = io.BytesIO(body)
     handler.wfile = io.BytesIO()
     handler.request_version = "HTTP/1.1"
-    handler.requestline = f"{http_method} /mcp HTTP/1.1"
+    handler.requestline = f"{http_method} {path} HTTP/1.1"
     handler.close_connection = False
     handler._handle()
     response = http.client.HTTPResponse(_MemorySocket(handler.wfile.getvalue()))
@@ -295,6 +309,25 @@ def test_allowlist_http_verbs_are_scoped(http_method, session_id, allowed):
         assert sign_calls == [("DELETE", UPSTREAM_BASE + "/mcp", None, "application/json")]
         assert upstream_requests[0][0:3] == ("DELETE", "/mcp", None)
         assert upstream_requests[0][3]["mcp-session-id"] == session_id
+
+
+def test_granted_job_is_refused_the_uploaded_file_route():
+    # A file's bytes are a data read no tool grant covers.
+    status, payload, sign_calls, upstream_requests = _in_memory_mcp_request(
+        b"", ("store",), http_method="GET", path=SOURCE_PATH,
+    )
+    assert status == 403
+    assert json.loads(payload)["error"]["code"] == -32003
+    assert sign_calls == [] and upstream_requests == []
+
+
+def test_no_allowlist_still_forwards_the_uploaded_file_route():
+    status, _, sign_calls, upstream_requests = _in_memory_mcp_request(
+        b"", None, http_method="GET", path=SOURCE_PATH,
+    )
+    assert status == 200
+    assert sign_calls == [("GET", UPSTREAM_BASE + SOURCE_PATH, None, "application/json")]
+    assert upstream_requests[0][0:3] == ("GET", SOURCE_PATH, None)
 
 
 def test_no_allowlist_keeps_ungranted_tool_forwarding():
@@ -488,6 +521,119 @@ def test_rejections_never_reach_upstream(method, path, status, upstream, sign_ca
     assert resp.status == status
     assert upstream.requests == []
     assert sign_calls == []
+
+
+# --- GET /sources/<id>/content --------------------------------------------
+
+
+def test_source_content_get_is_signed_and_returns_the_file_bytes(upstream, sign_calls, proxy_port):
+    conn = _client(proxy_port)
+    conn.request("GET", SOURCE_PATH, headers={"Authorization": "Bearer x", "Cookie": "c=1", "Accept": "*/*"})
+    resp = conn.getresponse()
+    payload = resp.read()
+    conn.close()
+
+    assert resp.status == 200
+    assert payload == SOURCE_BYTES
+    assert resp.getheader("Content-Type") == "application/pdf"
+    assert resp.getheader("Set-Cookie") is None and resp.getheader("X-Internal") is None
+    assert sign_calls == [("GET", UPSTREAM_BASE + SOURCE_PATH, None, "application/json")]
+    assert len(upstream.requests) == 1
+    seen = upstream.requests[0]
+    assert (seen["method"], seen["path"], seen["body"]) == ("GET", SOURCE_PATH, b"")
+    headers = _lower(seen["headers"])
+    assert headers["signature"] == SIGNATURE["signature"]
+    assert headers["accept"] == "*/*"
+    assert "authorization" not in headers and "cookie" not in headers
+
+
+def test_source_content_logs_method_path_status_and_bytes_never_the_body(caplog, upstream, proxy_port):
+    caplog.set_level("INFO", logger="neotoma_proxy")
+    conn = _client(proxy_port)
+    conn.request("GET", SOURCE_PATH)
+    resp = conn.getresponse()
+    resp.read()
+    conn.close()
+    deadline = time.time() + 5
+    while time.time() < deadline and not any(SOURCE_PATH in r.getMessage() for r in caplog.records):
+        time.sleep(0.01)
+    lines = [r.getMessage() for r in caplog.records]
+    assert f"neotoma proxy GET {SOURCE_PATH} 200 in=0 out={len(SOURCE_BYTES)}" in lines
+    assert not any("synthetic upload" in line for line in lines)
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+def test_source_content_refuses_every_other_method_with_404(method, upstream, sign_calls, proxy_port):
+    conn = _client(proxy_port)
+    conn.request(method, SOURCE_PATH, body=b"{}" if method in ("POST", "PUT", "PATCH") else None)
+    resp = conn.getresponse()
+    resp.read()
+    conn.close()
+    assert resp.status == 404
+    assert upstream.requests == [] and sign_calls == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        # Every other path, including neighbours of the allowed one.
+        "/sources",
+        f"/sources/{SOURCE_ID}",
+        f"/sources/{SOURCE_ID}/content/",
+        f"/sources/{SOURCE_ID}/content/extra",
+        f"/sources/{SOURCE_ID}/metadata",
+        f"/sources/{SOURCE_ID}/content?download=1",
+        f"/sources/{SOURCE_ID}/content?",
+        "/session",
+        "/entities",
+        f"/api/sources/{SOURCE_ID}/content",
+        f"http://neotoma.example/sources/{SOURCE_ID}/content",
+        # Malformed ids.
+        "/sources//content",
+        "/sources/abc/content",
+        "/sources/ent_0123456789abcdef01234567/content",
+        f"/sources/{SOURCE_ID.upper()}/content",
+        f"/sources/{SOURCE_ID}0/content",
+        f"/sources/{SOURCE_ID[:-1]}/content",
+        f"/sources/{SOURCE_ID.replace('-', '')}/content",
+        f"/sources/{SOURCE_ID}%00/content",
+        # Path traversal.
+        "/sources/../mcp",
+        "/sources/../session/content",
+        f"/sources/{SOURCE_ID}/../../mcp",
+        "/sources/..%2f..%2fsession/content",
+        "/sources/%2e%2e/content",
+        f"/sources/{SOURCE_ID}/..%2fcontent",
+    ],
+)
+def test_source_content_refuses_other_paths_ids_traversal_and_queries_with_404(
+    path, upstream, sign_calls, proxy_port
+):
+    conn = _client(proxy_port)
+    conn.request("GET", path)
+    resp = conn.getresponse()
+    resp.read()
+    conn.close()
+    assert resp.status == 404
+    assert upstream.requests == [] and sign_calls == []
+
+
+@pytest.mark.parametrize(("peer_uid", "status"), [(1000, 403), (None, 403), (4242, 200)])
+def test_source_content_is_only_forwarded_for_the_allowed_peer_uid(
+    peer_uid, status, monkeypatch, upstream, sign_calls, uid_checked_proxy_port
+):
+    monkeypatch.setattr(neotoma_proxy, "proc_net_peer_uid", lambda *a, **k: peer_uid)
+    conn = _client(uid_checked_proxy_port)
+    conn.request("GET", SOURCE_PATH)
+    resp = conn.getresponse()
+    payload = resp.read()
+    conn.close()
+    assert resp.status == status
+    if status == 403:
+        assert upstream.requests == [] and sign_calls == []
+    else:
+        assert payload == SOURCE_BYTES
+        assert len(upstream.requests) == 1 and len(sign_calls) == 1
 
 
 def test_chunked_request_body_gets_411(upstream, sign_calls, proxy_port):
