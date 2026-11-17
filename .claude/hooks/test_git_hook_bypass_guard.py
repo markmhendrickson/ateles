@@ -473,6 +473,41 @@ def test_file_tool_allows_ordinary_repository_file(tool):
     assert proc.returncode == 0 and proc.stdout.strip() == ""
 
 
+@pytest.mark.parametrize("command", (
+    "cp config .git/",
+    "cp -r hooks .git",
+    "mv config .git/",
+    "install config .git",
+    "ln -s config .git/",
+    "rsync config .git/",
+    "cp -r git ~/.config/",
+    "cp -r husky ~/.config",
+    "cp pre-commit .husky/",
+))
+def test_copy_into_protected_directory_refused(command):
+    assert_refused(command)
+
+
+@pytest.mark.parametrize("command", (
+    "cd .git && printf x > config",
+    "cd ~/.config && mkdir git",
+    "cd repo/.git/worktrees/linked",
+    "pushd .husky",
+    "cd ~ && cd .config",
+))
+def test_entering_protected_directory_refused(command):
+    assert_refused(command)
+
+
+@pytest.mark.parametrize("command", (
+    "cp notes.md docs/releases/",
+    "cd docs/releases && printf x > notes.md",
+    "mv draft.md docs/",
+))
+def test_ordinary_copy_and_cd_allowed(command):
+    assert_allowed(command)
+
+
 def test_non_bash_tool_ignored():
     proc = run_hook({"tool_name": "Edit", "tool_input": {"command": "git commit --no-verify"}})
     assert proc.returncode == 0 and proc.stdout.strip() == ""

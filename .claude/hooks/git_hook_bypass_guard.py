@@ -818,6 +818,12 @@ def _protected_path(path: str) -> bool:
     )
 
 
+def _enters_protected_dir(path: str) -> bool:
+    """A working directory from which a relative write reaches a protected path."""
+    normalized = os.path.normpath(os.path.expanduser(path))
+    return bool(re.search(r"(?:^|/)(?:\.git|\.husky|\.config)(?:/|$)", normalized))
+
+
 def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None:
     for op, target in cmd.redirects:
         if ">" in op and _protected_path(target.text):
@@ -834,11 +840,22 @@ def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None
         or arg.startswith("--in-place") for arg in args
     ):
         targets = args
-    elif base in {"cp", "mv", "ln", "install"}:
+    elif base in {"cp", "mv", "ln", "install", "rsync"}:
         targets = args[-1:] + [args[i + 1] for i, arg in enumerate(args[:-1])
                                if arg in ("-t", "--target-directory")]
+        sources = [arg for arg in args[:-1] if not arg.startswith("-")]
+        # A directory target writes each source under its own name, so
+        # `cp config .git/` lands on .git/config.
+        targets += [os.path.join(target, os.path.basename(os.path.normpath(source)))
+                    for target in list(targets) for source in sources]
         if base == "mv":
             targets += args  # moving a protected source also changes it
+    elif base in {"cd", "pushd"}:
+        # Entering a git, Husky or config directory lets a later relative
+        # write (`cd .git && printf x > config`) reach a protected file.
+        for arg in args:
+            if not arg.startswith("-") and _enters_protected_dir(arg):
+                return f"{base} into protected hook or git config directory {arg}"
     elif base in {"rm", "touch", "truncate", "chmod", "chown", "mkdir"}:
         targets = args
     elif base == "dd":
