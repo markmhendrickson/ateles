@@ -84,3 +84,60 @@ def test_superseded_blocking_verdict_still_spends_round():
     old = _verdict("pm", H1, verdict="BLOCKED", n=0)
     old["body"] = swarm_dispatch.compose_superseded_verdict(old["body"], H2)
     assert _status([old], H2).round_number == 2
+
+
+@pytest.mark.parametrize("bad_time", [
+    "", None, "   ", "yesterday", "2026-10-27T10:00:00", "2026-02-30T10:00:00Z",
+    123, "2019-12-31T23:00:00Z", "2101-01-01T00:00:00Z", "2099-01-01T00:00:00Z",
+])
+@pytest.mark.parametrize("bad_head", [H1, H4])
+def test_missing_or_unparseable_timestamp_fails_closed(bad_time, bad_head):
+    comments = [_verdict("pm", head, verdict="BLOCKED", n=i) for i, head in enumerate((H1, H2, H3))]
+    comments.append(_verdict("pm", H4, n=4))
+    affected = next(comment for comment in comments if bad_head in comment["body"])
+    affected["created_at"] = bad_time
+    status = _status(comments, H4)
+    assert status.refused
+    assert status.indeterminate_head == bad_head
+    assert f"round order indeterminate: a verdict timestamp is missing or malformed for {bad_head}" in status.describe()
+
+
+@pytest.mark.parametrize("bad_head", [H1, H4])
+def test_absent_timestamp_fails_closed(bad_head):
+    comments = [_verdict("pm", head, verdict="BLOCKED", n=i) for i, head in enumerate((H1, H2, H3))]
+    comments.append(_verdict("pm", H4, n=4))
+    next(comment for comment in comments if bad_head in comment["body"]).pop("created_at")
+    assert _status(comments, H4).refused
+
+
+def test_valid_offsets_are_normalized_to_utc_before_ordering():
+    first = _verdict("pm", H1, verdict="BLOCKED", n=0)
+    second = _verdict("pm", H2, n=1)
+    first["created_at"] = "2026-10-27T12:00:00+02:00"
+    second["created_at"] = "2026-10-27T10:01:00Z"
+    status = _status([second, first], H2)
+    assert status.round_number == 2 and not status.refused
+    assert status.rounds[0].heads == (H1,)
+
+
+def test_reset_to_earlier_clear_head_spends_after_blocking_history():
+    comments = [_verdict("pm", head, verdict="BLOCKED" if head != H2 else "SIGNED_OFF", n=i)
+                for i, head in enumerate((H1, H2, H3, H4))]
+    status = _status(comments, H2)
+    assert status.round_number == 4 and status.refused
+    assert status.rounds[-1].heads == (H2,)
+    assert all(head[:7] in status.describe() for head in (H1, H2, H3, H4))
+    assert "whole verdict history" in status.describe()
+
+
+def test_reset_to_earlier_head_after_all_clear_history_does_not_spend():
+    comments = [_verdict("pm", head, n=i) for i, head in enumerate((H1, H2, H3, H4))]
+    status = _status(comments, H2)
+    assert status.round_number == 1 and not status.refused
+    assert status.rounds[0].heads == (H1, H2, H3, H4)
+
+
+def test_rerun_on_latest_reviewed_head_spends_no_further_round():
+    comments = [_verdict("pm", head, verdict="BLOCKED", n=i) for i, head in enumerate((H1, H2, H3, H4))]
+    assert _status(comments, H4).round_number == 4
+    assert _status(comments + [_verdict("arch", H4, n=5)], H4).round_number == 4

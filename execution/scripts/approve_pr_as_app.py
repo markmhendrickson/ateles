@@ -142,7 +142,10 @@ not merged after three build, review and correct rounds is split or cut in scope
 before another round runs. A new round starts when a reviewed head follows a
 round with a blocking or unreadable lens verdict. Clear re-reviews on later
 heads stay in the same round. The tool orders heads by verdict comment creation
-time. A fourth round is refused unless the operator posted an unedited,
+time. Missing or malformed verdict timestamps refuse approval because the
+round order is unknown. Returning to an earlier reviewed head after any
+blocking round counts as a new round; the cap uses the whole PR history. A
+fourth round is refused unless the operator posted an unedited,
 PR-specific `/override-round-cap` comment with a reason of at least 20
 characters. The override lifts only this cap; every other gate still binds.
 
@@ -2657,6 +2660,7 @@ async def run(
         print(
             "round cap: "
             + (f"OVERRIDDEN by the operator ({override['html_url']})" if override
+               else "INDETERMINATE (refusing)" if rounds.indeterminate_head
                else "REACHED (split or cut scope)" if rounds.refused else "OK")
         )
         print(f"overall: {'PASS' if overall_pass else 'FAIL'}")

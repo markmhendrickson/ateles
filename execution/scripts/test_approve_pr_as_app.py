@@ -138,6 +138,7 @@ class _FakeClient:
         *,
         comments: list[dict],
         check_runs: list[dict],
+        comments_after_first_get: list[dict] | None = None,
         combined_state: str = "success",
         legacy_status_total_count: int = 1,
         changed_files: list[str] | None = None,
@@ -191,6 +192,8 @@ class _FakeClient:
         self.scope_by_ref = scope_by_ref or {}
         self.scope_refs: list[str] = []
         self.comments = comments
+        self.comments_after_first_get = comments_after_first_get
+        self.comment_get_count = 0
         self.check_runs = check_runs
         self.combined_state = combined_state
         self.legacy_status_total_count = legacy_status_total_count
@@ -324,8 +327,12 @@ class _FakeClient:
             )
             return _FakeResponse(rows[(page - 1) * 100 : page * 100])
         if url.endswith(f"/issues/{PR}/comments"):
+            self.comment_get_count += 1
             page = (params or {}).get("page", 1)
-            return _FakeResponse(self.comments if page == 1 else [])
+            comments = self.comments
+            if self.comment_get_count > 1 and self.comments_after_first_get is not None:
+                comments = self.comments_after_first_get
+            return _FakeResponse(comments if page == 1 else [])
         if url.endswith(f"/issues/{PARENT_ISSUE}/comments"):
             page = (params or {}).get("page", 1)
             return _FakeResponse(self.parent_issue_comments if page == 1 else [])
@@ -4908,8 +4915,9 @@ def _cap_round_comments(heads: list[str], *, author: str = SWARM_LOGIN, start: i
 
 @pytest.mark.asyncio
 class TestRoundCap:
-    async def _run(self, monkeypatch, comments, *, apply=True, **kw):
-        client = _FakeClient(comments=comments, check_runs=_green_checks())
+    async def _run(self, monkeypatch, comments, *, apply=True, comments_after_first_get=None, **kw):
+        client = _FakeClient(comments=comments, check_runs=_green_checks(),
+                             comments_after_first_get=comments_after_first_get)
         _install_client(monkeypatch, client)
         _install_app_mint(monkeypatch)
         code = await target.run(REPO, PR, ALL_FOUR, apply=apply, **kw)
@@ -4986,6 +4994,49 @@ class TestRoundCap:
         assert code == 0 and len(client.posted) == 1
         assert "round 2 of 3" in capsys.readouterr().out
 
+    @pytest.mark.parametrize("bad_time", [
+        "", None, "   ", "not ISO", "2026-11-17T00:00:00", "2026-02-30T00:00:00Z", 123,
+    ])
+    async def test_missing_or_unparseable_timestamp_fails_closed(self, monkeypatch, capsys, bad_time):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        comments[-1]["created_at"] = bad_time
+        code, client = await self._run(monkeypatch, comments)
+        out = capsys.readouterr().out
+        assert code == 1 and client.posted == []
+        assert f"round order indeterminate: a verdict timestamp is missing or malformed for {HEAD}" in out
+
+    async def test_absent_timestamp_on_current_head_fails_closed(self, monkeypatch, capsys):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        comments[-1].pop("created_at")
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 1 and client.posted == []
+        assert "round order indeterminate" in capsys.readouterr().out
+
+    async def test_unparseable_timestamp_on_earlier_head_fails_closed(self, monkeypatch, capsys):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        comments[0]["created_at"] = "broken"
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 1 and client.posted == []
+        assert f"for {ROUND_HEADS[0]}" in capsys.readouterr().out
+
+    async def test_returning_to_earlier_clear_head_counts_whole_history(self, monkeypatch, capsys):
+        comments = _cap_round_comments(ROUND_HEADS[:1], start=100)
+        for i, lens in enumerate(ALL_FOUR):
+            comments.append(_comment(110 + i, _lens_comment_body(lens, target.LENS_AGENTS[lens])))
+        comments += _cap_round_comments(ROUND_HEADS[1:], start=120)
+        code, client = await self._run(monkeypatch, comments)
+        out = capsys.readouterr().out
+        assert code == 1 and client.posted == []
+        assert "round 4 of 3 across the whole verdict history" in out
+        assert all(head[:7] in out for head in (*ROUND_HEADS, HEAD))
+
+    async def test_all_clear_history_return_to_earlier_head_is_not_refused(self, monkeypatch):
+        comments = _all_clear_comments(ALL_FOUR)
+        for i, head in enumerate(ROUND_HEADS):
+            comments.append(_comment(1100 + i, _lens_comment_body("pm", target.LENS_AGENTS["pm"], head=head)))
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 0 and len(client.posted) == 1
+
 
 def _operator_override(id_=1200, *, author=None, reason="The review has exceeded the cap for a documented reason.",
                        edited=False, other_pr=False, bot=False):
@@ -5027,6 +5078,56 @@ class TestRoundCapOverride:
         code, client = await self._run(monkeypatch,
             _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override])
         assert code == 1 and client.posted == []
+
+    @pytest.mark.parametrize("field,value", [
+        ("type", None), ("type", "Organization"),
+        ("login", swarm_dispatch._OPERATOR_LOGIN.swapcase()), ("login", None),
+        ("html_url", None), ("created_at", None), ("updated_at", None),
+    ])
+    async def test_override_missing_or_wrong_identity_and_evidence_refused(self, monkeypatch, field, value):
+        override = _operator_override()
+        if field in {"type", "login"}:
+            override["user"][field] = value
+        else:
+            override[field] = value
+        code, client = await self._run(monkeypatch,
+            _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override])
+        assert code == 1 and client.posted == []
+
+    @pytest.mark.parametrize("field", ["type", "html_url", "created_at", "updated_at"])
+    async def test_override_missing_required_field_refused(self, monkeypatch, field):
+        override = _operator_override()
+        (override["user"] if field == "type" else override).pop(field)
+        code, client = await self._run(monkeypatch,
+            _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override])
+        assert code == 1 and client.posted == []
+
+    async def test_valid_override_lifts_indeterminate_order_only(self, monkeypatch, capsys):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        comments[0]["created_at"] = None
+        comments.append(_operator_override())
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 0 and len(client.posted) == 1
+        assert "round order indeterminate" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("fresh_override", [None, "edited"])
+    async def test_override_changed_or_vanished_at_fresh_read_refuses(
+        self, monkeypatch, capsys, fresh_override
+    ):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        original = _operator_override()
+        fresh = [] if fresh_override is None else [{**original, "updated_at": "2026-11-18T10:00:00Z"}]
+        code, client = await self._run(monkeypatch, comments + [original],
+                                        comments_after_first_get=comments + fresh)
+        assert code == 1 and client.posted == [] and client.comment_get_count >= 2
+        assert "override changed or vanished" in capsys.readouterr().out
+
+    async def test_override_still_present_at_fresh_read_proceeds(self, monkeypatch):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        original = _operator_override()
+        code, client = await self._run(monkeypatch, comments + [original],
+                                        comments_after_first_get=comments + [{**original}])
+        assert code == 0 and len(client.posted) == 1 and client.comment_get_count >= 2
 
     async def test_flag_and_environment_cannot_grant_override(self, monkeypatch):
         monkeypatch.setenv("ATELES_OVERRIDE_ROUND_CAP", "1")
