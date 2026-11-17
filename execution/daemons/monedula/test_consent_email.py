@@ -1273,7 +1273,9 @@ def test_earlier_approval_cannot_survive_later_hold_or_withdrawal(
     monkeypatch.setattr(consent_email, "read_replies_with_status", read)
     for _ in range(2):
         monedula.main()
-        assert all(handler.execute_calls == [] for handler in handlers)
+        assert handlers[0].execute_calls == []
+    if batch:
+        assert len(handlers[1].execute_calls) == 1
 
 
 def test_consent_multi_item_reply_is_atomic_and_valid_reply_approves_both():

@@ -463,6 +463,7 @@ def overlay_verdicts(
         match_key(i): "awaiting_approval" for i in items
     }
     decisions: dict[str, HandlerState] = {}
+    held_keys: set[str] = set()
     unrecognized = False
     multi = len(items) > 1
     by_token = {i.token.upper(): i for i in items}
@@ -470,6 +471,14 @@ def overlay_verdicts(
     def _flag(line: str) -> None:
         nonlocal unrecognized
         unrecognized = True
+        marker = _line_marker_token(line)
+        if marker in by_token:
+            held_keys.add(match_key(by_token[marker]))
+        elif marker is None:
+            if multi:
+                held_keys.update(states)
+            elif subject_tok in by_token:
+                held_keys.add(match_key(by_token[subject_tok]))
         if unrecognized_lines is not None and line not in unrecognized_lines:
             unrecognized_lines.append(line)
 
@@ -570,10 +579,9 @@ def overlay_verdicts(
                 ):
                     _flag(line)
 
-    if unrecognized:
-        return states, True
     for key, state in decisions.items():
-        states[key] = state
+        if key not in held_keys:
+            states[key] = state
     return states, unrecognized
 
 
