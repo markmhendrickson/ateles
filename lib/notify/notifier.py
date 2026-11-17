@@ -857,6 +857,11 @@ class Notifier:
         """True when ``key`` was already reported and not yet cleared."""
         return self._is_duplicate(key)
 
+    def dedupe_keys_with_prefix(self, prefix: str) -> tuple[str, ...]:
+        """Journal keys beginning with ``prefix``, for condition cleanup."""
+        with self._notification_lock:
+            return tuple(key for key in self._dedupe_journal if key.startswith(prefix))
+
     def has_transport(self, email_eligible: bool = True) -> bool:
         """True when at least one delivery route is configured.
 

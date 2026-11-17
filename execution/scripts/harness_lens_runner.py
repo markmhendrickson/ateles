@@ -270,6 +270,7 @@ for _p in (str(REPO_ROOT), str(_DAEMON_DIR)):
 
 # noqa: E402 — path bootstrap above must run first
 import dispatch_role  # noqa: E402
+import model_tiering  # noqa: E402
 from lib.credential_templates import (  # noqa: E402
     is_placeholder_template,
     placeholder_template_sandbox_regexes,
@@ -3230,6 +3231,9 @@ async def run_compare(
 
 
 def main(argv: list[str] | None = None) -> int:
+    model_tiering.set_process_caller(
+        "interactive", os.environ.get(model_tiering.SESSION_ID_ENV)
+    )
     parser = argparse.ArgumentParser(
         prog="harness_lens_runner",
         description=(

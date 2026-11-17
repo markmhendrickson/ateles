@@ -234,6 +234,12 @@ def check_usage_thresholds(
             if notifier is None and journal is None:
                 journal = (journal_factory or _default_journal_factory)()
             probe = notifier if notifier is not None else journal
+            prefix = f"{DEDUPE_PREFIX}:{provider}:{name}:"
+            current_reset = reset_key or "no-reset"
+            for old_key in probe.dedupe_keys_with_prefix(prefix):
+                old_reset, separator, _ = old_key[len(prefix):].rpartition(":")
+                if separator and old_reset != current_reset:
+                    probe.clear_dedupe(old_key)
             if resets_at is None:
                 # No reset time means no per-window key: the key is reused
                 # across windows, so a threshold usage has fallen back under

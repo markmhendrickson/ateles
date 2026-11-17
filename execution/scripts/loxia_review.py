@@ -574,6 +574,14 @@ def run_reviewer(
 
 
 def main() -> None:
+    daemon_dir = Path(__file__).resolve().parents[1] / "daemons" / "apis"
+    if str(daemon_dir) not in sys.path:
+        sys.path.insert(0, str(daemon_dir))
+    import model_tiering
+
+    model_tiering.set_process_caller(
+        "interactive", os.environ.get(model_tiering.SESSION_ID_ENV)
+    )
     if not PR_NUMBER:
         print("[loxia] LOXIA_PR_NUMBER not set — nothing to review", file=sys.stderr)
         sys.exit(1)

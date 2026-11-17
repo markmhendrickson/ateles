@@ -39,6 +39,7 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR), str(_SCRIPTS_DIR)):
 
 import harness_lens_runner as hlr  # noqa: E402
 import harness_router  # noqa: E402
+import model_tiering  # noqa: E402
 import skill_runner  # noqa: E402
 from skill_runner import SkillResult  # noqa: E402
 from lib.daemon_runtime.agent_loader import AgentDefinition  # noqa: E402
@@ -4816,3 +4817,27 @@ def test_run_one_passes_the_repo_qualified_pr_to_dispatch(
     ))
     assert len(seen) == 1
     assert seen[0]["pr"] == f"{target.repo}#{target.pr}"
+
+
+def test_main_without_session_id_records_interactive_ledger_row(
+    monkeypatch, tmp_path, brief_file
+):
+    ledger = tmp_path / "tier-ledger.jsonl"
+    monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(ledger))
+    monkeypatch.delenv(model_tiering.SESSION_ID_ENV, raising=False)
+    monkeypatch.setattr(model_tiering, "_PROCESS_CALLER", (None, None))
+
+    async def record_dispatch(*args, **kwargs):
+        model_tiering.record_dispatch(
+            skill="pavo", provider="codex", resolved=None, model=None
+        )
+        return {"ok": True}
+
+    monkeypatch.setattr(hlr, "run_one", record_dispatch)
+    assert hlr.main([
+        "--repo", "owner/repo", "--pr", "1", "--head", SAMPLE_HEAD,
+        "--lens", "pm", "--provider", "codex", "--brief", str(brief_file),
+    ]) == 0
+    row = json.loads(ledger.read_text().splitlines()[0])
+    assert row["caller_kind"] == "interactive"
+    assert row["caller"] is None
