@@ -2598,6 +2598,8 @@ async def run(
         print(rounds.describe())
         if identity_gap:
             print(_unresolved_lens_reason(resolution))
+            if "the PR-opener App's bot login" in resolution.failed:
+                print("the PR-opener App is declared but its login cannot be read; approval is held")
         if owner_error:
             print(f"round-cap override unavailable: {owner_error}")
         if override:
