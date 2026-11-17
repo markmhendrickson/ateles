@@ -860,7 +860,15 @@ def test_no_reset_rollover_waits_for_in_flight_delivery(monkeypatch, tmp_path, l
     while time.monotonic() < deadline and spy.inner._dedupe_journal.get(key, {}).get("state") != "delivered":
         time.sleep(0.01)
     assert spy.inner._dedupe_journal[key]["state"] == "delivered"
-    usage_alerts.check_usage_thresholds("cursor", notifier=spy)
+    # The sender marks delivery before it releases its lock, so a check that
+    # lands in between skips and a later one clears the key. Assert the
+    # rollover happens once the in-flight send has fully finished.
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        usage_alerts.check_usage_thresholds("cursor", notifier=spy)
+        if key not in spy.inner._dedupe_journal:
+            break
+        time.sleep(0.01)
     assert key not in spy.inner._dedupe_journal
 
 
