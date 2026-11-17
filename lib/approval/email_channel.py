@@ -96,90 +96,110 @@ _RENDERED_PROSE = frozenset({
     "q", "cite", "address", "section", "article", "header", "footer", "main",
     "aside", "details", "summary", "dl", "dt", "dd",
 })
-_HIDING_CSS = re.compile(
-    r"(?i)(?:^|[;{])\s*(?:display\s*:\s*none\b|"
-    r"visibility\s*:\s*(?:hidden|collapse)\b|"
-    r"(?:opacity|font-size|max-height|max-width|text-indent)\s*:\s*"
-    r"(?:0(?:px|pt|em|rem|%)?|-[1-9]\d{2,}(?:px|pt|em|rem)?)\b|"
-    r"mso-hide\s*:\s*all\b|(?:clip|clip-path|content-visibility)\s*:|"
-    r"(?:color|-webkit-text-fill-color)\s*:\s*transparent\b|"
-    r"line-height\s*:\s*0(?:px|pt|em|rem|%)?\b|"
-    r"filter\s*:\s*opacity\s*\(\s*0(?:%)?\s*\)|"
-    r"transform\s*:\s*(?:scale\s*\(\s*0\s*\)|translate[XY]?\s*\(\s*-?[1-9]\d{2,})|"
-    r"@media\b|@import\b)"
-)
+_DARK_NAMES = {"black": (0, 0, 0), "navy": (0, 0, 128),
+               "darkblue": (0, 0, 139), "midnightblue": (25, 25, 112),
+               "darkslategray": (47, 79, 79), "dimgray": (105, 105, 105)}
+_LIGHT_NAMES = {"white": (255, 255, 255)}
+_SAFE_STYLE = frozenset({"font-family", "font-size", "font-weight", "font-style",
+                         "text-align", "text-decoration", "line-height", "white-space",
+                         "word-wrap", "overflow-wrap", "direction", "color",
+                         "background", "background-color"})
+
+
+def _rgba(value: str) -> tuple[int, int, int, float] | None:
+    """Parse only opaque, unambiguous CSS colours used by the approval policy."""
+    value = value.strip().lower()
+    if value in _DARK_NAMES | _LIGHT_NAMES:
+        return (*(_DARK_NAMES | _LIGHT_NAMES)[value], 1.0)
+    match = re.fullmatch(r"#([0-9a-f]{3}|[0-9a-f]{6})", value)
+    if match:
+        digits = match.group(1)
+        if len(digits) == 3:
+            return (*(int(c * 2, 16) for c in digits), 1.0)
+        return (*(int(digits[i:i + 2], 16) for i in (0, 2, 4)), 1.0)
+    match = re.fullmatch(
+        r"rgba?\(\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\s*[, ]\s*(\d{1,3})"
+        r"\s*(?:[,/]\s*(1(?:\.0+)?|0?\.\d+|0))?\s*\)", value)
+    if match:
+        channels = tuple(int(match.group(i)) for i in (1, 2, 3))
+        alpha = float(match.group(4)) if match.group(4) else 1.0
+        if all(channel <= 255 for channel in channels):
+            return (*channels, alpha)
+    return None
+
+
+def _safe_colour(value: str, *, background: bool) -> bool:
+    if not background and value.strip().lower() in _DARK_NAMES:
+        return True
+    rgba = _rgba(value)
+    return bool(rgba and rgba[3] == 1.0 and
+                (all(c >= 224 for c in rgba[:3]) if background else
+                 all(c <= 100 for c in rgba[:3])))
+
+
+def _safe_style(style: str) -> bool:
+    if re.search(r"(?i)/\*|[{}]|(?:var|calc|env)\s*\(", style):
+        return False
+    for declaration in style.split(";"):
+        if not declaration.strip():
+            continue
+        if declaration.count(":") != 1:
+            return False
+        name, value = (part.strip().lower() for part in declaration.split(":", 1))
+        if not value or "!important" in value:
+            return False
+        if name in {"color", "background", "background-color"}:
+            if not _safe_colour(value, background=name != "color"):
+                return False
+        elif name == "font-size":
+            size = re.fullmatch(r"(\d+(?:\.\d+)?)(px|pt|em|rem|%)", value)
+            if not size or float(size.group(1)) < {"px": 8, "pt": 6, "em": .5,
+                                                   "rem": .5, "%": 50}[size.group(2)]:
+                return False
+        elif name == "line-height":
+            if value != "normal" and not re.fullmatch(r"[1-9]\d*(?:\.\d+)?(?:px|pt|em|rem|%)?", value):
+                return False
+        elif name.startswith(("margin", "padding")):
+            if not re.fullmatch(r"(?:0|\d+(?:\.\d+)?(?:px|pt|em|rem|%))(?:\s+(?:0|\d+(?:\.\d+)?(?:px|pt|em|rem|%))){0,3}", value):
+                return False
+        elif name.startswith("border"):
+            if value not in {"none", "0", "0px"}:
+                return False
+        elif name not in _SAFE_STYLE:
+            return False
+    return True
 
 
 def _hiding_style(style: str) -> bool:
-    """Reject CSS that can conceal authored text without a renderer."""
-    css = re.sub(r"/\*.*?\*/", "", style, flags=re.DOTALL).lower()
-    if _HIDING_CSS.search(css):
-        return True
-    declarations = dict((name.strip(), value.strip().removesuffix("!important").strip())
-                        for name, value in re.findall(r"(?:^|[;{])\s*([\w-]+)\s*:\s*([^;{}]+)", css))
-    if (declarations.get("overflow") in {"hidden", "clip"} and
-            any(declarations.get(dim, "").startswith("0") for dim in ("height", "width"))):
-        return True
-    if declarations.get("position") in {"absolute", "fixed"} and any(
-            re.match(r"-[1-9]\d{2,}(?:px|pt|em|rem)?\b", declarations.get(side, ""))
-            for side in ("left", "top", "right", "bottom")):
-        return True
-    foreground = declarations.get("color")
-    background = declarations.get("background-color") or declarations.get("background")
-    if foreground and background and foreground == background:
-        return True
-    # Near-white text cannot be told from its background without a renderer (the
-    # background may come from an ancestor or a style block), so it counts as
-    # hidden on its own.
-    return bool(foreground and _near_white(foreground))
+    return not _safe_style(style)
 
 
-_NEAR_WHITE_NAMES = frozenset({
-    "white", "snow", "ghostwhite", "whitesmoke", "ivory", "floralwhite", "mintcream", "azure",
-    "aliceblue", "seashell", "lavenderblush", "oldlace", "linen", "cornsilk", "honeydew",
-})
-
-
-def _near_white(value: str) -> bool:
-    """True for a text colour that is white, near-white or fully transparent."""
-    value = value.strip().lower().removesuffix("!important").strip()
-    if value in _NEAR_WHITE_NAMES or value == "transparent":
-        return True
-    hex_match = re.fullmatch(r"#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})", value)
-    if hex_match:
-        digits = hex_match.group(1)
-        step = 1 if len(digits) == 3 else 2
-        channels = [int(digits[i:i + step] * (2 if step == 1 else 1), 16) for i in range(0, 3 * step, step)]
-        alpha = int(digits[6:8], 16) if len(digits) == 8 else 255
-        return alpha < 13 or all(channel >= 240 for channel in channels)
-    rgb_match = re.fullmatch(r"rgba?\(\s*([\d.]+)[ ,]+([\d.]+)[ ,]+([\d.]+)\s*(?:[,/]\s*([\d.%]+))?\s*\)", value)
-    if rgb_match:
-        red, green, blue = (float(rgb_match.group(i)) for i in (1, 2, 3))
-        alpha_text = rgb_match.group(4)
-        try:
-            alpha = (float(alpha_text.rstrip("%")) / (100.0 if alpha_text.endswith("%") else 1.0)
-                     if alpha_text else 1.0)
-        except ValueError:
-            return True
-        return alpha < 0.05 or min(red, green, blue) >= 240
-    # Any other colour form (hsl, var(), currentcolor, system colours) cannot be
-    # judged without a renderer; treat only the unambiguous forms above as hidden.
-    return False
+def _authored_plain_checked(text: str) -> tuple[str, bool]:
+    """Return authored lines and whether every quote boundary is terminal."""
+    lines: list[str] = []
+    source = text.splitlines()
+    saw_quote = False
+    for index, line in enumerate(source):
+        stripped = line.strip()
+        if stripped in ("--", "-- "):
+            break
+        if _ATTRIBUTION.match(stripped) or _FORWARD.match(stripped) or _QUOTE_HEADER.match(stripped):
+            safe_tail = all(not tail.strip() or tail.lstrip().startswith(">") or
+                            _QUOTE_HEADER.match(tail.strip()) for tail in source[index + 1:])
+            return "\n".join(lines), safe_tail
+        if stripped.startswith(">"):
+            saw_quote = True
+            continue
+        if stripped:
+            if saw_quote:
+                return "\n".join(lines), False
+            lines.append(stripped)
+    return "\n".join(lines), True
 
 
 def _authored_plain(text: str) -> str:
-    """Keep authored lines; an attribution, forward or signature ends the reply."""
-    lines: list[str] = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if (_ATTRIBUTION.match(stripped) or _FORWARD.match(stripped)
-                or _QUOTE_HEADER.match(stripped) or stripped in ("--", "-- ")):
-            break
-        if stripped.startswith(">"):
-            continue
-        if stripped:
-            lines.append(stripped)
-    return "\n".join(lines)
+    body, safe = _authored_plain_checked(text)
+    return body if safe else ""
 
 
 class _AuthoredHTML(HTMLParser):
@@ -211,6 +231,10 @@ class _AuthoredHTML(HTMLParser):
                 _hiding_style(attrs_by_name.get("style") or "") or
                 (tag == "link" and "stylesheet" in (attrs_by_name.get("rel") or "").lower().split())):
             self.unsafe = True
+        for name in ("color", "text", "bgcolor"):
+            if name in attrs_by_name and not _safe_colour(
+                attrs_by_name[name] or "", background=name == "bgcolor"):
+                self.unsafe = True
         if tag in {"html", "head", "body"}:
             if not self.structured:
                 self.parts.clear()
@@ -270,9 +294,17 @@ class _AuthoredHTML(HTMLParser):
             self.parts.append("\n")
 
     def handle_data(self, data: str) -> None:
-        if self.stack and self.stack[-1][0] == "style" and _hiding_style(data):
+        if self.stack and self.stack[-1][0] == "style":
+            # Empty rules cannot affect rendering. A rule with declarations
+            # can affect any descendant through selectors and cascade.
+            if data.strip() and not re.fullmatch(
+                r"(?:\s*[.#]?[a-zA-Z][\w-]*\s*\{\s*\}\s*)+", data):
+                self.unsafe = True
+        if self.quote_depth or self.non_rendered_depth or (self.structured and not self.body_depth):
+            return
+        if self.boundary_seen and data.strip():
             self.unsafe = True
-        if self.terminal or self.quote_depth or self.non_rendered_depth or (self.structured and not self.body_depth):
+        if self.terminal:
             return
         if self.hr_at is not None and _QUOTE_HEADER.search(data.strip()):
             self.parts = self.parts[:self.hr_at]
@@ -295,7 +327,8 @@ def _extract_authored_html(html: str) -> tuple[str, bool]:
         return "", False
     if parser.unsafe or parser.stack or parser.rawdata:
         return "", False
-    return _authored_plain("".join(parser.parts)), parser.boundary_seen
+    body, safe = _authored_plain_checked("".join(parser.parts))
+    return (body if safe else ""), parser.boundary_seen
 
 
 def _strip_html(html: str) -> str:
@@ -811,7 +844,7 @@ def read_replies_with_status(
             plain = next((value for key in ("body_text", "body", "text", "plain")
                          if isinstance((value := body_data.get(key)), str)
                          and value.strip()), "")
-            body = _authored_plain(plain)
+            body, plain_safe = _authored_plain_checked(plain)
             raw_html = body_data.get("body_html")
             # Preserve the target from the matched request token before quote
             # removal. The affirmative must still come from authored text.
@@ -821,6 +854,11 @@ def read_replies_with_status(
                              r"swarm-approve:\s*([A-Za-z0-9._-]+/[A-Za-z0-9._-]+#\d+)")
             targets = set(re.findall(token_pattern, raw_source, re.IGNORECASE))
             correlation_target = next(iter(targets)) if len(targets) == 1 else None
+            if not plain_safe:
+                saw_transport_error = True
+                transport_detail = "reply_quote_boundary_unknown"
+                unreadable_replies.append(ApprovalReply(mid, subject))
+                continue
             if not body and isinstance(raw_html, str):
                 body, boundary_seen = _extract_authored_html(raw_html)
                 if body and not boundary_seen and _unmarked_notification_copy(body):

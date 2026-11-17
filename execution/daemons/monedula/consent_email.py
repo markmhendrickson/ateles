@@ -502,10 +502,15 @@ def overlay_verdicts(
             marker = _line_marker_token(line)
             bound = marker or (None if multi else subject_tok)
             expected = (rf"\[(?:APPROVE-{re.escape(bound)})\]" if bound else "")
+            verb = (line.split() or [""])[0].upper().rstrip(".!")
+            item = by_token.get(bound or "")
             if (not bound or bound not in by_token or
                     re.fullmatch(rf"(?:ATTENDED|APPROVE|YES|SKIP)(?:\s+{expected})?[.!]?",
                                  line, re.IGNORECASE) is None or
-                    (multi and not marker)):
+                    (multi and not marker) or
+                    (item is not None and
+                     ((verb == "ATTENDED" and not item.is_calendar) or
+                      (verb in {"APPROVE", "YES"} and item.is_calendar)))):
                 _flag(line)
                 valid_lines = False
         if not valid_lines:

@@ -942,6 +942,7 @@ async def _maybe_handle_swarm_approval(msg: dict, notifier: Notifier) -> bool:
         return False
 
     if not msg.get("approval_allowed", True):
+        msg["held_approval_target"] = target
         return False
 
     repository, pr_number = subject_token
@@ -1079,6 +1080,7 @@ async def _maybe_handle_release_approval(msg: dict, notifier: Notifier) -> bool:
         return False
 
     if not msg.get("approval_allowed", True):
+        msg["held_approval_target"] = version
         return False
 
     ok = await _post_release_approval(version, sender_addr)
@@ -1110,6 +1112,8 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
     unreadable_notice_set = set(unreadable_notice_ids)
     correction_ids: list[str] = list(state.get("approval_correction_ids", []))
     correction_id_set = set(correction_ids)
+    held_notice_ids: list[str] = list(state.get("held_approval_notice_ids", []))
+    held_notice_set = set(held_notice_ids)
 
     def _mark_handled(mid: str) -> None:
         if mid and mid not in processed_id_set:
@@ -1165,6 +1169,18 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
                 if await _maybe_handle_release_approval(msg, notifier) or await _maybe_handle_swarm_approval(msg, notifier):
                     approval_count += 1
                     _mark_handled(reply.message_id)
+                held_target = msg.get("held_approval_target")
+                if held_target and reply.message_id not in held_notice_set:
+                    delivered = notifier.send(
+                        f"{DAEMON_NAME}: exact email approval for {held_target} is held "
+                        "because another reply in this sweep could not be read. "
+                        "Approve through Telegram instead.",
+                        priority=Priority.BLOCKER, handler=DAEMON_NAME,
+                        email_eligible=False,
+                    )
+                    if delivered:
+                        held_notice_set.add(reply.message_id)
+                        held_notice_ids.append(reply.message_id)
                 if msg.get("correction_notified") and reply.message_id not in correction_id_set:
                     correction_id_set.add(reply.message_id)
                     correction_ids.append(reply.message_id)
@@ -1172,6 +1188,9 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
                 log.error(f"[{DAEMON_NAME}] approval check failed: {exc}")
     if correction_ids != state.get("approval_correction_ids", []):
         state["approval_correction_ids"] = correction_ids[-_MAX_PROCESSED_IDS:]
+        _save_state(state)
+    if held_notice_ids != state.get("held_approval_notice_ids", []):
+        state["held_approval_notice_ids"] = held_notice_ids[-_MAX_PROCESSED_IDS:]
         _save_state(state)
 
     messages = _poll_gmail_messages(MAX_MESSAGES)

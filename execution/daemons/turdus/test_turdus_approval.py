@@ -852,12 +852,14 @@ def test_matching_correlation_metadata_routes_once(monkeypatch, tmp_path, kind):
 
 @pytest.mark.parametrize("kind", ("release", "pr"))
 @pytest.mark.parametrize("format", ("plain", "html"))
-def test_authored_approval_below_inline_quote_routes(monkeypatch, tmp_path, kind, format):
+def test_authored_approval_below_inline_quote_is_unreadable(monkeypatch, tmp_path, kind, format):
     approval = "APPROVE" if kind == "pr" else "approve v1.2.3"
     body = ({"body_text": f"> Different quoted line\n{approval}"} if format == "plain" else
             {"body_html": f"<blockquote>Different quoted line</blockquote><p>{approval}</p>"})
-    posts, _, _ = _poll_authored_reply(monkeypatch, tmp_path, kind, body)
-    assert len(posts) == 1
+    posts, state, notices = _poll_authored_reply(monkeypatch, tmp_path, kind, body, polls=2)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+    assert len([note for note in notices.sent if "could not be read yet" in note]) == 1
 
 
 @pytest.mark.parametrize("kind", ("release", "pr"))
@@ -1199,13 +1201,72 @@ def test_html_stylesheet_hiding_is_unreadable(monkeypatch, tmp_path, kind, css):
 
 
 @pytest.mark.parametrize("kind", ("release", "pr"))
-def test_visible_styled_html_body_still_approves(monkeypatch, tmp_path, kind):
+@pytest.mark.parametrize("style", ("color:#333", "color:rgb(34,34,34);font-family:Arial;font-size:14px;margin:0"))
+def test_visible_styled_html_body_still_approves(monkeypatch, tmp_path, kind, style):
     approval = "approve v1.2.3" if kind == "release" else "APPROVE"
     token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
-    html = f"<html><head><title>Reply</title></head><body><p style='color:#333'>{approval}</p><blockquote>{token}</blockquote></body></html>"
+    html = f"<html><head><title>Reply</title></head><body style='background:#fff'><p style='{style}'>{approval}</p><blockquote>{token}</blockquote></body></html>"
     posts, state, _ = _poll_authored_reply(monkeypatch, tmp_path, kind, {"body_html": html})
     assert len(posts) == 1
     assert state.get("processed_ids") == ["approval-1"]
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("property_name", ("color", "background"))
+@pytest.mark.parametrize("colour", (
+    "#0000", "#fff0", "hsla(0,0%,0%,0)", "hwb(0 0% 0% / 0)",
+    "lab(0 0 0 / 0)", "lch(0 0 0 / 0)", "color(srgb 0 0 0 / 0)",
+    "hsl(0,0%,0%)", "#00000000", "currentcolor", "var(--ink)",
+))
+def test_unsafe_html_colour_never_routes(monkeypatch, tmp_path, kind, property_name, colour):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    posts, state, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind,
+        {"body_html": f"<body><p style='{property_name}:{colour}'>{approval}</p></body>"}, polls=2)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+    assert len([note for note in notices.sent if "could not be read yet" in note]) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("style", (
+    "color:#222;background:rgb(34,34,34)",
+    "color:black;background:rgb(0,0,0)",
+    "color:white;background:#fff",
+    "color:hsl(0,0%,0%);background:black",
+))
+def test_equal_or_dark_background_never_routes(monkeypatch, tmp_path, kind, style):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    posts, state, _ = _poll_authored_reply(
+        monkeypatch, tmp_path, kind,
+        {"body_html": f"<body><p style='{style}'>{approval}</p></body>"})
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("tail", (
+    "From: Swarm <swarm@example.net>\nI withdraw approval",
+    "From: Swarm <swarm@example.net>\n> old message\nI withdraw approval",
+    "On Tuesday Example wrote:\n> old message\nI withdraw approval",
+))
+def test_header_followed_by_authored_withdrawal_never_routes(monkeypatch, tmp_path, kind, tail):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    posts, state, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind, {"body_text": f"{approval}\n{tail}"}, polls=2)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+    assert len([note for note in notices.sent if "could not be read yet" in note]) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+def test_terminal_header_and_signature_still_route(monkeypatch, tmp_path, kind):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    for suffix in ("From: Swarm <swarm@example.net>\n> old message", "-- \nOperator"):
+        posts, _, _ = _poll_authored_reply(
+            monkeypatch, tmp_path / str(len(suffix)), kind,
+            {"body_text": f"{approval}\n{suffix}"})
+        assert len(posts) == 1
 
 
 @pytest.mark.parametrize("kind", ("release", "pr"))
@@ -1241,7 +1302,8 @@ def test_unknown_html_element_is_unreadable(monkeypatch, tmp_path, kind):
 
 @pytest.mark.parametrize("kind", ("release", "pr"))
 @pytest.mark.parametrize("readable", ("Thank you for the update.", "approval"))
-def test_partial_sweep_corrects_readable_but_never_approves(monkeypatch, tmp_path, kind, readable):
+@pytest.mark.parametrize("failure", ("unreadable", "fetch"))
+def test_partial_sweep_corrects_readable_but_never_approves(monkeypatch, tmp_path, kind, readable, failure):
     monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
     monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
     monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
@@ -1267,6 +1329,8 @@ def test_partial_sweep_corrects_readable_but_never_approves(monkeypatch, tmp_pat
         if "+read" in args:
             mid = args[args.index("--id") + 1]
             if mid == "unreadable" and fail_read:
+                if failure == "fetch":
+                    return None
                 return {"body_html": f"<body><div hidden>{approval}</div><blockquote>{token}</blockquote></body>"}
             return {"body_text": f"{body if mid == 'readable' else 'hold'}\n> {token}"}
         raise AssertionError(args)
@@ -1297,6 +1361,10 @@ def test_partial_sweep_corrects_readable_but_never_approves(monkeypatch, tmp_pat
     assert len([note for note in notices if "could not be read yet" in note]) == 1
     if readable == "approval":
         assert state.get("approval_correction_ids", []) == []
+        assert state.get("held_approval_notice_ids") == ["readable"]
+        assert len([note for note in notices if "is held" in note]) == 1
+        assert ("v1.2.3" if kind == "release" else "o/r#7") in next(
+            note for note in notices if "is held" in note)
     else:
         assert state.get("approval_correction_ids") == ["readable"]
         assert len([note for note in notices if "no approval was recorded" in note]) == 1
@@ -1305,3 +1373,32 @@ def test_partial_sweep_corrects_readable_but_never_approves(monkeypatch, tmp_pat
     state = _run(turdus.poll_once(_StubNotifier(), state))
     assert len(posts) == (1 if readable == "approval" else 0)
     assert ("readable" in state.get("processed_ids", [])) == (readable == "approval")
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+def test_partial_sweep_retries_failed_held_notice(monkeypatch, tmp_path, kind):
+    monkeypatch.setattr(turdus, "_STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(turdus, "_poll_gmail_messages", lambda *_: [])
+    monkeypatch.setattr(turdus, "OPERATOR_EMAIL", "op@example.com")
+    target = "v1.2.3" if kind == "release" else "o/r#7"
+    subject = ("Re: Release v1.2.3 ready to approve" if kind == "release" else
+               "Re: [Ateles] PR o/r#7 is READY TO MERGE")
+    reply = email_channel.ApprovalReply("m1", subject,
+        "approve v1.2.3" if kind == "release" else "APPROVE",
+        correlation_target=target)
+    monkeypatch.setattr(email_channel, "read_replies_with_status", lambda *a, **k:
+        email_channel.ReadRepliesOutcome("transport_error", [], replies=(reply,)))
+    attempts = []
+
+    class FlakyNotifier(_StubNotifier):
+        def send(self, message, **kwargs):
+            attempts.append((message, kwargs))
+            return len(attempts) > 1
+
+    state = {"last_message_id": None}
+    for _ in range(3):
+        state = _run(turdus.poll_once(FlakyNotifier(), state))
+    assert len(attempts) == 2
+    assert all("is held" in message for message, _ in attempts)
+    assert all(kwargs["email_eligible"] is False for _, kwargs in attempts)
+    assert state["held_approval_notice_ids"] == ["m1"]

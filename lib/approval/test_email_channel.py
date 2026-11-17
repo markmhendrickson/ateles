@@ -13,7 +13,62 @@ from contextlib import contextmanager
 from typing import Any, Iterator
 from unittest.mock import patch
 
+import pytest
+
 from lib.approval import email_channel as ec
+
+
+@pytest.mark.parametrize("colour", (
+    "#0000", "#fff0", "hsla(0,0%,0%,0)", "hwb(0 0% 0% / 0)",
+    "lab(0 0 0 / 0)", "lch(0 0 0 / 0)", "color(srgb 0 0 0 / 0)",
+    "#333333", "rgb(34,34,34)", "black", "hsl(0,0%,0%)",
+))
+def test_html_colour_policy_rejects_unsafe_foreground_or_background(colour):
+    for property_name in ("color", "background"):
+        html = (f"<body><p style='{property_name}:{colour}'>APPROVE</p>"
+                "<blockquote>quoted token</blockquote></body>")
+        body, _ = ec._extract_authored_html(html)
+        if property_name == "color" and colour in {"#333333", "rgb(34,34,34)", "black"}:
+            assert body == "APPROVE"
+        else:
+            assert body == ""
+
+
+@pytest.mark.parametrize("style", (
+    "color:#333;background:#333", "color:rgb(34,34,34);background:#222222",
+    "color:black;background:rgb(0,0,0)", "color:white;background:#fff",
+    "font-size:0", "margin-left:-9999px", "opacity:0", "color:var(--ink)",
+    "color:#222!important", "background-image:url(x)",
+))
+def test_html_unsafe_style_is_unreadable(style):
+    assert ec._extract_authored_html(
+        f"<body><p style='{style}'>APPROVE</p></body>")[0] == ""
+
+
+def test_html_normal_mail_styles_and_terminal_quote_are_readable():
+    html = ("<body style='background:#fff'><p style='color:rgb(34,34,34);"
+            "font-family:Arial;font-size:14px;margin:0'>APPROVE</p>"
+            "<blockquote>quoted token</blockquote></body>")
+    assert ec._extract_authored_html(html)[0] == "APPROVE"
+
+
+@pytest.mark.parametrize("tail", (
+    "From: Swarm <swarm@example.net>\nI withdraw approval",
+    "From: Swarm <swarm@example.net>\n> old text\nI withdraw approval",
+    "On Tuesday Example wrote:\n> old text\nI withdraw approval",
+))
+def test_plain_header_with_later_authored_text_is_unreadable(tail):
+    assert ec._authored_plain_checked("APPROVE\n" + tail) == ("APPROVE", False)
+
+
+def test_plain_terminal_header_and_signature_keep_safe_reply():
+    assert ec._authored_plain_checked("APPROVE\nFrom: Swarm <swarm@example.net>\n> old") == ("APPROVE", True)
+    assert ec._authored_plain_checked("APPROVE\n-- \nSignature") == ("APPROVE", True)
+
+
+def test_html_bottom_post_after_quote_is_unreadable():
+    assert ec._extract_authored_html(
+        "<body><blockquote>old</blockquote><p>APPROVE</p></body>")[0] == ""
 
 
 def _ok(stdout=""):
@@ -989,9 +1044,6 @@ def test_gws_config_dir_env_requires_existing_swarm_directory(monkeypatch, tmp_p
     }
 
 
-import pytest  # noqa: E402
-
-
 @pytest.mark.parametrize("html", (
     "<blockquote/>QUOTED approve",
     "<div class='gmail_quote'/>QUOTED approve",
@@ -1018,7 +1070,7 @@ def test_near_white_or_transparent_text_is_not_authored_even_without_a_matching_
     assert "HIDDEN" not in text and "approve" not in text.lower()
 
 
-@pytest.mark.parametrize("color", ("#333", "black", "rgb(20, 20, 20)", "#1a73e8", "rgba(0,0,0,0.8)", "hsl(0 0% 20%)"))
+@pytest.mark.parametrize("color", ("#333", "black", "rgb(20, 20, 20)", "rgba(0,0,0,1)", "darkslategray"))
 def test_ordinary_text_colours_stay_readable(color):
     text, _boundary = ec._extract_authored_html(f'<body><p style="color:{color}">approve</p></body>')
     assert "approve" in text.lower()

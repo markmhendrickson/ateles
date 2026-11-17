@@ -228,10 +228,18 @@ including a different PR or version in a correlation line, is not approval.
 Only text in known rendered prose elements inside the HTML body counts as
 authored text; unknown elements make the body unreadable. Head, title,
 script, style, template, form values and other non-rendered elements do not
-count. HTML with hidden elements, hiding inline CSS, or a stylesheet that can
-hide content is unreadable; a substantive plain-text part takes precedence over
-HTML. Quoted, forwarded, original-message and signature text never grants
-approval. Any second instruction, text before or
+count. A substantive plain-text part takes precedence over HTML. For HTML-only
+replies, every element in the text's ancestor chain must have only allowed inline
+style properties: font family, safe font size and line height, font weight/style,
+text alignment/decoration, margins, padding, white space, wrapping, direction,
+and inert borders. Text colour must be an explicit opaque dark 3- or 6-digit hex,
+RGB(A) or supported dark name; backgrounds must be explicit opaque light colours
+or absent. Unparsed colours, transparency, images, gradients, hiding/layout CSS,
+variables and stylesheet declarations make the body unreadable. Quoted, forwarded,
+original-message and signature text never grants approval. A quote header is a
+boundary only when all following nonblank text is quoted or a header; unquoted
+text after it makes the reply unreadable. Bottom-posted HTML or plain-text replies
+are unreadable. Any second instruction, text before or
 after the affirmative, refusal, condition, question, longer sentence, or wrong
 target is a non-approval. For every readable, authenticated non-approval in an
 approval thread, Turdus sends one
@@ -250,9 +258,13 @@ failure is rejected and handled.
 If any reply in a sweep is unreadable or a fetch fails, no approval from that
 sweep is routed. Turdus still sends one Telegram correction for each readable,
 authenticated non-approval reply; an exact approval remains pending for a clean
-sweep. These operator notices go directly to Telegram even when email is the
+sweep and gets one Telegram notice per message ID naming its held target and
+offering the Telegram approval path. A failed notice delivery is retried. These
+operator notices go directly to Telegram even when email is the
 primary notification transport, and an ID is recorded as notified only after
-delivery succeeds. Monedula also holds consent on the same incomplete sweep.
+delivery succeeds. Monedula also holds consent on the same incomplete sweep. Its
+multi-line payment replies are atomic: every line must be bound to an item and
+use a verb valid for that item's type before any approval or skip is recorded.
 
 ```
 reply "approve <version>" to the RC email
