@@ -10,6 +10,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -500,6 +502,35 @@ def test_dedupe_key_journal_survives_a_new_notifier_instance(tmp_path):
     )
     assert again is False
     assert sent == ["[monedula] consent channel failed"]
+
+
+@pytest.mark.parametrize("mutation", [
+    "pending", "delivered", "notified", "clear", "migrate", "release",
+])
+def test_each_journal_mutation_preserves_a_concurrent_instances_key(
+    tmp_path, monkeypatch, mutation
+):
+    from . import neotoma_sink
+
+    first = _notifier(tmp_path, NO_SILENCE, [])
+    second = _notifier(tmp_path, NO_SILENCE, [])
+    first._mark_dedupe_notified("target")
+    assert "target" in first._dedupe_journal  # this instance loaded before the other write
+    second._mark_dedupe_notified("other")
+    monkeypatch.setattr(neotoma_sink, "migrate_key", lambda old, new: True)
+    if mutation == "pending":
+        first._mark_dedupe_pending("target")
+    elif mutation == "delivered":
+        first._mark_dedupe_delivered("target")
+    elif mutation == "notified":
+        first._mark_dedupe_notified("new")
+    elif mutation == "clear":
+        first.clear_dedupe("target")
+    elif mutation == "migrate":
+        assert first.migrate_dedupe("target", "moved")
+    else:
+        first.release_dedupe("target")
+    assert "other" in second._dedupe_journal
 
 
 def test_retryable_alert_recovers_pending_after_interrupted_handoff(tmp_path):

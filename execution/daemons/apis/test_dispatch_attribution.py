@@ -327,6 +327,14 @@ def _window(percent: float, resets_in_hours: float = 24, name: str = "weekly_all
     return {"name": name, "used_percent": percent, "resets_at": resets.isoformat()}
 
 
+def _replace_journal_entry(notifier, key: str, entry: dict) -> None:
+    def change(journal: dict) -> bool:
+        journal[key] = entry
+        return True
+
+    assert notifier._update_dedupe_journal(change)
+
+
 class _SpyNotifier:
     """A real Notifier (its own send, dedupe journal and silence check) whose
     transport is faked: ``deliver`` says whether the transport delivers, and
@@ -437,7 +445,7 @@ def test_a_failed_delivery_is_retried_on_the_next_check(
     usage_alerts._retry_after.clear()
     entry = spy.inner._dedupe_journal[key]
     entry["pending_at"] = (spy.inner._now_local() - timedelta(minutes=1)).isoformat()
-    spy.inner._persist_dedupe_journal({key: entry})
+    _replace_journal_entry(spy.inner, key, entry)
     assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == [key]
     assert len(spy.delivered) == 1
     assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
@@ -524,21 +532,81 @@ def test_a_send_that_raises_is_retried_on_the_next_check(
     key = spy.sent[0][2]
     entry = spy.inner._dedupe_journal[key]
     entry["pending_at"] = (spy.inner._now_local() - timedelta(minutes=1)).isoformat()
-    spy.inner._persist_dedupe_journal({key: entry})
+    _replace_journal_entry(spy.inner, key, entry)
     assert len(usage_alerts.check_usage_thresholds("cursor", notifier=spy)) == 1
 
 
-def test_a_held_alert_is_not_sent_and_stays_eligible(monkeypatch, tmp_path, ledger) -> None:
-    """In the silence window the alert is not sent (so it is not queued and
-    then re-queued on every check) and is delivered on the first check after."""
+def test_a_held_alert_drains_once_without_another_usage_check(monkeypatch, tmp_path, ledger) -> None:
+    """The held queue delivers a crossing even if usage is never refreshed again."""
     _usage_file(monkeypatch, tmp_path, "cursor", [_window(80)])
     spy = _SpyNotifier(silenced=True)
+    spy.inner._digest_path = tmp_path / "held.json"
+    spy.inner._apprise = object()
+    spy.inner._email_primary = False
     assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
     assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
-    assert spy.sent == []
+    assert len(spy.sent) == 1
+    assert len(spy.inner._digest_queue) == 1
     spy.silenced = False
-    assert len(usage_alerts.check_usage_thresholds("cursor", notifier=spy)) == 2
+    assert spy.inner.flush_digest()
+    assert spy.inner._digest_queue == []
     assert len(spy.delivered) == 1
+    assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
+    assert len(spy.sent) == 1
+
+
+def test_concurrent_ordinary_write_preserves_delivered_usage_key(
+    monkeypatch, tmp_path, ledger
+) -> None:
+    import threading
+
+    from lib.notify import Priority
+
+    window = _window(50)
+    _usage_file(monkeypatch, tmp_path, "cursor", [window])
+    usage = _SpyNotifier()
+    ordinary = _SpyNotifier()
+    entered = threading.Event()
+    second_started = threading.Event()
+    release = threading.Event()
+    original = usage.inner._persist_dedupe_journal
+
+    def paused_persist(journal):
+        if any(entry.get("state") == "delivered" for entry in journal.values()):
+            entered.set()
+            assert release.wait(timeout=3)
+        return original(journal)
+
+    monkeypatch.setattr(usage.inner, "_persist_dedupe_journal", paused_persist)
+    worker = threading.Thread(
+        target=lambda: usage_alerts.check_usage_thresholds("cursor", notifier=usage)
+    )
+    worker.start()
+    try:
+        assert entered.wait(timeout=3)
+        def send_ordinary():
+            second_started.set()
+            ordinary.send(
+                "ordinary", priority=Priority.WARN, handler="tyto",
+                dedupe_key="ordinary:key",
+            )
+
+        second = threading.Thread(target=send_ordinary)
+        second.start()
+        assert second_started.wait(timeout=3)
+        second.join(timeout=0.1)
+        assert second.is_alive()  # blocked by the first writer's journal lock
+    finally:
+        release.set()
+        worker.join(timeout=3)
+    second.join(timeout=3)
+    assert not worker.is_alive() and not second.is_alive()
+    journal = usage.inner._dedupe_journal
+    key = usage_alerts.dedupe_key("cursor", window["name"], window["resets_at"], 50)
+    assert journal[key]["state"] == "delivered"
+    assert "ordinary:key" in journal
+    assert usage_alerts.check_usage_thresholds("cursor", notifier=usage) == []
+    assert len(usage.sent) == 1
 
 
 def test_release_dedupe_forgets_only_the_journal_entry(tmp_path, monkeypatch) -> None:
@@ -681,7 +749,7 @@ def test_cli_exit_leaves_failed_alert_pending_for_next_process(
     assert spy.inner._dedupe_journal[key]["state"] == "pending"
     entry = spy.inner._dedupe_journal[key]
     entry["pending_at"] = (spy.inner._now_local() - timedelta(minutes=1)).isoformat()
-    spy.inner._persist_dedupe_journal({key: entry})
+    _replace_journal_entry(spy.inner, key, entry)
     usage_alerts._retry_after.clear()
     spy.deliver = True
     assert usage_alerts.check_usage_thresholds("codex", notifier=spy) == [key]

@@ -50,7 +50,7 @@ from collections import Counter
 from datetime import datetime, time
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 try:
     import apprise
@@ -259,6 +259,7 @@ class Notifier:
         dedupe_key: str | None = None,
         email_eligible: bool = True,
         retryable: bool = False,
+        related_dedupe_keys: tuple[str, ...] = (),
     ) -> bool:
         """
         Route a notification by priority.
@@ -271,6 +272,9 @@ class Notifier:
         actually wrong (e.g. ``"monedula:consent_channel_failed"``), not from
         data that varies per tick (a timestamp, a retry count) — a key that
         changes every send defeats the dedupe entirely.
+
+        ``related_dedupe_keys`` are other conditions covered by the same
+        retryable notice. They share its pending, held, and delivered outcome.
 
         ``email_eligible`` (default True, unchanged behaviour) gates the
         email transport specifically, not delivery as a whole. Set it False
@@ -298,12 +302,12 @@ class Notifier:
                 with self._notification_lock:
                     return self._send_locked(
                         message, priority, handler, bypass_silence, dedupe_key,
-                        email_eligible, retryable,
+                        email_eligible, retryable, related_dedupe_keys,
                     )
         with self._notification_lock:
             return self._send_locked(
                 message, priority, handler, bypass_silence, dedupe_key, email_eligible,
-                retryable,
+                retryable, related_dedupe_keys,
             )
 
     def _dedupe_owner_lock_path(self, key: str) -> Path:
@@ -319,6 +323,7 @@ class Notifier:
         dedupe_key: str | None = None,
         email_eligible: bool = True,
         retryable: bool = False,
+        related_dedupe_keys: tuple[str, ...] = (),
     ) -> bool:
         prio = Priority(priority) if isinstance(priority, str) else priority
         tag = f"[{handler}] " if handler else ""
@@ -362,13 +367,15 @@ class Notifier:
         # INFO; this keeps that from becoming a silent footgun.
         if dedupe_key and prio != Priority.INFO:
             if retryable:
-                self._mark_dedupe_pending(dedupe_key, handler)
+                for key in (dedupe_key, *related_dedupe_keys):
+                    self._mark_dedupe_pending(key, handler)
             else:
                 self._mark_dedupe_notified(dedupe_key, handler)
 
         def delivered(result: bool) -> bool:
             if result and retryable and dedupe_key:
-                self._mark_dedupe_delivered(dedupe_key, handler)
+                for key in (dedupe_key, *related_dedupe_keys):
+                    self._mark_dedupe_delivered(key, handler)
             return result
 
         # Drain any prior held actionable notices before handling this send.
@@ -390,7 +397,9 @@ class Notifier:
                 log.info(
                     "[notify] Operator decision in silence window — holding for later delivery"
                 )
-                self._queue_digest(f"⚠️ {full_message}", email_eligible)
+                held_message = f"⚠️ {full_message}"
+                if self._queue_digest(held_message, email_eligible) and retryable and dedupe_key:
+                    self._mark_dedupe_held((dedupe_key, *related_dedupe_keys), handler, held_message)
                 return False
             return delivered(self._deliver(
                 f"⚠️ {full_message}", force=False, email_eligible=email_eligible
@@ -398,7 +407,9 @@ class Notifier:
 
         if prio == Priority.WARN:
             if self._in_silence_window() and not bypass_silence:
-                self._queue_digest(f"⚠ {full_message}", email_eligible)
+                held_message = f"⚠ {full_message}"
+                if self._queue_digest(held_message, email_eligible) and retryable and dedupe_key:
+                    self._mark_dedupe_held((dedupe_key, *related_dedupe_keys), handler, held_message)
                 return False
             return delivered(self._deliver(
                 f"⚠ {full_message}", force=False, email_eligible=email_eligible
@@ -434,18 +445,20 @@ class Notifier:
         with self._notification_lock:
             return self._read(self._email_path)
 
-    def _persist_queue(self, items: list[str], path: Path | None = None) -> None:
+    def _persist_queue(self, items: list[str], path: Path | None = None) -> bool:
         """Atomically rewrite a queue file. Caller must hold the file lock."""
         path = path or self._digest_path
         try:
             held_view.write_queue(path, items)
+            return True
         except Exception as exc:  # noqa: BLE001
             log.error("[notify] could not persist held queue %s (%s)", path.name, exc)
+            return False
 
     def _queue_lock(self):
         return held_view.file_lock(held_view.queue_lock_path(self._digest_path))
 
-    def _queue_digest(self, message: str, email_eligible: bool = True) -> None:
+    def _queue_digest(self, message: str, email_eligible: bool = True) -> bool:
         """Append an actionable held notice. Never raises.
 
         The route is fixed here, by the send that raised the notice: only a
@@ -472,7 +485,7 @@ class Notifier:
                             HELD_QUEUE_MAX,
                             dropped,
                         )
-                    self._persist_queue(items, path)
+                    return self._persist_queue(items, path)
             except Exception as exc:  # noqa: BLE001
                 # Losing the queue write must not lose the alert: say so loudly.
                 log.error(
@@ -481,6 +494,7 @@ class Notifier:
                     exc,
                     message[:200],
                 )
+                return False
 
     def classify_queue(
         self, items: list[str] | None = None
@@ -610,6 +624,7 @@ class Notifier:
             if not self._apprise:
                 unrouted += 1
             elif self._try_deliver(item, email_eligible=False):
+                self._mark_held_message_delivered(item)
                 delivered_main.append(item)
             else:
                 failed += 1
@@ -620,6 +635,7 @@ class Notifier:
             if budget > 0 and not email_down:
                 if self._deliver_email(item):
                     # Only a sent email spends budget.
+                    self._mark_held_message_delivered(item)
                     self._budget_consume()
                     budget -= 1
                     delivered_email.append(item)
@@ -627,6 +643,7 @@ class Notifier:
                 email_down = True  # don't hammer a failing transport per item
             if self._apprise:
                 if self._try_deliver(item, email_eligible=False):
+                    self._mark_held_message_delivered(item)
                     delivered_email.append(item)
                 else:
                     failed += 1
@@ -716,14 +733,33 @@ class Notifier:
                 )
                 return {}
 
-    def _persist_dedupe_journal(self, journal: dict[str, Any]) -> None:
-        """Atomically rewrite the dedupe journal. Caller must hold the lock."""
+    def _dedupe_journal_lock_path(self) -> Path:
+        return self._dedupe_path.with_name(f"{self._dedupe_path.name}.lock")
+
+    def _update_dedupe_journal(
+        self, change: Callable[[dict[str, Any]], bool]
+    ) -> bool:
+        """Apply one change to a fresh disk read under the shared journal lock."""
+        with self._notification_lock:
+            with held_view.file_lock(
+                self._dedupe_journal_lock_path(), fail_open=False
+            ) as locked:
+                if not locked:
+                    return False
+                journal = self._dedupe_journal
+                if not change(journal):
+                    return True
+                return self._persist_dedupe_journal(journal)
+
+    def _persist_dedupe_journal(self, journal: dict[str, Any]) -> bool:
+        """Atomically rewrite the dedupe journal. Caller holds its sidecar lock."""
         try:
             self._dedupe_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._dedupe_path.with_suffix(".tmp")
             if journal:
                 tmp.write_text(json.dumps(journal))
                 tmp.replace(self._dedupe_path)
+                return True
             else:
                 try:
                     tmp.unlink(missing_ok=True)
@@ -735,66 +771,88 @@ class Notifier:
                     log.warning(
                         "[notify] could not clear empty dedupe journal: %s", exc
                     )
+                    return False
+                return True
         except Exception as exc:  # noqa: BLE001
             # Fail open toward SENDING rather than silently losing an alert:
             # if the journal can't be written, the key is simply not recorded
             # and the next tick will (harmlessly) re-notify. That is the
             # pre-existing behaviour, not a new failure mode.
             log.error("[notify] could not persist dedupe journal (%s)", exc)
+            return False
 
     def _is_duplicate(self, key: str, *, pending_owned: bool = False) -> bool:
-        with self._notification_lock:
-            entry = self._dedupe_journal.get(key)
-            if entry is None:
-                return False
-            if entry.get("state") != "pending":
-                return True
-            if pending_owned:
-                return False
-            # A free owner lock means the previous process died or its send
-            # finished without marking delivery. Age is not evidence of that.
-            with held_view.file_lock(
-                self._dedupe_owner_lock_path(key), blocking=False,
-                fail_open=False,
-            ) as available:
-                return not available
+        entry = self._dedupe_journal.get(key)
+        if entry is None:
+            return False
+        if entry.get("state") != "pending":
+            return True
+        if pending_owned:
+            return False
+        # Owner first, journal second: never acquire an owner lock while
+        # holding the journal lock (or this instance's notification lock).
+        with held_view.file_lock(
+            self._dedupe_owner_lock_path(key), blocking=False,
+            fail_open=False,
+        ) as available:
+            return not available
 
     def _mark_dedupe_pending(self, key: str, handler: str = "") -> None:
-        with self._notification_lock:
-            journal = self._dedupe_journal
+        def change(journal: dict[str, Any]) -> bool:
             journal[key] = {
                 "state": "pending", "pending_at": self._now_local().isoformat(),
                 "handler": handler,
             }
-            self._persist_dedupe_journal(journal)
+            return True
+        self._update_dedupe_journal(change)
 
     def _mark_dedupe_delivered(self, key: str, handler: str = "") -> None:
-        with self._notification_lock:
-            journal = self._dedupe_journal
+        def change(journal: dict[str, Any]) -> bool:
             journal[key] = {
                 "state": "delivered", "notified_at": self._now_local().isoformat(),
                 "handler": handler,
             }
-            self._persist_dedupe_journal(journal)
+            return True
+        self._update_dedupe_journal(change)
+
+    def _mark_dedupe_held(
+        self, keys: tuple[str, ...], handler: str, message: str
+    ) -> None:
+        def change(journal: dict[str, Any]) -> bool:
+            for key in keys:
+                journal[key] = {
+                    "state": "held", "held_message": message, "handler": handler,
+                }
+            return bool(keys)
+        self._update_dedupe_journal(change)
+
+    def _mark_held_message_delivered(self, message: str) -> None:
+        def change(journal: dict[str, Any]) -> bool:
+            keys = [key for key, entry in journal.items()
+                    if isinstance(entry, dict) and entry.get("state") == "held"
+                    and entry.get("held_message") == message]
+            for key in keys:
+                journal[key] = {
+                    "state": "delivered", "notified_at": self._now_local().isoformat(),
+                    "handler": journal[key].get("handler", ""),
+                }
+            return bool(keys)
+        self._update_dedupe_journal(change)
 
     def _mark_dedupe_notified(self, key: str, handler: str = "") -> None:
         """Record that ``key`` has been reported. Never raises."""
-        with self._notification_lock:
-            try:
-                journal = self._dedupe_journal
+        try:
+            def change(journal: dict[str, Any]) -> bool:
                 if key not in journal:
                     journal[key] = {
                         "notified_at": self._now_local().isoformat(),
                         "handler": handler,
                     }
-                    self._persist_dedupe_journal(journal)
-            except Exception as exc:  # noqa: BLE001
-                log.error(
-                    "[notify] could not record dedupe key %r (%s) — condition "
-                    "may re-notify on the next tick",
-                    key,
-                    exc,
-                )
+                    return True
+                return False
+            self._update_dedupe_journal(change)
+        except Exception as exc:  # noqa: BLE001
+            log.error("[notify] could not record dedupe key %r (%s)", key, exc)
 
     def release_dedupe(self, key: str) -> None:
         """Forget ``key`` in the journal only, after a send that did not deliver.
@@ -806,16 +864,15 @@ class Notifier:
         does not resolve the alert's Neotoma sink record: the condition is
         still open and still unreported. Never raises.
         """
-        with self._notification_lock:
-            try:
-                journal = self._dedupe_journal
+        try:
+            def change(journal: dict[str, Any]) -> bool:
                 if key in journal:
                     del journal[key]
-                    self._persist_dedupe_journal(journal)
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "[notify] could not release dedupe key %r (%s)", key, exc
-                )
+                    return True
+                return False
+            self._update_dedupe_journal(change)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[notify] could not release dedupe key %r (%s)", key, exc)
 
     def dedupe_journal_path(self) -> Path:
         """Where this notifier's dedupe journal lives (for a sidecar lock)."""
@@ -825,18 +882,21 @@ class Notifier:
         """Rename one open condition without resolving its sink alert."""
         if old_key == new_key:
             return True
-        with self._notification_lock:
-            journal = self._dedupe_journal
+        if old_key not in self._dedupe_journal:
+            return True
+        if not neotoma_sink.migrate_key(old_key, new_key):
+            return False
+        def change(journal: dict[str, Any]) -> bool:
             if old_key not in journal:
-                return True
-            if not neotoma_sink.migrate_key(old_key, new_key):
                 return False
             if new_key not in journal:
                 journal[new_key] = journal[old_key]
             del journal[old_key]
-            self._persist_dedupe_journal(journal)
-            persisted = self._dedupe_journal
-            return old_key not in persisted and new_key in persisted
+            return True
+        if not self._update_dedupe_journal(change):
+            return False
+        persisted = self._dedupe_journal
+        return old_key not in persisted and new_key in persisted
 
     def clear_dedupe(self, key: str) -> None:
         """Clear a dedupe key once its condition has resolved.
@@ -850,16 +910,15 @@ class Notifier:
             neotoma_sink.resolve(key)  # mark this process's stored alert resolved
         except Exception:  # noqa: BLE001
             pass
-        with self._notification_lock:
-            try:
-                journal = self._dedupe_journal
+        try:
+            def change(journal: dict[str, Any]) -> bool:
                 if key in journal:
                     del journal[key]
-                    self._persist_dedupe_journal(journal)
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "[notify] could not clear dedupe key %r (%s)", key, exc
-                )
+                    return True
+                return False
+            self._update_dedupe_journal(change)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[notify] could not clear dedupe key %r (%s)", key, exc)
 
     # ── Internal ──────────────────────────────────────────────────────────────
 

@@ -25,12 +25,10 @@ No separate state store is added.
 
 * Every crossed threshold the window has not yet delivered is sent, in one
   alert naming all of them: a first reading of 80% says "crossed 50% and 75%".
-* A threshold counts as delivered only when ``Notifier.send`` reports the
-  transport delivered it. A held notice (silence window: not sent at all, so
-  it is not queued twice) or a failed or transport-less send leaves it eligible
-  on the next check; ``send``'s own pre-delivery journal entry is released
-  (``Notifier.release_dedupe``) so the retry is not suppressed. The same
-  process waits ``RETRY_BACKOFF_SECONDS`` before retrying it.
+* A threshold counts as delivered only when the transport delivers it. During
+  silence, ``Notifier.send`` persists the notice in its existing held queue;
+  the journal records every threshold it covers as held, then delivered when
+  that queued notice drains. Failed sends remain eligible for a later check.
 * The handoff thread owns a non-blocking ``flock`` on a sidecar of the dedupe
   journal through transport completion and threshold marking. A second check
   that cannot acquire it skips the send; an unreadable lock also skips it.
@@ -198,16 +196,6 @@ def _journal_lock_path(notifier) -> Path:
     return journal.with_name(journal.name + ".usage-alerts.lock")
 
 
-def _silenced(notifier) -> bool:
-    probe = getattr(notifier, "in_silence_window", None)
-    if not callable(probe):
-        return False
-    try:
-        return bool(probe())
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def check_usage_thresholds(
     provider: str,
     *,
@@ -305,8 +293,6 @@ def check_usage_thresholds(
                         if not pending:
                             return
                         sender_notifier = notifier or (notifier_factory or _default_notifier_factory)()
-                        if _silenced(sender_notifier):
-                            return
                         span, span_known = window_span(name)
                         window_start = (resets_at - span) if resets_at else (current - span)
                         try:
@@ -329,15 +315,24 @@ def check_usage_thresholds(
                         delivered = bool(sender_notifier.send(
                             message, priority=Priority.WARN, handler="apis",
                             dedupe_key=keys[max(pending)], retryable=True,
+                            related_dedupe_keys=tuple(
+                                keys[t] for t in pending if t != max(pending)
+                            ),
                         ))
                         if delivered:
                             for threshold in pending:
                                 _mark_reported(sender_notifier, keys[threshold])
                             _retry_after.pop(retry_key, None)
                             result_keys.extend(keys[threshold] for threshold in pending)
+                            outcome = "delivered"
                         else:
-                            _retry_after[retry_key] = time.monotonic() + RETRY_BACKOFF_SECONDS
-                        log.info("[apis] usage alert %s: %s", "delivered" if delivered else "NOT delivered", message)
+                            entry = sender_notifier._dedupe_journal.get(keys[max(pending)], {})
+                            if isinstance(entry, dict) and entry.get("state") == "held":
+                                outcome = "held"
+                            else:
+                                outcome = "NOT delivered"
+                                _retry_after[retry_key] = time.monotonic() + RETRY_BACKOFF_SECONDS
+                        log.info("[apis] usage alert %s: %s", outcome, message)
                     except Exception as exc:  # noqa: BLE001
                         _retry_after[retry_key] = time.monotonic() + RETRY_BACKOFF_SECONDS
                         log.warning("[apis] usage alert handoff failed: %s", exc)
