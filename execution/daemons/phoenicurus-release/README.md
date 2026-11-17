@@ -204,30 +204,38 @@ only after the RC email was sent from the configured swarm mailbox.
 `release_result` to `approved` and runs `python3 publish.py --version <version>`.
 See the Ateles SOUL.md "Release approval" section.
 
-**Email reply** — the operator's first non-empty, unquoted line is
-`approve <version>` (case-insensitive; the `v` prefix is optional) to the RC
-email. The version must be the one named in that notification. The
-routing mirrors the swarm PR-approve flow:
+**Email reply** — after quoted text and signatures are removed, the entire
+operator-authored reply must contain exactly one instruction line:
+`approve <version>` (case-insensitive; the `v` prefix is optional). A final
+period or exclamation mark is allowed. The version must match the release in
+the subject. The routing mirrors the swarm PR-approve flow:
 
-For a PR merge-ready email, the first non-empty, unquoted line is `APPROVE`,
-optionally followed by that notification's PR number (`7`, `#7`, or
-`owner/repo#7`). A different PR number is not an approval.
+For a PR merge-ready email, the only instruction line is `APPROVE`, optionally
+followed by that notification's PR number (`7`, `#7`, or `owner/repo#7`). It
+allows the same case and final punctuation rules. The only other authored
+lines allowed are exact correlation lines for that target (`swarm-approve:
+owner/repo#7` or `release-approve: v1.2.3`). A line naming another target,
+including a different PR or version in a correlation line, is not approval.
 
 Only operator-authored text counts; quoted, forwarded, original-message and
-signature text never grants approval. A refusal, conditional instruction,
-question, longer sentence or wrong version is a non-approval and is handled
-under the normal non-approval rule. If authentication metadata or the reply
-body cannot be read, or an HTML-only copy of the notification has no
-identifiable quote boundary, Turdus leaves the reply pending, sends one
-Telegram notice naming the release, and retries on the next poll. A readable
-authentication failure is rejected and handled.
+signature text never grants approval. Any second instruction, text before or
+after the affirmative, refusal, condition, question, longer sentence, or wrong
+target is a non-approval. For an approval-like readable reply, Turdus sends one
+Telegram correction per message ID naming the target, saying no approval was
+recorded, and giving the exact accepted reply. It never routes that reply.
+Ordinary replies without approval intent receive no correction. If authentication
+metadata or the reply body cannot be read, if HTML markup is malformed around
+a quote, or if an HTML-only copy of the notification has no identifiable quote
+boundary, Turdus leaves the reply pending, sends one Telegram unreadable notice
+naming the target, and retries on the next poll. A readable authentication
+failure is rejected and handled.
 
 ```
 reply "approve <version>" to the RC email
   → Turdus (Gmail poll) verifies: sender == operator, subject has "ready to
     approve", the original mail carries the `release-approve: <version>`
-    search token, subject names the version, and the first unquoted authored
-    line is `approve <that exact version>`
+    search token, subject names the version, and the whole authored reply
+    contains only `approve <that exact version>` plus matching correlation lines
   → POST /approve-release (Apis, loopback + X-Approve-Secret)
   → swarm_dispatch._handle_release_approve
   → publish.py --version <version> --from-email-approval

@@ -1014,6 +1014,15 @@ def test_literal_programs_are_inspected_and_allowed(literal):
     "node --eval='console.log(1)' --require={bad}",
     "ruby -e 'puts 1' -r {bad}",
     "ruby -e'puts 1' -r{bad}",
+    "node20 -e 'console.log(1)' -r {bad}",
+    "nodejs-20 --eval='console.log(1)' --require={bad}",
+    "ruby3.2 -e 'puts 1' -r {bad}",
+    "python3.12 -m {bad}",
+    "pypy3 -m {bad}",
+    "perl5.36 -e 'print 1' -M {bad}",
+    "awk5 -f {good} -f {bad}",
+    "gawk-5.2 --file {good} --file {bad}",
+    "sed-4.9 -f {good} -f {bad}",
     "sh -c 'source {bad}'",
 ))
 def test_every_program_file_operand_is_judged(tmp_path, form):
@@ -1022,6 +1031,20 @@ def test_every_program_file_operand_is_judged(tmp_path, form):
     good.write_text("print 1\n")
     bad.write_text("git commit --no-verify -m x\n")
     assert_refused(form.format(good=good, bad=bad))
+
+
+@pytest.mark.parametrize("form", (
+    "node20 -e 'console.log(1)' -r {file}",
+    "ruby3.2 -e 'puts 1' -r {file}",
+    "python3.12 -m {file}",
+    "perl5.36 -e 'print 1' -M {file}",
+    "awk5 -f {file}",
+    "sed-4.9 -f {file}",
+))
+def test_versioned_interpreter_benign_file_operands_allowed(tmp_path, form):
+    good = tmp_path / "good.txt"
+    good.write_text("print 1\n")
+    assert_allowed(form.format(file=good))
 
 
 def test_every_inline_program_operand_is_judged(tmp_path):

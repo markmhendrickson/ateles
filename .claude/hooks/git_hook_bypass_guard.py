@@ -184,8 +184,23 @@ _WRAPPERS = frozenset({"env", "command", "exec", "builtin", "xargs", "nice", "ti
 _SHELLS = re.compile(r"^(?:sh|bash|zsh|dash|ksh|mksh|fish|tcsh|csh|busybox)$")
 _INTERPRETERS = re.compile(
     r"^(?:python|pypy|node|nodejs|deno|bun|perl|ruby|php|osascript|lua|tclsh|"
-    r"awk|gawk|mawk|nawk)[0-9.]*$"
+    r"awk|gawk|mawk|nawk|sed)(?:-?[0-9]+(?:\.[0-9]+)*)?$"
 )
+
+
+def _interpreter_family(runner: str) -> str:
+    """Normalize a versioned executable before applying its operand rules."""
+    name = os.path.basename(runner)
+    if not _INTERPRETERS.fullmatch(name):
+        return name
+    base = re.sub(r"-?[0-9]+(?:\.[0-9]+)*$", "", name)
+    if base in {"pypy", "python"}:
+        return "python"
+    if base in {"nodejs", "node", "bun", "deno"}:
+        return "node"
+    if base in {"gawk", "mawk", "nawk", "awk"}:
+        return "awk"
+    return base
 _EVALUATORS = frozenset({"eval", "source", "."})
 # Interpreter options whose value is the next token, so it is not a script.
 _INTERPRETER_VALUE_OPTIONS = frozenset({"-o", "-O", "--rcfile", "--init-file", "-W", "-X",
@@ -1118,7 +1133,7 @@ def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None
     targets: list[str] = []
     if base == "tee":
         targets = [arg for arg in args if not arg.startswith("-")]
-    elif base == "sed" and any(
+    elif _interpreter_family(base) == "sed" and any(
         arg == "-i" or (arg.startswith("-i") and len(arg) > 2)
         or arg.startswith("--in-place") for arg in args
     ):
@@ -1189,9 +1204,6 @@ def _mentions_protected_text(body: str) -> bool:
 
 
 _HOOK_BYPASS_TEXT = re.compile(r"--no-verify|core\.hooksPath|\bHUSKY\b|commit\s+-n\b")
-_AWKS = re.compile(r"^(?:awk|gawk|mawk|nawk)[0-9.]*$")
-
-
 def _script_operand(tail: list[Word], is_shell: bool) -> Word | None:
     """The script a shell or interpreter runs from a file, if it names one."""
     i = 0
@@ -1219,7 +1231,7 @@ def _script_file_violation(runner: str, tail: list[Word], is_shell: bool,
         return False, None
     if script.expanded or script.globbed or script.braced:
         return True, f"{runner} script assembled by the shell"
-    if _AWKS.match(runner):
+    if _interpreter_family(runner) == "awk":
         return True, _inline_program_violation(runner, script.text, depth)
     return True, _program_file_violation(runner, script, depth, is_shell)
 
@@ -1243,9 +1255,9 @@ def _stdin_program_violation(runner: str, body: str, depth: int) -> str | None:
 def _inline_program_violation(runner: str, body: str, depth: int) -> str | None:
     if _SHELLS.match(runner):
         return _judge_program_body(body, depth)
-    if not _AWKS.match(runner) and _RUNTIME_EVAL_TEXT.search(body):
+    if _interpreter_family(runner) != "awk" and _RUNTIME_EVAL_TEXT.search(body):
         return f"{runner} program decodes or evaluates program text at run time"
-    if _AWKS.match(runner):
+    if _interpreter_family(runner) == "awk":
         for include in re.findall(r'@include\s+["\']([^"\']+)["\']', body):
             hit = _program_file_violation(runner, Word(include), depth + 1)
             if hit:
@@ -1267,7 +1279,7 @@ def _program_file_violation(runner: str, script: Word, depth: int,
         text = Path(os.path.expanduser(script.text)).read_text()
     except (OSError, UnicodeError):
         return f"{runner} program file cannot be read"
-    if _AWKS.match(runner):
+    if _interpreter_family(runner) == "awk":
         for include in re.findall(r'@include\s+["\']([^"\']+)["\']', text):
             child = Path(script.text).parent / include
             hit = _program_file_violation(runner, Word(str(child)), depth + 1)
@@ -1275,7 +1287,7 @@ def _program_file_violation(runner: str, script: Word, depth: int,
                 return hit
     if is_shell:
         return _judge_program_body(text, depth)
-    if _AWKS.match(runner):
+    if _interpreter_family(runner) == "awk":
         if _mentions_protected_text(text) or _HOOK_BYPASS_TEXT.search(text) or mentions_git(text):
             return f"{runner} program names a protected path or hook bypass"
         return None
@@ -1284,20 +1296,22 @@ def _program_file_violation(runner: str, script: Word, depth: int,
 
 def _multi_program_violation(runner: str, tail: list[Word], depth: int) -> str | None:
     """Inspect every program source, including repeated and mixed options."""
-    if runner.startswith(("python", "pypy")) and any(w.text == "-c" for w in tail) and any(
+    family = _interpreter_family(runner)
+    if family == "python" and any(w.text == "-c" for w in tail) and any(
         w.text == "-m" for w in tail
     ):
         return f"{runner} has multiple program modes"
     file_options = ({"-f", "--file", "-i", "--include", "-l", "--load"}
-                    if _AWKS.match(runner) else
-                    {"-f", "--file", "-e", "--expression"} if runner == "sed" else
-                    {"-r", "--require"} if runner in {"node", "nodejs", "ruby"} else set())
-    inline_options = ({"-e", "--source"} if _AWKS.match(runner) else
-                      {"-e", "--expression"} if runner == "sed" else
-                      {"-e", "-E", "--eval", "-p", "--print"} if runner in {"perl", "node", "nodejs", "ruby"} else
-                      {"-c"} if runner.startswith(("python", "pypy")) else set())
+                    if family == "awk" else
+                    {"-f", "--file", "-e", "--expression"} if family == "sed" else
+                    {"-r", "--require"} if family in {"node", "ruby"} else
+                    {"-M", "-m"} if family == "perl" else set())
+    inline_options = ({"-e", "--source"} if family == "awk" else
+                      {"-e", "--expression"} if family == "sed" else
+                      {"-e", "-E", "--eval", "-p", "--print"} if family in {"perl", "node", "ruby"} else
+                      {"-c"} if family == "python" else set())
     # sed -e is inline, unlike awk -e. Keep it out of file operands.
-    if runner == "sed":
+    if family == "sed":
         file_options = {"-f", "--file"}
     i = 0
     while i < len(tail):
@@ -1372,13 +1386,13 @@ def _nested_program_violation(cmd: SimpleCommand, rest: list[Word], depth: int) 
     for start in starts:
         runner = os.path.basename(rest[start].text)
         is_shell = bool(_SHELLS.match(runner))
-        if not is_shell and not _INTERPRETERS.match(runner) and runner != "sed":
+        if not is_shell and not _INTERPRETERS.fullmatch(runner):
             continue
         tail = rest[start + 1:]
         hit = _multi_program_violation(runner, tail, depth)
         if hit:
             return True, hit
-        if runner == "sed":
+        if _interpreter_family(runner) == "sed":
             continue
         for i, option in enumerate(tail):
             name = option.text
@@ -1602,7 +1616,7 @@ def _judge(command: str, depth: int, in_substitution: bool) -> str | None:
                 for target in args:
                     if not target.startswith("-"):
                         written_files.add(os.path.abspath(os.path.expanduser(target)))
-            if writer == "sed" and any(a == "-i" or a.startswith("--in-place") for a in args):
+            if _interpreter_family(writer) == "sed" and any(a == "-i" or a.startswith("--in-place") for a in args):
                 for target in args:
                     if not target.startswith("-"):
                         written_files.add(os.path.abspath(os.path.expanduser(target)))

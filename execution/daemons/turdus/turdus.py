@@ -712,7 +712,7 @@ def _parse_approve_token(text: str) -> tuple[str, int] | None:
 
 
 def _affirmative_approval(body: str, target: str, *, release: bool) -> bool:
-    """Accept only the notification's affirmative first-line reply form.
+    """Accept only one complete affirmative instruction for the target.
 
     The shared mail reader supplies authored text. Direct callers use the same
     extraction so a quoted instruction cannot become a verdict on either path.
@@ -721,19 +721,35 @@ def _affirmative_approval(body: str, target: str, *, release: bool) -> bool:
     lines = [line.strip() for line in authored.splitlines() if line.strip()]
     if not lines:
         return False
-    suffix = (rf"(?:v?{re.escape(target.lstrip('v'))})" if release
-              else rf"(?:{re.escape(target)}|#?{re.escape(target.rsplit('#', 1)[-1])})")
-    pattern = rf"approve(?:\s+{suffix})?" if not release else rf"approve\s+{suffix}"
-    if not re.fullmatch(pattern, lines[0], re.IGNORECASE):
+    suffix = (rf"v?{re.escape(target.removeprefix('v'))}" if release else
+              rf"(?:{re.escape(target)}|#?{re.escape(target.rsplit('#', 1)[-1])})")
+    pattern = (rf"approve\s+{suffix}[.!]?" if release else
+               r"approve[.!]?" if not target else
+               rf"approve(?:\s+{suffix})?[.!]?")
+    if re.fullmatch(pattern, lines[0], re.IGNORECASE) is None:
         return False
-    # A following correction/hold makes the message ambiguous even if the
-    # first line looked valid. Correlation lines are metadata, not instructions.
+    expected_metadata = (f"release-approve: {target}" if release else
+                         f"swarm-approve: {target}")
     for line in lines[1:]:
-        if line.lower().startswith(("swarm-approve:", "release-approve:")):
-            continue
-        if re.search(r"(?i)\b(?:not|don'?t|do not|no|never|cannot|can'?t|won'?t|hold|wait|stop|cancel|reject|decline|deny|later|unless|if|but|instead)\b|\?", line):
+        if line.casefold() != expected_metadata.casefold():
             return False
     return True
+
+
+def _send_approval_correction(msg: dict, notifier: Notifier, target: str,
+                              exact_form: str) -> None:
+    """Explain an attempted but unrecorded approval once per reply id."""
+    if msg.get("correction_notified"):
+        return
+    authored = email_channel._authored_plain(msg.get("body", ""))
+    if not re.search(r"(?i)\bapprov(?:e|ed|al)\b", authored):
+        return
+    notifier.send(
+        f"{DAEMON_NAME}: no approval was recorded for {target}. Reply with "
+        f"exactly `{exact_form}` on one line to approve it.",
+        priority=Priority.INFO, handler=DAEMON_NAME,
+    )
+    msg["correction_notified"] = True
 
 
 def _reply_says_approve(body: str, target: str = "") -> bool:
@@ -881,9 +897,6 @@ async def _maybe_handle_swarm_approval(msg: dict, notifier: Notifier) -> bool:
         return True
     match = re.search(r"\bPR\s+([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)#(\d+)", subject)
     token = (match.group(1), int(match.group(2))) if match else _parse_approve_token(subject)
-    body_token = _parse_approve_token(body)
-    if body_token and body_token != token:
-        return False
     if not token:
         log.info(
             f"[{DAEMON_NAME}] operator reply matched merge-ready subject but "
@@ -891,6 +904,7 @@ async def _maybe_handle_swarm_approval(msg: dict, notifier: Notifier) -> bool:
         )
         return False
     if not _reply_says_approve(body, f"{token[0]}#{token[1]}"):
+        _send_approval_correction(msg, notifier, f"{token[0]}#{token[1]}", "approve")
         log.info(
             f"[{DAEMON_NAME}] operator reply to {token[0]}#{token[1]} did not say "
             "APPROVE — not merging (may be a question or a hold)"
@@ -1010,9 +1024,6 @@ async def _maybe_handle_release_approval(msg: dict, notifier: Notifier) -> bool:
         return True
     match = re.search(r"\bRelease\s+(v[0-9][\w.+-]*)", subject, re.IGNORECASE)
     version = match.group(1) if match else _parse_release_approve_token(subject)
-    body_version = _parse_release_approve_token(body)
-    if body_version and body_version.lower() != (version or "").lower():
-        return False
     if not version:
         log.info(
             f"[{DAEMON_NAME}] operator reply matched release subject but carried no "
@@ -1020,6 +1031,7 @@ async def _maybe_handle_release_approval(msg: dict, notifier: Notifier) -> bool:
         )
         return False
     if not _reply_approves_version(body, version):
+        _send_approval_correction(msg, notifier, version, f"approve {version}")
         log.info(
             f"[{DAEMON_NAME}] operator reply to release {version} did not say "
             f"`approve {version}` — not publishing (a bare/other-version approve "
@@ -1054,6 +1066,8 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
     processed_id_set = set(processed_ids)
     unreadable_notice_ids: list[str] = list(state.get("unreadable_notice_ids", []))
     unreadable_notice_set = set(unreadable_notice_ids)
+    correction_ids: list[str] = list(state.get("approval_correction_ids", []))
+    correction_id_set = set(correction_ids)
 
     def _mark_handled(mid: str) -> None:
         if mid and mid not in processed_id_set:
@@ -1102,13 +1116,20 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
                 continue
             msg = {"id": reply.message_id, "sender": OPERATOR_EMAIL,
                    "subject": reply.subject, "body": reply.body,
-                   "authenticated": reply.authenticated}
+                   "authenticated": reply.authenticated,
+                   "correction_notified": reply.message_id in correction_id_set}
             try:
                 if await _maybe_handle_release_approval(msg, notifier) or await _maybe_handle_swarm_approval(msg, notifier):
                     approval_count += 1
                     _mark_handled(reply.message_id)
+                if msg.get("correction_notified") and reply.message_id not in correction_id_set:
+                    correction_id_set.add(reply.message_id)
+                    correction_ids.append(reply.message_id)
             except Exception as exc:
                 log.error(f"[{DAEMON_NAME}] approval check failed: {exc}")
+    if correction_ids != state.get("approval_correction_ids", []):
+        state["approval_correction_ids"] = correction_ids[-_MAX_PROCESSED_IDS:]
+        _save_state(state)
 
     messages = _poll_gmail_messages(MAX_MESSAGES)
 

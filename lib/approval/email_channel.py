@@ -108,6 +108,11 @@ class _AuthoredHTML(HTMLParser):
         self.boundary_seen = False
         self.terminal = False
         self.hr_at: int | None = None
+        self.unsafe = False
+
+    _VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img",
+                       "input", "link", "meta", "param", "source", "track", "wbr"})
+    _MAX_STACK = 64
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attrs_by_name = dict(attrs)
@@ -122,31 +127,39 @@ class _AuthoredHTML(HTMLParser):
                 or element_id in {"divrplyfwdmsg", "appendonsend"}):
             self.terminal = True
             self.boundary_seen = True
+        if tag in self._VOID:
+            if tag == "hr" and self.quote_depth == 0:
+                self.hr_at = len(self.parts)
+                self.parts.append("\n")
+            elif tag == "br" and self.quote_depth == 0:
+                self.parts.append("\n")
+            return
+        if len(self.stack) >= self._MAX_STACK:
+            self.unsafe = True
+            return
         if quote:
             self.quote_depth += 1
             self.boundary_seen = True
         self.stack.append((tag, quote))
-        if tag == "hr" and self.quote_depth == 0:
-            self.hr_at = len(self.parts)
-            self.parts.append("\n")
-        elif tag in ("br", "p", "div", "li", "tr") and self.quote_depth == 0:
+        if tag in ("p", "div", "li", "tr") and self.quote_depth == 0:
             self.parts.append("\n")
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in self._VOID:
+            self.handle_starttag(tag, attrs)
+            return
         self.handle_starttag(tag, attrs)
         self.handle_endtag(tag)
 
     def handle_endtag(self, tag: str) -> None:
-        if not self.stack:
+        if tag in self._VOID:
             return
-        # Well-formed mail usually nests correctly; close through a mismatched
-        # wrapper without allowing quoted content to escape its subtree.
-        while self.stack:
-            opened, quote = self.stack.pop()
-            if quote:
-                self.quote_depth -= 1
-            if opened == tag:
-                break
+        if not self.stack or self.stack[-1][0] != tag:
+            self.unsafe = True
+            return
+        _, quote = self.stack.pop()
+        if quote:
+            self.quote_depth -= 1
         if tag in ("p", "div", "li", "tr") and self.quote_depth == 0:
             self.parts.append("\n")
 
@@ -160,11 +173,20 @@ class _AuthoredHTML(HTMLParser):
             return
         self.parts.append(data)
 
+    def unknown_decl(self, data: str) -> None:
+        self.unsafe = True
+
 
 def _extract_authored_html(html: str) -> tuple[str, bool]:
-    """Return (authored text, quote boundary seen) from an HTML reply."""
+    """Return authored text only when the HTML can be separated safely."""
     parser = _AuthoredHTML()
-    parser.feed(html)
+    try:
+        parser.feed(html)
+        parser.close()
+    except Exception:  # noqa: BLE001 — malformed HTML cannot grant approval
+        return "", False
+    if parser.unsafe or parser.stack or parser.rawdata:
+        return "", False
     return _authored_plain("".join(parser.parts)), parser.boundary_seen
 
 

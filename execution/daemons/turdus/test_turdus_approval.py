@@ -812,8 +812,9 @@ def test_html_quoted_notification_never_posts(monkeypatch, tmp_path, kind, quote
 
 @pytest.mark.parametrize("kind,approval", (
     ("pr", "APPROVE"), ("pr", "approve 7"), ("pr", "approve #7"),
-    ("pr", "approve o/r#7"), ("release", "approve v1.2.3"),
-    ("release", "APPROVE 1.2.3"),
+    ("pr", "approve o/r#7"), ("pr", "Approve #7!"),
+    ("release", "approve v1.2.3"), ("release", "APPROVE 1.2.3"),
+    ("release", "approve 1.2.3."),
 ))
 @pytest.mark.parametrize("format", ("plain", "html"))
 def test_authored_approval_routes_once(monkeypatch, tmp_path, kind, approval, format):
@@ -823,6 +824,17 @@ def test_authored_approval_routes_once(monkeypatch, tmp_path, kind, approval, fo
     posts, state, _ = _poll_authored_reply(monkeypatch, tmp_path, kind, body)
     assert len(posts) == 1
     assert state.get("processed_ids", []).count("approval-1") == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+def test_matching_correlation_metadata_routes_once(monkeypatch, tmp_path, kind):
+    body = ("approve v1.2.3\nrelease-approve: v1.2.3" if kind == "release" else
+            "approve\nswarm-approve: o/r#7")
+    posts, state, notices = _poll_authored_reply(monkeypatch, tmp_path, kind,
+                                                  {"body_text": body}, polls=2)
+    assert len(posts) == 1
+    assert state.get("processed_ids", []).count("approval-1") == 1
+    assert not any("no approval was recorded" in note for note in notices.sent)
 
 
 @pytest.mark.parametrize("kind", ("release", "pr"))
@@ -874,6 +886,85 @@ def test_conflicting_body_correlation_never_posts(monkeypatch, tmp_path, kind):
     posts, _, _ = _poll_authored_reply(monkeypatch, tmp_path, kind,
                                        {"body_text": body})
     assert posts == []
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("suffix", (
+    "wait", "actually no", "unless X", "but not 0.9.2", "approve #8",
+    "approve v1.2.4", "why?", "thank you", "approve o/r#8",
+))
+def test_second_authored_line_refuses_and_corrects_once(
+    monkeypatch, tmp_path, kind, suffix
+):
+    approval = "approve v1.2.3" if kind == "release" else "approve"
+    posts, state, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind, {"body_text": f"{approval}\n{suffix}"}, polls=2)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+    corrections = [note for note in notices.sent if "no approval was recorded" in note]
+    assert len(corrections) == 1
+    assert ("v1.2.3" if kind == "release" else "o/r#7") in corrections[0]
+    assert ("approve v1.2.3" if kind == "release" else "approve") in corrections[0]
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("reply", (
+    "before\n{approval}", "{approval}\n{approval}",
+    "please {approval} now", "{approval}\n{other_metadata}",
+    "", "{approval} if CI passes", "{approval}?", "{approval} #8",
+))
+def test_closed_grammar_refuses_other_authored_text(
+    monkeypatch, tmp_path, kind, reply
+):
+    approval = "approve v1.2.3" if kind == "release" else "approve"
+    other_metadata = ("release-approve: v1.2.4" if kind == "release" else
+                      "swarm-approve: o/r#8")
+    body = reply.format(approval=approval, other_metadata=other_metadata)
+    posts, state, notices = _poll_authored_reply(monkeypatch, tmp_path, kind,
+                                                  {"body_text": body}, polls=2)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+    if body:
+        assert len([note for note in notices.sent if "no approval was recorded" in note]) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+def test_normal_reply_does_not_get_approval_correction(monkeypatch, tmp_path, kind):
+    posts, _, notices = _poll_authored_reply(monkeypatch, tmp_path, kind,
+                                              {"body_text": "Thank you for the update."})
+    assert posts == []
+    assert not any("no approval was recorded" in note for note in notices.sent)
+
+
+_BROKEN_QUOTE_HTML = (
+    "<blockquote><p>{quoted}</blockquote></p>",
+    "<blockquote><p>{quoted}</div></p></blockquote>",
+    "<blockquote><div>{quoted}</div>",
+    "<div><blockquote>{quoted}</blockquote>",
+    "<BLOCKQUOTE><P>{quoted}</BLOCKQUOTE></P>",
+    '<blockquote data-note="a > b"><p>{quoted}</blockquote></p>',
+    "<!-- quote --><blockquote><p>{quoted}</blockquote></p>",
+    "<![CDATA[quote]]><blockquote>{quoted}</blockquote>",
+    "<div><blockquote>{quoted}</div></blockquote>",
+    "<blockquote><blockquote><p>{quoted}</blockquote></p></blockquote>",
+)
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("broken", _BROKEN_QUOTE_HTML)
+def test_malformed_html_quote_is_unreadable_on_both_routes(
+    monkeypatch, tmp_path, kind, broken
+):
+    approval = "approve v1.2.3" if kind == "release" else "approve"
+    html = f"<p>{approval}</p>" + broken.format(quoted="quoted instruction")
+    extracted, _ = email_channel._extract_authored_html(html)
+    assert "quoted instruction" not in extracted
+    posts, state, notices = _poll_authored_reply(monkeypatch, tmp_path, kind,
+                                                  {"body_html": html}, polls=2)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+    assert len([note for note in notices.sent if "could not be read yet" in note]) == 1
+    assert not any("no approval was recorded" in note for note in notices.sent)
 
 
 @pytest.mark.parametrize("kind", ("release", "pr"))

@@ -319,6 +319,18 @@ def test_body_does_not_treat_paid_as_pre_execution_verb():
     assert states["AAAA1111"] != "approved"
 
 
+@pytest.mark.parametrize("calendar,verb", ((True, "ATTENDED"), (False, "APPROVE")))
+@pytest.mark.parametrize("extra", ("wait", "actually no", "unless X",
+                                  "APPROVE [APPROVE-BBBB2222]", "thank you"))
+def test_payment_reply_with_second_authored_line_never_approves(calendar, verb, extra):
+    item = consent_email.PendingItem(
+        "synthetic", "Synthetic", 25, "2026-09-22", calendar, "AAAA1111")
+    states, unrecognized = consent_email.overlay_verdicts(
+        [item], [f"RE: [APPROVE-AAAA1111]\n{verb}\n{extra}"])
+    assert states["AAAA1111"] != "approved"
+    assert unrecognized
+
+
 def test_statusful_ok_empty_is_awaiting_approval_not_skipped(monkeypatch, tmp_path):
     h = _Handler("therapy", label="Studio Example", amount=60)
     monkeypatch.setattr(consent_email, "send_request", lambda *a, **k: True)

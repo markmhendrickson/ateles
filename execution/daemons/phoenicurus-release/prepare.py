@@ -958,10 +958,10 @@ def _build_agent_prompt(last_tag: str, commit_count: int) -> str:
       (b) an approve/skip instruction, e.g. a line: Reply <code>approve &lt;TAG&gt;</code>
           to publish, or <code>skip &lt;TAG&gt;</code> to discard;
       (c) a line reading exactly `release-approve: <TAG>` (real tag, e.g.
-          `release-approve: v0.20.0`) — Turdus parses this token from the reply
-          body to route an `approve <TAG>` reply to the publish gate, so it MUST be
-          present, exact, and in a form that survives as plain text in a quoted
-          reply (put it in its own <p> or <code> line, NOT only inside an href).
+          `release-approve: v0.20.0`) — Turdus uses this token to discover replies
+          in the mailbox and selects the target release from the reply subject.
+          Keep it present, exact, and visible on its own <p> or <code> line (NOT
+          only inside an href) so it survives as quoted plain text.
 
     If the gws send fails, log it and add this exact sentence to the Telegram
     notification: "Email approval unavailable because the RC email failed to
