@@ -31,11 +31,9 @@ No separate state store is added.
   on the next check; ``send``'s own pre-delivery journal entry is released
   (``Notifier.release_dedupe``) so the retry is not suppressed. The same
   process waits ``RETRY_BACKOFF_SECONDS`` before retrying it.
-* The re-check and the send run under a non-blocking ``flock`` on a sidecar of
-  the dedupe journal (``held_view.file_lock``, the notifier's own cross-process
-  lock pattern). A second process that finds it held skips this check: the
-  holder is alerting, and if it fails the key stays eligible. If ``flock``
-  itself errors the lock fails open, as every notifier lock does.
+* The handoff thread owns a non-blocking ``flock`` on a sidecar of the dedupe
+  journal through transport completion and threshold marking. A second check
+  that cannot acquire it skips the send; an unreadable lock also skips it.
 
 Fail-open, always: a missing or malformed usage file, an unreadable ledger, a
 notifier that cannot be built or a send that raises is logged and swallowed.
@@ -88,9 +86,13 @@ ALERT_SEND_TIMEOUT_SECONDS = 30.0
 _retry_after: dict[str, float] = {}
 
 
+def _canonical_window_name(name: str) -> str:
+    return (name or "").strip().casefold() or "unnamed"
+
+
 def window_span(name: str) -> tuple[timedelta, bool]:
     """``(span, known)`` for a usage window name."""
-    key = (name or "").strip().lower()
+    key = _canonical_window_name(name)
     if key in _NAMED_SPANS:
         return _NAMED_SPANS[key], True
     match = _MINUTES_NAME.match(key)
@@ -123,7 +125,7 @@ def _percent(raw: object) -> float | None:
 def dedupe_key(provider: str, window: str, resets_at: str | None, threshold: int) -> str:
     reset = _parse_iso(resets_at)
     normalized = reset.isoformat(timespec="seconds") if reset else "no-reset"
-    return f"{DEDUPE_PREFIX}:{provider}:{window}:{normalized}:{threshold}"
+    return f"{DEDUPE_PREFIX}:{provider}:{_canonical_window_name(window)}:{normalized}:{threshold}"
 
 
 def _describe_callers(callers: list[tuple[str | None, str | None, int]]) -> str:
@@ -232,7 +234,7 @@ def check_usage_thresholds(
         current = now or datetime.now(timezone.utc)
         windows = harness_router.usage_windows(provider)
         for window in windows:
-            name = str(window.get("name") or "").strip() or "unnamed"
+            name = _canonical_window_name(str(window.get("name") or ""))
             used = _percent(window.get("used_percent"))
             if used is None:
                 continue
@@ -241,38 +243,22 @@ def check_usage_thresholds(
             if resets_at is not None and resets_at <= current:
                 continue  # that window has reset; its reading no longer applies
             reset_key = resets_at.isoformat(timespec="seconds") if resets_at else None
+            current_instant = _parse_iso(reset_key)
             crossed = [t for t in THRESHOLDS if used >= t]
             if notifier is None and journal is None:
                 journal = (journal_factory or _default_journal_factory)()
             probe = notifier if notifier is not None else journal
-            prefix = f"{DEDUPE_PREFIX}:{provider}:{name}:"
-            current_reset = reset_key or "no-reset"
-            migration_failed = False
-            for old_key in probe.dedupe_keys_with_prefix(prefix):
-                old_reset, separator, threshold_text = old_key[len(prefix):].rpartition(":")
-                old_instant = _parse_iso(old_reset)
-                normalized_old = (
-                    old_instant.isoformat(timespec="seconds") if old_instant else old_reset
-                )
-                if separator and normalized_old != current_reset:
-                    probe.clear_dedupe(old_key)
-                elif separator and threshold_text.isdigit():
-                    canonical_key = dedupe_key(provider, name, reset_key, int(threshold_text))
-                    if old_key == canonical_key:
-                        continue
-                    # This is the same open condition, so move both the
-                    # journal key and sink reference without resolving it.
-                    migrator = getattr(probe, "migrate_dedupe", None)
-                    if not callable(migrator) or not migrator(old_key, canonical_key):
-                        migration_failed = True
-            if migration_failed:
-                continue  # retain the old key and retry migration next check
             if resets_at is None:
                 # No reset time means no per-window key: the key is reused
                 # across windows, so a threshold usage has fallen back under
                 # (the window rolled over) is cleared and can alert again.
-                for below in (t for t in THRESHOLDS if used < t):
-                    _clear_if_reported(probe, dedupe_key(provider, name, None, below))
+                with held_view.file_lock(
+                    _journal_lock_path(probe), blocking=False, fail_open=False,
+                ) as held:
+                    if not held:
+                        continue
+                    for below in (t for t in THRESHOLDS if used < t):
+                        _clear_if_reported(probe, dedupe_key(provider, name, None, below))
             if not crossed:
                 continue
             keys = {t: dedupe_key(provider, name, reset_key, t) for t in crossed}
@@ -281,79 +267,85 @@ def check_usage_thresholds(
             retry_key = keys[max(crossed)]
             if _retry_after.get(retry_key, 0.0) > time.monotonic():
                 continue  # this process just failed to deliver it; back off
-            with held_view.file_lock(_journal_lock_path(probe), blocking=False) as held:
-                if not held:
-                    log.info(
-                        f"[apis] usage alert for {provider} {name}: another process "
-                        "is alerting it now; skipping this check"
-                    )
-                    continue
-                # Re-read under the lock: another process may have delivered.
-                pending = [t for t in crossed if not _already_reported(probe, keys[t])]
-                if not pending:
-                    continue
-                if notifier is None:
-                    notifier = (notifier_factory or _default_notifier_factory)()
-                if _silenced(notifier):
-                    log.info(
-                        f"[apis] usage alert for {provider} {name} held (silence "
-                        "window); it stays eligible on the next check"
-                    )
-                    continue
-                span, span_known = window_span(name)
-                window_start = (resets_at - span) if resets_at else (current - span)
-                try:
-                    callers = model_tiering.top_callers(
-                        since=window_start, provider=provider, limit=3
-                    )
-                    attribution_unavailable = False
-                except Exception as exc:  # noqa: BLE001 — the alert still goes out
-                    log.warning(
-                        f"[apis] usage alert: ledger unreadable ({exc}); sending without callers"
-                    )
-                    callers = []
-                    attribution_unavailable = True
-                message = build_message(
-                    provider=provider, window=name, used_percent=used,
-                    thresholds=pending, resets_at=resets_at, callers=callers,
-                    span_known=span_known,
-                    attribution_unavailable=attribution_unavailable,
-                )
-                send_key = keys[max(pending)]
-                delivered = False
-                try:
-                    from lib.notify import Priority
+            result_keys: list[str] = []
 
-                    result: list[bool] = []
-                    def handoff() -> None:
+            def handoff(
+                *, probe=probe, keys=keys, crossed=crossed, name=name,
+                resets_at=resets_at, reset_key=reset_key,
+                current_instant=current_instant, used=used, current=current,
+                retry_key=retry_key, notifier=notifier,
+            ) -> None:
+                # This thread owns the journal-sidecar lock until every key
+                # covered by the transport is marked. The caller's join may
+                # time out without releasing ownership of an in-flight send.
+                with held_view.file_lock(
+                    _journal_lock_path(probe), blocking=False, fail_open=False,
+                ) as held:
+                    if not held:
+                        return
+                    try:
+                        provider_prefix = f"{DEDUPE_PREFIX}:{provider}:"
+                        for old_key in probe.dedupe_keys_with_prefix(provider_prefix):
+                            old_name, name_separator, remainder = old_key[len(provider_prefix):].partition(":")
+                            if not name_separator or _canonical_window_name(old_name) != name:
+                                continue
+                            old_reset, separator, threshold_text = remainder.rpartition(":")
+                            if not separator or not threshold_text.isdigit():
+                                continue
+                            old_instant = _parse_iso(old_reset)
+                            canonical_key = dedupe_key(provider, name, reset_key, int(threshold_text))
+                            if (old_instant is not None and current_instant is not None
+                                    and current_instant > old_instant):
+                                probe.clear_dedupe(old_key)
+                            elif old_key != canonical_key:
+                                migrator = getattr(probe, "migrate_dedupe", None)
+                                if not callable(migrator) or not migrator(old_key, canonical_key):
+                                    return  # keep the old key for a later check
+                        pending = [t for t in crossed if not _already_reported(probe, keys[t])]
+                        if not pending:
+                            return
+                        sender_notifier = notifier or (notifier_factory or _default_notifier_factory)()
+                        if _silenced(sender_notifier):
+                            return
+                        span, span_known = window_span(name)
+                        window_start = (resets_at - span) if resets_at else (current - span)
                         try:
-                            result.append(bool(notifier.send(
-                                message, priority=Priority.WARN, handler="apis",
-                                dedupe_key=send_key, retryable=True,
-                            )))
+                            callers = model_tiering.top_callers(
+                                since=window_start, provider=provider, limit=3
+                            )
+                            attribution_unavailable = False
                         except Exception as exc:  # noqa: BLE001
-                            log.warning("[apis] usage alert handoff failed: %s", exc)
-                    sender = threading.Thread(target=handoff, daemon=True)
-                    sender.start()
-                    sender.join(ALERT_SEND_TIMEOUT_SECONDS)
-                    delivered = bool(result) and result[0]
-                except Exception as exc:  # noqa: BLE001 — retried next check
-                    log.warning(f"[apis] usage alert send raised (non-fatal): {exc}")
-                if delivered:
-                    _retry_after.pop(retry_key, None)
-                    for t in pending:
-                        _mark_reported(notifier, keys[t])
-                    delivered_keys.extend(keys[t] for t in pending)
-                else:
-                    # A pending journal entry survives a failed or interrupted
-                    # handoff and becomes retryable after its short bound.
-                    _retry_after[retry_key] = time.monotonic() + RETRY_BACKOFF_SECONDS
-                log.info(
-                    "[apis] usage alert "
-                    + ("delivered" if delivered
-                       else "NOT delivered (failed or no transport); retried on the next check")
-                    + f": {message}"
-                )
+                            log.warning("[apis] usage alert: ledger unreadable (%s)", exc)
+                            callers = []
+                            attribution_unavailable = True
+                        message = build_message(
+                            provider=provider, window=name, used_percent=used,
+                            thresholds=pending, resets_at=resets_at, callers=callers,
+                            span_known=span_known,
+                            attribution_unavailable=attribution_unavailable,
+                        )
+                        from lib.notify import Priority
+
+                        delivered = bool(sender_notifier.send(
+                            message, priority=Priority.WARN, handler="apis",
+                            dedupe_key=keys[max(pending)], retryable=True,
+                        ))
+                        if delivered:
+                            for threshold in pending:
+                                _mark_reported(sender_notifier, keys[threshold])
+                            _retry_after.pop(retry_key, None)
+                            result_keys.extend(keys[threshold] for threshold in pending)
+                        else:
+                            _retry_after[retry_key] = time.monotonic() + RETRY_BACKOFF_SECONDS
+                        log.info("[apis] usage alert %s: %s", "delivered" if delivered else "NOT delivered", message)
+                    except Exception as exc:  # noqa: BLE001
+                        _retry_after[retry_key] = time.monotonic() + RETRY_BACKOFF_SECONDS
+                        log.warning("[apis] usage alert handoff failed: %s", exc)
+
+            sender = threading.Thread(target=handoff, daemon=True)
+            sender.start()
+            sender.join(ALERT_SEND_TIMEOUT_SECONDS)
+            delivered_keys.extend(result_keys)
     except Exception as exc:  # noqa: BLE001 — never block or fail a dispatch
         log.warning(f"[apis] usage threshold check failed (non-fatal): {exc}")
     return delivered_keys

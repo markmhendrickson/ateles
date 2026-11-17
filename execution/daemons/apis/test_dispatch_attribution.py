@@ -466,6 +466,48 @@ def test_combined_delivery_marks_an_earlier_pending_threshold_delivered(
     assert len(spy.sent) == 2
 
 
+def test_timed_out_combined_handoff_keeps_all_thresholds_owned(
+    monkeypatch, tmp_path, ledger
+) -> None:
+    import threading
+    import time
+
+    window = _window(60)
+    _usage_file(monkeypatch, tmp_path, "cursor", [window])
+    spy = _SpyNotifier(deliver=False)
+    usage_alerts.check_usage_thresholds("cursor", notifier=spy)
+    window["used_percent"] = 80
+    _usage_file(monkeypatch, tmp_path, "cursor", [window])
+    spy.deliver = True
+    entered = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(usage_alerts, "ALERT_SEND_TIMEOUT_SECONDS", 0.02)
+
+    def slow_transport(message, force=False, email_eligible=True):
+        entered.set()
+        assert release.wait(timeout=2)
+        spy.delivered.append(message)
+        return True
+
+    spy.inner._deliver = slow_transport
+    try:
+        assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
+        assert entered.wait(timeout=2)
+        assert usage_alerts.check_usage_thresholds("cursor", notifier=_SpyNotifier()) == []
+        assert len(spy.sent) == 2
+    finally:
+        release.set()
+    keys = [usage_alerts.dedupe_key("cursor", window["name"], window["resets_at"], t)
+            for t in (50, 75)]
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and not all(
+        spy.inner._dedupe_journal.get(key, {}).get("state") == "delivered" for key in keys
+    ):
+        time.sleep(0.01)
+    assert all(spy.inner._dedupe_journal[key]["state"] == "delivered" for key in keys)
+    assert usage_alerts.check_usage_thresholds("cursor", notifier=_SpyNotifier()) == []
+
+
 def test_a_send_that_raises_is_retried_on_the_next_check(
     monkeypatch, tmp_path, ledger
 ) -> None:
@@ -670,6 +712,91 @@ def test_reset_offsets_for_one_instant_share_a_dedupe_key(monkeypatch, tmp_path,
     assert len(spy.sent) == 2
 
 
+def test_earlier_reset_correction_migrates_without_resolving_or_resending(
+    monkeypatch, tmp_path, ledger
+) -> None:
+    from lib.notify import neotoma_sink
+
+    migrated = []
+    resolved = []
+    monkeypatch.setattr(neotoma_sink, "migrate_key", lambda old, new: (
+        migrated.append((old, new)) or True
+    ))
+    monkeypatch.setattr(neotoma_sink, "resolve", lambda key: resolved.append(key))
+    spy = _SpyNotifier()
+    later = datetime.now(timezone.utc) + timedelta(days=4)
+    earlier = later - timedelta(days=1)
+    for reset in (later, earlier):
+        _usage_file(monkeypatch, tmp_path, "codex", [{
+            "name": "monthly", "used_percent": 60, "resets_at": reset.isoformat(),
+        }])
+        usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    new_key = usage_alerts.dedupe_key("codex", "monthly", earlier.isoformat(), 50)
+    assert len(spy.delivered) == 1
+    assert len(migrated) == 1 and migrated[0][1] == new_key
+    assert resolved == []
+    assert spy.inner._dedupe_journal[new_key]["state"] == "delivered"
+
+
+def test_window_name_case_is_one_condition(monkeypatch, tmp_path, ledger) -> None:
+    spy = _SpyNotifier()
+    reset = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    for name in ("monthly", "Monthly", " MONTHLY "):
+        _usage_file(monkeypatch, tmp_path, "codex", [{
+            "name": name, "used_percent": 60, "resets_at": reset,
+        }])
+        usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    assert len(spy.delivered) == 1
+    assert list(spy.inner._dedupe_journal) == [
+        usage_alerts.dedupe_key("codex", "monthly", reset, 50)
+    ]
+
+
+def test_legacy_case_and_unparseable_reset_migrate_without_resolution(
+    monkeypatch, tmp_path, ledger
+) -> None:
+    from lib.notify import neotoma_sink
+
+    migrated = []
+    resolved = []
+    monkeypatch.setattr(neotoma_sink, "migrate_key", lambda old, new: (
+        migrated.append((old, new)) or True
+    ))
+    monkeypatch.setattr(neotoma_sink, "resolve", lambda key: resolved.append(key))
+    spy = _SpyNotifier()
+    old_key = "provider-usage-threshold:codex:Monthly:bad-reset:50"
+    spy.inner._mark_dedupe_delivered(old_key, "apis")
+    reset = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    _usage_file(monkeypatch, tmp_path, "codex", [{
+        "name": "monthly", "used_percent": 60, "resets_at": reset,
+    }])
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    new_key = usage_alerts.dedupe_key("codex", "monthly", reset, 50)
+    assert migrated == [(old_key, new_key)]
+    assert resolved == [] and spy.sent == []
+    assert list(spy.inner._dedupe_journal) == [new_key]
+
+
+def test_later_reset_resolves_and_sends_one_new_alert(monkeypatch, tmp_path, ledger) -> None:
+    from lib.notify import neotoma_sink
+
+    resolved = []
+    monkeypatch.setattr(neotoma_sink, "resolve", lambda key: resolved.append(key))
+    spy = _SpyNotifier()
+    first = datetime.now(timezone.utc) + timedelta(days=2)
+    second = first + timedelta(days=30)
+    for reset in (first, second):
+        _usage_file(monkeypatch, tmp_path, "codex", [{
+            "name": "monthly", "used_percent": 60, "resets_at": reset.isoformat(),
+        }])
+        usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    first_key = usage_alerts.dedupe_key("codex", "monthly", first.isoformat(), 50)
+    second_key = usage_alerts.dedupe_key("codex", "monthly", second.isoformat(), 50)
+    assert resolved == [first_key]
+    assert len(spy.delivered) == 2
+    assert list(spy.inner._dedupe_journal) == [second_key]
+
+
 def test_unreadable_ledger_is_not_described_as_zero_activity(monkeypatch, tmp_path, ledger) -> None:
     _usage_file(monkeypatch, tmp_path, "codex", [_window(60)])
     spy = _SpyNotifier()
@@ -700,6 +827,41 @@ def test_a_window_with_no_reset_time_alerts_again_after_it_rolls_over(
     assert [k for _, _, k in spy.sent] == [
         "provider-usage-threshold:cursor:monthly:no-reset:50",
     ] * 2
+
+
+def test_no_reset_rollover_waits_for_in_flight_delivery(monkeypatch, tmp_path, ledger) -> None:
+    import threading
+    import time
+
+    spy = _SpyNotifier()
+    entered = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(usage_alerts, "ALERT_SEND_TIMEOUT_SECONDS", 0.02)
+    key = usage_alerts.dedupe_key("cursor", "monthly", None, 50)
+
+    def slow_transport(message, force=False, email_eligible=True):
+        entered.set()
+        assert release.wait(timeout=2)
+        spy.delivered.append(message)
+        return True
+
+    spy.inner._deliver = slow_transport
+    other = _SpyNotifier()
+    _usage_file(monkeypatch, tmp_path, "cursor", [{"name": "monthly", "used_percent": 60}])
+    try:
+        assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
+        assert entered.wait(timeout=2)
+        _usage_file(monkeypatch, tmp_path, "cursor", [{"name": "monthly", "used_percent": 5}])
+        usage_alerts.check_usage_thresholds("cursor", notifier=other)
+        assert key in other.inner._dedupe_journal
+    finally:
+        release.set()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and spy.inner._dedupe_journal.get(key, {}).get("state") != "delivered":
+        time.sleep(0.01)
+    assert spy.inner._dedupe_journal[key]["state"] == "delivered"
+    usage_alerts.check_usage_thresholds("cursor", notifier=spy)
+    assert key not in spy.inner._dedupe_journal
 
 
 def test_a_window_past_its_reset_does_not_alert(monkeypatch, tmp_path, ledger) -> None:
