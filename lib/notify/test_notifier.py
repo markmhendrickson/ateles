@@ -867,6 +867,7 @@ def test_malformed_journal_entry_replaced_on_retryable_send(tmp_path, entry):
         n._digest_path.write_text(json.dumps([entry["held_message"]]))
         assert not n.send("usage crossed", Priority.WARN, handler="apis",
                           dedupe_key=key, retryable=True)
+        assert n._dedupe_journal[key]["handler"] == ""
         assert n.flush_digest()
         assert len(sent) == 1
         assert n._dedupe_journal[key]["state"] == "delivered"
