@@ -1,11 +1,11 @@
-"""Count genuine review rounds from the swarm's author-scoped lens records.
+"""Count review rounds from ordered episodes of author-scoped lens verdicts.
 
-A round starts at the first reviewed head. A later head starts another round
-only after a blocking (or unreadable) verdict on a head in the current round.
-The cap counts the whole PR verdict history: returning to an earlier head after
-any blocking round spends a new round. Clear re-reviews and repeat runs on the
-latest head do not. Missing or malformed verdict timestamps make round order
-indeterminate and refuse approval unless a valid operator override is present.
+Contiguous verdicts for one head form an episode; returning to that head after
+another head forms another episode. An episode after a blocking or unreadable
+episode starts a round, while an episode after an all-clear one stays in the
+same round. Timestamp ties use integer GitHub comment ids, then source order.
+Missing timestamps or ids needed to resolve a tie make order indeterminate and
+refuse approval unless a valid operator override is present.
 The three-round cap can be overridden only by the operator's unedited,
 PR-local GitHub comment; the approval gate verifies that comment separately.
 """
@@ -46,6 +46,12 @@ class ReviewRound:
 
 
 @dataclass(frozen=True)
+class ReviewEpisode:
+    head: str
+    blocking: bool
+
+
+@dataclass(frozen=True)
 class RoundStatus:
     current_head: str
     rounds: tuple[ReviewRound, ...]
@@ -54,6 +60,7 @@ class RoundStatus:
     current_has_verdict: bool = False
     indeterminate_head: str = ""
     unplaced_heads: tuple[str, ...] = ()
+    indeterminate_reason: str = "a verdict timestamp is missing or malformed"
 
     @property
     def capped(self) -> bool:
@@ -70,7 +77,7 @@ class RoundStatus:
         if self.indeterminate_head:
             lines.append(f"  unplaced reviewed heads: {', '.join(self.unplaced_heads)}")
             lines.append(
-                "round order indeterminate: a verdict timestamp is missing or malformed "
+                f"round order indeterminate: {self.indeterminate_reason} "
                 f"for {self.indeterminate_head}; refusing unless the operator override is valid."
             )
         elif self.capped:
@@ -81,63 +88,94 @@ class RoundStatus:
         return "\n".join(lines)
 
 
+def _comment_id(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.isascii() and value.isdecimal():
+        try:
+            parsed = int(value)
+        except ValueError:
+            return None
+        return parsed if parsed > 0 else None
+    return None
+
+
 def round_status(records: dict[str, list], current_head: str, *, cap: int = ROUND_CAP) -> RoundStatus:
-    """Count all reviewed heads by their first valid UTC verdict time; unknown order denies."""
+    """Count contiguous review episodes in verdict order; unknown order denies."""
     current = (current_head or "").lower()
     now = datetime.now(timezone.utc)
-    by_head: dict[str, dict] = {}
+    verdicts: list[tuple[datetime, int | None, int, str, bool]] = []
+    unplaced: set[str] = set()
+    invalid_timestamps: set[str] = set()
+    reviewed: set[str] = set()
     for recs in records.values():
         for rec in recs:
             head = (getattr(rec, "head", "") or "").lower()
             if not head:
                 continue
+            reviewed.add(head)
             timestamp = _verdict_time(getattr(rec, "created_at", None), now)
-            entry = by_head.setdefault(head, {"created_at": timestamp, "blocking": False, "invalid": False})
             if timestamp is None:
-                entry["invalid"] = True
-            elif entry["created_at"] is None or timestamp < entry["created_at"]:
-                entry["created_at"] = timestamp
-            entry["blocking"] |= bool(getattr(rec, "blocking", not getattr(rec, "cleared", False)))
+                unplaced.add(head)
+                invalid_timestamps.add(head)
+                continue
+            verdicts.append((
+                timestamp, _comment_id(getattr(rec, "comment_id", None)),
+                getattr(rec, "source_order", 0), head,
+                bool(getattr(rec, "blocking", not getattr(rec, "cleared", False))),
+            ))
+
+    by_time: dict[datetime, list[tuple[datetime, int | None, int, str, bool]]] = {}
+    for verdict in verdicts:
+        by_time.setdefault(verdict[0], []).append(verdict)
+    ambiguous_times = {
+        timestamp for timestamp, tied in by_time.items()
+        if len(tied) > 1 and any(verdict[1] is None for verdict in tied)
+    }
+    for timestamp in ambiguous_times:
+        unplaced.update(verdict[3] for verdict in by_time[timestamp])
+    ordered = sorted(
+        (verdict for verdict in verdicts if verdict[0] not in ambiguous_times),
+        key=lambda verdict: (verdict[0], verdict[1] if verdict[1] is not None else -1, verdict[2]),
+    )
+    episodes: list[ReviewEpisode] = []
+    for _, _, _, head, blocking in ordered:
+        if episodes and episodes[-1].head == head:
+            episodes[-1] = ReviewEpisode(head, episodes[-1].blocking or blocking)
+        else:
+            episodes.append(ReviewEpisode(head, blocking))
 
     rounds: list[ReviewRound] = []
-    head_round: dict[str, int] = {}
-    unplaced = tuple(sorted(head for head, item in by_head.items() if item["invalid"]))
-    ordered = sorted(
-        ((head, item) for head, item in by_head.items() if not item["invalid"]),
-        key=lambda pair: (pair[1]["created_at"], pair[0]),
-    )
-    for head, item in ordered:
-        if not rounds or rounds[-1].blocking:
-            rounds.append(ReviewRound((head,), item["blocking"]))
+    previous: ReviewEpisode | None = None
+    for episode in episodes:
+        if previous is None or previous.blocking:
+            rounds.append(ReviewRound((episode.head,), episode.blocking))
         else:
-            previous = rounds[-1]
-            rounds[-1] = ReviewRound(previous.heads + (head,), item["blocking"])
-        head_round[head] = len(rounds)
+            last = rounds[-1]
+            rounds[-1] = ReviewRound(last.heads + (episode.head,), episode.blocking)
+        previous = episode
 
     if unplaced:
-        # Never infer a cheaper order by placing an unreadable head first or
-        # silently omitting it. The gate refuses regardless of the lower bound.
-        return RoundStatus(current, tuple(rounds), max(1, len(rounds)), cap, current in by_head,
-                           unplaced[0], unplaced)
+        unknown = tuple(sorted(unplaced))
+        reason = (
+            "a verdict timestamp is missing or malformed"
+            if invalid_timestamps else "tied verdict timestamps lack usable integer comment ids"
+        )
+        affected_head = min(invalid_timestamps) if invalid_timestamps else unknown[0]
+        return RoundStatus(current, tuple(rounds), max(1, len(rounds)), cap, current in reviewed,
+                           affected_head, unknown, reason)
 
-    if current in head_round:
-        if ordered[-1][0] != current and any(round_.blocking for round_ in rounds):
-            number = len(rounds) + 1
+    if previous is None or previous.head != current:
+        # The current head has no latest episode yet. Even a previously reviewed
+        # SHA is a new episode after verdicts on another head.
+        if previous is None or previous.blocking:
             rounds.append(ReviewRound((current,), False))
         else:
-            number = len(rounds)
-    elif not rounds:
-        number = 1
-        rounds.append(ReviewRound((current,), False))
-    elif rounds[-1].blocking:
-        number = len(rounds) + 1
-        rounds.append(ReviewRound((current,), False))
-    else:
-        number = len(rounds)
-        last = rounds[-1]
-        rounds[-1] = ReviewRound(last.heads + (current,), False)
-
-    return RoundStatus(current, tuple(rounds), number, cap, current in by_head)
+            last = rounds[-1]
+            rounds[-1] = ReviewRound(last.heads + (current,), False)
+    return RoundStatus(current, tuple(rounds), len(rounds), cap, current in reviewed)
 
 
 def operator_override(comments: list[dict], operator_login: str, repo: str, pr: int) -> dict | None:

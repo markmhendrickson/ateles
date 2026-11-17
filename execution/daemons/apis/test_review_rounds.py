@@ -1,4 +1,4 @@
-"""Genuine review rounds, ordered by first lens-verdict creation time."""
+"""Genuine review rounds, ordered by individual lens-verdict creation time."""
 
 from __future__ import annotations
 
@@ -134,10 +134,95 @@ def test_reset_to_earlier_head_after_all_clear_history_does_not_spend():
     comments = [_verdict("pm", head, n=i) for i, head in enumerate((H1, H2, H3, H4))]
     status = _status(comments, H2)
     assert status.round_number == 1 and not status.refused
-    assert status.rounds[0].heads == (H1, H2, H3, H4)
+    assert status.rounds[0].heads == (H1, H2, H3, H4, H2)
 
 
 def test_rerun_on_latest_reviewed_head_spends_no_further_round():
     comments = [_verdict("pm", head, verdict="BLOCKED", n=i) for i, head in enumerate((H1, H2, H3, H4))]
     assert _status(comments, H4).round_number == 4
     assert _status(comments + [_verdict("arch", H4, n=5)], H4).round_number == 4
+
+
+def test_revisited_heads_form_distinct_episodes_and_refuse_at_cap():
+    comments = [
+        _verdict("pm", head, verdict=verdict, n=i + 1)
+        for i, (head, verdict) in enumerate((
+            (H1, "BLOCKED"), (H2, "SIGNED_OFF"), (H1, "BLOCKED"),
+            (H3, "BLOCKED"), (H4, "SIGNED_OFF"),
+        ))
+    ]
+    status = _status(comments, H4)
+    # The clear H2 episode and following H1 episode share round two.
+    assert status.round_number == 4 and status.refused
+    assert [round_.heads for round_ in status.rounds] == [
+        (H1,), (H2, H1), (H3,), (H4,),
+    ]
+
+
+def test_block_then_clear_on_one_episode_still_spends_next_round():
+    comments = [_verdict("pm", H1, verdict="BLOCKED", n=1),
+                _verdict("pm", H1, n=2), _verdict("pm", H2, n=3)]
+    assert _status(comments, H2).round_number == 2
+
+
+def test_revisit_with_each_previous_episode_blocking_spends_five_rounds():
+    comments = [_verdict("pm", head, verdict="BLOCKED", n=i + 1)
+                for i, head in enumerate((H1, H2, H1, H3))]
+    comments.append(_verdict("pm", H4, n=5))
+    status = _status(comments, H4)
+    assert status.round_number == 5 and status.refused
+    assert [round_.heads for round_ in status.rounds] == [(H1,), (H2,), (H1,), (H3,), (H4,)]
+
+
+def test_security_revisit_spends_four_rounds():
+    comments = [_verdict("security", head, verdict="BLOCKED", n=i + 1)
+                for i, head in enumerate((H1, H2, H1))]
+    comments.append(_verdict("security", H3, n=4))
+    assert _status(comments, H3).round_number == 4
+
+
+def test_equal_timestamps_use_integer_comment_ids_not_sha_or_lens_bucket_order():
+    high = "f" * 40
+    low = "0" * 40
+    comments = [_verdict("arch", low, verdict="BLOCKED", n=20),
+                _verdict("pm", high, verdict="BLOCKED", n=10),
+                _verdict("pm", high, n=30)]
+    comments[0]["created_at"] = comments[1]["created_at"]
+    status = _status(comments, high)
+    assert status.round_number == 3 and status.refused is False
+    assert [round_.heads for round_ in status.rounds] == [(high,), (low,), (high,)]
+
+
+def test_equal_timestamp_same_comment_id_uses_source_order():
+    comments = [_verdict("pm", H1, verdict="BLOCKED", n=1),
+                _verdict("arch", H2, verdict="BLOCKED", n=2)]
+    comments[1]["created_at"] = comments[0]["created_at"]
+    comments[1]["id"] = comments[0]["id"]
+    assert _status(comments, H2).rounds[0].heads == (H1,)
+
+
+def test_missing_comment_id_with_unique_timestamp_still_has_known_order():
+    comments = [_verdict("pm", H1, verdict="BLOCKED", n=1),
+                _verdict("pm", H2, n=2)]
+    comments[0]["id"] = None
+    status = _status(comments, H2)
+    assert status.round_number == 2 and not status.refused
+
+
+@pytest.mark.parametrize("bad_id", [None, "not-an-integer", 0, True])
+def test_equal_timestamps_without_usable_comment_id_are_indeterminate(bad_id):
+    comments = [_verdict("pm", H1, verdict="BLOCKED", n=1),
+                _verdict("arch", H2, n=2)]
+    comments[1]["created_at"] = comments[0]["created_at"]
+    comments[1]["id"] = bad_id
+    status = _status(comments, H2)
+    assert status.refused
+    assert "round order indeterminate" in status.describe()
+    assert "comment ids" in status.describe()
+
+
+def test_many_clear_heads_with_revisits_remain_one_round():
+    comments = [_verdict("pm", head, n=i + 1)
+                for i, head in enumerate((H1, H2, H1, H3, H2, H4))]
+    status = _status(comments, H4)
+    assert status.round_number == 1 and status.rounds[0].heads == (H1, H2, H1, H3, H2, H4)

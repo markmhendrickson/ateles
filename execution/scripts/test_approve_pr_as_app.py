@@ -5037,6 +5037,32 @@ class TestRoundCap:
         code, client = await self._run(monkeypatch, comments)
         assert code == 0 and len(client.posted) == 1
 
+    async def test_revisited_blocking_head_refuses_after_four_rounds(self, monkeypatch, capsys):
+        h1, h2, h3 = ROUND_HEADS
+        sequence = [(h1, "REQUEST_CHANGES"), (h2, "SIGNED_OFF"),
+                    (h1, "REQUEST_CHANGES"), (h3, "REQUEST_CHANGES")]
+        comments = [
+            _comment(100 + i, _lens_comment_body("pm", target.LENS_AGENTS["pm"],
+                                                 head=head, verdict=verdict))
+            for i, (head, verdict) in enumerate(sequence)
+        ] + _all_clear_comments(ALL_FOUR)
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 1 and client.posted == []
+        assert "round 4 of 3" in capsys.readouterr().out
+
+    async def test_equal_timestamp_missing_comment_id_refuses_even_with_clear_current_head(
+        self, monkeypatch, capsys
+    ):
+        first = _comment(100, _lens_comment_body("pm", target.LENS_AGENTS["pm"],
+                                                  head="f" * 40, verdict="REQUEST_CHANGES"))
+        second = _comment(101, _lens_comment_body("pm", target.LENS_AGENTS["pm"],
+                                                   head="0" * 40, verdict="SIGNED_OFF"))
+        second["created_at"] = first["created_at"]
+        second["id"] = "not-an-integer"
+        code, client = await self._run(monkeypatch, [first, second] + _all_clear_comments(ALL_FOUR))
+        assert code == 1 and client.posted == []
+        assert "round order indeterminate" in capsys.readouterr().out
+
 
 def _operator_override(id_=1200, *, author=None, reason="The review has exceeded the cap for a documented reason.",
                        edited=False, other_pr=False, bot=False):

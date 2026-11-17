@@ -139,12 +139,13 @@ conclusion always blocks. See `_unscheduled_non_required_reason`.
 
 Three-round cap (operator ruling 2026-10-27, `review_rounds`): a repair unit
 not merged after three build, review and correct rounds is split or cut in scope
-before another round runs. A new round starts when a reviewed head follows a
-round with a blocking or unreadable lens verdict. Clear re-reviews on later
-heads stay in the same round. The tool orders heads by verdict comment creation
-time. Missing or malformed verdict timestamps refuse approval because the
-round order is unknown. Returning to an earlier reviewed head after any
-blocking round counts as a new round; the cap uses the whole PR history. A
+before another round runs. Contiguous verdicts on one head form a review
+episode; returning to an earlier head after another head forms another episode.
+An episode after a blocking or unreadable episode starts a round; one after an
+all-clear episode continues the round. Verdicts are ordered by UTC creation
+time, integer comment id, then source order. Missing or malformed timestamps,
+or timestamp ties without usable comment ids, refuse approval because the
+round order is unknown. The cap uses the whole PR history. A
 fourth round is refused unless the operator posted an unedited,
 PR-specific `/override-round-cap` comment with a reason of at least 20
 characters. The override lifts only this cap; every other gate still binds.

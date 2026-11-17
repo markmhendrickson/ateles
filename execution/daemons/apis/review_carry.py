@@ -156,6 +156,8 @@ class LensRecord:
     url: str = ""
     created_at: str = ""  # GitHub comment creation time, for round ordering
     blocking: bool = False  # includes unreadable verdicts and [BLOCKING] findings
+    comment_id: object = None  # GitHub creation order when timestamps tie
+    source_order: int = 0  # stable order from the fetched comment list
 
 
 def carry_candidate(
