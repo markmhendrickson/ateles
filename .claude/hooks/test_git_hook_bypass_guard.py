@@ -829,3 +829,59 @@ def test_allowlist_is_data():
 
 # The real-harness check lives in execution/daemons/phoenicurus-release/verify_guard_live.py:
 # the repository's test setup strips credentials, so the Claude CLI cannot run under pytest.
+
+
+# Same-class forms found after the split build: a program piped into a shell,
+# old-style tar bundles, and programs run from a script file.
+@pytest.mark.parametrize("command", (
+    'echo "cp s .git/config" | bash', "echo 'tee .git/hooks/pre-commit' | sh",
+    'printf "cp s .husky/pre-commit" | zsh', "tar xf a.tar -C .git", "tar xzf a.tgz",
+    "awk 'BEGIN{print 1 > \".git/config\"}'",
+))
+def test_piped_programs_and_old_style_tar_refused(command):
+    assert_refused(command)
+
+
+@pytest.mark.parametrize("command", (
+    'echo "hello" | bash', "tar tf a.tar", "tar xf a.tar -C /tmp/out",
+    "awk '{print $1}' notes.txt", "awk '{print}' .git/config",
+))
+def test_piped_programs_and_tar_without_protected_targets_allowed(command):
+    assert_allowed(command)
+
+
+@pytest.mark.parametrize("runner", ("bash", "sh", "zsh -e", "bash -x"))
+@pytest.mark.parametrize("body", ("cp s .git/config", "tee .git/hooks/pre-commit",
+                                  "git commit --no-verify -m x"))
+def test_shell_script_files_are_judged_like_sourced_files(tmp_path, runner, body):
+    script = tmp_path / "w.sh"
+    script.write_text(body + "\n")
+    assert_refused(f"{runner} {script}")
+
+
+@pytest.mark.parametrize("runner", ("bash", "sh"))
+def test_shell_script_file_with_ordinary_writes_allowed(tmp_path, runner):
+    script = tmp_path / "ok.sh"
+    script.write_text("cp s src/out\necho done\n")
+    assert_allowed(f"{runner} {script}")
+
+
+def test_assembled_shell_script_refused_and_missing_one_allowed(tmp_path):
+    assert_refused("bash $SCRIPT")
+    # bash cannot run a script it cannot read either, so nothing runs.
+    assert_allowed(f"bash {tmp_path / 'missing.sh'}")
+
+
+@pytest.mark.parametrize("body", ("open('.git/config', 'w')", "x = '--no-verify'",
+                                  "subprocess.run(['git', '-c', 'core.hooksPath=/tmp'])"))
+def test_interpreter_script_naming_protected_path_or_bypass_refused(tmp_path, body):
+    script = tmp_path / "w.py"
+    script.write_text(body + "\n")
+    assert_refused(f"python3 {script}")
+
+
+def test_interpreter_script_without_protected_names_allowed(tmp_path):
+    script = tmp_path / "ok.py"
+    script.write_text("print('hello')\n")
+    assert_allowed(f"python3 {script}")
+    assert_allowed("python3 -m pytest -q")

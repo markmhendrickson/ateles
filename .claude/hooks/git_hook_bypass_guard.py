@@ -906,7 +906,8 @@ def _tree_destinations(base: str, args: list[str]) -> list[str]:
     if base in {"tar", "bsdtar", "gtar"}:
         extracting = any(arg in ("--extract", "--get") or
                          (arg.startswith("-") and not arg.startswith("--") and "x" in arg[1:])
-                         for arg in flags)
+                         for arg in flags) or bool(
+            args and re.fullmatch(r"[A-Za-z]+", args[0]) and "x" in args[0])
         if extracting:
             return ([args[i + 1] for i, arg in enumerate(args[:-1])
                      if arg in ("-C", "--directory")]
@@ -1044,6 +1045,62 @@ def _mentions_protected_text(body: str) -> bool:
                           r"\.gitconfig\b|\.config/(?:git|husky)(?:/|\b))", body))
 
 
+_HOOK_BYPASS_TEXT = re.compile(r"--no-verify|core\.hooksPath|\bHUSKY\b|commit\s+-n\b")
+_AWKS = re.compile(r"^(?:awk|gawk|mawk|nawk)[0-9.]*$")
+
+
+def _script_operand(tail: list[Word], is_shell: bool) -> Word | None:
+    """The script a shell or interpreter runs from a file, if it names one."""
+    i = 0
+    while i < len(tail):
+        t = tail[i].text
+        if t == "--":
+            return tail[i + 1] if i + 1 < len(tail) else None
+        if t in _INTERPRETER_VALUE_OPTIONS or (is_shell and t in ("+o", "+O")):
+            i += 2
+            continue
+        if t.startswith("-") or (is_shell and t.startswith("+")):
+            if is_shell and not t.startswith("--") and "s" in t[1:]:
+                return None  # -s: the program is read from stdin
+            i += 1
+            continue
+        return tail[i]
+    return None
+
+
+def _script_file_violation(runner: str, tail: list[Word], is_shell: bool,
+                           depth: int) -> tuple[bool, str | None]:
+    """Judge the program a shell, interpreter or awk takes as an operand."""
+    if _AWKS.match(runner):
+        files = [tail[i + 1] for i, w in enumerate(tail[:-1]) if w.text == "-f"]
+        if files:
+            script = files[0]
+        else:
+            program = _script_operand(tail, False)
+            if program is None:
+                return False, None
+            if program.expanded or program.globbed or program.braced:
+                return True, f"{runner} program assembled by the shell"
+            if _mentions_protected_text(program.text) or _HOOK_BYPASS_TEXT.search(program.text):
+                return True, f"{runner} program names a protected path or hook bypass"
+            return True, None
+    else:
+        script = _script_operand(tail, is_shell)
+    if script is None:
+        return False, None
+    if script.expanded or script.globbed or script.braced:
+        return True, f"{runner} script assembled by the shell"
+    try:
+        text = Path(os.path.expanduser(script.text)).read_text()
+    except (OSError, UnicodeError):
+        return True, None  # the runner cannot read it either; nothing runs
+    if is_shell:
+        return True, _judge_program_body(text, depth)
+    if _mentions_protected_text(text) or _HOOK_BYPASS_TEXT.search(text):
+        return True, f"{runner} script names a protected path or hook bypass"
+    return True, None
+
+
 def _judge_program_body(body: str, depth: int) -> str | None:
     if body.strip() != "git status" and _code_mentions_git(body, depth + 1):
         return "nested program invokes git outside the allowed status inspection"
@@ -1086,7 +1143,9 @@ def _nested_program_violation(cmd: SimpleCommand, rest: list[Word], depth: int) 
         tail = rest[start + 1:]
         for i, option in enumerate(tail):
             name = option.text
-            is_program = name in _INTERPRETER_PROGRAM_OPTIONS or (
+            # A shell's only program option is -c (alone or bundled); its -e
+            # is errexit, not a program as it is for perl or ruby.
+            is_program = (not is_shell and name in _INTERPRETER_PROGRAM_OPTIONS) or (
                 is_shell and name.startswith("-") and not name.startswith("--") and "c" in name[1:])
             if not is_program:
                 continue
@@ -1103,10 +1162,14 @@ def _nested_program_violation(cmd: SimpleCommand, rest: list[Word], depth: int) 
         if is_shell and cmd.stdin and _reads_program_from_stdin(rest[start:]):
             return True, next((hit for body in cmd.stdin
                                if (hit := _judge_program_body(body, depth))), None)
+        checked, hit = _script_file_violation(runner, tail, is_shell, depth)
+        if checked:
+            return True, hit
     return False, None
 
 
-def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int = 0) -> str | None:
+def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int = 0,
+                      whole_mentions_protected: bool = False) -> str | None:
     words = list(cmd.words)
     stripped = _strip_command_prefix(words, wrappers=True)
     hit = _direct_write_violation(cmd, stripped) or _wrapped_write_violation(cmd, stripped)
@@ -1173,6 +1236,9 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int =
         if base not in _EVALUATORS and cmd.pipe_in and not cmd.stdin and (
                 _reads_program_from_stdin(rest)) and whole_mentions_git:
             return f"{base} reading a program from a pipe in a command that mentions git"
+        if base not in _EVALUATORS and cmd.pipe_in and not cmd.stdin and (
+                _reads_program_from_stdin(rest)) and whole_mentions_protected:
+            return f"{base} reading a program from a pipe in a command that names a protected path"
         return None
     # Any other command carrying git as a word may be a wrapper this guard
     # does not know (setsid, arch, ionice, chroot ...): git must be the
@@ -1220,6 +1286,8 @@ def _judge(command: str, depth: int, in_substitution: bool) -> str | None:
     # its words and substitutions, not heredoc data written to a file.
     whole = any(mentions_git(w.text) for c in commands for w in c.words) or any(
         _code_mentions_git(body, depth + 1) for body in lexer.subs)
+    whole_protected = any(_mentions_protected_text(w.text)
+                          for c in commands for w in c.words)
     for body in lexer.subs:
         if depth >= _MAX_DEPTH:
             if mentions_git(body):
@@ -1231,7 +1299,7 @@ def _judge(command: str, depth: int, in_substitution: bool) -> str | None:
     for cmd in commands:
         if in_substitution and _is_git_invocation(cmd):
             return "command or process substitution around git"
-        hit = command_violation(cmd, whole, depth)
+        hit = command_violation(cmd, whole, depth, whole_protected)
         if hit:
             return hit
     return None
