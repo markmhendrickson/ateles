@@ -219,20 +219,24 @@ def test_email_send_body_is_html_not_raw_markdown(monkeypatch, tmp_path):
     assert "##" not in body_arg
 
 
-def test_email_send_fail_open_on_nonzero_rc(monkeypatch):
+def test_email_send_fail_open_on_nonzero_rc(monkeypatch, tmp_path):
     monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
     monkeypatch.setattr(prepare, "SWARM_EMAIL", "")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
     with patch("shutil.which", return_value="/usr/bin/gws"), \
          patch.object(prepare.subprocess, "run",
-                      return_value=MagicMock(returncode=1, stdout="", stderr="boom")):
+                      return_value=MagicMock(returncode=1, stdout="", stderr="boom")) as run:
         assert prepare.email_send("subj", "body") is False
+        run.assert_called_once()
 
 
-def test_email_send_fail_open_on_exception(monkeypatch):
+def test_email_send_fail_open_on_exception(monkeypatch, tmp_path):
     monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
     with patch("shutil.which", return_value="/usr/bin/gws"), \
-         patch.object(prepare.subprocess, "run", side_effect=OSError("no gws")):
+         patch.object(prepare.subprocess, "run", side_effect=OSError("no gws")) as run:
         assert prepare.email_send("subj", "body") is False
+        run.assert_called_once()
 
 
 def test_agent_prompt_includes_email_step_when_configured(monkeypatch, tmp_path):
