@@ -3953,14 +3953,11 @@ async def _run_skill_once(
             model=resolved_model, dispatch_id=_ledger_dispatch_id,
         )
     )
-    # Provider spend alerts (ent_e5259618cae6cafd4be120e0): every attempt, daemon
-    # or interactive, passes here with its selected provider. Fail-open by
-    # contract: check_usage_thresholds never raises; the guard below is belt
-    # and braces so an alert can never block or fail this dispatch.
+    # Alert reads, notifier configuration and transport I/O run independently
+    # of the provider launch. The worker retains the notifier's journal lock
+    # and dedupe handling across concurrent processes.
     try:
-        await asyncio.to_thread(
-            usage_alerts.check_usage_thresholds, provider, notifier=notifier
-        )
+        usage_alerts.schedule_dispatch_check(provider, notifier=notifier)
     except Exception as exc:  # noqa: BLE001
         log.debug(f"[apis] usage threshold check raised (ignored): {exc}")
 
@@ -5959,6 +5956,19 @@ async def run_review_prompt(
     async def attempt(provider: str) -> SkillResult:
         binary = binaries[provider]
         model = model_tiering.validate_model_selector(models[provider].strip())
+        dispatch_id = model_tiering.new_dispatch_id()
+        log.info(
+            "[apis] %s via %s: %s",
+            role, provider,
+            model_tiering.record_dispatch(
+                skill=role, provider=provider, resolved=None, model=model,
+                dispatch_id=dispatch_id,
+            ),
+        )
+        try:
+            usage_alerts.schedule_dispatch_check(provider)
+        except Exception as exc:  # noqa: BLE001 — alerting cannot stop a review
+            log.debug("[apis] review usage alert check failed: %s", exc)
         with tempfile.TemporaryDirectory(prefix="ateles-review-") as workdir:
             if provider == "claude":
                 cmd = [
@@ -6059,6 +6069,15 @@ async def run_review_prompt(
                     error=f"{provider} launch failed: {exc}",
                     provider=provider,
                 )
+            model_tiering.record_dispatch_usage(
+                dispatch_id=dispatch_id, skill=role, provider=provider,
+                resolved=None, requested_model=model,
+                usage=parse_dispatch_usage(
+                    provider, result.stdout, requested_model=model,
+                    stderr=result.stderr,
+                ),
+                ok=result.ok,
+            )
             try:
                 await _emit_harness_event(
                     task_entity_id="",

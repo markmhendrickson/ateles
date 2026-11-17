@@ -54,6 +54,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -104,7 +105,8 @@ def _parse_iso(raw: object) -> datetime | None:
         parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
     except ValueError:
         return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    aware = parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return aware.astimezone(timezone.utc)
 
 
 def _percent(raw: object) -> float | None:
@@ -118,7 +120,9 @@ def _percent(raw: object) -> float | None:
 
 
 def dedupe_key(provider: str, window: str, resets_at: str | None, threshold: int) -> str:
-    return f"{DEDUPE_PREFIX}:{provider}:{window}:{resets_at or 'no-reset'}:{threshold}"
+    reset = _parse_iso(resets_at)
+    normalized = reset.isoformat(timespec="seconds") if reset else "no-reset"
+    return f"{DEDUPE_PREFIX}:{provider}:{window}:{normalized}:{threshold}"
 
 
 def _describe_callers(callers: list[tuple[str | None, str | None, int]]) -> str:
@@ -145,13 +149,19 @@ def build_message(
     resets_at: datetime | None,
     callers: list[tuple[str | None, str | None, int]],
     span_known: bool,
+    attribution_unavailable: bool = False,
 ) -> str:
     reset_text = resets_at.isoformat(timespec="minutes") if resets_at else "unknown"
     span_note = "" if span_known else " (window length unknown; last 7 days)"
+    caller_text = (
+        "attribution unavailable (ledger could not be read)"
+        if attribution_unavailable else _describe_callers(callers)
+    )
     return (
         f"Provider usage: {provider} {window} window is {used_percent:g}% used "
         f"(crossed {_threshold_text(thresholds)}). Resets {reset_text}. "
-        f"Top callers by dispatch count{span_note}: {_describe_callers(callers)}."
+        f"Top callers by dispatch count{span_note}: "
+        f"{caller_text}."
     )
 
 
@@ -229,7 +239,7 @@ def check_usage_thresholds(
             resets_at = _parse_iso(resets_raw)
             if resets_at is not None and resets_at <= current:
                 continue  # that window has reset; its reading no longer applies
-            reset_key = resets_at.isoformat() if resets_at else None
+            reset_key = resets_at.isoformat(timespec="seconds") if resets_at else None
             crossed = [t for t in THRESHOLDS if used >= t]
             if notifier is None and journal is None:
                 journal = (journal_factory or _default_journal_factory)()
@@ -237,8 +247,21 @@ def check_usage_thresholds(
             prefix = f"{DEDUPE_PREFIX}:{provider}:{name}:"
             current_reset = reset_key or "no-reset"
             for old_key in probe.dedupe_keys_with_prefix(prefix):
-                old_reset, separator, _ = old_key[len(prefix):].rpartition(":")
-                if separator and old_reset != current_reset:
+                old_reset, separator, threshold_text = old_key[len(prefix):].rpartition(":")
+                old_instant = _parse_iso(old_reset)
+                normalized_old = (
+                    old_instant.isoformat(timespec="seconds") if old_instant else old_reset
+                )
+                if separator and normalized_old != current_reset:
+                    probe.clear_dedupe(old_key)
+                elif separator and threshold_text.isdigit():
+                    canonical_key = dedupe_key(provider, name, reset_key, int(threshold_text))
+                    if old_key == canonical_key:
+                        continue
+                    # Preserve a delivered alert written by an older offset
+                    # spelling before retiring its noncanonical journal key.
+                    if _already_reported(probe, old_key):
+                        _mark_reported(probe, canonical_key)
                     probe.clear_dedupe(old_key)
             if resets_at is None:
                 # No reset time means no per-window key: the key is reused
@@ -279,15 +302,18 @@ def check_usage_thresholds(
                     callers = model_tiering.top_callers(
                         since=window_start, provider=provider, limit=3
                     )
+                    attribution_unavailable = False
                 except Exception as exc:  # noqa: BLE001 — the alert still goes out
                     log.warning(
                         f"[apis] usage alert: ledger unreadable ({exc}); sending without callers"
                     )
                     callers = []
+                    attribution_unavailable = True
                 message = build_message(
                     provider=provider, window=name, used_percent=used,
                     thresholds=pending, resets_at=resets_at, callers=callers,
                     span_known=span_known,
+                    attribution_unavailable=attribution_unavailable,
                 )
                 send_key = keys[max(pending)]
                 delivered = False
@@ -319,6 +345,28 @@ def check_usage_thresholds(
     except Exception as exc:  # noqa: BLE001 — never block or fail a dispatch
         log.warning(f"[apis] usage threshold check failed (non-fatal): {exc}")
     return delivered_keys
+
+
+def schedule_dispatch_check(provider: str, *, notifier=None) -> threading.Thread:
+    """Keep notifier configuration and transport I/O off the dispatch path.
+
+    The worker uses the same journal and cross-process lock as synchronous
+    usage-refresh checks. Notifier.send records its dedupe entry before handing
+    the alert to a transport; a failed send releases it for retry.
+    """
+    def run() -> None:
+        try:
+            check_usage_thresholds(provider, notifier=notifier)
+        except Exception as exc:  # noqa: BLE001 — alerts cannot fail a dispatch
+            log.warning("[apis] usage threshold worker failed (non-fatal): %s", exc)
+
+    worker = threading.Thread(
+        target=run,
+        name=f"usage-alert-{provider}",
+        daemon=True,
+    )
+    worker.start()
+    return worker
 
 
 def check_after_usage_write(provider: str) -> None:

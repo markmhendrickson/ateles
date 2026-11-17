@@ -126,6 +126,45 @@ def test_an_invalid_caller_kind_is_recorded_as_unknown(ledger) -> None:
     assert attribution.caller_kind is None and attribution.caller == "x"
 
 
+def test_review_prompt_records_dispatch_and_usage_with_process_caller(
+    ledger, monkeypatch
+) -> None:
+    model_tiering.set_process_caller("interactive", "loxia-session")
+    monkeypatch.setenv("APIS_REVIEW_MODELS", '{"codex":"qualified-model"}')
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"codex": "fake-codex"})
+    monkeypatch.setattr(
+        usage_alerts, "schedule_dispatch_check", lambda *a, **k: None, raising=False
+    )
+
+    async def one_attempt(skill, attempt, **kwargs):
+        return await attempt("codex")
+
+    async def no_event(**kwargs):
+        return None
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self, input=None):
+            assert input == b"review input"
+            return b"Verdict: APPROVE", b"tokens used: 12"
+
+    async def spawn(*cmd, **kwargs):
+        assert cmd[0] == "fake-codex"
+        return Process()
+
+    monkeypatch.setattr(skill_runner, "_run_provider_attempts", one_attempt)
+    monkeypatch.setattr(skill_runner, "_emit_harness_event", no_event)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    result = asyncio.run(skill_runner.run_review_prompt(role="loxia", prompt="review input"))
+    assert result.ok
+    rows = _rows(ledger)
+    assert [row["event"] for row in rows] == ["dispatch", "usage"]
+    assert rows[0]["dispatch_id"] == rows[1]["dispatch_id"]
+    assert all(row["caller_kind"] == "interactive" and row["caller"] == "loxia-session" for row in rows)
+    assert rows[1]["model"] == "qualified-model"
+
+
 # ── rows written before attribution still parse everywhere ──────────────────
 
 OLD_ROWS = [
@@ -562,6 +601,37 @@ def test_a_new_window_alerts_again(monkeypatch, tmp_path, ledger) -> None:
     assert len(spy.sent) == 2
 
 
+def test_reset_offsets_for_one_instant_share_a_dedupe_key(monkeypatch, tmp_path, ledger) -> None:
+    spy = _SpyNotifier()
+    instant = datetime.now(timezone.utc) + timedelta(days=2)
+    for reset in (
+        instant.isoformat().replace("+00:00", "Z"),
+        instant.isoformat(),
+        instant.astimezone(timezone(timedelta(hours=1))).isoformat(),
+        (instant + timedelta(days=7)).isoformat(),
+    ):
+        _usage_file(monkeypatch, tmp_path, "codex", [{"name": "weekly", "used_percent": 60, "resets_at": reset}])
+        usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    assert len(spy.sent) == 2
+
+
+def test_unreadable_ledger_is_not_described_as_zero_activity(monkeypatch, tmp_path, ledger) -> None:
+    _usage_file(monkeypatch, tmp_path, "codex", [_window(60)])
+    spy = _SpyNotifier()
+
+    def unreadable(**kwargs):
+        raise model_tiering.LedgerReadError(ledger, OSError("unreadable"))
+
+    monkeypatch.setattr(model_tiering, "top_callers", unreadable)
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    assert "attribution unavailable (ledger could not be read)" in spy.sent[0][0]
+    assert "no attributed dispatches" not in spy.sent[0][0]
+    monkeypatch.setattr(model_tiering, "top_callers", lambda **kwargs: [])
+    _usage_file(monkeypatch, tmp_path, "codex", [_window(60, resets_in_hours=170)])
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    assert "no attributed dispatches in the ledger" in spy.sent[1][0]
+
+
 def test_a_window_with_no_reset_time_alerts_again_after_it_rolls_over(
     monkeypatch, tmp_path, ledger
 ) -> None:
@@ -633,7 +703,39 @@ def test_a_dispatch_succeeds_when_the_alert_check_blows_up(
 
     monkeypatch.setattr(usage_alerts, "check_usage_thresholds", _explode)
     rc = dispatch_role.main(["--role", "cicada", "--task", "t"])
+    for thread in __import__("threading").enumerate():
+        if thread.name == "usage-alert-codex":
+            thread.join(timeout=2)
     assert rc == 0 and calls == ["codex"]
+
+
+def test_slow_alert_delivery_does_not_delay_dispatch(
+    captured_codex_dispatches, ledger, monkeypatch, tmp_path
+) -> None:
+    import threading
+    import time
+
+    _usage_file(monkeypatch, tmp_path, "codex", [_window(60)])
+    delivered = threading.Event()
+    release = threading.Event()
+    spy = _SpyNotifier()
+
+    def slow_transport(message, force=False, email_eligible=True):
+        release.wait(timeout=2)
+        delivered.set()
+        return True
+
+    spy.inner._deliver = slow_transport
+    monkeypatch.setattr(usage_alerts, "_default_journal_factory", lambda: spy)
+    monkeypatch.setattr(usage_alerts, "_default_notifier_factory", lambda: spy)
+    started = time.monotonic()
+    try:
+        assert dispatch_role.main(["--role", "cicada", "--task", "t"]) == 0
+        assert time.monotonic() - started < 0.5
+        assert not delivered.is_set()
+    finally:
+        release.set()
+    assert delivered.wait(timeout=2)
 
 
 def test_window_span_names() -> None:

@@ -159,6 +159,34 @@ def test_call_review_preserves_requested_role(monkeypatch):
     assert calls == [{"role":"monedula", "prompt":"role-specific input"}]
 
 
+def test_main_sets_process_caller_before_review(monkeypatch, capsys):
+    daemon_dir = Path(__file__).resolve().parents[1] / "daemons" / "apis"
+    monkeypatch.syspath_prepend(str(daemon_dir))
+    import model_tiering
+
+    monkeypatch.setenv(model_tiering.SESSION_ID_ENV, "review-session")
+    monkeypatch.setattr(model_tiering, "_PROCESS_CALLER", (None, None))
+    monkeypatch.setattr(lx, "PR_NUMBER", "87")
+    monkeypatch.setattr(lx, "get_pr_diff", lambda: "diff")
+    monkeypatch.setattr(lx, "get_changed_files", lambda: ["f.py"])
+    monkeypatch.setattr(lx, "select_reviewers", lambda files: [lx.LOXIA])
+    seen = []
+
+    def call_review(prompt, *, role):
+        seen.append(model_tiering.current_attribution().as_fields())
+        return "Verdict: APPROVE"
+
+    def reviewer(reviewer, diff, changed_files):
+        lx.call_review("review input", role=reviewer.skill)
+        return lx.ReviewOutcome.REVIEWED
+
+    monkeypatch.setattr(lx, "call_review", call_review)
+    monkeypatch.setattr(lx, "run_reviewer", reviewer)
+    lx.main()
+    assert seen[0]["caller_kind"] == "interactive"
+    assert seen[0]["caller"] == "review-session"
+
+
 def test_capacity_failure_does_not_publish_review(monkeypatch):
     import types
     async def run(**kwargs):
@@ -428,6 +456,7 @@ def test_diff_reads_pr_head_ref_without_touching_worktree(tmp_path, monkeypatch)
     run("git", "init", "-q", "-b", "main")
     run("git", "config", "user.email", "t@example.invalid")
     run("git", "config", "user.name", "t")
+    run("git", "config", "commit.gpgsign", "false")
     (tmp_path / "a.txt").write_text("base\n")
     run("git", "add", "a.txt")
     run("git", "commit", "-q", "-m", "base")
