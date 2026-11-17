@@ -12,6 +12,8 @@ import types
 import json
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
@@ -157,6 +159,44 @@ def _world(m, tmp_path):
     w.calendars["primary"] = [_event("evt-1")]
     m.setattr(monedula, "PAYMENT_EVENT_PENDING_FILE", tmp_path / "pending.json", raising=False)
     return w, neo
+
+
+@pytest.mark.parametrize("pending_failure", ["read_error", "malformed_json"])
+def test_unreadable_pending_payment_events_halts_before_payment_or_approval(
+    monkeypatch, tmp_path, pending_failure
+):
+    w, neo = _world(monkeypatch, tmp_path)
+    pending_file = tmp_path / "pending.json"
+    pending_file.write_text('{"entries": [], "halted": false}')
+    if pending_failure == "read_error":
+        read_text = Path.read_text
+
+        def unreadable(path, *args, **kwargs):
+            if path == pending_file:
+                raise OSError("synthetic pending-file read failure")
+            return read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", unreadable)
+    else:
+        pending_file.write_text("{malformed json")
+
+    alerts = _capture_alerts(monkeypatch)
+    telegram_sends = []
+    monkeypatch.setattr(monedula, "telegram_send", telegram_sends.append)
+
+    assert monedula.main() is False
+    assert w.handler.execute_calls == []
+    assert neo.writes == 0
+    assert w.sends == []
+    assert telegram_sends == []
+    assert len(alerts) == 1
+    (args, kwargs), = alerts
+    assert "pending payment outcomes cannot be read or written" in args[0]
+    assert dict(kwargs) == {
+        "priority": "blocker",
+        "dedupe_key": monedula._PAYMENT_EVENT_HALT_KEY,
+        "email_eligible": True,
+    }
 
 
 def _run(monkeypatch, tmp_path, *, fail: bool):
