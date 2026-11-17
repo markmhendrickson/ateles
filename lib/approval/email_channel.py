@@ -831,6 +831,53 @@ def sender_domain_authenticated(auth_results: list[str]) -> bool:
     return _auth_result_authorizes(auth_results[0], domain)
 
 
+def _complete_triage_rows(data: Any, max_msgs: int) -> tuple[list[dict] | None, str]:
+    """Accept only a complete, structurally valid mailbox collection."""
+    if not isinstance(data, dict):
+        return None, "gws_triage_invalid_response"
+    if "messages" in data and "results" in data:
+        return None, "gws_triage_invalid_response"
+    rows = data.get("messages", data.get("results"))
+    if not isinstance(rows, list):
+        return None, "gws_triage_invalid_response"
+    if any(not isinstance(row, dict) or
+           not isinstance(row.get("id"), str) or not row["id"] or
+           not isinstance(row.get("subject"), str) or
+           not isinstance(row.get("from", row.get("sender", row.get("From"))), str)
+           for row in rows):
+        return None, "gws_triage_invalid_response"
+    if "complete" in data and not isinstance(data["complete"], bool):
+        return None, "gws_triage_invalid_response"
+    if data.get("complete") is False or len(rows) > max_msgs:
+        return None, "gws_triage_truncated"
+    for key in ("nextPageToken", "next_page_token", "nextPage", "next_page",
+                "continuation", "continuationToken"):
+        if key in data and data[key] not in (None, ""):
+            return None, "gws_triage_truncated"
+    for key in ("has_more", "hasMore", "truncated"):
+        if key in data and not isinstance(data[key], bool):
+            return None, "gws_triage_invalid_response"
+    if data.get("has_more") or data.get("hasMore") or data.get("truncated"):
+        return None, "gws_triage_truncated"
+    for key in ("total", "totalCount", "resultSizeEstimate"):
+        if key in data:
+            if type(data[key]) is not int or data[key] < len(rows):
+                return None, "gws_triage_invalid_response"
+            if data[key] > len(rows):
+                return None, "gws_triage_truncated"
+    complete = (data.get("complete") is True or
+                data.get("has_more") is False or data.get("hasMore") is False or
+                data.get("truncated") is False or
+                any(key in data and data[key] in (None, "") for key in
+                    ("nextPageToken", "next_page_token", "nextPage", "next_page",
+                     "continuation", "continuationToken")) or
+                any(key in data and data[key] == len(rows) for key in
+                    ("total", "totalCount")))
+    if not complete:
+        return None, "gws_triage_truncated"
+    return rows, ""
+
+
 def read_replies_with_status(
     tokens: list[str],
     max_msgs: int = 40,
@@ -859,6 +906,8 @@ def read_replies_with_status(
         return ReadRepliesOutcome(kind="disabled", texts=[], detail="ATELES_NOTIFY_EMAIL")
     if not tokens:
         return ReadRepliesOutcome(kind="ok", texts=[], detail="")
+    if type(max_msgs) is not int or max_msgs < 1:
+        return ReadRepliesOutcome(kind="transport_error", texts=[], detail="gws_triage_invalid_limit")
     if not _gws():
         return ReadRepliesOutcome(
             kind="transport_error", texts=[], detail="gws_cli_missing"
@@ -874,6 +923,7 @@ def read_replies_with_status(
     replies: list[ApprovalReply] = []
     rejected_replies: list[ApprovalReply] = []
     unreadable_replies: list[ApprovalReply] = []
+    callback_pairs: list[tuple[str, str]] = []
     seen_ids: set[str] = set()
     saw_transport_error = False
     transport_detail = ""
@@ -887,14 +937,18 @@ def read_replies_with_status(
             saw_transport_error = True
             transport_detail = "gws_triage_failed"
             continue
-        msgs: list[dict] = []
-        if isinstance(data, dict):
-            msgs = data.get("messages") or data.get("results") or []
-        elif isinstance(data, list):
-            msgs = data
+        msgs, error = _complete_triage_rows(data, max_msgs)
+        if msgs is None:
+            saw_transport_error = True
+            transport_detail = error
+            continue
         for m in msgs:
-            mid = str(m.get("id") or "")
-            subject = str(m.get("subject") or "")
+            mid = m["id"]
+            subject = m["subject"]
+            if len(mid) > 256 or len(subject) > 8192:
+                saw_transport_error = True
+                transport_detail = "gws_triage_oversized"
+                continue
             if not mid or mid in seen_ids or not subject.upper().startswith("RE:"):
                 continue
             # AUTHORIZATION, not merely authentication. The triage query is a
@@ -948,11 +1002,23 @@ def read_replies_with_status(
                 transport_detail = "gws_read_failed"
                 unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
+            if any(isinstance(value, str) and len(value) > 262144
+                   for value in body_data.values()):
+                saw_transport_error = True
+                transport_detail = "gws_read_oversized"
+                unreadable_replies.append(ApprovalReply(mid, subject))
+                continue
             # A triage snippet, subject, preview, or header can contain both
             # verdict and token, but none proves that the full reply was read.
-            plain = next((value for key in ("body_text", "body", "text", "plain")
-                         if isinstance((value := body_data.get(key)), str)
-                         and value.strip()), "")
+            plain_key = next((key for key in ("body_text", "body", "text", "plain")
+                              if key in body_data), None)
+            if plain_key is not None and not isinstance(body_data[plain_key], str):
+                saw_transport_error = True
+                transport_detail = "gws_read_invalid_response"
+                unreadable_replies.append(ApprovalReply(mid, subject))
+                continue
+            plain_present = plain_key is not None
+            plain = body_data[plain_key] if plain_present else ""
             body, plain_safe = _authored_plain_checked(plain)
             raw_html = body_data.get("body_html")
             # Preserve the target from the matched request token before quote
@@ -964,12 +1030,12 @@ def read_replies_with_status(
             targets = set(re.findall(token_pattern, raw_source, re.IGNORECASE))
             correlation_target = next(iter(targets)) if len(targets) == 1 else None
             html_body = ""
-            html_present = raw_html is not None
+            html_present = "body_html" in body_data
             if isinstance(raw_html, str) and html_present:
                 html_body, boundary_seen = _extract_authored_html(raw_html)
                 if html_body and not boundary_seen and _unmarked_notification_copy(html_body):
                     html_body = ""
-            if not plain_safe or (plain and html_present and
+            if not plain_safe or (plain_present and html_present and
                                   (not html_body.strip() or
                                    [line.casefold() for line in body.splitlines()] !=
                                    [line.casefold() for line in html_body.splitlines()])):
@@ -977,7 +1043,7 @@ def read_replies_with_status(
                 transport_detail = "reply_quote_boundary_unknown"
                 unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
-            if not plain:
+            if not plain_present:
                 body = html_body
             # A blank authored reply above a recognizable quote is readable:
             # it is a non-approval, so Turdus owes a correction.
@@ -990,12 +1056,8 @@ def read_replies_with_status(
                 transport_detail = "reply_quote_boundary_unknown"
                 unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
-            if on_reply_message is not None:
-                try:
-                    on_reply_message(token, mid)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning(f"on_reply_message callback failed: {exc}")
             texts.append(f"{subject}\n{body}")
+            callback_pairs.append((token, mid))
             replies.append(ApprovalReply(mid, subject, body,
                                          correlation_target=correlation_target))
 
@@ -1009,6 +1071,17 @@ def read_replies_with_status(
             rejected_replies=tuple(rejected_replies),
             unreadable_replies=tuple(unreadable_replies),
         )
+    if on_reply_message is not None:
+        for token, mid in callback_pairs:
+            try:
+                on_reply_message(token, mid)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"on_reply_message callback failed: {exc}")
+                return ReadRepliesOutcome(
+                    kind="transport_error", texts=[], detail="reply_callback_failed",
+                    replies=tuple(replies), rejected_replies=tuple(rejected_replies),
+                    unreadable_replies=tuple(unreadable_replies),
+                )
     return ReadRepliesOutcome(kind="ok", texts=texts, detail="",
                               replies=tuple(replies),
                               rejected_replies=tuple(rejected_replies))

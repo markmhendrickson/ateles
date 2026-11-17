@@ -471,14 +471,21 @@ def overlay_verdicts(
     def _flag(line: str) -> None:
         nonlocal unrecognized
         unrecognized = True
-        marker = _line_marker_token(line)
-        if marker in by_token:
-            held_keys.add(match_key(by_token[marker]))
-        elif marker is None:
-            if multi:
-                held_keys.update(states)
-            elif subject_tok in by_token:
-                held_keys.add(match_key(by_token[subject_tok]))
+        def mentions(value: str) -> bool:
+            return bool(value and re.search(
+                rf"(?<![A-Za-z0-9]){re.escape(value)}(?![A-Za-z0-9])",
+                line, re.IGNORECASE))
+
+        named = {
+            match_key(item) for item in items
+            if any(mentions(ref) for ref in (item.token, item.obligation,
+                                             item.match_id, item.label,
+                                             item.handler_name))
+        }
+        if named:
+            held_keys.update(named)
+        else:
+            held_keys.update(states)
         if unrecognized_lines is not None and line not in unrecognized_lines:
             unrecognized_lines.append(line)
 

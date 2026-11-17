@@ -226,7 +226,7 @@ def test_two_mailbox_approval_effect(monkeypatch, tmp_path, kind, auth):
                              "subject": subject}] if matching else []
             else:
                 messages = []
-            return subprocess.CompletedProcess(cmd, 0, json.dumps({"messages": messages}), "")
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"complete": True, "messages": messages}), "")
         if "get" in cmd:
             assert config_dir == str(swarm_dir)
             if auth == "unreadable":
@@ -296,7 +296,7 @@ def test_operator_inbox_lookalike_does_not_approve(monkeypatch, tmp_path, kind):
                 "id": "lookalike", "from": "op@example.com",
                 "subject": ("Re: Release v1.2.3 ready to approve" if kind == "release"
                             else "Re: [Ateles] PR o/r#7 is READY TO MERGE") }]
-            return subprocess.CompletedProcess(cmd, 0, json.dumps({"messages": messages}), "")
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"complete": True, "messages": messages}), "")
         raise AssertionError(cmd)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -513,7 +513,7 @@ def test_poll_query_excludes_processed_label(monkeypatch):
 
         class R:
             returncode = 0
-            stdout = '{"messages": []}'
+            stdout = '{"complete": True, "messages": []}'
             stderr = ""
 
         return R()
@@ -687,8 +687,8 @@ def test_unreadable_authenticated_reply_notices_once_then_routes_once(
         if "+triage" in args:
             token = args[args.index("--query") + 1]
             matches = ("release-approve:" in token) == (kind == "release")
-            return {"messages": [{"id": "approval-1", "from": "Op <op@example.com>",
-                                  "subject": subject}]} if matches else {"messages": []}
+            return {"complete": True, "messages": [{"id": "approval-1", "from": "Op <op@example.com>",
+                                  "subject": subject}]} if matches else {"complete": True, "messages": []}
         if "+read" in args:
             read_attempts.append(args)
             if len(read_attempts) == 1:
@@ -725,7 +725,7 @@ def test_unreadable_authenticated_reply_notices_once_then_routes_once(
 
 
 def _poll_authored_reply(monkeypatch, tmp_path, kind, body_data, *, polls=1,
-                         include_token=True):
+                         include_token=True, triage_response=None):
     """Exercise the real shared reader and both Turdus POST routes with fake gws."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
@@ -753,9 +753,11 @@ def _poll_authored_reply(monkeypatch, tmp_path, kind, body_data, *, polls=1,
         if "+triage" in args:
             token = args[args.index("--query") + 1]
             if ("release-approve:" in token) == (kind == "release"):
-                return {"messages": [{"id": "approval-1", "from": "Op <op@example.com>",
-                                      "subject": subject}]}
-            return {"messages": []}
+                base = {"complete": True, "messages": [{"id": "approval-1", "from": "Op <op@example.com>",
+                                                       "subject": subject}]}
+            else:
+                base = {"complete": True, "messages": []}
+            return triage_response(token, base) if triage_response else base
         if "+read" in args:
             return body_data
         raise AssertionError(args)
@@ -1480,6 +1482,45 @@ def test_present_empty_html_holds_plain_approval(monkeypatch, tmp_path, kind, ht
 
 
 @pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("plain", ("", " \n "))
+def test_present_empty_plain_holds_html_approval(monkeypatch, tmp_path, kind, plain):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    posts, state, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind,
+        {"body_text": plain, "body_html": f"<p>{approval}</p><blockquote>{token}</blockquote>"},
+        polls=2, include_token=False)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+    assert len([m for m in notices.sent if "could not be read yet" in m]) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("fault", ("continuation", "invalid_envelope", "invalid_row"))
+@pytest.mark.parametrize("query", ("active", "other"))
+def test_incomplete_or_invalid_triage_never_posts_approval(
+        monkeypatch, tmp_path, kind, fault, query):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+
+    def response(token, base):
+        active = ("release-approve:" in token) == (kind == "release")
+        if active != (query == "active"):
+            return base
+        if fault == "continuation":
+            return {**base, "nextPageToken": "next"}
+        if fault == "invalid_row":
+            return {"complete": True, "messages": [{"id": [], "subject": "RE: x",
+                                                     "from": "op@example.com"}]}
+        return {"invalid": True}
+
+    posts, state, _ = _poll_authored_reply(
+        monkeypatch, tmp_path, kind, {"body_text": approval},
+        triage_response=response)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
 @pytest.mark.parametrize("tag,attribute", (
     ("body", "background='image.png'"),
     ("table", "background='image.png'"),
@@ -1536,9 +1577,9 @@ def test_partial_sweep_corrects_readable_but_never_approves(monkeypatch, tmp_pat
         if "+triage" in args:
             query = args[args.index("--query") + 1]
             if ("release-approve:" in query) == (kind == "release"):
-                return {"messages": [{"id": mid, "from": "Op <op@example.com>",
+                return {"complete": True, "messages": [{"id": mid, "from": "Op <op@example.com>",
                                       "subject": subject} for mid in ("readable", "unreadable")]}
-            return {"messages": []}
+            return {"complete": True, "messages": []}
         if "+read" in args:
             mid = args[args.index("--id") + 1]
             if mid == "unreadable" and fail_read:

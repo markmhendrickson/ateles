@@ -391,7 +391,7 @@ class TestReadReplies:
     def test_only_re_subjects_are_read(self, monkeypatch):
         monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
         monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
-        triage = {"messages": [
+        triage = {"complete": True, "messages": [
             {"id": "m1", "subject": "RE: [ATELES] Approve [APPROVE-TOK]",
              "from": "op@example.com"},
             {"id": "m2", "subject": "[ATELES] Approve [APPROVE-TOK]",
@@ -418,7 +418,7 @@ class TestReadReplies:
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                return {"complete": True, "messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
                                       "from": "op@example.com"}]}
             return {"body_text": "SKIP"}
 
@@ -437,7 +437,7 @@ class TestReadReplies:
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                return {"complete": True, "messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
                                       "from": "op@example.com"}]}
             return {"body_text": "approve v0.20.0", "body_html": "<p>APPROVE v0.20.0</p>"}
 
@@ -457,7 +457,7 @@ class TestReadReplies:
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                return {"complete": True, "messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
                                       "from": "op@example.com"}]}
             return {"body_text": plain, "body_html": html}
 
@@ -472,7 +472,7 @@ class TestReadReplies:
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                return {"complete": True, "messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
                                       "from": "op@example.com"}]}
             return {"body_text": "APPROVE", "body_html": html}
 
@@ -485,6 +485,24 @@ class TestReadReplies:
         assert outcome.texts == []
         assert len(outcome.unreadable_replies) == 1
 
+    @pytest.mark.parametrize("plain", ("", " \n "))
+    def test_present_empty_plain_holds_html_approval(self, monkeypatch, plain):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+
+        def fake(args, timeout=45):
+            if "+triage" in args:
+                return {"complete": True, "messages": [
+                    {"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                     "from": "op@example.com"}]}
+            return {"body_text": plain, "body_html": "<p>APPROVE</p>"}
+
+        with _mock_inbox(side_effect=fake):
+            outcome = ec.read_replies_with_status(["TOK"])
+        assert outcome.kind == "transport_error"
+        assert outcome.texts == []
+        assert [r.message_id for r in outcome.unreadable_replies] == ["m1"]
+
     def test_falls_back_to_body_html_when_no_plaintext(self, monkeypatch):
         # An HTML-only reply must not read as an empty body and silently drop the
         # approval — the ateles#286 live-release failure mode. Tags are stripped
@@ -496,7 +514,7 @@ class TestReadReplies:
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                return {"complete": True, "messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
                                       "from": "op@example.com"}]}
             return {"body_html": "<div dir=\"ltr\">approve v0.20.0</div>"}
 
@@ -599,7 +617,7 @@ class TestSenderVerification:
 
     @staticmethod
     def _triage(from_addr: str) -> dict:
-        return {"messages": [
+        return {"complete": True, "messages": [
             {"id": "m1", "subject": "RE: [ATELES] Approve [APPROVE-TOK]",
              "from": from_addr},
         ]}
@@ -751,7 +769,7 @@ class TestReadRepliesWithStatus:
     def test_read_replies_with_status_ok_empty_texts(self, monkeypatch):
         monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
         monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
-        with _mock_inbox({"messages": []}):
+        with _mock_inbox({"complete": True, "messages": []}):
             outcome = ec.read_replies_with_status(["TOK"])
         assert outcome.kind == "ok"
         assert outcome.texts == []
@@ -832,7 +850,7 @@ class TestSenderDomainAuthentication:
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [{"id": "m1",
+                return {"complete": True, "messages": [{"id": "m1",
                                       "subject": "RE: x [APPROVE-TOK]",
                                       "from": "Op <op@example.com>"}]}
             if _is_metadata_get(args):
@@ -930,7 +948,7 @@ class TestSenderDomainAuthentication:
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                return {"complete": True, "messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
                                       "from": "op@example.com"}]}
             if _is_metadata_get(args):
                 return _metadata([])
@@ -950,7 +968,7 @@ class TestSenderDomainAuthentication:
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                return {"complete": True, "messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
                                       "from": "op@example.com"}]}
             if _is_metadata_get(args):
                 return _metadata([])
@@ -981,7 +999,7 @@ class TestSenderDomainAuthentication:
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                return {"complete": True, "messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
                                       "from": "op@example.com"}]}
             if _is_metadata_get(args):
                 return _metadata([])
@@ -1008,7 +1026,7 @@ class TestPartialReadFailsClosed:
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [
+                return {"complete": True, "messages": [
                     {"id": "m1", "subject": "RE: x [APPROVE-TOK]", "from": "op@example.com"},
                     {"id": "m2", "subject": "RE: x [APPROVE-TOK]", "from": "op@example.com"},
                 ]}
@@ -1029,7 +1047,7 @@ class TestPartialReadFailsClosed:
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [
+                return {"complete": True, "messages": [
                     {"id": "m1", "subject": "RE: x [APPROVE-TOK]", "from": "op@example.com"},
                     {"id": "m2", "subject": "RE: x [APPROVE-TOK]", "from": "op@example.com"},
                 ]}
@@ -1049,12 +1067,107 @@ class TestPartialReadFailsClosed:
             if "+triage" in args:
                 if any("TOK2" in a for a in args):
                     return None
-                return {"messages": [
+                return {"complete": True, "messages": [
                     {"id": "m1", "subject": "RE: x [APPROVE-TOK1]", "from": "op@example.com"}]}
             return {"body_text": "APPROVE"}
 
         with _mock_inbox(side_effect=fake_gws_json):
             out = ec.read_replies_with_status(["TOK1", "TOK2"])
+        assert out.kind == "transport_error"
+        assert out.texts == []
+
+    @pytest.mark.parametrize("position", ("first", "second", "only"))
+    @pytest.mark.parametrize("bad", ({"unexpected": []}, {"messages": "bad", "complete": True},
+                                     {"messages": [{"id": 5, "subject": "RE: x",
+                                                    "from": "op@example.com"}], "complete": True}))
+    def test_invalid_triage_response_poison_whole_sweep(self, monkeypatch, position, bad):
+        self._env(monkeypatch)
+        good = {"complete": True, "messages": [
+            {"id": "m1", "subject": "RE: x [APPROVE-TOK]", "from": "op@example.com"}]}
+
+        def fake(args, timeout=45):
+            if "+triage" in args:
+                query = args[args.index("--query") + 1]
+                return bad if position == "only" or (("TOK1" in query) == (position == "first")) else good
+            return {"body_text": "APPROVE"}
+
+        tokens = ["TOK1"] if position == "only" else ["TOK1", "TOK2"]
+        with _mock_inbox(side_effect=fake):
+            out = ec.read_replies_with_status(tokens)
+        assert out.kind == "transport_error"
+        assert out.texts == []
+        assert out.detail == "gws_triage_invalid_response"
+
+    @pytest.mark.parametrize("collection,expected", (
+        ({"complete": True, "messages": []}, "ok"),
+        ({"messages": []}, "transport_error"),
+        ({"complete": True, "messages": [], "nextPageToken": "next"}, "transport_error"),
+        ({"complete": True, "messages": [], "resultSizeEstimate": 2}, "transport_error"),
+        ({"complete": True, "messages": [], "has_more": True}, "transport_error"),
+    ))
+    def test_collection_completeness(self, monkeypatch, collection, expected):
+        self._env(monkeypatch)
+        with _mock_inbox(collection):
+            out = ec.read_replies_with_status(["TOK"], max_msgs=1)
+        assert out.kind == expected
+        if expected != "ok":
+            assert out.texts == []
+            assert "truncated" in out.detail
+
+    def test_full_page_requires_exhaustion_and_does_not_fire_callback(self, monkeypatch):
+        self._env(monkeypatch)
+        seen = []
+
+        def fake(args, timeout=45):
+            if "+triage" in args:
+                query = args[args.index("--query") + 1]
+                if "TOK2" in query:
+                    return {"messages": [], "nextPageToken": "more"}
+                return {"complete": True, "messages": [
+                    {"id": "m1", "subject": "RE: x [APPROVE-TOK1]",
+                     "from": "op@example.com"}]}
+            return {"body_text": "APPROVE"}
+
+        with _mock_inbox(side_effect=fake):
+            out = ec.read_replies_with_status(
+                ["TOK1", "TOK2"], max_msgs=1,
+                on_reply_message=lambda token, mid: seen.append((token, mid)))
+        assert out.kind == "transport_error"
+        assert out.texts == []
+        assert seen == []
+
+    def test_oversized_body_cannot_approve(self, monkeypatch):
+        self._env(monkeypatch)
+
+        def fake(args, timeout=45):
+            if "+triage" in args:
+                return {"complete": True, "messages": [
+                    {"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                     "from": "op@example.com"}]}
+            return {"body_text": "APPROVE" + " " * 262144}
+
+        with _mock_inbox(side_effect=fake):
+            out = ec.read_replies_with_status(["TOK"])
+        assert out.kind == "transport_error"
+        assert out.texts == []
+        assert out.detail == "gws_read_oversized"
+
+    def test_callback_failure_cannot_return_approval(self, monkeypatch):
+        self._env(monkeypatch)
+
+        def fake(args, timeout=45):
+            if "+triage" in args:
+                return {"complete": True, "messages": [
+                    {"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                     "from": "op@example.com"}]}
+            return {"body_text": "APPROVE"}
+
+        def failed_callback(_token, _mid):
+            raise RuntimeError("synthetic callback failure")
+
+        with _mock_inbox(side_effect=fake):
+            out = ec.read_replies_with_status(
+                ["TOK"], on_reply_message=failed_callback)
         assert out.kind == "transport_error"
         assert out.texts == []
 
@@ -1109,7 +1222,7 @@ def _subprocess_mailbox(calls: list, *, auth_value: str | None, body: str = "ATT
         calls.append((list(cmd), kw.get("env")))
         args = list(cmd[1:])
         if "+triage" in args:
-            out = {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+            out = {"complete": True, "messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
                                  "from": sender}]}
         elif args[:4] == ["gmail", "users", "messages", "get"]:
             headers = [] if auth_value is None else [

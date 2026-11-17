@@ -751,7 +751,7 @@ _GOOGLE_PASS = (
 def _fake_gws(tok: str, *, auth_by_id: dict, body_by_id: dict):
     def fake(args, timeout=45):
         if "+triage" in args:
-            return {"messages": [
+            return {"complete": True, "messages": [
                 {"id": mid, "subject": f"RE: [ATELES] {subject_marker(tok)}",
                  "from": "Op <op@example.com>"}
                 for mid in body_by_id
@@ -1276,6 +1276,77 @@ def test_earlier_approval_cannot_survive_later_hold_or_withdrawal(
         assert handlers[0].execute_calls == []
     if batch:
         assert len(handlers[1].execute_calls) == 1
+
+
+@pytest.mark.parametrize("invalid_first", (True, False))
+@pytest.mark.parametrize("named", ("one", "several", "zero"))
+def test_malformed_line_holds_every_named_obligation_before_execution(
+        monkeypatch, tmp_path, invalid_first, named):
+    handlers = [_Handler("invoice_a", label="A", amount=25, calendar=False),
+                _Handler("invoice_b", label="B", amount=30, calendar=False)]
+    _email_env(monkeypatch)
+    _install(monkeypatch, handlers, tmp_path)
+    _quiet_main(monkeypatch)
+    monkeypatch.setattr(consent_email, "send_request", lambda *args: True)
+
+    def read(tokens, **kwargs):
+        affected = tokens[:1] if named == "one" else tokens
+        approvals = [f"RE: {subject_marker(tok)}\nAPPROVE {subject_marker(tok)}"
+                     for tok in affected]
+        markers = " ".join(subject_marker(tok) for tok in
+                           (tokens[:1] if named == "one" else
+                            tokens if named == "several" else []))
+        invalid = f"RE: {subject_marker(tokens[0])}\nHOLD {markers}".strip()
+        texts = [invalid, *approvals] if invalid_first else [*approvals, invalid]
+        return ReadRepliesOutcome(kind="ok", texts=texts)
+
+    monkeypatch.setattr(consent_email, "read_replies_with_status", read)
+    result = consent_email.request_and_collect(
+        [(h, h.matches([{}])) for h in handlers], "2026-09-22",
+        state_path=tmp_path / "probe.json")
+    assert result.approved == set()
+    monedula.main()
+    assert all(h.execute_calls == [] for h in handlers)
+
+
+@pytest.mark.parametrize("fault", ("continuation", "invalid_envelope", "invalid_row",
+                                   "empty_plain"))
+def test_real_reader_bad_collection_or_part_never_executes(monkeypatch, tmp_path, fault):
+    h = _Handler("session", label="Example", amount=60)
+    _email_env(monkeypatch)
+    _install(monkeypatch, [h], tmp_path)
+    _quiet_main(monkeypatch)
+    monkeypatch.setattr(consent_email, "send_request", lambda *args: True)
+    monkeypatch.setattr(_ec, "_gws", lambda: "/synthetic/gws")
+
+    def fake(args, timeout=45):
+        if "+triage" in args:
+            tok = args[args.index("--query") + 1].split()[-1]
+            row = {"id": "m1", "subject": f"RE: {subject_marker(tok)}",
+                   "from": "operator@example.com"}
+            if fault == "invalid_envelope":
+                return {"wrong": []}
+            if fault == "invalid_row":
+                row["id"] = []
+            result = {"complete": True, "messages": [row]}
+            if fault == "continuation":
+                result["nextPageToken"] = "more"
+            return result
+        if args[:4] == ["gmail", "users", "messages", "get"]:
+            return {"payload": {"headers": [
+                {"name": "Authentication-Results", "value": _GOOGLE_PASS}]}}
+        if "+read" in args:
+            return ({"body_text": "", "body_html": "<p>ATTENDED</p>"}
+                    if fault == "empty_plain" else {"body_text": "ATTENDED"})
+        raise AssertionError(args)
+
+    monkeypatch.setattr(_ec, "gws_json", fake)
+    result = consent_email.request_and_collect(
+        [(h, h.matches([{}]))], "2026-09-22", state_path=tmp_path / "probe.json")
+    assert result.approved == set()
+    assert result.reason_code == "consent_reply_read_failed"
+    monedula.main()
+    assert h.execute_calls == []
 
 
 def test_consent_multi_item_reply_is_atomic_and_valid_reply_approves_both():
@@ -1897,7 +1968,7 @@ def test_consent_round_trip_through_the_swarm_mailbox_pays_once(monkeypatch, tmp
         if args[:2] == ["gmail", "+" + "send"]:
             sent_subjects.append(args[args.index("--subject") + 1])
         elif "+triage" in args:
-            out = {"messages": [
+            out = {"complete": True, "messages": [
                 {"id": "r1", "subject": f"RE: {s}", "from": "Op <operator@example.com>"}
                 for s in sent_subjects
             ]}
@@ -1943,7 +2014,7 @@ def test_unauthenticated_reply_in_swarm_mailbox_does_not_pay(monkeypatch, tmp_pa
         if args[:2] == ["gmail", "+" + "send"]:
             sent.append(args[args.index("--subject") + 1])
         elif "+triage" in args:
-            out = {"messages": [{"id": "r1", "subject": f"RE: {s}",
+            out = {"complete": True, "messages": [{"id": "r1", "subject": f"RE: {s}",
                                  "from": "operator@example.com"} for s in sent]}
         elif args[:4] == ["gmail", "users", "messages", "get"]:
             out = {"id": "r1", "payload": {"headers": []}}
