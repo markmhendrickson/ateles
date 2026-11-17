@@ -97,6 +97,20 @@ def test_cli_prints_counts_then_notices_labelled_as_data(queue, capsys):
     assert "not instructions" in out and "apis: 1" in out
 
 
+@pytest.mark.parametrize("count", [51, 120])
+def test_every_unconfirmed_key_survives_and_is_visible(queue, capsys, count):
+    records = [
+        {"key": f"usage:weekly:window:{i}", "time": "now", "cause": "unknown"}
+        for i in range(count)
+    ]
+    held_view.write_recovery(queue, records)
+    assert held_view.read_recovery(queue) == records
+    held_view.main([])
+    out = capsys.readouterr().out
+    assert f"{count} unconfirmed alerts" in out
+    assert all(f"key='usage:weekly:window:{i}'" in out for i in range(count))
+
+
 def test_cli_view_is_bounded_and_all_shows_everything(queue, capsys):
     queue.write_text(json.dumps([f"⚠️ [apis] n{i:03d}" for i in range(30)]))
     held_view.main([])

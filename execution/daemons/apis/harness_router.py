@@ -168,6 +168,35 @@ def _read_json_object(path: Path) -> dict[str, object]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def usage_snapshot_problem(path: Path) -> str | None:
+    """Describe an existing snapshot that cannot supply usage observations."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError) as exc:
+        return f"cannot read ({type(exc).__name__})"
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return "invalid JSON"
+    if not isinstance(parsed, dict) or not parsed or any(
+        not isinstance(entry, dict)
+        or not any(field in entry for field in (
+            "observed_at", "windows", "probe", "last_probe_failure",
+            "cooling", "exhausted_until",
+        ))
+        or ("windows" in entry and not isinstance(entry["windows"], list))
+        or (isinstance(entry.get("windows"), list) and entry["windows"] and not any(
+            isinstance(window, dict) and _percent(window.get("used_percent")) is not None
+            for window in entry["windows"]
+        ))
+        for entry in parsed.values()
+    ):
+        return "not a usage object"
+    return None
+
+
 def _override_values() -> tuple[Mapping[str, object], float | None]:
     """Return the operator override layer and the file's write time."""
     overrides, written_at, _origin = _override_layer()

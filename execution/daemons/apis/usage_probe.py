@@ -681,8 +681,13 @@ def _observed_age(provider: str, moment: float) -> float | None:
     if not isinstance(entry, dict):
         return None
     probe = entry.get("probe")
+    probe_observed = (
+        probe.get("observed_at")
+        if isinstance(probe, dict) and probe.get("status") in ("available", "exhausted")
+        else None
+    )
     observed = harness_router._wall_from_iso(
-        probe.get("observed_at") if isinstance(probe, dict) else entry.get("observed_at")
+        probe_observed or entry.get("observed_at")
     )
     return None if observed is None else moment - observed
 
@@ -711,15 +716,7 @@ def _refresh_provider(
 
     def is_fresh() -> bool:
         age = _observed_age(provider, moment)
-        gate = harness_router.usage_gate(provider, now_wall=moment)
-        # A reading that is young but malformed still needs replacing.
-        return (
-            not force
-            and age is not None
-            and 0 <= age <= threshold
-            and gate is not None
-            and gate.code in (harness_router.GATE_OK, harness_router.GATE_PACED)
-        )
+        return not force and age is not None and 0 <= age <= threshold
 
     def in_backoff() -> str | None:
         until = _backoff_until(provider)

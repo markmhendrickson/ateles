@@ -114,7 +114,12 @@ def read_recovery(main: Path) -> list[dict]:
 
 
 def write_recovery(main: Path, records: list[dict]) -> None:
-    atomic_write(recovery_path(main), json.dumps(records[-50:]))
+    # An uncertain send stays visible until the operator clears it.  The
+    # recovery file is the only independent evidence if the journal write fails.
+    atomic_write(recovery_path(main), json.dumps(records))
+
+
+UNREADABLE_USAGE_KEY_PREFIX = "provider-usage-threshold:source-unreadable:"
 
 
 def journal_path() -> Path:
@@ -281,7 +286,13 @@ def summary(main: Path | None = None) -> dict:
     except Exception:
         recovery = [{"key": "unreadable", "time": "", "cause": "unreadable"}]
     recovery_fp = hashlib.sha256(json.dumps(recovery).encode()).hexdigest() if recovery else ""
+    unreadable_usage = sum(
+        isinstance(item, dict) and any(
+            key.startswith(UNREADABLE_USAGE_KEY_PREFIX) for key in item["keys"]
+        ) for item in items
+    )
     return {"total": len(items), "by_handler": dict(counts), "fingerprint": fp,
+            "usage_snapshot_unreadable": unreadable_usage,
             "unconfirmed": len(recovery), "unconfirmed_fingerprint": recovery_fp}
 
 

@@ -605,7 +605,7 @@ def test_timed_out_combined_handoff_keeps_all_thresholds_owned(
     assert usage_alerts.check_usage_thresholds("cursor", notifier=_SpyNotifier()) == []
 
 
-def test_a_send_that_raises_is_retried_on_the_next_check(
+def test_a_send_that_raises_is_quarantined_on_the_next_check(
     monkeypatch, tmp_path, ledger
 ) -> None:
     _usage_file(monkeypatch, tmp_path, "cursor", [_window(60)])
@@ -619,8 +619,9 @@ def test_a_send_that_raises_is_retried_on_the_next_check(
     spy.inner._deliver = spy._transport
     usage_alerts._retry_after.clear()  # past the backoff
     key = spy.sent[0][2]
-    assert spy.inner._dedupe_journal[key]["state"] == "pending"
-    assert len(usage_alerts.check_usage_thresholds("cursor", notifier=spy)) == 1
+    assert spy.inner._dedupe_journal[key]["state"] == "delivered_unconfirmed"
+    assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
+    assert len(spy.sent) == 1
 
 
 def test_a_held_alert_drains_once_without_another_usage_check(monkeypatch, tmp_path, ledger) -> None:
@@ -1186,8 +1187,47 @@ def test_an_alert_failure_never_raises(monkeypatch, tmp_path, ledger) -> None:
     assert usage_alerts.check_usage_thresholds(
         "cursor", notifier_factory=_no_notifier
     ) == []
-    (tmp_path / "harness-usage.json").write_text("{not json")
-    assert usage_alerts.check_usage_thresholds("cursor", notifier=_Broken()) == []
+
+
+@pytest.mark.parametrize("contents", [
+    "{not json", "[]", "{}", '{"cursor": []}',
+    '{"cursor": {}}', '{"cursor": {"windows": [1]}}',
+])
+def test_unreadable_usage_snapshot_has_one_held_notice(
+    monkeypatch, tmp_path, ledger, capsys, contents
+) -> None:
+    from lib.notify import held_view
+
+    path = tmp_path / "harness-usage.json"
+    path.write_text(contents)
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(path))
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    spy = _SpyNotifier(silenced=True)
+    assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
+    assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
+    assert len(spy.sent) == 1
+    assert len(held_view.read_queue(tmp_path / "digest.json")) == 1
+    held_view.main([])
+    output = capsys.readouterr().out
+    assert str(path) in output
+    assert "harness_usage.py refresh" in output
+    hook = Path(__file__).resolve().parents[3] / ".claude" / "hooks" / "user_prompt_submit.py"
+    env = {**os.environ, "HOME": str(tmp_path), "CLAUDE_PROJECT_DIR": str(tmp_path)}
+    run = subprocess.run(
+        [sys.executable, str(hook)], input='{"session_id":"synthetic"}',
+        text=True, capture_output=True, env=env, timeout=10,
+    )
+    assert run.returncode == 0
+    assert "APIS_HARNESS_USAGE_FILE" in run.stdout
+    assert "harness_usage.py refresh" in run.stdout
+
+
+def test_missing_usage_snapshot_does_not_raise_notice(monkeypatch, tmp_path, ledger) -> None:
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "missing.json"))
+    spy = _SpyNotifier(silenced=True)
+    assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
+    assert spy.sent == []
 
 
 def test_a_dispatch_succeeds_when_the_alert_check_blows_up(

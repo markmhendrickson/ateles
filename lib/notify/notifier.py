@@ -48,7 +48,8 @@ Retryable held-notice state table (journal x queue x queue lock):
 * Failed receipt write: the queued notice survives; retry repairs the receipt.
 * Sending is suppressing for the life of its key, including after restart.
   Missing, malformed, or future attempt times become delivered_unconfirmed.
-* Transport refusal or a pre-acceptance exception restores pending/held.
+* Explicit transport refusal or an exception before invoking transport restores
+  pending/held. An exception inside transport is uncertain and suppresses retry.
 * Transport success followed by a failed delivered receipt retains sending
   and returns DELIVERED_RECEIPT_UNKNOWN. A recovery record and direct notice
   make the uncertain outcome visible; only an operator clear permits resend.
@@ -111,6 +112,10 @@ HELD_QUEUE_MAX = 500
 
 class SendResult(str, Enum):
     DELIVERED_RECEIPT_UNKNOWN = "delivered_receipt_unknown"
+
+
+class TransportNotStarted(Exception):
+    """Message preparation failed before a transport was invoked."""
 
 NEOTOMA_BASE_URL = os.environ.get(
     "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
@@ -440,9 +445,18 @@ class Notifier:
                     return False
             try:
                 accepted = self._deliver(text, force=force, email_eligible=email_eligible)
-            except Exception as exc:  # noqa: BLE001 — pre-acceptance failure is retryable
-                log.warning("[notify] transport refused before acceptance: %s", exc)
+            except TransportNotStarted as exc:
+                log.warning("[notify] delivery not started: %s", exc)
                 accepted = False
+            except Exception as exc:  # noqa: BLE001 — transport may have accepted
+                if retryable and dedupe_key:
+                    self._mark_delivery_uncertain(
+                        (dedupe_key, *related_dedupe_keys),
+                        f"transport outcome unknown: {type(exc).__name__}",
+                    )
+                    return False
+                log.warning("[notify] delivery outcome unknown: %s", exc)
+                return False
             return delivered(accepted)
 
         # Drain any prior held actionable notices before handling this send.
@@ -775,12 +789,16 @@ class Notifier:
                 unrouted += 1
             elif not self._begin_held_delivery(item):
                 continue
-            elif self._try_deliver(held_view.notice_text(item), email_eligible=False):
-                if self._finish_held_delivery(item):
-                    delivered_main.append(item)
             else:
-                self._restore_held_delivery(item)
-                failed += 1
+                outcome = self._try_deliver(held_view.notice_text(item), email_eligible=False)
+                if outcome is None:
+                    self._mark_held_uncertain(item)
+                elif outcome:
+                    if self._finish_held_delivery(item):
+                        delivered_main.append(item)
+                else:
+                    self._restore_held_delivery(item)
+                    failed += 1
 
         budget = self._budget_remaining() if self._email_primary and self._notify_to else 0
         email_down = False
@@ -794,7 +812,15 @@ class Notifier:
             if not self._begin_held_delivery(item):
                 continue
             if budget > 0 and not email_down:
-                if self._deliver_email(held_view.notice_text(item)):
+                try:
+                    email_accepted = self._deliver_email(held_view.notice_text(item))
+                except TransportNotStarted:
+                    email_accepted = False
+                except Exception as exc:  # noqa: BLE001 — acceptance is unknown
+                    log.warning("[notify] held email outcome unknown: %s", exc)
+                    self._mark_held_uncertain(item)
+                    continue
+                if email_accepted:
                     # Only a sent email spends budget.
                     self._budget_consume()
                     budget -= 1
@@ -803,7 +829,10 @@ class Notifier:
                     continue
                 email_down = True  # don't hammer a failing transport per item
             if self._apprise:
-                if self._try_deliver(held_view.notice_text(item), email_eligible=False):
+                outcome = self._try_deliver(held_view.notice_text(item), email_eligible=False)
+                if outcome is None:
+                    self._mark_held_uncertain(item)
+                elif outcome:
                     if self._finish_held_delivery(item):
                         delivered_email.append(item)
                 else:
@@ -865,12 +894,31 @@ class Notifier:
             self._mark_dedupe_held(keys, entry.get("handler", "") if isinstance(entry, dict) else "",
                                    item["message"])
 
-    def _try_deliver(self, item: str, email_eligible: bool) -> bool:
+    def _mark_held_uncertain(self, item: str | dict) -> None:
+        if isinstance(item, dict):
+            self._mark_delivery_uncertain(tuple(item["keys"]), "held transport outcome unknown")
+
+    def _mark_delivery_uncertain(self, keys: tuple[str, ...], cause: str) -> None:
+        def change(journal: dict[str, Any]) -> bool:
+            for key in keys:
+                current = journal.get(key)
+                if isinstance(current, dict) and current.get("state") == "sending":
+                    journal[key] = {**current, "state": "delivered_unconfirmed"}
+            return True
+
+        self._update_dedupe_journal(change)
+        for key in keys:
+            self._raise_recovery(key, cause)
+
+    def _try_deliver(self, item: str, email_eligible: bool) -> bool | None:
         try:
             return bool(self._deliver(item, force=True, email_eligible=email_eligible))
+        except TransportNotStarted as exc:
+            log.warning("[notify] held delivery not started: %s", exc)
+            return False
         except Exception as exc:  # noqa: BLE001 — a drain must never raise
             log.warning("[notify] held-notice delivery error: %s", exc)
-            return False
+            return None
 
     def _maybe_flush_digest(self) -> None:
         """Drain held actionable notices opportunistically.
@@ -1443,7 +1491,10 @@ class Notifier:
         back to Telegram."""
         if not self._notify_to:
             return False
-        first = (message.strip().splitlines() or ["notification"])[0]
+        try:
+            first = (message.strip().splitlines() or ["notification"])[0]
+        except Exception as exc:  # noqa: BLE001 — no transport was invoked
+            raise TransportNotStarted("could not build email message") from exc
         # Refuse to mint a digest-shaped subject even if a caller bypasses flush.
         if first.startswith("📋 Digest") or "Digest (" in first[:40]:
             log.warning(
@@ -1463,15 +1514,18 @@ class Notifier:
                             r.returncode, (r.stderr or "").strip()[:200])
                 return False
             return True
-        except Exception as exc:  # noqa: BLE001 — never crash the caller
+        except Exception as exc:  # noqa: BLE001 — caller must quarantine an uncertain send
             log.warning("[notify] email send error: %s", exc)
-            return False
+            raise
 
     def _deliver(
         self, message: str, force: bool = False, email_eligible: bool = True
     ) -> bool:
         # Hard stop: never deliver a bulk digest payload on any channel.
-        first = (message.strip().splitlines() or [""])[0]
+        try:
+            first = (message.strip().splitlines() or [""])[0]
+        except Exception as exc:  # noqa: BLE001 — no transport was invoked
+            raise TransportNotStarted("could not build notification") from exc
         if first.startswith("📋 Digest") or message.lstrip().startswith("📋 Digest"):
             log.warning(
                 "[notify] refusing bulk digest delivery (routine digests disabled): %r",
@@ -1500,7 +1554,7 @@ class Notifier:
             return bool(ok)
         except Exception as exc:
             log.error(f"[notify] Delivery error: {exc}")
-            return False
+            raise
 
     def is_dedupe_open(self, key: str) -> bool:
         """True when ``key`` was already reported and not yet cleared."""

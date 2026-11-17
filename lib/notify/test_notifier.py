@@ -571,7 +571,7 @@ def test_retryable_alert_recovers_transport_refusal_before_acceptance(tmp_path):
     key = "usage:weekly:50"
 
     def interrupted(*args, **kwargs):
-        raise RuntimeError("interrupted before transport return")
+        raise notifier_mod.TransportNotStarted("message construction failed")
 
     first._deliver = interrupted
     assert not first.send("usage crossed", Priority.WARN, handler="apis",
@@ -1144,12 +1144,68 @@ def test_failed_transport_remains_retryable(tmp_path, restart):
     assert sent == ["⚠ [apis] crossed"]
 
 
+@pytest.mark.parametrize("held", [False, True])
+def test_transport_accepts_then_raises_is_never_resent(tmp_path, held):
+    from . import held_view
+
+    calls = []
+    n = _notifier(tmp_path, ALWAYS_SILENT if held else NO_SILENCE, calls)
+    key = "usage:weekly:uncertain:50"
+
+    def accepted_then_lost(message, **kwargs):
+        calls.append(message)
+        raise OSError("reply lost")
+
+    n._deliver = accepted_then_lost
+    if held:
+        n.should_flush_digest = lambda: False
+        assert not n.send("crossed", Priority.WARN, handler="apis", dedupe_key=key,
+                          retryable=True)
+        n._in_silence_window = lambda: False
+        n.flush_digest()
+    else:
+        n.send("crossed", Priority.WARN, handler="apis", dedupe_key=key,
+               retryable=True)
+    assert len([m for m in calls if "crossed" in m]) == 1
+    assert n._dedupe_journal[key]["state"] == "delivered_unconfirmed"
+    assert [r["key"] for r in held_view.read_recovery(n._digest_path)] == [key]
+    n.send("crossed", Priority.WARN, handler="apis", dedupe_key=key,
+           retryable=True)
+    n.flush_digest()
+    original_now = n._now_local
+    n._now_local = lambda: original_now() + timedelta(seconds=10)
+    n.send("crossed", Priority.WARN, handler="apis", dedupe_key=key,
+           retryable=True)
+    n = _notifier(tmp_path, NO_SILENCE, calls)
+    n._deliver = accepted_then_lost
+    n.send("crossed", Priority.WARN, handler="apis", dedupe_key=key,
+           retryable=True)
+    n.flush_digest()
+    assert len([m for m in calls if "crossed" in m]) == 1
+
+
+def test_explicit_refusal_in_held_drain_is_retryable(tmp_path):
+    calls = []
+    n = _notifier(tmp_path, ALWAYS_SILENT, calls)
+    n.should_flush_digest = lambda: False
+    key = "usage:weekly:refused:50"
+    n.send("crossed", Priority.WARN, handler="apis", dedupe_key=key,
+           retryable=True)
+    n._in_silence_window = lambda: False
+    n._deliver = lambda *args, **kwargs: False
+    n.flush_digest()
+    assert n._dedupe_journal[key]["state"] == "held"
+    n._deliver = lambda message, **kwargs: calls.append(message) or True
+    n.flush_digest()
+    assert calls == ["⚠ [apis] crossed"]
+
+
 def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
     """Every three-step walk preserves queue, receipt and delivery invariants."""
     from . import held_view
 
     operations = ("send", "drain", "held_receipt_fail", "direct_receipt_fail",
-                  "transport_refuse", "crash_pending", "crash_sending", "restart",
+                  "transport_refuse", "transport_uncertain", "crash_pending", "crash_sending", "restart",
                   "migrate", "operator_clear", "window_roll")
     for length in range(1, 4):
         for index, sequence in enumerate(product(operations, repeat=length)):
@@ -1214,6 +1270,19 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
                     n._in_silence_window = lambda: False
                     original = n._deliver
                     n._deliver = lambda *args, **kwargs: False
+                    n.send(f"crossed {key}", Priority.WARN, handler="apis",
+                           dedupe_key=key, retryable=True)
+                    n._deliver = original
+                    n._in_silence_window = lambda: True
+                elif operation == "transport_uncertain":
+                    n._in_silence_window = lambda: False
+                    original = n._deliver
+
+                    def uncertain(message, **kwargs):
+                        sent.append(message)
+                        raise OSError("transport result lost")
+
+                    n._deliver = uncertain
                     n.send(f"crossed {key}", Priority.WARN, handler="apis",
                            dedupe_key=key, retryable=True)
                     n._deliver = original

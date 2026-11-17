@@ -33,8 +33,9 @@ No separate state store is added.
   journal through transport completion and threshold marking. A second check
   that cannot acquire it skips the send; an unreadable lock also skips it.
 
-Fail-open, always: a missing or malformed usage file, an unreadable ledger, a
-notifier that cannot be built or a send that raises is logged and swallowed.
+Fail-open, always: a missing usage file, an unreadable ledger, a notifier that
+cannot be built or a send that raises is logged and swallowed. An existing
+malformed usage file raises one keyed diagnostic notice per source per day.
 ``check_usage_thresholds`` never raises and never blocks a dispatch.
 
 Top callers come from the tier ledger's attribution fields
@@ -47,6 +48,7 @@ the last seven days are used and the message says so.
 from __future__ import annotations
 
 import logging
+import hashlib
 import math
 import os
 import re
@@ -236,6 +238,15 @@ def check_usage_thresholds(
     journal = None
     try:
         current = now or datetime.now(timezone.utc)
+        source = harness_router._usage_path()
+        problem = harness_router.usage_snapshot_problem(source)
+        if problem is not None:
+            _notice_unreadable_snapshot(
+                source, problem, current, notifier=notifier,
+                notifier_factory=notifier_factory,
+                journal_factory=journal_factory,
+            )
+            return []
         try:
             reading = harness_router.usage_reading(provider, now_wall=current.timestamp())
         except (ValueError, OverflowError, OSError) as exc:
@@ -382,6 +393,33 @@ def check_usage_thresholds(
     except Exception as exc:  # noqa: BLE001 — never block or fail a dispatch
         log.warning(f"[apis] usage threshold check failed (non-fatal): {exc}")
     return delivered_keys
+
+
+def _notice_unreadable_snapshot(
+    source: Path, problem: str, current: datetime, *,
+    notifier, notifier_factory, journal_factory,
+) -> None:
+    """Use the same journal and held queue as threshold notices."""
+    from lib.notify import Priority, held_view
+
+    digest = hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:16]
+    key = f"{held_view.UNREADABLE_USAGE_KEY_PREFIX}{digest}:{current.date().isoformat()}"
+    source_label = str(source)
+    if len(source_label) > 200:
+        source_label = source_label[:197] + "... (APIS_HARNESS_USAGE_FILE)"
+    try:
+        probe = notifier or (journal_factory or _default_journal_factory)()
+        if _already_reported(probe, key):
+            return
+        sender = notifier or (notifier_factory or _default_notifier_factory)()
+        sender.send(
+            f"Usage snapshot unreadable at {source_label}: {problem}. Inspect and repair "
+            "the source, then run `python3 execution/scripts/harness_usage.py refresh`.",
+            priority=Priority.WARN, handler="apis", dedupe_key=key,
+            retryable=True, email_eligible=False,
+        )
+    except Exception as exc:  # noqa: BLE001 — diagnostics cannot block dispatch
+        log.warning("[apis] unreadable usage snapshot notice failed: %s", exc)
 
 
 def schedule_dispatch_check(provider: str, *, notifier=None) -> threading.Thread:

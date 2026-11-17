@@ -7,13 +7,14 @@ per state change, not per turn) integrity is judged on conversation capture
 seen in the transcript, not on a turn count. The counter is kept only as a
 cheap liveness signal.
 
-It also prints ONE line to stdout (which the harness adds to model context)
+It also prints a bounded notice to stdout (which the harness adds to model context)
 when daemons hold operator notices that are waiting undelivered, and only when the
 held total is non-zero and differs from the last total shown in this session.
 The line is built from integers and regex-validated handler names returned by
 lib/notify/held_view.py, never from notice text: notice text can embed
 attacker-influenced strings (PR titles, issue text) and must not reach model
-context from here. Fail-open: any error means no output and exit 0.
+context from here. A keyed unreadable-usage notice adds fixed source and repair
+text, never the queued message. Fail-open: any error means no output and exit 0.
 """
 import importlib.util
 import sys
@@ -61,7 +62,12 @@ def held_notice_line(state: dict) -> str:
         "After the operator decides to allow a resend, clear one with "
         "python3 lib/notify/held_view.py --clear-unconfirmed <key>."
     ) if unconfirmed else ""
-    return "\n".join(part for part in (held_line, recovery_line) if part)
+    usage_line = (
+        "[usage-snapshot] The usage snapshot source (APIS_HARNESS_USAGE_FILE) "
+        "is unreadable. Inspect it with python3 lib/notify/held_view.py, "
+        "repair the file, then run python3 execution/scripts/harness_usage.py refresh."
+    ) if int(info.get("usage_snapshot_unreadable", 0)) else ""
+    return "\n".join(part for part in (held_line, recovery_line, usage_line) if part)
 
 
 def main() -> int:
