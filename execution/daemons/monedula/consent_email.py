@@ -484,6 +484,11 @@ def overlay_verdicts(
         }
         if named:
             held_keys.update(named)
+        elif _MARKER_RE.search(line):
+            # An old request's marker does not name any obligation in this
+            # generation. It must not veto an unrelated new request.
+            if subject_tok in by_token:
+                held_keys.add(match_key(by_token[subject_tok]))
         else:
             held_keys.update(states)
         if unrecognized_lines is not None and line not in unrecognized_lines:
