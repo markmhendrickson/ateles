@@ -412,6 +412,9 @@ class Notifier:
                 full_message[:200],
             )
             return False
+        if retryable and any(self._is_duplicate(key, pending_owned=True)
+                             for key in related_dedupe_keys):
+            return False
 
         # Record the key as reported BEFORE routing, not after. The dedupe
         # contract is "have I already told the operator about this open
@@ -570,6 +573,7 @@ class Notifier:
         self, message: str, email_eligible: bool = True,
         dedupe_keys: tuple[str, ...] = (), handler: str = "",
         record_receipt: bool = True,
+        unreadable_source: bool = False,
     ) -> bool:
         """Append an actionable held notice. Never raises.
 
@@ -610,6 +614,8 @@ class Notifier:
                             # A changed reading replaces its predecessor under
                             # the queue lock, even if its receipt never landed.
                             replacement = {"keys": list(identity), "message": message} if dedupe_keys else message
+                            if isinstance(replacement, dict) and unreadable_source:
+                                replacement["unreadable_source"] = True
                             if item != replacement:
                                 queue[index] = replacement
                                 if not self._persist_queue(queue, existing_path):
@@ -620,7 +626,10 @@ class Notifier:
                     if len(items) >= HELD_QUEUE_MAX:
                         log.error("[notify] held queue %s full; preserving existing notices", path.name)
                         return False
-                    items.append({"keys": list(identity), "message": message} if dedupe_keys else message)
+                    notice = {"keys": list(identity), "message": message} if dedupe_keys else message
+                    if isinstance(notice, dict) and unreadable_source:
+                        notice["unreadable_source"] = True
+                    items.append(notice)
                     if not self._persist_queue(items, path):
                         return False
                     # The queue lock excludes drainers until the held receipt
@@ -894,7 +903,15 @@ class Notifier:
         if not isinstance(item, dict):
             return True
         keys = tuple(item["keys"])
-        entry = self._dedupe_journal.get(keys[0], {})
+        entries = self._dedupe_journal
+        for key in keys:
+            existing = entries.get(key)
+            if key in entries and held_view.receipt_problem(existing):
+                self._raise_recovery(key, "malformed held receipt")
+                return False
+            if existing is None and self._is_duplicate(key):
+                return False
+        entry = entries.get(keys[0], {})
         if isinstance(entry, dict) and entry.get("state") == "delivered":
             return False
         if isinstance(entry, dict) and entry.get("state") in ("sending", "delivered_unconfirmed"):
@@ -906,7 +923,8 @@ class Notifier:
         if not isinstance(item, dict):
             return False
         entry = self._dedupe_journal.get(item["keys"][0], {})
-        return isinstance(entry, dict) and entry.get("state") == "delivered"
+        return isinstance(entry, dict) and not held_view.receipt_problem(entry) \
+            and entry.get("state") == "delivered"
 
     def _finish_held_delivery(self, item: str | dict) -> bool:
         if not isinstance(item, dict):
@@ -1016,20 +1034,12 @@ class Notifier:
                 raise UnreadableDedupeJournal("dedupe journal unreadable") from exc
 
     def _preserve_unreadable_journal(self) -> None:
-        """Keep one bounded forensic copy without exposing its contents."""
+        """Keep bounded forensic copies without replacing the first version."""
         try:
             fd = os.open(str(self._dedupe_path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
             with os.fdopen(fd, "rb") as source:
                 raw = source.read()
-            path = self._dedupe_path.with_name(self._dedupe_path.name + ".unreadable")
-            fd, name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
-            try:
-                with os.fdopen(fd, "wb") as target:
-                    target.write(raw)
-                os.replace(name, path)
-            except BaseException:
-                os.unlink(name)
-                raise
+            held_view.preserve_unreadable(self._dedupe_path, raw)
         except OSError:
             pass  # The original remains in place even if copying is denied.
 
@@ -1046,7 +1056,7 @@ class Notifier:
         if key:
             self._queue_digest(
                 f"⚠ [{handler or 'notify'}] {message}", False, (key,),
-                handler, record_receipt=False,
+                handler, record_receipt=False, unreadable_source=True,
             )
 
     def _dedupe_journal_lock_path(self) -> Path:
@@ -1090,10 +1100,8 @@ class Notifier:
                     return False
                 return True
         except Exception as exc:  # noqa: BLE001
-            # Fail open toward SENDING rather than silently losing an alert:
-            # if the journal can't be written, the key is simply not recorded
-            # and the next tick will (harmlessly) re-notify. That is the
-            # pre-existing behaviour, not a new failure mode.
+            # The caller must keep a keyed notice held or retryable; a failed
+            # receipt write is never evidence that transport may run again.
             log.error("[notify] could not persist dedupe journal (%s)", exc)
             return False
 
@@ -1135,6 +1143,16 @@ class Notifier:
             self._hold_unreadable_journal(None, "", "")
             return
         for key, entry in entries:
+            if key == held_view.RECOVERED_AT:
+                continue
+            if held_view.receipt_problem(entry):
+                if isinstance(entry, dict) and entry.get("state") in (
+                    "sending", "delivered_unconfirmed"
+                ):
+                    self._recover_sending(key, entry, "malformed sending receipt")
+                else:
+                    self._raise_recovery(key, "malformed receipt")
+                continue
             if isinstance(entry, dict) and entry.get("state") in (
                 "sending", "delivered_unconfirmed"
             ):
@@ -1166,7 +1184,39 @@ class Notifier:
 
     def _is_duplicate(self, key: str, *, pending_owned: bool = False,
                       replacement_message: str | None = None) -> bool:
-        entry = self._dedupe_journal.get(key)
+        journal = self._dedupe_journal
+        entry = journal.get(key)
+        try:
+            recovery = held_view.read_recovery(self._digest_path)
+        except Exception:
+            log.error("[notify] recovery file unreadable; key %r held", key)
+            return True
+        if any(row["key"] == key for row in recovery):
+            return True
+        if key in journal and held_view.receipt_problem(entry):
+            if isinstance(entry, dict) and entry.get("state") in (
+                "sending", "delivered_unconfirmed"
+            ):
+                self._recover_sending(key, entry, "malformed sending receipt")
+            else:
+                self._raise_recovery(key, "malformed receipt")
+            return True
+        epoch = journal.get(held_view.RECOVERED_AT)
+        if entry is None and held_view.RECOVERED_AT in journal and (
+            not isinstance(epoch, str) or not held_view.recovered_window_is_new(key, epoch)
+        ):
+            attempt_at = epoch if isinstance(epoch, str) and not held_view.receipt_problem(
+                {"state": "delivered_unconfirmed", "attempt_at": epoch}
+            ) else self._now_local().isoformat()
+            def quarantine(current: dict[str, Any]) -> bool:
+                if key in current:
+                    return False
+                current[key] = {"state": "delivered_unconfirmed", "attempt_at": attempt_at,
+                                "handler": ""}
+                return True
+            self._update_dedupe_journal(quarantine)
+            self._raise_recovery(key, "key absent after journal recovery")
+            return True
         if pending_owned and (entry is None or (
             isinstance(entry, dict) and entry.get("state") == "pending"
         )):
@@ -1204,30 +1254,14 @@ class Notifier:
                     self._recover_sending(key, entry, "send outcome unknown")
             return True
         if isinstance(entry, dict) and entry.get("state") == "held" \
-                and isinstance(entry.get("held_message"), str) \
-                and not isinstance(entry.get("handler", ""), str):
-            def normalize_held(journal: dict[str, Any]) -> bool:
-                current = journal.get(key)
-                if not isinstance(current, dict) or current.get("state") != "held":
-                    return False
-                journal[key] = {**current, "handler": ""}
-                return True
-            if not self._update_dedupe_journal(normalize_held):
-                return False
-            entry = self._dedupe_journal.get(key)
-        if not isinstance(entry, dict) or not isinstance(entry.get("handler", ""), str):
-            self.release_dedupe(key)
-            return False
-        if isinstance(entry, dict) and entry.get("state") == "held" \
                 and isinstance(entry.get("held_message"), str):
             # A held key suppresses only while its notice survives in either
             # queue. Lock order on every shared path: this instance's
             # notification lock, then the queue lock, then the journal lock.
             with self._notification_lock, self._queue_lock() as locked:
                 if not locked:
-                    log.error("[notify] held queue lock unavailable; key %r remains retryable", key)
-                    self.release_dedupe(key)
-                    return False
+                    self._raise_recovery(key, "held queue lock unavailable")
+                    return True
                 try:
                     queued = (
                         held_view.read_queue(self._digest_path)
@@ -1235,37 +1269,30 @@ class Notifier:
                     )
                 except Exception as exc:  # noqa: BLE001
                     log.error("[notify] cannot verify held notice (%s); recovery required", exc)
-                    self.release_dedupe(key)
-                    return False
+                    self._raise_recovery(key, "held queue unreadable")
+                    return True
                 message = entry.get("held_message")
                 if any((key in item["keys"] if isinstance(item, dict)
                         else item == message) for item in queued):
                     return True
 
-                def release_missing(journal: dict[str, Any]) -> bool:
+                def quarantine_missing(journal: dict[str, Any]) -> bool:
                     current = journal.get(key)
                     if isinstance(current, dict) and current.get("state") == "held" \
                             and current.get("held_message") == message:
-                        del journal[key]
+                        journal[key] = {"state": "delivered_unconfirmed",
+                                        "attempt_at": self._now_local().isoformat(),
+                                        "handler": current.get("handler", "")}
                         return True
                     return False
 
-                if not self._update_dedupe_journal(release_missing):
-                    return False  # retry the alert when reconciliation cannot persist
-                entry = self._dedupe_journal.get(key)
-                if entry is None:
-                    return False
+                self._update_dedupe_journal(quarantine_missing)
+                self._raise_recovery(key, "held notice missing from queue")
+                return True
         state = entry.get("state")
-        if state == "held" and not isinstance(entry.get("held_message"), str):
-            self.release_dedupe(key)
-            return False
-        if state not in (None, "held", "pending", "delivered") or (
-            state == "pending" and not isinstance(entry.get("pending_at"), str)
-        ) or (state == "delivered" and not isinstance(entry.get("notified_at"), str)) or (
-            state is None and not isinstance(entry.get("notified_at"), str)
-        ):
-            self.release_dedupe(key)
-            return False
+        if state not in ("held", "pending", "delivered"):
+            self._raise_recovery(key, "unexpected receipt state")
+            return True
         if state != "pending":
             return True
         if pending_owned:
@@ -1341,6 +1368,7 @@ class Notifier:
         def change(journal: dict[str, Any]) -> bool:
             keys = [key for key, entry in journal.items()
                     if isinstance(entry, dict) and entry.get("state") == "held"
+                    and not held_view.receipt_problem(entry)
                     and (any(isinstance(identity, tuple) and key in identity for identity in gone)
                          or entry.get("held_message") in gone)]
             for key in keys:
@@ -1353,6 +1381,7 @@ class Notifier:
         def change(journal: dict[str, Any]) -> bool:
             keys = [key for key, entry in journal.items()
                     if isinstance(entry, dict) and entry.get("state") == "held"
+                    and not held_view.receipt_problem(entry)
                     and (key in message["keys"] if isinstance(message, dict)
                          else entry.get("held_message") == message)]
             for key in keys:
@@ -1369,6 +1398,7 @@ class Notifier:
             def change(journal: dict[str, Any]) -> bool:
                 if key not in journal:
                     journal[key] = {
+                        "state": "delivered",
                         "notified_at": self._now_local().isoformat(),
                         "handler": handler,
                     }
@@ -1389,6 +1419,12 @@ class Notifier:
         still open and still unreported. Never raises.
         """
         try:
+            entry = self._dedupe_journal.get(key)
+            if key in self._dedupe_journal and held_view.receipt_problem(entry):
+                self._raise_recovery(key, "malformed receipt")
+                return
+            if any(row["key"] == key for row in held_view.read_recovery(self._digest_path)):
+                return
             def change(journal: dict[str, Any]) -> bool:
                 if key in journal:
                     del journal[key]
@@ -1407,14 +1443,6 @@ class Notifier:
         if old_key == new_key:
             return True
         try:
-            if old_key not in self._dedupe_journal:
-                return True
-        except UnreadableDedupeJournal:
-            self._hold_unreadable_journal(None, "", "")
-            return False
-        if not neotoma_sink.migrate_key(old_key, new_key):
-            return False
-        try:
             with self._notification_lock, self._queue_lock() as queue_locked:
                 if not queue_locked:
                     return False
@@ -1423,10 +1451,36 @@ class Notifier:
                     if not journal_locked:
                         return False
                     journal = self._dedupe_journal
+                    marker = next((row for row in held_view.read_recovery(self._digest_path)
+                                   if row["key"] == old_key and row.get("migration_to") == new_key), None)
                     if old_key not in journal:
+                        if marker is None:
+                            return True
+                        if not neotoma_sink.migrate_key(old_key, new_key):
+                            return False
+                        with held_view.file_lock(held_view.recovery_lock_path(self._digest_path),
+                                                 fail_open=False) as recovered:
+                            if not recovered:
+                                return False
+                            held_view.write_recovery(self._digest_path, [row for row in
+                                held_view.read_recovery(self._digest_path) if row != marker])
                         return True
-                    if new_key in journal:
+                    if held_view.receipt_problem(journal[old_key]):
+                        self._raise_recovery(old_key, "malformed receipt during migration")
                         return False
+                    if new_key in journal:
+                        if held_view.receipt_problem(journal[new_key]):
+                            self._raise_recovery(new_key, "malformed receipt during migration")
+                        return False
+                    if marker is None:
+                        with held_view.file_lock(held_view.recovery_lock_path(self._digest_path),
+                                                 fail_open=False) as recovered:
+                            if not recovered:
+                                return False
+                            records = held_view.read_recovery(self._digest_path)
+                            marker = {"key": old_key, "time": self._now_local().isoformat(),
+                                      "cause": "sink key migration pending", "migration_to": new_key}
+                            held_view.write_recovery(self._digest_path, records + [marker])
                     queues = {path: held_view.read_queue(path)
                               for path in (self._digest_path, self._email_path)}
                     changed: dict[Path, list[str | dict]] = {}
@@ -1466,6 +1520,7 @@ class Notifier:
                                 raise OSError("recovery lock unavailable")
                             records = held_view.read_recovery(self._digest_path)
                             migrated = [{**row, "key": new_key} if row["key"] == old_key
+                                        and not row.get("migration_to")
                                         else row for row in records]
                             if migrated != records:
                                 held_view.write_recovery(self._digest_path, migrated)
@@ -1476,6 +1531,14 @@ class Notifier:
                             self._persist_queue(queues[previous], previous)
                         self._raise_recovery(old_key, "recovery key migration failed")
                         return False
+                    if not neotoma_sink.migrate_key(old_key, new_key):
+                        return False
+                    with held_view.file_lock(held_view.recovery_lock_path(self._digest_path),
+                                             fail_open=False) as recovered:
+                        if not recovered:
+                            return False
+                        held_view.write_recovery(self._digest_path, [row for row in
+                            held_view.read_recovery(self._digest_path) if row != marker])
                     return True
         except Exception as exc:  # noqa: BLE001
             log.error("[notify] key migration failed for %r: %s", old_key, exc)
@@ -1491,12 +1554,49 @@ class Notifier:
         reported again rather than staying suppressed forever. Never raises.
         """
         try:
+            journal = self._dedupe_journal
+            records = held_view.read_recovery(self._digest_path)
+            marker = next((row for row in records if row["key"] == key and row.get("migration_to")), None)
+            projection = next((row for row in records if row["key"] == key
+                               and row.get("cause") == "sink resolution pending"), None)
+            if key not in journal and marker:
+                self.clear_dedupe(marker["migration_to"])
+                if neotoma_sink.resolve(key) is False:
+                    return
+                with held_view.file_lock(held_view.recovery_lock_path(self._digest_path),
+                                         fail_open=False) as recovered:
+                    if recovered:
+                        held_view.write_recovery(self._digest_path, [row for row in
+                            held_view.read_recovery(self._digest_path) if row != marker])
+                return
+            if key not in journal and projection:
+                if neotoma_sink.resolve(key) is False:
+                    return
+                with held_view.file_lock(held_view.recovery_lock_path(self._digest_path),
+                                         fail_open=False) as recovered:
+                    if recovered:
+                        held_view.write_recovery(self._digest_path, [row for row in
+                            held_view.read_recovery(self._digest_path) if row != projection])
+                return
+            if key in journal and held_view.receipt_problem(journal[key]):
+                self._raise_recovery(key, "malformed receipt")
+                return
+            if any(row["key"] == key and not row.get("migration_to")
+                   and row.get("cause") != "sink resolution pending" for row in records):
+                return
             with self._notification_lock, self._queue_lock() as queue_locked:
                 if not queue_locked:
                     return
                 # Establish that the receipt source is readable before any
                 # held queue item can be removed.
                 self._dedupe_journal
+                if projection is None and marker is None:
+                    self._raise_recovery(key, "sink resolution pending", notify=False)
+                    projection = next((row for row in held_view.read_recovery(self._digest_path)
+                                       if row["key"] == key
+                                       and row.get("cause") == "sink resolution pending"), None)
+                    if projection is None:
+                        return
                 queues = {path: held_view.read_queue(path)
                           for path in (self._digest_path, self._email_path)}
                 kept = {path: [item for item in items if not (
@@ -1536,26 +1636,14 @@ class Notifier:
                             for previous in written:
                                 self._persist_queue(queues[previous], previous)
                             return
-                    with held_view.file_lock(
-                        held_view.recovery_lock_path(self._digest_path),
-                        fail_open=False,
-                    ) as recovery_locked:
-                        try:
-                            if not recovery_locked:
-                                raise OSError("recovery lock unavailable")
-                            records = held_view.read_recovery(self._digest_path)
-                            if any(row["key"] == key for row in records):
-                                held_view.write_recovery(
-                                    self._digest_path,
-                                    [row for row in records if row["key"] != key],
-                                )
-                        except Exception:
-                            if key in journal:
-                                self._persist_dedupe_journal(journal)
-                            for previous in written:
-                                self._persist_queue(queues[previous], previous)
-                            raise
-            neotoma_sink.resolve(key)
+            if neotoma_sink.resolve(key) is False:
+                return
+            with held_view.file_lock(held_view.recovery_lock_path(self._digest_path),
+                                     fail_open=False) as recovered:
+                if recovered:
+                    held_view.write_recovery(self._digest_path, [row for row in
+                        held_view.read_recovery(self._digest_path)
+                        if row != projection and row != marker])
         except UnreadableDedupeJournal:
             self._hold_unreadable_journal(None, "", "")
         except Exception as exc:  # noqa: BLE001

@@ -423,7 +423,7 @@ def test_unreadable_held_queue_is_not_overwritten_by_new_usage_warning(
     _usage_file(monkeypatch, tmp_path, "cursor", [window])
     usage_alerts.check_usage_thresholds("cursor", notifier=spy)
     assert spy.inner._digest_path.read_text() == "unreadable queue"
-    assert key not in spy.inner._dedupe_journal
+    assert key in spy.inner._dedupe_journal
     assert len(spy.sent) == 2
     assert held_view._print_notices(spy.inner._digest_path, False) == 1
     assert capsys.readouterr().out.count("RECOVERY REQUIRED:") == 1
@@ -434,10 +434,10 @@ def test_unreadable_held_queue_is_not_overwritten_by_new_usage_warning(
     assert held_view.notice_text(spy.inner._digest_queue[0]) == "⚠ [apis] " + spy.sent[0][0]
 
 
-def test_missing_held_notice_allows_one_new_usage_warning(
+def test_missing_held_notice_quarantines_usage_warning(
     monkeypatch, tmp_path, ledger
 ) -> None:
-    from lib.notify import neotoma_sink
+    from lib.notify import held_view, neotoma_sink
 
     monkeypatch.setattr(neotoma_sink, "record", lambda **kwargs: None)
     window = _window(52)
@@ -450,10 +450,11 @@ def test_missing_held_notice_allows_one_new_usage_warning(
     spy.inner._digest_path.unlink()
 
     usage_alerts.check_usage_thresholds("cursor", notifier=spy)
-    assert len(spy.sent) == 2
-    assert spy.inner._dedupe_journal[key]["state"] == "held"
+    assert len(spy.sent) == 1
+    assert spy.inner._dedupe_journal[key]["state"] == "delivered_unconfirmed"
+    assert any(row["key"] == key for row in held_view.read_recovery(spy.inner._digest_path))
     usage_alerts.check_usage_thresholds("cursor", notifier=spy)
-    assert len(spy.sent) == 2
+    assert len(spy.sent) == 1
 
 
 def test_no_alert_below_fifty_percent(monkeypatch, tmp_path, ledger) -> None:
@@ -932,7 +933,7 @@ def test_cli_exit_leaves_failed_alert_pending_for_next_process(
 def test_real_apis_notifier_retries_malformed_thresholds_on_both_entrances(
     monkeypatch, tmp_path, ledger
 ) -> None:
-    from lib.notify import neotoma_sink
+    from lib.notify import held_view, neotoma_sink
     import red_conditions
 
     monkeypatch.setattr(neotoma_sink, "record", lambda **kwargs: None)
@@ -942,6 +943,8 @@ def test_real_apis_notifier_retries_malformed_thresholds_on_both_entrances(
     })
     notifier._digest_path = tmp_path / "held.json"
     notifier._dedupe_path = tmp_path / "dedupe.json"
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(notifier._digest_path))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(notifier._dedupe_path))
     notifier._email_primary = False
     delivered = []
     notifier._deliver = lambda message, **kwargs: delivered.append(message) or True
@@ -951,6 +954,9 @@ def test_real_apis_notifier_retries_malformed_thresholds_on_both_entrances(
     notifier._dedupe_path.write_text(json.dumps({first: "malformed"}))
 
     # Usage-write entrance calls the threshold checker synchronously.
+    assert usage_alerts.check_usage_thresholds("cursor", notifier=notifier) == []
+    assert not [message for message in delivered if "crossed 50%" in message]
+    assert held_view.main(["--clear-unconfirmed", first]) == 0
     assert usage_alerts.check_usage_thresholds("cursor", notifier=notifier) == [first]
     assert notifier._dedupe_journal[first]["state"] == "delivered"
     window["used_percent"] = 76
@@ -962,7 +968,10 @@ def test_real_apis_notifier_retries_malformed_thresholds_on_both_entrances(
 
     # The dispatch entrance runs the same handoff in its worker thread.
     usage_alerts.schedule_dispatch_check("cursor", notifier=notifier).join(2)
-    assert len(delivered) == 2
+    assert not [message for message in delivered if "crossed 75%" in message]
+    assert held_view.main(["--clear-unconfirmed", second]) == 0
+    usage_alerts.schedule_dispatch_check("cursor", notifier=notifier).join(2)
+    assert len([message for message in delivered if "crossed" in message]) == 2
     assert notifier._dedupe_journal[second]["state"] == "delivered"
 
 
@@ -1193,6 +1202,7 @@ def test_an_alert_failure_never_raises(monkeypatch, tmp_path, ledger) -> None:
 @pytest.mark.parametrize("contents", [
     "{not json", "[]", "{}", '{"cursor": []}',
     '{"cursor": {}}', '{"cursor": {"windows": [1]}}',
+    '{"cursor": {"windows": [{"used_percent": 55}, {}]}}',
 ])
 def test_unreadable_usage_snapshot_has_one_held_notice(
     monkeypatch, tmp_path, ledger, capsys, contents
@@ -1308,6 +1318,25 @@ def test_probe_preserves_and_reports_unreadable_snapshot(monkeypatch, tmp_path, 
     assert harness_router.usage_snapshot_problem(path) is None
     assert len([item for item in spy.sent if "Usage snapshot unreadable" in item[0]]) == 1
     assert len([item for item in spy.sent if "crossed 50%" in item[0]]) == 1
+
+
+def test_repeated_usage_writes_keep_first_and_latest_unreadable_versions(
+    monkeypatch, tmp_path, ledger
+) -> None:
+    path = tmp_path / "usage.json"
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(path))
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    first = b'{"cursor": [], "codex": {"windows": []}}'
+    later = b'{"cursor": {"windows": []}, "codex": []}'
+    final = b'{"cursor": [], "codex": []}'
+    for raw in (first, first, later, final, final):
+        path.write_bytes(raw)
+        harness_router.record_cooling("claude", 1_900_000_000, reason="synthetic")
+    copies = list(tmp_path.glob("usage.json.unreadable*"))
+    assert len(copies) == 2
+    assert (tmp_path / "usage.json.unreadable").read_bytes() == first
+    assert (tmp_path / "usage.json.unreadable.latest").read_bytes() == final
 
 
 def test_refused_source_notice_outside_silence_reaches_hook(

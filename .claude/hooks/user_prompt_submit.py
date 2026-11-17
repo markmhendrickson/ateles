@@ -43,8 +43,14 @@ def held_notice_line(state: dict) -> str:
     info = _load_held_view().summary()
     total = int(info["total"])
     unconfirmed = int(info.get("unconfirmed", 0))
-    fingerprint = str(info["fingerprint"]) + ":" + str(info.get("unconfirmed_fingerprint", ""))
-    if total == 0 and unconfirmed == 0 or fingerprint == state.get("held_notices_hash"):
+    projections = int(info.get("projection_pending", 0))
+    bad_sink = int(info.get("sink_state_unreadable", 0))
+    bad_queues = int(info.get("queue_unreadable", 0))
+    fingerprint = (str(info["fingerprint"]) + ":" +
+                   str(info.get("unconfirmed_fingerprint", "")) + ":" +
+                   str(bad_sink) + ":" + str(bad_queues))
+    if (total == 0 and unconfirmed == 0 and projections == 0 and bad_sink == 0
+            and bad_queues == 0) or fingerprint == state.get("held_notices_hash"):
         state["held_notices_hash"] = fingerprint  # re-arm after the queue empties
         return ""
     state["held_notices_hash"] = fingerprint
@@ -72,7 +78,25 @@ def held_notice_line(state: dict) -> str:
         "Reconcile unknown deliveries, then run python3 "
         "lib/notify/held_view.py --clear-unreadable-journal."
     ) if info.get("dedupe_journal_unreadable") else ""
-    return "\n".join(part for part in (held_line, recovery_line, usage_line, journal_line) if part)
+    sink_line = (
+        f"[notify-sink] {bad_sink} sink state file(s) are unreadable. "
+        "Read python3 lib/notify/held_view.py and repair the preserved state "
+        "before key migration or resolution."
+    ) if bad_sink else ""
+    queue_line = (
+        f"[held-queue] {bad_queues} held notice queue file(s) are unreadable. "
+        "Read python3 lib/notify/held_view.py; preserve and repair the file "
+        "before clearing or draining notices."
+    ) if bad_queues else ""
+    projection_line = (
+        f"[notify-projection] {projections} sink projection repair(s) are pending. "
+        "Read python3 lib/notify/held_view.py and retry the named key migration "
+        "or resolution; these records cannot be cleared as uncertain sends."
+    ) if projections else ""
+    return "\n".join(part for part in
+                     (held_line, recovery_line, projection_line, usage_line,
+                      journal_line, sink_line, queue_line)
+                     if part)
 
 
 def main() -> int:

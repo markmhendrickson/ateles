@@ -181,8 +181,8 @@ def _usage_entry_problem(entry: object) -> bool:
         or not _USAGE_ENTRY_FIELDS.intersection(entry)
         or ("windows" in entry and (
             not isinstance(entry["windows"], list)
-            or bool(entry["windows"]) and not any(
-                isinstance(window, dict) and _percent(window.get("used_percent")) is not None
+            or any(
+                not isinstance(window, dict) or _percent(window.get("used_percent")) is None
                 for window in entry["windows"]
             )
         ))
@@ -725,15 +725,9 @@ def _write_usage_entry(
                 notifier=None, notifier_factory=None, journal_factory=None,
             )
             raw = path.read_bytes()
-            unreadable = path.with_name(path.name + ".unreadable")
-            fd, backup_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{unreadable.name}.")
-            try:
-                with os.fdopen(fd, "wb") as backup:
-                    backup.write(raw)
-                os.replace(backup_name, unreadable)
-            except BaseException:
-                os.unlink(backup_name)
-                raise
+            from lib.notify.held_view import preserve_unreadable
+
+            preserve_unreadable(path, raw)
         existing = _read_json_object(path)
         current = existing.get(provider)
         current = current if isinstance(current, dict) else {}

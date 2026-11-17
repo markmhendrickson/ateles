@@ -18,8 +18,8 @@ CLI:
     python3 lib/notify/held_view.py --clear    back up and remove exactly what was
                                                last printed, nothing newer
     python3 lib/notify/held_view.py --clear-unreadable-journal
-                                               after reconciling unknown sends,
-                                               rebuild receipts from held notices
+                                               rebuild surviving receipts and
+                                               quarantine unknown prior keys
 
 Queue text is written by daemons and can embed attacker-influenced strings
 (PR titles, issue text). Anything that puts a summary into model context must
@@ -39,6 +39,7 @@ import sys
 import tempfile
 import time
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:  # POSIX only; without it locking degrades to fail-open no-ops.
@@ -60,6 +61,144 @@ VIEW_LIMIT = 20
 BACKUP_MAX = 1000
 # Do not follow a symlink planted at a sibling file's path (0 where unsupported).
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+RECOVERED_AT = "__recovered_at__"
+
+
+def receipt_problem(entry: object) -> str | None:
+    """One validation contract for every consumer of a per-key receipt."""
+    if not isinstance(entry, dict):
+        return "receipt is not an object"
+    state = entry.get("state")
+    field = {"held": "held_message", "pending": "pending_at",
+             "sending": "attempt_at", "delivered_unconfirmed": "attempt_at",
+             "delivered": "notified_at"}.get(state) if isinstance(state, str) else None
+    if field is None:
+        return "receipt state is missing or invalid"
+    if not isinstance(entry.get("handler", ""), str):
+        return "receipt handler is invalid"
+    if field == "held_message":
+        return None if isinstance(entry.get(field), str) else "held message is invalid"
+    stamp = entry.get(field)
+    if not isinstance(stamp, str):
+        return "receipt timestamp is missing or invalid"
+    try:
+        parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return "receipt timestamp has no timezone"
+    except (ValueError, OverflowError):
+        return "receipt timestamp is invalid"
+    return None
+
+
+def preserve_unreadable(path: Path, raw: bytes) -> None:
+    """Keep the first and latest distinct forensic versions, never replacing first."""
+    first = path.with_name(path.name + ".unreadable")
+    latest = path.with_name(path.name + ".unreadable.latest")
+    def read_copy(copy: Path) -> bytes:
+        fd = os.open(str(copy), os.O_RDONLY | _NOFOLLOW)
+        with os.fdopen(fd, "rb") as source:
+            return source.read()
+
+    try:
+        first_raw = read_copy(first)
+    except FileNotFoundError:
+        first_raw = None
+    if first_raw is None:
+        target = first
+    elif raw == first_raw:
+        return
+    else:
+        try:
+            if read_copy(latest) == raw:
+                return
+        except FileNotFoundError:
+            pass
+        target = latest
+    fd, name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{target.name}.")
+    try:
+        with os.fdopen(fd, "wb") as output:
+            output.write(raw)
+        if target == first:
+            try:
+                os.link(name, first, follow_symlinks=False)
+            except FileExistsError:
+                # Another reader won; keep its first copy and retain ours as latest.
+                if read_copy(first) != raw:
+                    os.replace(name, latest)
+                    return
+        else:
+            os.replace(name, target)
+        Path(name).unlink(missing_ok=True)
+    except BaseException:
+        Path(name).unlink(missing_ok=True)
+        raise
+
+
+def recovered_window_is_new(key: str, recovered_at: str) -> bool:
+    """Only a provably later usage window bypasses an unknown-key quarantine."""
+    parts = key.split(":")
+    if len(parts) < 6 or parts[0] != "provider-usage-threshold":
+        return False
+    name = parts[2]
+    reset = ":".join(parts[3:-1])
+    try:
+        end = datetime.fromisoformat(reset.replace("Z", "+00:00"))
+        epoch = datetime.fromisoformat(recovered_at.replace("Z", "+00:00"))
+        if end.tzinfo is None or epoch.tzinfo is None:
+            return False
+        minutes = {"five_hour": 300, "session": 300, "weekly": 10080,
+                   "weekly_all": 10080, "seven_day": 10080,
+                   "monthly": 43200}.get(name)
+        if minutes is None and re.fullmatch(r"window_\d{1,6}m", name):
+            minutes = int(name[7:-1])
+        return bool(minutes and 1 <= minutes <= 525600
+                    and end - timedelta(minutes=minutes) > epoch)
+    except (ValueError, OverflowError):
+        return False
+
+
+def salvage_journal_entries(raw: str) -> dict[str, object]:
+    """Extract complete per-key JSON objects even if a sibling is torn."""
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except ValueError:
+        pass
+    found: dict[str, object] = {}
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r'("(?:\\.|[^"\\])+")\s*:\s*(?=\{)', raw):
+        try:
+            key = json.loads(match.group(1))
+            value, _ = decoder.raw_decode(raw, match.end())
+        except ValueError:
+            continue
+        if isinstance(key, str) and isinstance(value, dict) and key not in (
+            "state", "handler", "held_message", "pending_at", "attempt_at", "notified_at"
+        ):
+            found[key] = value
+    return found
+
+
+def sink_state_problem(state: object) -> bool:
+    return (not isinstance(state, dict) or not isinstance(state.get("entries"), dict)
+            or any(not isinstance(entry, dict) or not isinstance(entry.get("key"), str)
+                   or entry.get("status") not in ("open", "resolved")
+                   for entry in state["entries"].values()))
+
+
+def unreadable_sink_states() -> list[Path]:
+    directory = Path(os.environ.get("ATELES_NOTIFY_SINK_DIR", "").strip()
+                     or Path.home() / ".ateles-work" / "notify-sink")
+    bad = []
+    for path in directory.glob("state-*.json"):
+        try:
+            state = json.loads(read_text_nofollow(path))
+            if sink_state_problem(state):
+                bad.append(path)
+        except (OSError, ValueError):
+            bad.append(path)
+    return bad
 
 
 def notice_text(item: str | dict) -> str:
@@ -110,6 +249,11 @@ def read_recovery(main: Path) -> list[dict]:
     if not isinstance(records, list) or any(
         not isinstance(row, dict) or not isinstance(row.get("key"), str)
         or not isinstance(row.get("time"), str) or not isinstance(row.get("cause"), str)
+        or ("migration_to" in row and (
+            not isinstance(row["migration_to"], str) or not row["migration_to"]
+        ))
+        or any(field in row and not isinstance(row[field], bool)
+               for field in ("notice_started", "noticed"))
         for row in records
     ):
         raise ValueError("unconfirmed alert recovery file is malformed")
@@ -280,6 +424,13 @@ def summary(main: Path | None = None) -> dict:
     """
     counts: Counter[str] = Counter()
     items = actionable_items(main)
+    queue_main = main or queue_path()
+    queue_unreadable = 0
+    for path in (queue_main, email_queue_path(queue_main)):
+        try:
+            read_queue(path)
+        except Exception:
+            queue_unreadable += 1
     for item in items:
         m = _HANDLER_RE.match(notice_text(item))
         counts[m.group(1) if m else "other"] += 1
@@ -289,6 +440,8 @@ def summary(main: Path | None = None) -> dict:
     except Exception:
         recovery = [{"key": "unreadable", "time": "", "cause": "unreadable"}]
     recovery_fp = hashlib.sha256(json.dumps(recovery).encode()).hexdigest() if recovery else ""
+    projections = sum(bool(row.get("migration_to")) or row.get("cause") == "sink resolution pending"
+                      for row in recovery)
     unreadable_usage = sum(
         isinstance(item, dict) and any(
             key.startswith(UNREADABLE_USAGE_KEY_PREFIX) for key in item["keys"]
@@ -297,10 +450,14 @@ def summary(main: Path | None = None) -> dict:
     unreadable_journal = any(
         row.get("key") == "dedupe-journal-unreadable" for row in recovery
     )
+    bad_sink_states = unreadable_sink_states()
     return {"total": len(items), "by_handler": dict(counts), "fingerprint": fp,
             "usage_snapshot_unreadable": unreadable_usage,
             "dedupe_journal_unreadable": unreadable_journal,
-            "unconfirmed": len(recovery), "unconfirmed_fingerprint": recovery_fp}
+            "queue_unreadable": queue_unreadable,
+            "sink_state_unreadable": len(bad_sink_states),
+            "unconfirmed": len(recovery) - projections, "projection_pending": projections,
+            "unconfirmed_fingerprint": recovery_fp}
 
 
 def _print_notices(main: Path, show_all: bool) -> int:
@@ -310,13 +467,17 @@ def _print_notices(main: Path, show_all: bool) -> int:
         recovery = []
         print(f"RECOVERY REQUIRED: unconfirmed alert file unreadable: {exc}")
     if recovery:
-        print(f"# {len(recovery)} unconfirmed alerts (transport outcome unknown):")
+        print(f"# {len(recovery)} unconfirmed alerts and projection repairs:")
         for row in recovery:
             print(f"- key={row['key']!r} window={row.get('window', '')!r} "
                   f"time={row['time']!r} cause={row['cause']!r}")
             if row["key"] == "dedupe-journal-unreadable":
                 print("  Reconcile unknown deliveries, then run python3 "
                       "lib/notify/held_view.py --clear-unreadable-journal")
+            elif row.get("migration_to"):
+                print("  Sink key migration pending; retry migrate_dedupe with the recorded keys.")
+            elif row.get("cause") == "sink resolution pending":
+                print("  Sink resolution pending; retry clear_dedupe for this key.")
             else:
                 print("  Clear only after deciding to resend: python3 "
                       "lib/notify/held_view.py --clear-unconfirmed "
@@ -329,6 +490,8 @@ def _print_notices(main: Path, show_all: bool) -> int:
             unreadable.append(path)
     for path in unreadable:
         print(f"RECOVERY REQUIRED: held notice queue unreadable at {path}; preserve the file and repair it before clearing notices.")
+    for path in unreadable_sink_states():
+        print(f"RECOVERY REQUIRED: notification sink state unreadable at {path}; preserve and repair it before key migration or resolution.")
     items = actionable_items(main)
     if not items:
         if not unreadable:
@@ -425,7 +588,8 @@ def _clear(main: Path) -> int:
                         raise ValueError("dedupe journal is not an object")
                     changed = False
                     for key, entry in journal.items():
-                        if (isinstance(entry, dict) and entry.get("state") == "held"
+                        if (isinstance(entry, dict) and not receipt_problem(entry)
+                                and entry.get("state") == "held"
                                 and any(
                                     (key in item["keys"] if isinstance(item, dict)
                                      else entry.get("held_message") == item)
@@ -469,14 +633,16 @@ def _clear_unconfirmed(main: Path, key: str) -> int:
                 queues: dict[Path, list[str | dict]] = {}
                 try:
                     records = read_recovery(main)
-                    if not any(row["key"] == key for row in records):
+                    if not any(row["key"] == key and not row.get("migration_to")
+                               and row.get("cause") != "sink resolution pending"
+                               for row in records):
                         print(f"No unconfirmed alert for {key!r}.")
                         return 1
                     journal = json.loads(read_text_nofollow(journal_file))
                     if not isinstance(journal, dict):
                         raise ValueError("dedupe journal is not an object")
                     entry = journal.get(key)
-                    if not isinstance(entry, dict) or entry.get("state") not in (
+                    if entry is not None and not receipt_problem(entry) and entry.get("state") not in (
                         "sending", "delivered_unconfirmed"
                     ):
                         raise ValueError("key is no longer in an uncertain state")
@@ -489,12 +655,23 @@ def _clear_unconfirmed(main: Path, key: str) -> int:
                         if kept[path] != queues[path]:
                             write_queue(path, kept[path])
                             written.append(path)
-                    del journal[key]
+                    if RECOVERED_AT in journal:
+                        # A cleared unknown key must bypass the recovery epoch once.
+                        journal[key] = {"state": "pending", "pending_at":
+                                        datetime.now(timezone.utc).isoformat(), "handler": ""}
+                    else:
+                        journal.pop(key, None)
                     try:
                         atomic_write(journal_file, json.dumps(journal))
-                        write_recovery(main, [row for row in records if row["key"] != key])
+                        write_recovery(main, [row for row in records if row["key"] != key
+                                              or row.get("migration_to")
+                                              or row.get("cause") == "sink resolution pending"])
                     except Exception:
-                        atomic_write(journal_file, json.dumps({**journal, key: entry}))
+                        if entry is None:
+                            journal.pop(key, None)
+                        else:
+                            journal[key] = entry
+                        atomic_write(journal_file, json.dumps(journal))
                         raise
                 except Exception as exc:
                     for path in written:
@@ -509,7 +686,7 @@ def _clear_unconfirmed(main: Path, key: str) -> int:
 
 
 def _clear_unreadable_journal(main: Path) -> int:
-    """Rebuild receipts only after the operator reconciles unknown deliveries."""
+    """Rebuild every surviving receipt and quarantine keys without evidence."""
     journal_file = journal_path()
     with file_lock(queue_lock_path(main), fail_open=False) as queue_locked:
         if not queue_locked:
@@ -527,26 +704,81 @@ def _clear_unreadable_journal(main: Path) -> int:
                         print("No unreadable-journal recovery record; nothing cleared.")
                         return 1
                     items = read_queue(main) + read_queue(email_queue_path(main))
-                    journal = {}
+                    journal: dict[str, object] = {}
+                    additional = []
+                    epoch = datetime.now(timezone.utc).isoformat()
+                    copies = (journal_file.with_name(journal_file.name + ".unreadable"),
+                              journal_file.with_name(journal_file.name + ".unreadable.latest"),
+                              journal_file)
+                    for copy in copies:
+                        try:
+                            source = salvage_journal_entries(read_text_nofollow(copy))
+                        except (FileNotFoundError, OSError):
+                            continue
+                        if not isinstance(source, dict):
+                            continue
+                        prior_epoch = source.get(RECOVERED_AT)
+                        if isinstance(prior_epoch, str):
+                            try:
+                                prior = datetime.fromisoformat(prior_epoch.replace("Z", "+00:00"))
+                                if prior.tzinfo and prior < datetime.fromisoformat(epoch):
+                                    epoch = prior_epoch
+                            except (ValueError, OverflowError):
+                                pass
+                        for key, entry in source.items():
+                            if key == RECOVERED_AT or not isinstance(key, str):
+                                continue
+                            if receipt_problem(entry):
+                                entry = {"state": "delivered_unconfirmed", "attempt_at": epoch,
+                                         "handler": ""}
+                                additional.append({"key": key, "time": epoch,
+                                                   "cause": "malformed salvaged receipt"})
+                            elif entry["state"] in ("sending", "delivered_unconfirmed"):
+                                entry = {**entry, "state": "delivered_unconfirmed"}
+                                additional.append({"key": key, "time": epoch,
+                                                   "cause": "uncertain salvaged receipt"})
+                            current = journal.get(key)
+                            # An uncertain or delivered receipt cannot be weakened by
+                            # another copy containing an earlier held state.
+                            rank = {"held": 1, "pending": 2, "delivered": 3,
+                                    "delivered_unconfirmed": 4}
+                            if not isinstance(current, dict) or rank[entry["state"]] > rank[current["state"]]:
+                                journal[key] = entry
+                    for row in records:
+                        key = row["key"]
+                        if key == "dedupe-journal-unreadable" or row.get("migration_to"):
+                            continue
+                        journal[key] = {"state": "delivered_unconfirmed",
+                                        "attempt_at": epoch, "handler": ""}
                     for item in items:
                         if not isinstance(item, dict):
                             continue
                         for key in item["keys"]:
-                            if key != "dedupe-journal-unreadable":
+                            if key == "dedupe-journal-unreadable" or key in journal:
+                                continue
+                            if item.get("unreadable_source"):
+                                journal[key] = {"state": "delivered_unconfirmed",
+                                                "attempt_at": epoch, "handler": ""}
+                                additional.append({"key": key, "time": epoch,
+                                                   "cause": "notice refused while journal unreadable"})
+                            else:
                                 journal[key] = {"state": "held", "held_message": item["message"],
                                                 "handler": ""}
+                    journal[RECOVERED_AT] = epoch
                     for path in (main, email_queue_path(main)):
                         queue = read_queue(path)
                         write_queue(path, [item for item in queue if not (
                             isinstance(item, dict) and "dedupe-journal-unreadable" in item["keys"]
                         )])
                     atomic_write(journal_file, json.dumps(journal))
-                    write_recovery(main, [row for row in records
-                                          if row["key"] != "dedupe-journal-unreadable"])
+                    retained = [row for row in records if row["key"] != "dedupe-journal-unreadable"]
+                    seen = {row["key"] for row in retained}
+                    write_recovery(main, retained + [row for row in additional
+                                                      if row["key"] not in seen])
                 except Exception as exc:  # noqa: BLE001
                     print(f"could not reconcile dedupe journal: {exc}", file=sys.stderr)
                     return 1
-    print("Rebuilt dedupe journal from held notices; keyed delivery may resume.")
+    print("Rebuilt dedupe journal; unknown prior-window keys remain quarantined.")
     return 0
 
 
