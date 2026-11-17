@@ -821,6 +821,16 @@ def _path_forms(path: str) -> tuple[tuple[str, ...], bool]:
     expanded = os.path.expanduser(path)
     literal = os.path.normpath(expanded).casefold()
     try:
+        # strict=False may retain a loop in the spelling instead of raising.
+        # Resolve the last existing component strictly before allowing a new
+        # file beneath it.
+        existing = Path(expanded)
+        while not os.path.lexists(existing):
+            parent = existing.parent
+            if parent == existing:
+                break
+            existing = parent
+        existing.resolve(strict=True)
         resolved = str(Path(expanded).resolve(strict=False)).casefold()
     except (OSError, RuntimeError):
         # A loop or unreadable component beneath a protected directory cannot
