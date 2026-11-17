@@ -610,7 +610,7 @@ def refresh_usage_if_stale(
     alert_in_background: bool = True,
     run=subprocess.run,
 ) -> dict[str, str]:
-    """Refresh each gated provider's reading when it is older than the refresh age.
+    """Refresh each active provider's reading when it is older than the refresh age.
 
     Returns ``{provider: outcome}`` for the providers it looked at (``fresh``,
     ``refreshed``, or a failure detail).  Never raises: a failed refresh is
@@ -619,10 +619,10 @@ def refresh_usage_if_stale(
     """
     if os.environ.get("APIS_USAGE_PROBE", "on").strip().lower() in ("off", "0", "false", "no"):
         return {}
-    if not harness_router.usage_gate_enabled():
-        return {}
     outcomes: dict[str, str] = {}
-    for provider in harness_router.usage_gated_providers():
+    for provider in harness_router.configured_providers():
+        if provider not in PROBE_ADAPTERS:
+            continue
         if provider not in available:
             continue
         binary = available.get(provider)
@@ -671,7 +671,9 @@ def _alert_on_new_reading(provider: str, *, background: bool = True) -> None:
         else:
             usage_alerts.check_after_usage_write(provider)
     except Exception as exc:  # noqa: BLE001 - an alert never breaks a refresh
-        log.warning(f"[apis] usage threshold check after refresh failed: {exc}")
+        import sys
+        print(f"[apis] ERROR: usage threshold check after refresh failed: {exc}", file=sys.stderr)
+        log.error("[apis] usage threshold check after refresh failed: %s", exc)
 
 
 def _observed_age(provider: str, moment: float) -> float | None:

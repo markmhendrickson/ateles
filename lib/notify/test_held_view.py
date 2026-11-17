@@ -162,7 +162,8 @@ def test_clear_backup_failure_keeps_held_receipt(queue, monkeypatch, tmp_path):
     monkeypatch.setattr(held_view, "backup_path", lambda main: main / "missing" / "backup.json")
     assert held_view.main(["--clear"]) == 1
     assert notifier._dedupe_journal["usage:weekly:50"]["state"] == "held"
-    assert held_view.read_queue(queue) == ["⚠ [apis] usage crossed"]
+    assert held_view.read_queue(queue) == [{"keys": ["usage:weekly:50"],
+                                            "message": "⚠ [apis] usage crossed"}]
 
 
 def test_sibling_files_are_private_and_symlinks_are_not_followed(queue, tmp_path):

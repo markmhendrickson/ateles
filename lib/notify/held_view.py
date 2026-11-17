@@ -58,8 +58,19 @@ BACKUP_MAX = 1000
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
-def is_actionable(message: str) -> bool:
-    return (message or "").lstrip().startswith(ACTIONABLE_HELD_PREFIXES)
+def notice_text(item: str | dict) -> str:
+    return item.get("message", "") if isinstance(item, dict) else item
+
+
+def notice_identity(item: str | dict) -> tuple[str, ...] | str:
+    """Stable identity for keyed notices; legacy notices retain text identity."""
+    if isinstance(item, dict):
+        return tuple(sorted(item["keys"]))
+    return item
+
+
+def is_actionable(message: str | dict) -> bool:
+    return (notice_text(message) or "").lstrip().startswith(ACTIONABLE_HELD_PREFIXES)
 
 
 def queue_path() -> Path:
@@ -182,7 +193,7 @@ def atomic_write(path: Path, text: str) -> None:
         raise
 
 
-def read_queue(path: Path) -> list[str]:
+def read_queue(path: Path) -> list[str | dict]:
     """Queue contents; a missing file is empty, other errors propagate."""
     try:
         raw = json.loads(read_text_nofollow(path))
@@ -190,10 +201,20 @@ def read_queue(path: Path) -> list[str]:
         return []
     if not isinstance(raw, list):
         raise ValueError(f"held queue {path} is not a list")
-    return [str(x) for x in raw]
+    items = []
+    for item in raw:
+        if isinstance(item, str):
+            items.append(item)
+        elif (isinstance(item, dict) and isinstance(item.get("message"), str)
+              and isinstance(item.get("keys"), list) and item["keys"]
+              and all(isinstance(key, str) and key for key in item["keys"])):
+            items.append(item)
+        else:
+            raise ValueError(f"held queue {path} has an invalid notice")
+    return items
 
 
-def write_queue(path: Path, items: list[str]) -> None:
+def write_queue(path: Path, items: list[str | dict]) -> None:
     """Atomically rewrite a queue file; an empty queue removes it. Raises."""
     if items:
         atomic_write(path, json.dumps(items))
@@ -225,7 +246,7 @@ def summary(main: Path | None = None) -> dict:
     counts: Counter[str] = Counter()
     items = actionable_items(main)
     for item in items:
-        m = _HANDLER_RE.match(item)
+        m = _HANDLER_RE.match(notice_text(item))
         counts[m.group(1) if m else "other"] += 1
     fp = hashlib.sha256(json.dumps(items).encode()).hexdigest() if items else ""
     return {"total": len(items), "by_handler": dict(counts), "fingerprint": fp}
@@ -259,7 +280,7 @@ def _print_notices(main: Path, show_all: bool) -> int:
     )
     base = len(items) - len(shown)
     for i, item in enumerate(shown, base + 1):
-        print(f"{i}. {item[:600]!r}")
+        print(f"{i}. {notice_text(item)[:600]!r}")
     hidden = len(items) - len(shown)
     if hidden:
         print(
@@ -280,7 +301,9 @@ def _clear(main: Path) -> int:
             print(f"could not lock held queues at {main}; nothing cleared", file=sys.stderr)
             return 1
         try:
-            shown = [str(x) for x in json.loads(read_text_nofollow(snap))]
+            shown = json.loads(read_text_nofollow(snap))
+            if not isinstance(shown, list):
+                raise ValueError("shown notices are not a list")
         except FileNotFoundError:
             shown = []
         except Exception as exc:  # noqa: BLE001
@@ -296,14 +319,15 @@ def _clear(main: Path) -> int:
             return 1
         # Multiset removal from a fresh read: a notice that arrived after the
         # listing is not in ``shown`` and survives.
-        want = Counter(shown)
-        removed: list[str] = []
-        kept: dict[Path, list[str]] = {}
+        want = Counter(notice_identity(item) for item in shown)
+        removed: list[str | dict] = []
+        kept: dict[Path, list[str | dict]] = {}
         for path, items in queues.items():
-            keep: list[str] = []
+            keep: list[str | dict] = []
             for item in items:
-                if want[item] > 0:
-                    want[item] -= 1
+                identity = notice_identity(item)
+                if want[identity] > 0:
+                    want[identity] -= 1
                     removed.append(item)
                 else:
                     keep.append(item)
@@ -313,7 +337,7 @@ def _clear(main: Path) -> int:
             if removed:
                 try:
                     old = json.loads(read_text_nofollow(backup))
-                    old = [str(x) for x in old] if isinstance(old, list) else []
+                    old = old if isinstance(old, list) else []
                 except Exception:  # noqa: BLE001 — a missing/corrupt backup restarts
                     old = []
                 atomic_write(backup, json.dumps((old + removed)[-BACKUP_MAX:]))
@@ -334,7 +358,10 @@ def _clear(main: Path) -> int:
                     changed = False
                     for key, entry in journal.items():
                         if (isinstance(entry, dict) and entry.get("state") == "held"
-                                and entry.get("held_message") in removed):
+                                and any(
+                                    (key in item["keys"] if isinstance(item, dict)
+                                     else entry.get("held_message") == item)
+                                    for item in removed)):
                             journal[key] = {
                                 "state": "delivered", "notified_at": time.strftime(
                                     "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

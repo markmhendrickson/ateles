@@ -347,20 +347,22 @@ def check_usage_thresholds(
                         )
                         from lib.notify import Priority
 
-                        delivered = bool(sender_notifier.send(
+                        send_result = sender_notifier.send(
                             message, priority=Priority.WARN, handler="apis",
                             dedupe_key=keys[max(pending)], retryable=True,
                             email_eligible=False,
                             related_dedupe_keys=tuple(
                                 keys[t] for t in pending if t != max(pending)
                             ),
-                        ))
+                        )
+                        delivered = bool(send_result)
                         if delivered:
-                            for threshold in pending:
-                                _mark_reported(sender_notifier, keys[threshold])
+                            if getattr(send_result, "value", None) != "delivered_receipt_unknown":
+                                for threshold in pending:
+                                    _mark_reported(sender_notifier, keys[threshold])
                             _retry_after.pop(retry_key, None)
                             result_keys.extend(keys[threshold] for threshold in pending)
-                            outcome = "delivered"
+                            outcome = "delivered, receipt unknown" if getattr(send_result, "value", None) == "delivered_receipt_unknown" else "delivered"
                         else:
                             entry = sender_notifier._dedupe_journal.get(keys[max(pending)], {})
                             if isinstance(entry, dict) and entry.get("state") == "held":
@@ -409,7 +411,9 @@ def check_after_usage_write(provider: str) -> None:
     try:
         check_usage_thresholds(provider)
     except Exception as exc:  # noqa: BLE001
-        log.warning(f"[apis] usage threshold check after refresh failed (non-fatal): {exc}")
+        import sys
+        print(f"[apis] ERROR: usage threshold check after refresh failed: {exc}", file=sys.stderr)
+        log.error("[apis] usage threshold check after refresh failed: %s", exc)
 
 
 def _already_reported(notifier, key: str) -> bool:

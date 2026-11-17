@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -821,6 +823,65 @@ def test_the_usage_command_alerts_the_crossing_it_records(
     assert harness_usage.main(["usage", "codex", "--window", f"weekly=77@{resets}"]) == 0
     assert len(spy.delivered) == 1
     assert "(crossed 50% and 75%)" in spy.delivered[0]
+
+
+def test_documented_usage_script_invokes_alert_without_pythonpath(tmp_path):
+    """An isolated direct script invocation reaches the fake transport."""
+    script = _DAEMON_DIR.parent.parent / "scripts" / "harness_usage.py"
+    reset = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    child = f'''import runpy, sys
+sys.path.insert(0, {str(script.parent)!r})
+import usage_alerts
+class Fake:
+    def is_dedupe_open(self, key): return False
+    def dedupe_keys_with_prefix(self, prefix): return ()
+    def send(self, *args, **kwargs):
+        print("FAKE_TRANSPORT_DELIVERED", flush=True)
+        return True
+fake = Fake()
+usage_alerts._default_journal_factory = lambda: fake
+usage_alerts._default_notifier_factory = lambda: fake
+sys.argv = [{str(script)!r}, "usage", "codex", "--window", {f"weekly=52@{reset}"!r}]
+runpy.run_path({str(script)!r}, run_name="__main__")
+'''
+    env = {**os.environ, "HOME": str(tmp_path),
+           "APIS_HARNESS_USAGE_FILE": str(tmp_path / "usage.json"),
+           "APIS_HARNESS_HEADROOM_FILE": str(tmp_path / "headroom.json"),
+           "ATELES_DEDUPE_JOURNAL_PATH": str(tmp_path / "dedupe.json"),
+           "APIS_TIER_LEDGER_FILE": str(tmp_path / "ledger.jsonl")}
+    env.pop("PYTHONPATH", None)
+    result = subprocess.run([sys.executable, "-I", "-c", child], cwd=_DAEMON_DIR.parent.parent.parent,
+                            env=env, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert "FAKE_TRANSPORT_DELIVERED" in result.stdout, result.stderr
+    assert "No module named 'lib'" not in result.stderr
+
+
+def test_active_ungated_providers_are_observed_and_alerted(monkeypatch, tmp_path, ledger):
+    import harness_router
+    import usage_probe
+
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
+    called = []
+    alerted = []
+    def refresh(provider, *args, **kwargs):
+        called.append(provider)
+        harness_router.record_usage(provider, [
+            {"name": "weekly", "used_percent": 76,
+             "resets_at": (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()}
+        ])
+        return "refreshed"
+    monkeypatch.setattr(usage_probe, "_refresh_provider", refresh)
+    monkeypatch.setattr(usage_probe, "_alert_on_new_reading", lambda provider, **kw: alerted.append(provider))
+    outcome = usage_probe.refresh_usage_if_stale(
+        {"codex": "/bin/codex", "cursor": "/bin/cursor", "claude": "/bin/claude"},
+        env={}, force=True,
+    )
+    assert outcome == {"codex": "refreshed", "cursor": "refreshed"}
+    assert called == alerted == ["codex", "cursor"]
+    assert all(len(harness_router.usage_windows(p)) == 1 for p in called)
 
 
 def test_cli_exit_leaves_failed_alert_pending_for_next_process(

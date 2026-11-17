@@ -46,6 +46,12 @@ Retryable held-notice state table (journal x queue x queue lock):
 * Any timed-out queue lock: do not mutate or drain the queue; retry the send.
   A previously held key is checked again when the lock becomes available.
 * Failed receipt write: the queued notice survives; retry repairs the receipt.
+* Sending younger than the retry backoff: suppress as in flight. An older
+  sending record is ambiguous and is retried once.
+* Transport success followed by a failed delivered receipt: return
+  DELIVERED_RECEIPT_UNKNOWN, retain sending, and surface a recovery error.
+  This delivers at most once after reported transport success, and at least
+  once otherwise; an ambiguous crash may cause one resend after backoff.
 * Operator clear: a held receipt becomes delivered/cleared before queue removal.
 * Full queue: keep existing bytes and reject the new notice for retry.
 Across send, retry, drain, clear, and restart: at most one queued copy per
@@ -66,6 +72,7 @@ import subprocess
 import tempfile
 import threading
 import time as time_mod
+import uuid
 from collections import Counter
 from datetime import datetime, time
 from enum import Enum
@@ -97,6 +104,11 @@ HELD_EMAIL_BUDGET_PER_HOUR = 5
 _HELD_EMAIL_WINDOW_SECONDS = 3600
 # Newest items kept per queue; a queue nobody can drain must not grow forever.
 HELD_QUEUE_MAX = 500
+SEND_RETRY_BACKOFF_SECONDS = 5.0
+
+
+class SendResult(str, Enum):
+    DELIVERED_RECEIPT_UNKNOWN = "delivered_receipt_unknown"
 
 NEOTOMA_BASE_URL = os.environ.get(
     "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
@@ -280,7 +292,7 @@ class Notifier:
         email_eligible: bool = True,
         retryable: bool = False,
         related_dedupe_keys: tuple[str, ...] = (),
-    ) -> bool:
+    ) -> bool | SendResult:
         """
         Route a notification by priority.
 
@@ -398,25 +410,37 @@ class Notifier:
             else:
                 self._mark_dedupe_notified(dedupe_key, handler)
 
-        def delivered(result: bool) -> bool:
-            if result and retryable and dedupe_key:
-                for key in (dedupe_key, *related_dedupe_keys):
-                    self._mark_dedupe_delivered(key, handler)
+        def delivered(result: bool) -> bool | SendResult:
+            if retryable and dedupe_key:
+                keys = (dedupe_key, *related_dedupe_keys)
+                if result:
+                    if not self._mark_dedupe_delivered_many(keys, handler):
+                        log.error("[notify] delivered, receipt unknown for %r; recovery required", dedupe_key)
+                        return SendResult.DELIVERED_RECEIPT_UNKNOWN
+                else:
+                    self._mark_dedupe_pending_many(keys, handler)
             return result
+
+        def deliver_now(text: str, force: bool) -> bool | SendResult:
+            if retryable and dedupe_key:
+                if not self._mark_dedupe_sending((dedupe_key, *related_dedupe_keys), handler):
+                    log.error("[notify] could not record sending state for %r; delivery deferred", dedupe_key)
+                    return False
+            return delivered(self._deliver(text, force=force, email_eligible=email_eligible))
 
         # Drain any prior held actionable notices before handling this send.
         self._maybe_flush_digest()
 
         if prio == Priority.CRITICAL:
             # Critical always fires immediately, even in silence window
-            return delivered(self._deliver(full_message, force=True, email_eligible=email_eligible))
+            return deliver_now(full_message, True)
 
         if prio == Priority.BLOCKER:
             if self._in_silence_window() and not bypass_silence:
                 log.info(
                     "[notify] Blocker in silence window — delivering anyway (blocker policy)"
                 )
-            return delivered(self._deliver(full_message, force=True, email_eligible=email_eligible))
+            return deliver_now(full_message, True)
 
         if prio == Priority.OPERATOR_DECISION:
             if self._in_silence_window() and not bypass_silence:
@@ -433,9 +457,7 @@ class Notifier:
                     for key in (dedupe_key, *related_dedupe_keys):
                         self.release_dedupe(key)
                 return False
-            return delivered(self._deliver(
-                f"⚠️ {full_message}", force=False, email_eligible=email_eligible
-            ))
+            return deliver_now(f"⚠️ {full_message}", False)
 
         if prio == Priority.WARN:
             if self._in_silence_window() and not bypass_silence:
@@ -449,9 +471,7 @@ class Notifier:
                     for key in (dedupe_key, *related_dedupe_keys):
                         self.release_dedupe(key)
                 return False
-            return delivered(self._deliver(
-                f"⚠ {full_message}", force=False, email_eligible=email_eligible
-            ))
+            return deliver_now(f"⚠ {full_message}", False)
 
         # INFO — never email, never queue, never flush later as a digest.
         log.debug("[notify] Dropping routine INFO (no digest): %r", full_message)
@@ -464,7 +484,7 @@ class Notifier:
         # Derived on each use: callers (and tests) repoint _digest_path.
         return held_view.email_queue_path(self._digest_path)
 
-    def _read(self, path: Path) -> list[str]:
+    def _read(self, path: Path) -> list[str | dict]:
         """Read a queue file. Fail-open: unreadable state => empty."""
         try:
             return held_view.read_queue(path)
@@ -473,17 +493,17 @@ class Notifier:
             return []
 
     @property
-    def _digest_queue(self) -> list[str]:
+    def _digest_queue(self) -> list[str | dict]:
         """The main (never-emailed) queue. Property name kept for compat callers."""
         with self._notification_lock:
             return self._read(self._digest_path)
 
     @property
-    def _email_queue(self) -> list[str]:
+    def _email_queue(self) -> list[str | dict]:
         with self._notification_lock:
             return self._read(self._email_path)
 
-    def _persist_queue(self, items: list[str], path: Path | None = None) -> bool:
+    def _persist_queue(self, items: list[str | dict], path: Path | None = None) -> bool:
         """Atomically rewrite a queue file. Caller must hold the file lock."""
         path = path or self._digest_path
         try:
@@ -525,16 +545,25 @@ class Notifier:
                     items = [] if path.is_symlink() else held_view.read_queue(path)
                     other_path = self._email_path if path == self._digest_path else self._digest_path
                     other_items = held_view.read_queue(other_path)
-                    if message in items or message in other_items:
-                        # The previous queue write may have succeeded while its
-                        # held receipt failed. Repair the receipt in place.
-                        return not dedupe_keys or self._mark_dedupe_held(
-                            dedupe_keys, handler, message
-                        )
+                    identity = tuple(sorted(dedupe_keys)) if dedupe_keys else message
+                    for existing_path, queue in ((path, items), (other_path, other_items)):
+                        for index, item in enumerate(queue):
+                            if held_view.notice_identity(item) != identity:
+                                continue
+                            # A changed reading replaces its predecessor under
+                            # the queue lock, even if its receipt never landed.
+                            replacement = {"keys": list(identity), "message": message} if dedupe_keys else message
+                            if item != replacement:
+                                queue[index] = replacement
+                                if not self._persist_queue(queue, existing_path):
+                                    return False
+                            return not dedupe_keys or self._mark_dedupe_held(
+                                dedupe_keys, handler, message
+                            )
                     if len(items) >= HELD_QUEUE_MAX:
                         log.error("[notify] held queue %s full; preserving existing notices", path.name)
                         return False
-                    items.append(message)
+                    items.append({"keys": list(identity), "message": message} if dedupe_keys else message)
                     if not self._persist_queue(items, path):
                         return False
                     # The queue lock excludes drainers until the held receipt
@@ -634,7 +663,7 @@ class Notifier:
             if not locked:
                 log.error("[notify] held queue lock unavailable; delivered item retained")
                 return
-            gone = Counter(delivered)
+            gone = Counter(held_view.notice_identity(item) for item in delivered)
             kept: list[str] = []
             removed: list[str] = []
             try:
@@ -643,13 +672,14 @@ class Notifier:
                 log.warning("[notify] held queue %s unreadable (%s)", path.name, exc)
                 return
             for item in items:
-                if gone[item] > 0:
-                    gone[item] -= 1
+                identity = held_view.notice_identity(item)
+                if gone[identity] > 0:
+                    gone[identity] -= 1
                     removed.append(item)
                 else:
                     kept.append(item)
             if not removed or self._persist_queue(kept, path):
-                for item in set(delivered):
+                for item in delivered:
                     self._mark_held_message_delivered(item)
 
     def _drop_routine(self, path: Path) -> list[str] | None:
@@ -714,33 +744,53 @@ class Notifier:
         failed = 0
 
         for item in main_items:
+            if self._held_already_delivered(item):
+                delivered_main.append(item)
+                continue
             # Main-queue items are never emailed, whatever this daemon's flags.
             if not self._apprise:
                 unrouted += 1
-            elif self._try_deliver(item, email_eligible=False):
-                delivered_main.append(item)
+            elif not self._begin_held_delivery(item):
+                continue
+            elif self._try_deliver(held_view.notice_text(item), email_eligible=False):
+                if self._finish_held_delivery(item):
+                    delivered_main.append(item)
             else:
+                self._restore_held_delivery(item)
                 failed += 1
 
         budget = self._budget_remaining() if self._email_primary and self._notify_to else 0
         email_down = False
         for item in email_items:
+            if self._held_already_delivered(item):
+                delivered_email.append(item)
+                continue
+            if not (self._email_primary and self._notify_to and budget > 0 or self._apprise):
+                unrouted += 1
+                continue
+            if not self._begin_held_delivery(item):
+                continue
             if budget > 0 and not email_down:
-                if self._deliver_email(item):
+                if self._deliver_email(held_view.notice_text(item)):
                     # Only a sent email spends budget.
                     self._budget_consume()
                     budget -= 1
-                    delivered_email.append(item)
+                    if self._finish_held_delivery(item):
+                        delivered_email.append(item)
                     continue
                 email_down = True  # don't hammer a failing transport per item
             if self._apprise:
-                if self._try_deliver(item, email_eligible=False):
-                    delivered_email.append(item)
+                if self._try_deliver(held_view.notice_text(item), email_eligible=False):
+                    if self._finish_held_delivery(item):
+                        delivered_email.append(item)
                 else:
+                    self._restore_held_delivery(item)
                     failed += 1
             elif email_down:
+                self._restore_held_delivery(item)
                 failed += 1
             else:
+                self._restore_held_delivery(item)
                 unrouted += 1  # over budget, nothing else to send it by
 
         self._remove_delivered(self._digest_path, delivered_main)
@@ -754,6 +804,41 @@ class Notifier:
         if failed:
             log.warning("[notify] held-notice delivery incomplete — %d item(s) kept", failed)
         return bool(delivered_main or delivered_email)
+
+    def _begin_held_delivery(self, item: str | dict) -> bool:
+        if not isinstance(item, dict):
+            return True
+        keys = tuple(item["keys"])
+        entry = self._dedupe_journal.get(keys[0], {})
+        if isinstance(entry, dict) and entry.get("state") == "delivered":
+            return False
+        if isinstance(entry, dict) and entry.get("state") == "sending" \
+                and self._is_duplicate(keys[0]):
+            return False
+        return self._mark_dedupe_sending(keys, entry.get("handler", "") if isinstance(entry, dict) else "")
+
+    def _held_already_delivered(self, item: str | dict) -> bool:
+        if not isinstance(item, dict):
+            return False
+        entry = self._dedupe_journal.get(item["keys"][0], {})
+        return isinstance(entry, dict) and entry.get("state") == "delivered"
+
+    def _finish_held_delivery(self, item: str | dict) -> bool:
+        if not isinstance(item, dict):
+            return True
+        keys = tuple(item["keys"])
+        entry = self._dedupe_journal.get(keys[0], {})
+        if not self._mark_dedupe_delivered_many(keys, entry.get("handler", "") if isinstance(entry, dict) else ""):
+            log.error("[notify] held notice delivered, receipt unknown for %r; recovery required", keys[0])
+            return False
+        return True
+
+    def _restore_held_delivery(self, item: str | dict) -> None:
+        if isinstance(item, dict):
+            keys = tuple(item["keys"])
+            entry = self._dedupe_journal.get(keys[0], {})
+            self._mark_dedupe_held(keys, entry.get("handler", "") if isinstance(entry, dict) else "",
+                                   item["message"])
 
     def _try_deliver(self, item: str, email_eligible: bool) -> bool:
         try:
@@ -911,7 +996,8 @@ class Notifier:
                     self.release_dedupe(key)
                     return False
                 message = entry.get("held_message")
-                if message in queued:
+                if any((key in item["keys"] if isinstance(item, dict)
+                        else item == message) for item in queued):
                     return True
 
                 def release_missing(journal: dict[str, Any]) -> bool:
@@ -931,13 +1017,21 @@ class Notifier:
         if state == "held" and not isinstance(entry.get("held_message"), str):
             self.release_dedupe(key)
             return False
-        if state not in (None, "held", "pending", "delivered") or (
+        if state not in (None, "held", "pending", "sending", "delivered") or (
             state == "pending" and not isinstance(entry.get("pending_at"), str)
+        ) or (state == "sending" and not isinstance(entry.get("attempt_at"), str)
         ) or (state == "delivered" and not isinstance(entry.get("notified_at"), str)) or (
             state is None and not isinstance(entry.get("notified_at"), str)
         ):
             self.release_dedupe(key)
             return False
+        if state == "sending":
+            try:
+                age = (self._now_local() - datetime.fromisoformat(entry["attempt_at"])).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                log.error("[notify] sending receipt unreadable for %r; recovery required", key)
+                return True
+            return age < SEND_RETRY_BACKOFF_SECONDS
         if state != "pending":
             return True
         if pending_owned:
@@ -957,6 +1051,31 @@ class Notifier:
                 "handler": handler,
             }
             return True
+        return self._update_dedupe_journal(change)
+
+    def _mark_dedupe_pending_many(self, keys: tuple[str, ...], handler: str) -> bool:
+        def change(journal: dict[str, Any]) -> bool:
+            for key in keys:
+                journal[key] = {"state": "pending", "pending_at": self._now_local().isoformat(),
+                                "handler": handler}
+            return bool(keys)
+        return self._update_dedupe_journal(change)
+
+    def _mark_dedupe_sending(self, keys: tuple[str, ...], handler: str) -> bool:
+        attempt = {"state": "sending", "attempt_at": self._now_local().isoformat(),
+                   "attempt_id": uuid.uuid4().hex, "handler": handler}
+        def change(journal: dict[str, Any]) -> bool:
+            for key in keys:
+                journal[key] = attempt.copy()
+            return bool(keys)
+        return self._update_dedupe_journal(change)
+
+    def _mark_dedupe_delivered_many(self, keys: tuple[str, ...], handler: str) -> bool:
+        def change(journal: dict[str, Any]) -> bool:
+            for key in keys:
+                journal[key] = {"state": "delivered", "notified_at": self._now_local().isoformat(),
+                                "handler": handler}
+            return bool(keys)
         return self._update_dedupe_journal(change)
 
     def _mark_dedupe_delivered(self, key: str, handler: str = "") -> None:
@@ -981,25 +1100,27 @@ class Notifier:
 
     def _release_held_messages(self, messages) -> None:
         """Release keys for notices removed without delivery (queue lock held)."""
-        gone = set(messages)
+        gone = {held_view.notice_identity(item) for item in messages}
         if not gone:
             return
 
         def change(journal: dict[str, Any]) -> bool:
             keys = [key for key, entry in journal.items()
                     if isinstance(entry, dict) and entry.get("state") == "held"
-                    and entry.get("held_message") in gone]
+                    and (any(isinstance(identity, tuple) and key in identity for identity in gone)
+                         or entry.get("held_message") in gone)]
             for key in keys:
                 del journal[key]
             return bool(keys)
 
         self._update_dedupe_journal(change)
 
-    def _mark_held_message_delivered(self, message: str) -> None:
+    def _mark_held_message_delivered(self, message: str | dict) -> None:
         def change(journal: dict[str, Any]) -> bool:
             keys = [key for key, entry in journal.items()
                     if isinstance(entry, dict) and entry.get("state") == "held"
-                    and entry.get("held_message") == message]
+                    and (key in message["keys"] if isinstance(message, dict)
+                         else entry.get("held_message") == message)]
             for key in keys:
                 journal[key] = {
                     "state": "delivered", "notified_at": self._now_local().isoformat(),
