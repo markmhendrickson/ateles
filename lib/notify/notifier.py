@@ -545,8 +545,14 @@ class Notifier:
                     items = [] if path.is_symlink() else held_view.read_queue(path)
                     other_path = self._email_path if path == self._digest_path else self._digest_path
                     other_items = held_view.read_queue(other_path)
-                    identity = tuple(sorted(dedupe_keys)) if dedupe_keys else message
-                    for existing_path, queue in ((path, items), (other_path, other_items)):
+                    # Only a KEYED notice has an identity that survives its text: a
+                    # keyless notice is an independent event, so a recurrence after
+                    # its condition cleared queues again (main's contract, pinned by
+                    # test_ownership_warning_lifecycle).
+                    identity = tuple(sorted(dedupe_keys)) if dedupe_keys else None
+                    for existing_path, queue in (
+                        ((path, items), (other_path, other_items)) if dedupe_keys else ()
+                    ):
                         for index, item in enumerate(queue):
                             if held_view.notice_identity(item) != identity:
                                 continue
