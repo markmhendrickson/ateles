@@ -528,6 +528,49 @@ def test_case_folded_and_worktree_config_writes_refused(command):
     assert_refused(command)
 
 
+def test_symlink_alias_to_protected_file_refused(tmp_path):
+    config = tmp_path / ".git" / "config"
+    config.parent.mkdir()
+    config.write_text("synthetic")
+    alias = tmp_path / "ordinary-file"
+    alias.symlink_to(config)
+    assert_refused(f"printf x > {alias}")
+    assert_refused(f"cp source {alias}")
+    payload = {"tool_name": "Write", "tool_input": {"file_path": str(alias)},
+               "hook_event_name": "PreToolUse"}
+    assert run_hook(payload).returncode == 2
+
+
+def test_symlink_directory_alias_and_parent_traversal_refused(tmp_path):
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    alias = tmp_path / "ordinary-dir"
+    alias.symlink_to(git_dir, target_is_directory=True)
+    assert_refused(f"printf x > {alias}/config")
+    assert_refused(f"cd {alias} && printf x > config")
+    nested = git_dir / "nested"
+    nested.mkdir()
+    assert_refused(f"printf x > {alias}/nested/../config")
+
+
+@pytest.mark.parametrize("flag", ("-s", "-sf", "-fs", "--symbolic"))
+def test_symlink_to_protected_path_refused(flag, tmp_path):
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    target = git_dir / "config"
+    link = tmp_path / "ordinary-link"
+    assert_refused(f"ln {flag} {target} {link}")
+    assert_refused(f"ln {flag} .git/config {link}")
+
+
+def test_unresolvable_path_beneath_protected_directory_refused(tmp_path):
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    loop = git_dir / "loop"
+    loop.symlink_to(loop)
+    assert_refused(f"printf x > {loop}/config")
+
+
 @pytest.mark.parametrize("name", (
     "HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
     "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG", "GIT_CONFIG_COUNT",

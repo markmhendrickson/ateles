@@ -816,9 +816,20 @@ _GIT_WORD_READERS = frozenset({"echo", "printf", "which", "type", "whereis", "gr
                                "[", "[[", "cat", "ls", "head", "tail", "wc", "sed"})
 
 
-def _protected_path(path: str) -> bool:
-    """Paths that can redirect or disable the prepare checkout's hooks."""
-    normalized = os.path.normpath(os.path.expanduser(path)).casefold()
+def _path_forms(path: str) -> tuple[tuple[str, ...], bool]:
+    """Check both spelling and destination; resolve existing symlink components."""
+    expanded = os.path.expanduser(path)
+    literal = os.path.normpath(expanded).casefold()
+    try:
+        resolved = str(Path(expanded).resolve(strict=False)).casefold()
+    except (OSError, RuntimeError):
+        # A loop or unreadable component beneath a protected directory cannot
+        # establish a safe destination for a write.
+        return (literal,), True
+    return (literal, resolved), False
+
+
+def _matches_protected_path(normalized: str) -> bool:
     return bool(
         re.search(r"(?:^|/)\.git/config$", normalized)
         or re.search(r"(?:^|/)\.git/hooks(?:/|$)", normalized)
@@ -830,10 +841,19 @@ def _protected_path(path: str) -> bool:
     )
 
 
+def _protected_path(path: str) -> bool:
+    """Paths that can redirect or disable the prepare checkout's hooks."""
+    forms, unresolved = _path_forms(path)
+    return any(_matches_protected_path(form) for form in forms) or (
+        unresolved and _enters_protected_dir(path)
+    )
+
+
 def _enters_protected_dir(path: str) -> bool:
     """A working directory from which a relative write reaches a protected path."""
-    normalized = os.path.normpath(os.path.expanduser(path)).casefold()
-    return bool(re.search(r"(?:^|/)(?:\.git|\.husky|\.config)(?:/|$)", normalized))
+    forms, _ = _path_forms(path)
+    return any(re.search(r"(?:^|/)(?:\.git|\.husky|\.config)(?:/|$)", form)
+               for form in forms)
 
 
 def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None:
@@ -856,6 +876,17 @@ def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None
         targets = args[-1:] + [args[i + 1] for i, arg in enumerate(args[:-1])
                                if arg in ("-t", "--target-directory")]
         sources = [arg for arg in args[:-1] if not arg.startswith("-")]
+        if base == "ln" and any(
+            arg in {"-s", "--symbolic"} or (
+                arg.startswith("-") and not arg.startswith("--") and "s" in arg[1:]
+            ) for arg in args
+        ):
+            for source in sources:
+                if _protected_path(source) or any(
+                    _protected_path(os.path.join(os.path.dirname(target), source))
+                    for target in targets
+                ):
+                    return "ln creating a symlink to protected hook or git config path"
         # A directory target writes each source under its own name, so
         # `cp config .git/` lands on .git/config.
         targets += [os.path.join(target, os.path.basename(os.path.normpath(source)))
