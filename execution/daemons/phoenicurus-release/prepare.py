@@ -929,9 +929,12 @@ def _build_agent_prompt(last_tag: str, commit_count: int) -> str:
         else "Send the Telegram notification to the default chat."
     )
     from_flag = f' --from "{SWARM_EMAIL}"' if SWARM_EMAIL else ""
+    email_available = bool(
+        OPERATOR_EMAIL and gws_config_dir_env(require_existing=True)
+    )
     email_note = (
-        f"""12. ALSO email the operator the SAME notification (release goes to the
-    inbox, not just Telegram — and the operator can approve BY EMAIL REPLY).
+        f"""11. Email the operator the SAME notification before Telegram. Email
+    approval is available only when this send succeeds.
 
     SEND AS HTML, not raw markdown. The release notes are markdown; if sent as a
     plain --body they render as a literal wall of `##` and `-` characters in
@@ -956,10 +959,11 @@ def _build_agent_prompt(last_tag: str, commit_count: int) -> str:
           present, exact, and in a form that survives as plain text in a quoted
           reply (put it in its own <p> or <code> line, NOT only inside an href).
 
-    If the gws send fails, log it and continue — Telegram (step 11) is the
-    guaranteed channel; do NOT abort the run over an email failure."""
-        if OPERATOR_EMAIL
-        else "12. (Email notification skipped: OPERATOR_EMAIL is not configured.)"
+    If the gws send fails, log it and add this exact sentence to the Telegram
+    notification: "Email approval unavailable because the RC email failed to
+    send; approve through Telegram instead." Do NOT abort the run."""
+        if email_available
+        else "11. Email notification skipped: email approval unavailable because the swarm mailbox directory is not configured and present, or OPERATOR_EMAIL is unset. Do not run gws. Add this sentence to Telegram: \"Email approval unavailable; approve through Telegram instead.\""
     )
     return f"""You are Phoenicurus, the Neotoma release-preparation agent.
 
@@ -1028,11 +1032,12 @@ Then record + notify:
     The script sets both the `rc_*` and plain field names, and the idempotency
     key, so re-running it is safe. If it exits non-zero, say so in your Telegram
     and email — do NOT report the release as recorded.
-11. Send a Telegram notification with: the version, the FULL rendered release
-    notes, the RC PR URL, and any advisory flags (security sensitive=true,
-    /review findings, CI status). End with: "Reply `approve <TAG>` to publish, or
-    `skip <TAG>` to discard." {topic_note}
 {email_note}
+12. Send a Telegram notification with: the version, the FULL rendered release
+    notes, the RC PR URL, and any advisory flags (security sensitive=true,
+    /review findings, CI status). Include the email-approval status sentence
+    from step 11 when email was unavailable or failed. End with: "Reply
+    `approve <TAG>` to publish, or `skip <TAG>` to discard." {topic_note}
 
 If preflight shows nothing to release, send a one-line Telegram saying so and stop.
 Be precise and terse in the Telegram/email messages. No motivational filler.
@@ -1144,17 +1149,9 @@ def _agent_env() -> dict:
         if name in os.environ:
             env[name] = os.environ[name]
     # The RC email goes out through gws as the swarm mailbox when one is
-    # configured: the shared mapping turns ATELES_SWARM_GWS_CONFIG_DIR into the
-    # child's GOOGLE_WORKSPACE_CLI_CONFIG_DIR, falls back to an already-set
-    # value, and adds nothing when neither is set.
+    # configured and present: never inherit the ambient operator account.
     env.pop("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", None)
-    env.update(gws_config_dir_env())
-    gws_dir = env.get("GOOGLE_WORKSPACE_CLI_CONFIG_DIR")
-    if gws_dir and not os.path.isdir(gws_dir):
-        log.warning(
-            "prepare agent: the gws config directory selected for the RC email "
-            "does not exist; the agent's gws calls will fail"
-        )
+    env.update(gws_config_dir_env(require_existing=True))
 
     oauth = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
     api_key = os.environ.get("ANTHROPIC_API_KEY")

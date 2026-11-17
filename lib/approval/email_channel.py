@@ -112,24 +112,23 @@ def _swarm_config_dir() -> str:
     )
 
 
-def gws_config_dir_env() -> dict[str, str]:
+def gws_config_dir_env(*, allow_ambient: bool = False,
+                       require_existing: bool = False) -> dict[str, str]:
     """The gws config selection for a child process, as an env fragment.
 
-    Precedence: a set ``ATELES_SWARM_GWS_CONFIG_DIR`` (the swarm mailbox) wins
-    and becomes the child's ``GOOGLE_WORKSPACE_CLI_CONFIG_DIR``; otherwise an
-    already-set ``GOOGLE_WORKSPACE_CLI_CONFIG_DIR`` is kept; otherwise the
-    fragment is empty and gws uses its default. Never invents a directory.
-    This is the one place the swarm-dir mapping lives; ``_gws_env`` and the
-    release prepare agent both use it.
-
-    Selection only, not a consent gate: the fallback to an already-set
-    directory can be the operator's mailbox. Consent mail must keep going
-    through ``_gws_env``, which refuses unless ``swarm_mailbox_configured()``.
+    Non-approval reads may explicitly opt into the ambient directory. Approval
+    sends pass ``require_existing=True`` so a missing
+    swarm directory cannot select the operator's mailbox or gws default.
+    ``_gws_env`` separately checks the full swarm mailbox configuration.
     """
     swarm_dir = _swarm_config_dir()
-    if swarm_dir:
+    if swarm_dir and (not require_existing or os.path.isdir(swarm_dir)):
         return {_GWS_CONFIG_ENV: swarm_dir}
+    if not allow_ambient:
+        return {}
     ambient = os.environ.get(_GWS_CONFIG_ENV, "")
+    if require_existing and not os.path.isdir(os.path.expanduser(ambient)):
+        return {}
     return {_GWS_CONFIG_ENV: ambient} if ambient else {}
 
 

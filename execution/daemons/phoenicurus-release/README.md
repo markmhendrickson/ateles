@@ -19,15 +19,18 @@ Operator-approved release executor for Neotoma. Two halves:
 
 ### The prepare agent's environment and git hooks
 
-The agent never skips the release checkout's git hooks. `spawn_prepare_agent`
+For commands it can inspect, the guard refuses attempts to skip the release
+checkout's git hooks. `spawn_prepare_agent`
 passes it `--settings` with a PreToolUse guard,
 `.claude/hooks/git_hook_bypass_guard.py`. The guard is an allowlist: the agent
 may run only a plain `git` (optionally `-C <path>`) with a subcommand a release
 prep needs (`ALLOWED_SUBCOMMANDS` in the guard: status, diff, log, show,
 fetch, add, commit, push, checkout, switch, merge, worktree and a few reads),
 with no hook-skipping option (`--no-verify`, `commit -n`,
-`--no-post-rewrite`), no `git config` write (reads stay allowed), no tag
+`--no-post-rewrite`), no `git config` write (reads stay allowed), no writes to
+git or Husky configuration locations, no tag
 creation, and no `GIT_*` or `HUSKY` variable set anywhere in the command.
+Git commands with inline `HOME` or `XDG_CONFIG_HOME` changes are also refused.
 Everything else around git is refused: wrappers (`env`, `xargs`, `timeout`),
 path-qualified or variable-named git binaries, other global options (`-c`,
 `--config-env`, `--git-dir`, `--work-tree`, `--exec-path`), aliases, command
@@ -51,9 +54,9 @@ configuration overrides and unrelated vendor credentials never pass by
 inheritance. The RC email goes out as the swarm mailbox: when
 `ATELES_SWARM_GWS_CONFIG_DIR` is set, the shared mapping in
 `lib/approval/email_channel.py` (`gws_config_dir_env`) makes it the child's
-`GOOGLE_WORKSPACE_CLI_CONFIG_DIR`; otherwise an already-set
-`GOOGLE_WORKSPACE_CLI_CONFIG_DIR` passes through, and with neither set none is
-added. `store_release_result.py` loads its own Neotoma target and signing
+`GOOGLE_WORKSPACE_CLI_CONFIG_DIR` only when the swarm directory exists.
+The ambient Workspace directory is never passed to the prepare child.
+`store_release_result.py` loads its own Neotoma target and signing
 inputs when it runs.
 
 The Bash guard is an accidental-bypass tripwire, not a security boundary: a
@@ -174,23 +177,25 @@ and re-running it would be redundant or unsafe.
 | `NEOTOMA_SANDBOX_URL` | Sandbox host to verify (default `https://neotoma-sandbox.fly.dev`). |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram push (via shared `send.mjs`). |
 | `TELEGRAM_TOPIC_PHOENICURUS` | Optional Telegram topic/thread id for release messages. |
-| `OPERATOR_EMAIL` | Where release RC notifications are emailed (in addition to Telegram). Unset → email is skipped, Telegram only. |
+| `OPERATOR_EMAIL` | Where release RC notifications are emailed when the swarm mailbox directory exists. Unset → email is skipped, Telegram only. |
+| `ATELES_SWARM_GWS_CONFIG_DIR` | Existing gws configuration directory for the swarm mailbox. Missing → no RC email or email approval. |
 | `ATELES_SWARM_EMAIL` | Optional `From:` for release email (the shared swarm address, matching the other daemons). |
 
 ## Notification channels
 
-A prepared release candidate is sent to the operator on **both Telegram and
-email**. The spawned prepare agent (step 11–12 of its prompt) posts the full
-rendered notes + RC PR link + `approve/skip` instruction to Telegram, and emails
-the same via `gws gmail +send` (subject `🚀 Release <TAG> ready to approve`) using
-the same `OPERATOR_EMAIL`/`ATELES_SWARM_EMAIL` the shared `lib/notify` Notifier
-uses — so release mail matches every other swarm daemon. Email is **fail-open**:
-if `OPERATOR_EMAIL` is unset or the send fails, the run logs it and continues;
-Telegram is the guaranteed channel and the release is never blocked on email.
+A prepared release candidate always gets a Telegram notification with the full
+rendered notes, RC PR link and `approve/skip` instruction. If `OPERATOR_EMAIL`
+and an existing `ATELES_SWARM_GWS_CONFIG_DIR` are configured, the prepare agent
+first sends the same notes via `gws gmail +send` (subject `🚀 Release <TAG> ready
+to approve`) from the swarm mailbox. A missing directory prevents the email;
+a send failure is reported in the Telegram notification. In either case the
+notification says that email approval is unavailable and to approve through
+Telegram instead. The release is never blocked on email.
 
 ## Approval routing — two channels
 
-A prepared release can be approved on **either channel**:
+A prepared release can be approved on Telegram. Email reply approval is offered
+only after the RC email was sent from the configured swarm mailbox.
 
 **Telegram** — the operator replies `approve <version>`; Ateles flips the
 `release_result` to `approved` and runs `python3 publish.py --version <version>`.

@@ -957,11 +957,27 @@ class TestSwarmMailboxProblems:
 
 
 def test_gws_config_dir_env_precedence(monkeypatch):
-    # Swarm dir wins, an already-set dir is kept otherwise, nothing is invented.
+    # Approval selection never falls back to an ambient Workspace account.
     monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", "/synthetic/operator-gws")
     monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", "/synthetic/swarm-gws")
     assert ec.gws_config_dir_env() == {"GOOGLE_WORKSPACE_CLI_CONFIG_DIR": "/synthetic/swarm-gws"}
     monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR")
-    assert ec.gws_config_dir_env() == {"GOOGLE_WORKSPACE_CLI_CONFIG_DIR": "/synthetic/operator-gws"}
+    assert ec.gws_config_dir_env() == {}
+    assert ec.gws_config_dir_env(allow_ambient=True) == {
+        "GOOGLE_WORKSPACE_CLI_CONFIG_DIR": "/synthetic/operator-gws"
+    }
     monkeypatch.delenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR")
     assert ec.gws_config_dir_env() == {}
+
+
+def test_gws_config_dir_env_requires_existing_swarm_directory(monkeypatch, tmp_path):
+    swarm = tmp_path / "swarm"
+    ambient = tmp_path / "ambient"
+    ambient.mkdir()
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(swarm))
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", str(ambient))
+    assert ec.gws_config_dir_env(require_existing=True) == {}
+    swarm.mkdir()
+    assert ec.gws_config_dir_env(require_existing=True) == {
+        "GOOGLE_WORKSPACE_CLI_CONFIG_DIR": str(swarm)
+    }

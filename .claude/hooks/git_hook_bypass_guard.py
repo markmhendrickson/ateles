@@ -159,6 +159,7 @@ _TAG_LIST_VALUE = frozenset({"--sort", "--format", "--contains", "--no-contains"
 
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 _SENSITIVE_NAME = re.compile(r"^(?:GIT_[A-Za-z0-9_]*|HUSKY[A-Za-z0-9_]*)$")
+_GIT_LOCATION_NAME = frozenset({"HOME", "XDG_CONFIG_HOME"})
 # A word that names git: `git`, a path to it, a dashed builtin (git-commit), a
 # remote spec (git@host). Not `github`, `.gitignore` or `digit`.
 # A dashed word counts only when it is a git command (git-commit), so a path
@@ -790,12 +791,14 @@ def _program_word_expanded(rest: list[Word], is_shell: bool) -> bool:
     return False
 
 
-def _assignment_violation(words: list[Word]) -> str | None:
+def _assignment_violation(words: list[Word], *, command_mentions_git: bool = False) -> str | None:
     for w in words:
         if _ASSIGNMENT.match(w.text):
             name = w.text.split("=", 1)[0].rstrip("+")
             if _SENSITIVE_NAME.match(name):
                 return f"{name}=... (git and Husky variables may not be set)"
+            if command_mentions_git and name in _GIT_LOCATION_NAME:
+                return f"{name}=... (git config location may not be changed)"
     return None
 
 
@@ -807,11 +810,12 @@ _GIT_WORD_READERS = frozenset({"echo", "printf", "which", "type", "whereis", "gr
 
 def _protected_path(path: str) -> bool:
     """Paths that can redirect or disable the prepare checkout's hooks."""
-    normalized = os.path.normpath(os.path.expanduser(path))
+    normalized = os.path.normpath(os.path.expanduser(path)).casefold()
     return bool(
         re.search(r"(?:^|/)\.git/config$", normalized)
         or re.search(r"(?:^|/)\.git/hooks(?:/|$)", normalized)
-        or re.search(r"(?:^|/)\.git/worktrees/[^/]+/config$", normalized)
+        or re.search(r"(?:^|/)\.git/worktrees/[^/]+/config(?:\.worktree)?$", normalized)
+        or re.search(r"(?:^|/)\.git/config\.worktree$", normalized)
         or re.search(r"(?:^|/)\.gitconfig$", normalized)
         or re.search(r"(?:^|/)\.config/(?:git|husky)(?:/|$)", normalized)
         or re.search(r"(?:^|/)\.husky(?:/|$)", normalized)
@@ -820,7 +824,7 @@ def _protected_path(path: str) -> bool:
 
 def _enters_protected_dir(path: str) -> bool:
     """A working directory from which a relative write reaches a protected path."""
-    normalized = os.path.normpath(os.path.expanduser(path))
+    normalized = os.path.normpath(os.path.expanduser(path)).casefold()
     return bool(re.search(r"(?:^|/)(?:\.git|\.husky|\.config)(?:/|$)", normalized))
 
 
@@ -881,7 +885,7 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool) -> str | Non
     i = 0
     while i < len(words) and _ASSIGNMENT.match(words[i].text):
         i += 1
-    hit = _assignment_violation(words[:i])
+    hit = _assignment_violation(words[:i], command_mentions_git=whole_mentions_git)
     if hit:
         return hit
     rest = words[i:]
@@ -899,7 +903,8 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool) -> str | Non
     if base in _EXPORTERS:
         for w in rest[1:]:
             name = w.text.split("=", 1)[0].rstrip("+")
-            if _SENSITIVE_NAME.match(name):
+            if _SENSITIVE_NAME.match(name) or (
+                    whole_mentions_git and name in _GIT_LOCATION_NAME):
                 return f"{base} {name} (git and Husky variables may not be set)"
         return None
     if base == "git" or base.startswith("git-"):
@@ -908,7 +913,7 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool) -> str | Non
         return git_violation(rest[1:])
     if base in _WRAPPERS:
         if base == "env":
-            hit = _assignment_violation(rest[1:])
+            hit = _assignment_violation(rest[1:], command_mentions_git=whole_mentions_git)
             if hit:
                 return f"env {hit}"
         if base == "command" and len(rest) > 1 and rest[1].text in ("-v", "-V"):

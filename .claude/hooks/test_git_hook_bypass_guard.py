@@ -425,11 +425,17 @@ def test_glob_after_double_dash_is_pathspec(subcommand):
 
 PROTECTED_PATHS = (
     ".git/config",
+    ".GIT/config",
+    ".Git/CONFIG",
+    ".git/config.worktree",
     ".git/hooks/pre-commit",
     "repo/.git/worktrees/linked/config",
+    "repo/.git/worktrees/linked/config.worktree",
     "~/.gitconfig",
     "~/.config/git/config",
+    "~/.CONFIG/GIT/config",
     ".husky/pre-commit",
+    ".HUSKY/pre-commit",
     "~/.config/husky/init.sh",
 )
 
@@ -486,6 +492,38 @@ def test_file_tool_allows_ordinary_repository_file(tool):
 ))
 def test_copy_into_protected_directory_refused(command):
     assert_refused(command)
+
+
+@pytest.mark.parametrize("command", (
+    "printf x > .GIT/config",
+    "printf x > .HUSKY/pre-commit",
+    "printf x > .git/worktrees/linked/config.worktree",
+    "cp source .git/worktrees/linked/config.worktree",
+    "cp config.worktree .git/worktrees/linked/",
+))
+def test_case_folded_and_worktree_config_writes_refused(command):
+    assert_refused(command)
+
+
+@pytest.mark.parametrize("name", (
+    "HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG", "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_DIR", "GIT_COMMON_DIR",
+))
+@pytest.mark.parametrize("prefix", ("", "env "))
+def test_alternate_git_config_environment_refused(name, prefix):
+    assert_refused(f"{prefix}{name}=/tmp/synthetic git commit -m x")
+
+
+def test_exported_home_before_git_refused():
+    assert_refused("export HOME=/tmp/synthetic; git commit -m x")
+
+
+@pytest.mark.parametrize("command", (
+    "git commit -m x", "git status", "printf x > config.txt",
+))
+def test_ordinary_git_and_unrelated_config_write_allowed(command):
+    assert_allowed(command)
 
 
 @pytest.mark.parametrize("command", (

@@ -216,9 +216,10 @@ def test_email_send_fail_open_on_exception(monkeypatch):
         assert prepare.email_send("subj", "body") is False
 
 
-def test_agent_prompt_includes_email_step_when_configured(monkeypatch):
+def test_agent_prompt_includes_email_step_when_configured(monkeypatch, tmp_path):
     monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
     monkeypatch.setattr(prepare, "SWARM_EMAIL", "swarm@example.com")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
     p = prepare._build_agent_prompt("v0.19.0", 3)
     assert "gws gmail +send" in p
     assert "op@example.com" in p
@@ -227,7 +228,7 @@ def test_agent_prompt_includes_email_step_when_configured(monkeypatch):
     assert '--from "swarm@example.com"' in p
 
 
-def test_agent_prompt_carries_html_email_contract(monkeypatch):
+def test_agent_prompt_carries_html_email_contract(monkeypatch, tmp_path):
     """The prompt must instruct the agent to send HTML, not raw markdown.
 
     This is path-1 of ateles#336. The release notes are markdown; sent as a
@@ -238,6 +239,7 @@ def test_agent_prompt_carries_html_email_contract(monkeypatch):
     """
     monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
     monkeypatch.setattr(prepare, "SWARM_EMAIL", "")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
     p = prepare._build_agent_prompt("v0.20.0", 3)
 
     # (a) The flag itself must be named, and named in the sample command.
@@ -288,6 +290,27 @@ def test_agent_prompt_notes_skip_when_email_unconfigured(monkeypatch):
     # No email step at all means no HTML contract to carry.
     assert "SEND AS HTML" not in p
     assert "--html" not in p
+
+
+def test_rc_email_absent_swarm_directory_uses_telegram_only(monkeypatch, tmp_path):
+    monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR", raising=False)
+    prompt = prepare._build_agent_prompt("v0.19.0", 3)
+    assert "gws gmail +send" not in prompt
+    assert "Do not run gws" in prompt
+    assert "Email approval unavailable; approve through Telegram instead." in prompt
+    assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" not in prepare._agent_env()
+
+
+def test_rc_email_send_failure_is_in_telegram_instructions(monkeypatch, tmp_path):
+    monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
+    prompt = prepare._build_agent_prompt("v0.19.0", 3)
+    assert prompt.index("gws gmail +send") < prompt.index("12. Send a Telegram")
+    assert ("Email approval unavailable because the RC email failed to\n"
+            "    send; approve through Telegram instead.") in prompt
+    assert "Include the email-approval status sentence" in prompt
 
 
 def test_notify_operator_sends_both_channels(monkeypatch):
@@ -400,21 +423,21 @@ def test_agent_env_drops_storage_git_and_unknown_ambient_names(monkeypatch, name
     assert _os.environ.get(name) == "canary", "daemon env untouched"
 
 
-def test_agent_env_maps_swarm_gws_config(monkeypatch):
+def test_agent_env_maps_swarm_gws_config(monkeypatch, tmp_path):
     # The RC email must go out as the swarm mailbox: a configured swarm gws
     # directory becomes the child's GOOGLE_WORKSPACE_CLI_CONFIG_DIR and wins
     # over an already-set value, the same precedence email_channel uses.
-    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", "/synthetic/swarm-gws")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", "/synthetic/operator-gws")
     env = prepare._agent_env()
-    assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == "/synthetic/swarm-gws"
+    assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == str(tmp_path)
     assert "ATELES_SWARM_GWS_CONFIG_DIR" not in env
     import os as _os
     assert _os.environ["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == "/synthetic/operator-gws"
 
     monkeypatch.delenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR")
     env = prepare._agent_env()
-    assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == "/synthetic/swarm-gws"
+    assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == str(tmp_path)
 
 
 def test_agent_env_invents_no_gws_config_when_unset(monkeypatch):
@@ -436,7 +459,7 @@ def test_agent_env_keeps_only_needed_release_additions(monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/synthetic/claude")
     env = prepare._agent_env()
     assert env["PATH"] == "/synthetic/bin"
-    assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == "/synthetic/gws"
+    assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" not in env
     assert env["CLAUDE_CONFIG_DIR"] == "/synthetic/claude"
 
 
