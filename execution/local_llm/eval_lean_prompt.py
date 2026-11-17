@@ -107,6 +107,8 @@ def _dispatch(role: str, task: str, *, cwd: Path, work_class: str, timeout: int)
         [
             sys.executable, str(DISPATCH_ROLE),
             "--role", role,
+            "--caller-kind", "daemon",
+            "--caller", "eval_lean_prompt",
             "--task", task,
             "--provider", "claude-local",
             "--work-class", work_class,

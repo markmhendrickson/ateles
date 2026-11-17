@@ -401,9 +401,9 @@ def test_evicted_usage_warning_is_sent_again_once(monkeypatch, tmp_path, ledger)
 
 
 def test_unreadable_held_queue_is_not_overwritten_by_new_usage_warning(
-    monkeypatch, tmp_path, ledger
+    monkeypatch, tmp_path, ledger, capsys
 ) -> None:
-    from lib.notify import neotoma_sink
+    from lib.notify import neotoma_sink, held_view
 
     monkeypatch.setattr(neotoma_sink, "record", lambda **kwargs: None)
     window = _window(52)
@@ -420,9 +420,13 @@ def test_unreadable_held_queue_is_not_overwritten_by_new_usage_warning(
     _usage_file(monkeypatch, tmp_path, "cursor", [window])
     usage_alerts.check_usage_thresholds("cursor", notifier=spy)
     assert spy.inner._digest_path.read_text() == "unreadable queue"
-    assert spy.inner._dedupe_journal[key]["state"] == "held"
+    assert key not in spy.inner._dedupe_journal
+    assert len(spy.sent) == 2
+    assert held_view._print_notices(spy.inner._digest_path, False) == 1
+    assert capsys.readouterr().out.count("RECOVERY REQUIRED:") == 1
 
     spy.inner._digest_path.write_text(retained)
+    usage_alerts._retry_after.clear()
     assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
     assert spy.inner._digest_queue[0] == "⚠ [apis] " + spy.sent[0][0]
 
@@ -842,6 +846,43 @@ def test_cli_exit_leaves_failed_alert_pending_for_next_process(
     assert usage_alerts.check_usage_thresholds("codex", notifier=spy) == [key]
     assert len(spy.delivered) == 1
     assert usage_alerts.check_usage_thresholds("codex", notifier=spy) == []
+
+
+def test_real_apis_notifier_retries_malformed_thresholds_on_both_entrances(
+    monkeypatch, tmp_path, ledger
+) -> None:
+    from lib.notify import neotoma_sink
+    import red_conditions
+
+    monkeypatch.setattr(neotoma_sink, "record", lambda **kwargs: None)
+    monkeypatch.setenv(red_conditions.STATE_ENV, str(tmp_path / "red.json"))
+    notifier = red_conditions.ApisNotifier(rubric={
+        "silence_start": "", "silence_end": "", "timezone": "Europe/Madrid",
+    })
+    notifier._digest_path = tmp_path / "held.json"
+    notifier._dedupe_path = tmp_path / "dedupe.json"
+    notifier._email_primary = False
+    delivered = []
+    notifier._deliver = lambda message, **kwargs: delivered.append(message) or True
+    window = _window(52)
+    _usage_file(monkeypatch, tmp_path, "cursor", [window])
+    first = usage_alerts.dedupe_key("cursor", window["name"], window["resets_at"], 50)
+    notifier._dedupe_path.write_text(json.dumps({first: "malformed"}))
+
+    # Usage-write entrance calls the threshold checker synchronously.
+    assert usage_alerts.check_usage_thresholds("cursor", notifier=notifier) == [first]
+    assert notifier._dedupe_journal[first]["state"] == "delivered"
+    window["used_percent"] = 76
+    _usage_file(monkeypatch, tmp_path, "cursor", [window])
+    second = usage_alerts.dedupe_key("cursor", window["name"], window["resets_at"], 75)
+    doc = notifier._dedupe_journal
+    doc[second] = ["malformed"]
+    notifier._dedupe_path.write_text(json.dumps(doc))
+
+    # The dispatch entrance runs the same handoff in its worker thread.
+    usage_alerts.schedule_dispatch_check("cursor", notifier=notifier).join(2)
+    assert len(delivered) == 2
+    assert notifier._dedupe_journal[second]["state"] == "delivered"
 
 
 def test_a_new_window_alerts_again(monkeypatch, tmp_path, ledger) -> None:

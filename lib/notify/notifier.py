@@ -33,6 +33,21 @@ calls ``clear_dedupe(key)`` once the condition resolves. Without a key, every
 call is delivered independently, same as before.
 
 All times are in the rubric's configured timezone (default: Europe/Madrid).
+
+Retryable held-notice state table (journal x queue x queue lock):
+* Journal absent, malformed, stale, or pending: every queue state and either
+  lock outcome remains retriable; a malformed entry is replaced on the send.
+* Journal held/delivered with a readable queue containing its notice and an
+  acquired lock: suppress (the notice is deliverable or already delivered).
+* Journal held with a readable queue missing its notice and an acquired lock:
+  release the key and retry; a missing queue is the same case.
+* Journal held with an unreadable queue and an acquired lock: release the key,
+  preserve the queue bytes, and surface the recovery error in held_view.
+* Any timed-out queue lock: do not mutate or drain the queue; retry the send.
+  A previously held key is checked again when the lock becomes available.
+For each of the 4 journal states x 4 queue states x 2 lock outcomes, the
+outcome is delivered, queued with a held key, or retriable with a visible
+recovery error; no unreadable queue is overwritten.
 """
 
 from __future__ import annotations
@@ -398,11 +413,14 @@ class Notifier:
                     "[notify] Operator decision in silence window — holding for later delivery"
                 )
                 held_message = f"⚠️ {full_message}"
-                self._queue_digest(
+                queued = self._queue_digest(
                     held_message, email_eligible,
                     (dedupe_key, *related_dedupe_keys) if retryable and dedupe_key else (),
                     handler,
                 )
+                if not queued and retryable and dedupe_key:
+                    for key in (dedupe_key, *related_dedupe_keys):
+                        self.release_dedupe(key)
                 return False
             return delivered(self._deliver(
                 f"⚠️ {full_message}", force=False, email_eligible=email_eligible
@@ -411,11 +429,14 @@ class Notifier:
         if prio == Priority.WARN:
             if self._in_silence_window() and not bypass_silence:
                 held_message = f"⚠ {full_message}"
-                self._queue_digest(
+                queued = self._queue_digest(
                     held_message, email_eligible,
                     (dedupe_key, *related_dedupe_keys) if retryable and dedupe_key else (),
                     handler,
                 )
+                if not queued and retryable and dedupe_key:
+                    for key in (dedupe_key, *related_dedupe_keys):
+                        self.release_dedupe(key)
                 return False
             return delivered(self._deliver(
                 f"⚠ {full_message}", force=False, email_eligible=email_eligible
@@ -462,7 +483,7 @@ class Notifier:
             return False
 
     def _queue_lock(self):
-        return held_view.file_lock(held_view.queue_lock_path(self._digest_path))
+        return held_view.file_lock(held_view.queue_lock_path(self._digest_path), fail_open=False)
 
     def _queue_digest(
         self, message: str, email_eligible: bool = True,
@@ -482,7 +503,10 @@ class Notifier:
         )
         with self._notification_lock:
             try:
-                with self._queue_lock():
+                with self._queue_lock() as locked:
+                    if not locked:
+                        log.error("[notify] held queue lock unavailable; notice remains retryable")
+                        return False
                     # A failed read must never turn an existing queue into an
                     # empty one. Missing files alone mean an empty queue.
                     # A symlink is not a queue file; atomic_write safely
@@ -502,14 +526,14 @@ class Notifier:
                         )
                     if message not in items:
                         return False
-                    # Queue -> journal is the fixed lock order. Drains cannot
-                    # see this notice until its held keys have been recorded.
+                    if not self._persist_queue(items, path):
+                        return False
+                    # The queue lock excludes drainers until the held receipt
+                    # is recorded. A failed journal write leaves a visible
+                    # notice, never a held key without one.
                     if dedupe_keys and not self._mark_dedupe_held(
                         dedupe_keys, handler, message
                     ):
-                        return False
-                    if not self._persist_queue(items, path):
-                        self._release_held_messages([message])
                         return False
                     if dropped:
                         other_path = (
@@ -582,11 +606,16 @@ class Notifier:
         return start, count
 
     def _budget_remaining(self) -> int:
-        with self._queue_lock():
+        with self._queue_lock() as locked:
+            if not locked:
+                return 0
             return max(0, HELD_EMAIL_BUDGET_PER_HOUR - self._budget_state()[1])
 
     def _budget_consume(self) -> None:
-        with self._queue_lock():
+        with self._queue_lock() as locked:
+            if not locked:
+                log.error("[notify] held-email budget lock unavailable")
+                return
             start, count = self._budget_state()
             try:
                 held_view.atomic_write(
@@ -604,7 +633,10 @@ class Notifier:
         """
         if not delivered:
             return
-        with self._queue_lock():
+        with self._queue_lock() as locked:
+            if not locked:
+                log.error("[notify] held queue lock unavailable; delivered item retained")
+                return
             gone = Counter(delivered)
             kept: list[str] = []
             removed: list[str] = []
@@ -623,14 +655,17 @@ class Notifier:
                 for item in set(delivered):
                     self._mark_held_message_delivered(item)
 
-    def _drop_routine(self, path: Path) -> list[str]:
+    def _drop_routine(self, path: Path) -> list[str] | None:
         """Remove non-actionable residue from a queue; return what remains."""
-        with self._queue_lock():
+        with self._queue_lock() as locked:
+            if not locked:
+                log.error("[notify] held queue lock unavailable; drain deferred")
+                return None
             try:
                 items = held_view.read_queue(path)
             except Exception as exc:  # noqa: BLE001
                 log.warning("[notify] held queue %s unreadable (%s)", path.name, exc)
-                return []
+                return None
             actionable, routine = self.classify_queue(items)
             if routine:
                 log.info(
@@ -656,7 +691,8 @@ class Notifier:
         """
         with self._notification_lock:
             with held_view.file_lock(
-                held_view.drain_lock_path(self._digest_path), blocking=False
+                held_view.drain_lock_path(self._digest_path), blocking=False,
+                fail_open=False,
             ) as free:
                 if not free:
                     return False
@@ -665,6 +701,8 @@ class Notifier:
     def _drain(self) -> bool:
         main_items = self._drop_routine(self._digest_path)
         email_items = self._drop_routine(self._email_path)
+        if main_items is None or email_items is None:
+            return False
         if not main_items and not email_items:
             self._last_unrouted = 0
             return False
@@ -837,19 +875,25 @@ class Notifier:
         entry = self._dedupe_journal.get(key)
         if entry is None:
             return False
-        if isinstance(entry, dict) and entry.get("state") == "held":
+        if isinstance(entry, dict) and entry.get("state") == "held" \
+                and isinstance(entry.get("held_message"), str):
             # A held key suppresses only while its notice survives in either
             # queue. Lock order on every shared path: this instance's
             # notification lock, then the queue lock, then the journal lock.
-            with self._notification_lock, self._queue_lock():
+            with self._notification_lock, self._queue_lock() as locked:
+                if not locked:
+                    log.error("[notify] held queue lock unavailable; key %r remains retryable", key)
+                    self.release_dedupe(key)
+                    return False
                 try:
                     queued = (
                         held_view.read_queue(self._digest_path)
                         + held_view.read_queue(self._email_path)
                     )
                 except Exception as exc:  # noqa: BLE001
-                    log.warning("[notify] cannot verify held notice (%s)", exc)
-                    return True
+                    log.error("[notify] cannot verify held notice (%s); recovery required", exc)
+                    self.release_dedupe(key)
+                    return False
                 message = entry.get("held_message")
                 if message in queued:
                     return True
@@ -867,7 +911,21 @@ class Notifier:
                 entry = self._dedupe_journal.get(key)
                 if entry is None:
                     return False
-        if entry.get("state") != "pending":
+        if not isinstance(entry, dict) or not isinstance(entry.get("handler", ""), str):
+            self.release_dedupe(key)
+            return False
+        state = entry.get("state")
+        if state == "held" and not isinstance(entry.get("held_message"), str):
+            self.release_dedupe(key)
+            return False
+        if state not in (None, "held", "pending", "delivered") or (
+            state == "pending" and not isinstance(entry.get("pending_at"), str)
+        ) or (state == "delivered" and not isinstance(entry.get("notified_at"), str)) or (
+            state is None and not isinstance(entry.get("notified_at"), str)
+        ):
+            self.release_dedupe(key)
+            return False
+        if state != "pending":
             return True
         if pending_owned:
             return False

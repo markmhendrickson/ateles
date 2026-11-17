@@ -225,10 +225,19 @@ def summary(main: Path | None = None) -> dict:
 
 
 def _print_notices(main: Path, show_all: bool) -> int:
+    unreadable = []
+    for path in (main, email_queue_path(main)):
+        try:
+            read_queue(path)
+        except Exception:  # noqa: BLE001 — show a recovery signal without queue data
+            unreadable.append(path)
+    for path in unreadable:
+        print(f"RECOVERY REQUIRED: held notice queue unreadable at {path}; preserve the file and repair it before clearing notices.")
     items = actionable_items(main)
     if not items:
-        print("No held operator notices.")
-        return 0
+        if not unreadable:
+            print("No held operator notices.")
+        return 1 if unreadable else 0
     info = summary(main)
     shown = items if show_all else items[-VIEW_LIMIT:]
     try:
@@ -253,13 +262,16 @@ def _print_notices(main: Path, show_all: bool) -> int:
         )
     else:
         print("# --clear removes only the notices printed above.")
-    return 0
+    return 1 if unreadable else 0
 
 
 def _clear(main: Path) -> int:
     email = email_queue_path(main)
     snap = snapshot_path(main)
-    with file_lock(queue_lock_path(main)):
+    with file_lock(queue_lock_path(main), fail_open=False) as locked:
+        if not locked:
+            print(f"could not lock held queues at {main}; nothing cleared", file=sys.stderr)
+            return 1
         try:
             shown = [str(x) for x in json.loads(read_text_nofollow(snap))]
         except FileNotFoundError:

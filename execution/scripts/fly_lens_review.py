@@ -192,6 +192,8 @@ def dispatch_once(*, python: str, dispatch_script: Path, role: str, lens: str,
         "--github-read",
         "--action-class", f"lens_review:{lens}",
         "--task-entity-id", task_entity_id,
+        "--caller-kind", "daemon",
+        "--caller", "fly_lens_review",
         "--timeout", str(JOB_TIMEOUT_SECONDS),
         "--json",
     ]

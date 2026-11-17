@@ -158,8 +158,29 @@ def test_dispatch_command_line(monkeypatch, tmp_path):
     f.dispatch_once(python="py", dispatch_script=Path("d.py"), role="pavo", lens="pm",
                     repo="o/r", task_entity_id="ent_x", task_file=tmp_path / "b.md")
     c = seen["cmd"]
-    for a in ("--runner", "fly", "--github-read", "lens_review:pm", "ent_x", "2700"):
+    for a in ("--runner", "fly", "--github-read", "lens_review:pm", "ent_x", "2700",
+              "--caller", "fly_lens_review", "--caller-kind", "daemon"):
         assert a in c
+
+
+def test_local_eval_dispatch_names_its_launcher(monkeypatch, tmp_path):
+    import importlib.util
+
+    path = Path(__file__).resolve().parent.parent / "local_llm" / "eval_lean_prompt.py"
+    spec = importlib.util.spec_from_file_location("eval_lean_prompt", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    seen = {}
+
+    class P:
+        stdout, stderr = '{"ok": true}', ""
+
+    monkeypatch.setattr(module.subprocess, "run", lambda cmd, **kw: seen.update(cmd=cmd) or P())
+    assert module._dispatch("cicada", "test", cwd=tmp_path,
+                            work_class="worktree_hygiene", timeout=1)["ok"]
+    assert seen["cmd"][seen["cmd"].index("--caller") + 1] == "eval_lean_prompt"
+    assert seen["cmd"][seen["cmd"].index("--caller-kind") + 1] == "daemon"
 
 
 def test_bad_task_id_is_usage_error(tmp_path):

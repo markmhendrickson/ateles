@@ -7,6 +7,8 @@ those paths raised AttributeError instead of notifying.
 
 import sys
 import threading
+import json
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -804,6 +806,86 @@ def test_unreadable_dedupe_journal_does_not_crash_send(tmp_path):
         dedupe_key="monedula:consent_channel_failed",
     )
     assert ok is True  # treated as empty journal, not a crash
+
+
+@pytest.mark.parametrize("journal", ["absent", "delivered", "malformed", "held"])
+@pytest.mark.parametrize("queue", ["with_notice", "without_notice", "unreadable", "missing"])
+@pytest.mark.parametrize("locked", [True, False])
+def test_retryable_held_state_table(tmp_path, monkeypatch, journal, queue, locked):
+    """Every journal/queue/lock cell is safe across two notifier instances."""
+    from . import held_view, neotoma_sink
+
+    monkeypatch.setattr(neotoma_sink, "record", lambda **kwargs: None)
+    first = _notifier(tmp_path, ALWAYS_SILENT, [])
+    second = _notifier(tmp_path, ALWAYS_SILENT, [])
+    first.should_flush_digest = second.should_flush_digest = lambda: False
+    key = "usage:weekly:50"
+    notice = "⚠ [apis] usage crossed"
+    entries = {
+        "delivered": {"state": "delivered", "notified_at": "now", "handler": "apis"},
+        "malformed": ["bad"],
+        "held": {"state": "held", "held_message": notice, "handler": "apis"},
+    }
+    if journal != "absent":
+        first._dedupe_path.write_text(json.dumps({key: entries[journal]}))
+    if queue == "with_notice":
+        first._digest_path.write_text(json.dumps([notice]))
+    elif queue == "without_notice":
+        first._digest_path.write_text("[]")
+    elif queue == "unreadable":
+        first._digest_path.write_bytes(b"broken queue bytes")
+
+    if not locked:
+        @contextmanager
+        def unavailable():
+            yield False
+        monkeypatch.setattr(second, "_queue_lock", unavailable)
+
+    assert second.send("usage crossed", Priority.WARN, handler="apis",
+                       dedupe_key=key, retryable=True) is False
+    entry = second._dedupe_journal.get(key)
+    if queue == "unreadable":
+        assert first._digest_path.read_bytes() == b"broken queue bytes"
+    if isinstance(entry, dict) and entry.get("state") == "held":
+        assert notice in held_view.read_queue(first._digest_path)
+    if journal == "malformed":
+        assert isinstance(entry, dict) or entry is None
+    assert second.is_dedupe_open(key) in (True, False)
+
+
+@pytest.mark.parametrize("entry", ["bad", ["bad"], 17, None,
+                                    {"state": "held", "held_message": []},
+                                    {"state": "delivered", "notified_at": 7}])
+def test_malformed_journal_entry_replaced_on_retryable_send(tmp_path, entry):
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    key = "provider-usage-threshold:cursor:50"
+    n._dedupe_path.write_text(json.dumps({key: entry}))
+    assert n.send("usage crossed", Priority.WARN, handler="apis",
+                  dedupe_key=key, retryable=True)
+    assert len(sent) == 1
+    assert n._dedupe_journal[key]["state"] == "delivered"
+
+
+def test_two_instances_retry_after_queue_lock_timeout(tmp_path, monkeypatch):
+    from . import held_view
+
+    first = _notifier(tmp_path, ALWAYS_SILENT, [])
+    second = _notifier(tmp_path, ALWAYS_SILENT, [])
+    first.should_flush_digest = second.should_flush_digest = lambda: False
+    monkeypatch.setattr(held_view, "_LOCK_WAIT_SECONDS", 0.01)
+    key = "usage:weekly:50"
+    lock_path = held_view.queue_lock_path(first._digest_path)
+    with held_view.file_lock(lock_path, fail_open=False) as acquired:
+        assert acquired
+        assert not second.send("usage crossed", Priority.WARN, handler="apis",
+                               dedupe_key=key, retryable=True)
+        assert not first._digest_path.exists()
+        assert first._dedupe_journal.get(key, {}).get("state") != "held"
+    assert not second.send("usage crossed", Priority.WARN, handler="apis",
+                           dedupe_key=key, retryable=True)
+    assert second._dedupe_journal[key]["state"] == "held"
+    assert len(held_view.read_queue(first._digest_path)) == 1
 
 
 def test_clear_dedupe_on_a_key_never_seen_does_not_raise(tmp_path):
