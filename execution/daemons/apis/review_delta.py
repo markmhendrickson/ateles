@@ -29,6 +29,8 @@ from __future__ import annotations
 import difflib
 from dataclasses import dataclass
 
+import review_scope
+
 # GitHub lists at most this many files for a compare and gives no signal that it
 # truncated, so a list this long may be missing files: not trustworthy.
 COMPARE_FILE_CAP = 300
@@ -56,7 +58,9 @@ def compare_files(body: object) -> list[dict] | None:
     if not isinstance(files, list) or len(files) >= COMPARE_FILE_CAP:
         return None
     for entry in files:
-        if not isinstance(entry, dict) or not isinstance(entry.get("filename"), str):
+        try:
+            review_scope.file_row_paths(entry)
+        except ValueError:
             return None
     return files
 
@@ -132,6 +136,8 @@ def interdiff(old_files: list[dict], new_files: list[dict]) -> Delta:
     side only counts at its full size there: the PR started touching it, or
     stopped, and either is part of what changed since the last review.
     """
+    for entry in (*old_files, *new_files):
+        review_scope.file_row_paths(entry)
     old = {e["filename"]: e for e in old_files}
     new = {e["filename"]: e for e in new_files}
     total = 0
@@ -148,7 +154,8 @@ def interdiff(old_files: list[dict], new_files: list[dict]) -> Delta:
         changed.append(name)
         # A rename moves the path a security-path check would have matched.
         for entry in (before, after):
-            previous = (entry or {}).get("previous_filename")
-            if isinstance(previous, str) and previous and previous not in changed:
-                changed.append(previous)
+            if entry is not None:
+                for path in review_scope.file_row_paths(entry):
+                    if path not in changed:
+                        changed.append(path)
     return Delta(lines=total, files=tuple(changed))

@@ -58,7 +58,13 @@ LENS_ROLES: dict[str, str] = {
     "security": "falco",
     "qa": "phoenicurus",
     "ux": "accipiter",
+    "legal": "buteo",
 }
+# Each entry must equal review_panel.LENSES' lens -> agent mapping; a test
+# (test_lens_roles_match_the_review_panel_registry) asserts it.
+# The five bootstrap lenses `--lens all` always runs, in this order. `legal`
+# is appended only when the approval floor requires it for the PR's diff
+# (see `lenses_for_all`); `content`/Corvus is never run (bootstrap exclusion).
 LENS_ORDER = ("pm", "arch", "security", "qa", "ux")
 
 JOB_TIMEOUT_SECONDS = 45 * 60  # approved per-job limit
@@ -66,6 +72,7 @@ QUEUE_MAX_WAIT_SECONDS = 60 * 60  # approved queue limit
 MAX_ATTEMPTS = 2  # one try plus one retry
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+APIS_DIR = SCRIPT_DIR.parent / "daemons" / "apis"
 DEFAULT_DISPATCH = SCRIPT_DIR.parent / "daemons" / "apis" / "dispatch_role.py"
 DEFAULT_POST = SCRIPT_DIR / "post_lens_verdict.py"
 
@@ -121,6 +128,112 @@ def resolve_head(repo: str, pr: int) -> str:
             f"(rc={proc.returncode}): {(proc.stderr or '').strip()[:200]}"
         )
     return sha
+
+
+def resolve_changed_files(repo: str, pr: int) -> list[str]:
+    """Every path the PR touches, or raise RuntimeError.
+
+    A rename counts BOTH its new and its old path (``previous_filename``), the
+    rule ``review_scope.fetch_pr_files`` applies for the approval tool: a rename
+    out of a legal-relevant path must still select the lenses that path needs.
+    A list that cannot be read, or that comes back empty (a PR always touches at
+    least one file), raises, so the caller falls back to every lens.
+    """
+    def read_query(args: list[str], *, timeout: int, label: str) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            raise RuntimeError(
+                f"could not read the changed files of {repo}#{pr} ({label}): {exc}"
+            ) from exc
+
+    proc = read_query(
+        ["gh", "api", "--paginate", f"repos/{repo}/pulls/{pr}/files",
+         "--jq", ".[] | {filename, previous_filename, status}"],
+        timeout=120, label="file list",
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"could not list the changed files of {repo}#{pr} "
+            f"(rc={proc.returncode}): {(proc.stderr or '').strip()[:200]}"
+        )
+    if str(APIS_DIR) not in sys.path:
+        sys.path.insert(0, str(APIS_DIR))
+    import review_scope  # noqa: PLC0415 - daemon module, stdlib only
+
+    paths: list[str] = []
+    rows_seen = 0
+    for line in (proc.stdout or "").splitlines():
+        if not line.strip():
+            continue
+        rows_seen += 1
+        try:
+            row = json.loads(line)
+        except ValueError:
+            raise RuntimeError(
+                f"could not read the changed files of {repo}#{pr}: a row was not JSON"
+            ) from None
+        try:
+            row_paths = review_scope.file_row_paths(row)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"could not read the changed files of {repo}#{pr}: {exc}"
+            ) from exc
+        for path in row_paths:
+            if path not in paths:
+                paths.append(path)
+    if not paths:
+        raise RuntimeError(f"the changed-file list of {repo}#{pr} came back empty")
+    # The same completeness rule the approval tool applies
+    # (review_scope.file_list_problem): a list at the files API's cap, or one
+    # whose row count differs from the PR's own changed_files, is not trusted.
+    count = read_query(
+        ["gh", "api", f"repos/{repo}/pulls/{pr}", "--jq", ".changed_files"],
+        timeout=60, label="changed-files count",
+    )
+    expected: object = None
+    if count.returncode == 0:
+        try:
+            expected = json.loads((count.stdout or "").strip())
+        except ValueError:
+            expected = None
+    problem = review_scope.file_list_problem(rows_seen, expected)
+    if problem:
+        raise RuntimeError(f"the changed-file list of {repo}#{pr} is not complete: {problem}")
+    return paths
+
+
+def lenses_for_all(changed_files: list[str] | None) -> list[str]:
+    """The lenses `--lens all` runs: the approval tool's required set.
+
+    The five bootstrap lenses in LENS_ORDER, plus any lens the approval
+    floor (`review_panel.approval_floor`, the function
+    `approve_pr_as_app.derive_required_lenses` uses) adds for this diff that
+    this runner can dispatch, i.e. `legal`. Lenses the approval tool excludes
+    in bootstrap mode (`content`) are never added. Lenses pre-registered on
+    the parent issue are not read here. ``None`` means the file list could
+    not be read: fail toward MORE review and add every runnable extra lens.
+    """
+    if str(APIS_DIR) not in sys.path:
+        sys.path.insert(0, str(APIS_DIR))
+    import review_panel  # noqa: PLC0415 - daemon module, stdlib only
+    from approve_pr_as_app import _validate_panel_max  # noqa: PLC0415 - share approval bound
+
+    max_panel = _validate_panel_max(os.environ.get("APIS_PANEL_MAX", "6"))
+
+    extras = [name for name in LENS_ROLES
+              if name not in LENS_ORDER
+              and name not in review_panel.APPROVAL_EXCLUDED_LENSES]
+    if changed_files is None:
+        requirable = review_panel.every_requirable_lens()
+        missing = sorted(requirable - LENS_ROLES.keys())
+        if missing:
+            print(f"warning: the approval tool could require {', '.join(missing)}, "
+                  "which this runner cannot dispatch", file=sys.stderr)
+        return [*LENS_ORDER, *(name for name in extras if name in requirable)]
+    floor = {lens.lens for lens in
+             review_panel.approval_floor(set(), changed_files, max_panel)}
+    return [*LENS_ORDER, *(name for name in extras if name in floor)]
 
 
 # --------------------------------------------------------------------------
@@ -332,7 +445,8 @@ def post_verdict(*, python: str, post_script: Path, repo: str, pr: int, lens: st
 def main(argv: list[str] | None = None, *,
          dispatch: Callable[..., dict[str, Any]] = dispatch_once,
          head_resolver: Callable[[str, int], str] = resolve_head,
-         poster: Callable[..., tuple[bool, str]] = post_verdict) -> int:
+         poster: Callable[..., tuple[bool, str]] = post_verdict,
+         files_resolver: Callable[[str, int], list[str]] = resolve_changed_files) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--repo", required=True, help="owner/name")
     p.add_argument("--pr", required=True, type=int)
@@ -374,7 +488,20 @@ def main(argv: list[str] | None = None, *,
         f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}")
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"out-dir: {out_dir}", flush=True)
-    lenses = list(LENS_ORDER) if args.lens == "all" else [args.lens]
+    if args.lens == "all":
+        try:
+            changed: list[str] | None = files_resolver(args.repo, args.pr)
+        except RuntimeError as exc:
+            log(f"{exc}; running every lens the approval tool could require")
+            changed = None
+        try:
+            lenses = lenses_for_all(changed)
+        except RuntimeError as exc:
+            log(str(exc))
+            return 2
+    else:
+        lenses = [args.lens]
+    print(f"lenses: {', '.join(lenses)}", flush=True)
     summary: dict[str, Any] = {
         "repo": args.repo, "pr": args.pr, "head": head, "started": now_iso(),
         "task_entity_id": args.task_entity_id, "posted": False, "complete": False,

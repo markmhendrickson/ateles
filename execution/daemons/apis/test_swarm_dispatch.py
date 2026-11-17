@@ -14236,9 +14236,11 @@ def _carry_client(delta_files, *, scope_status=200, prs=()):
                     "content": _carry_b64.b64encode(_CARRY_SCOPE_TEXT.encode()).decode(),
                 })
             if "/compare/" in url:
-                files = [{"filename": "a.txt", "patch": "+x\n", "changes": 1}]
+                files = [{"filename": "a.txt", "status": "modified",
+                          "patch": "+x\n", "changes": 1}]
                 if url.rsplit("...", 1)[1] == _CARRY_NEW:
-                    files += [{"filename": f, "patch": "+y\n", "changes": 1}
+                    files += [{"filename": f, "status": "modified",
+                               "patch": "+y\n", "changes": 1}
                               for f in delta_files]
                 return _CarryResp(200, {"files": files})
             if url.endswith("/pulls"):

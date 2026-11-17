@@ -1,5 +1,7 @@
 """Tests for fly_lens_review.py with the Fly dispatch mocked."""
+import asyncio
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -34,7 +36,8 @@ class Script:
         return self.envs.pop(0)
 
 
-def run(tmp_path, dispatch, *extra, heads=(HEAD,), poster=None, lens="pm"):
+def run(tmp_path, dispatch, *extra, heads=(HEAD,), poster=None, lens="pm",
+        files=("README.md",)):
     seq = list(heads)
 
     def head_resolver(repo, pr):
@@ -49,7 +52,8 @@ def run(tmp_path, dispatch, *extra, heads=(HEAD,), poster=None, lens="pm"):
     rc = f.main(["--repo", "o/r", "--pr", "7", "--lens", lens, "--task-entity-id",
                  "ent_x", "--out-dir", str(tmp_path), *extra],
                 dispatch=dispatch, head_resolver=head_resolver,
-                poster=poster or default_poster)
+                poster=poster or default_poster,
+                files_resolver=lambda repo, pr: list(files))
     return rc, posts
 
 
@@ -243,6 +247,305 @@ def test_default_out_dir_is_not_cwd(tmp_path, monkeypatch):
     assert rc == 0
     assert not list(tmp_path.glob("fly-lens-review-*"))
     assert list((tmp_path / "home" / ".ateles-work" / "fly-lens-review").glob("*/summary.json"))
+
+
+def lens_env(role, lname):
+    return ok_env(GOOD.replace("Pavo", role).replace("pm lens", lname + " lens"))
+
+
+def test_legal_lens_accepted_and_dispatched_as_buteo(tmp_path):
+    d = Script(lens_env("Buteo", "legal"))
+    rc, posts = run(tmp_path, d, "--post", lens="legal")
+    assert rc == 0
+    assert [(c["lens"], c["role"]) for c in d.calls] == [("legal", "buteo")]
+    assert ".claude/skills/buteo/SKILL.md" in (tmp_path / "legal.brief.md").read_text()
+    rec = json.loads((tmp_path / "summary.json").read_text())["lenses"][0]
+    assert (rec["role"], rec["verdict"]) == ("buteo", "SIGNED_OFF")
+    assert [p["lens"] for p in posts] == ["legal"]
+
+
+def test_all_adds_legal_for_a_package_json_diff(tmp_path):
+    roles = [("Pavo", "pm"), ("Waxwing", "arch"), ("Falco", "security"),
+             ("Phoenicurus", "qa"), ("Accipiter", "ux"), ("Buteo", "legal")]
+    d = Script(*[lens_env(r, n) for r, n in roles])
+    rc, _ = run(tmp_path, d, lens="all", files=("package.json", "src/a.ts"))
+    assert rc == 0
+    assert [c["lens"] for c in d.calls] == [*f.LENS_ORDER, "legal"]
+    assert d.calls[-1]["role"] == "buteo"
+
+
+def test_all_without_legal_path_is_the_five_in_order(tmp_path):
+    d = Script(*[lens_env("Pavo", "pm")] * 5)
+    rc, _ = run(tmp_path, d, lens="all", files=("execution/scripts/x.py", "README.md"))
+    assert rc == 0
+    assert [c["lens"] for c in d.calls] == ["pm", "arch", "security", "qa", "ux"]
+
+
+def test_all_never_includes_content():
+    # a large docs diff is what lets select_panel pick the forward-looking content lens
+    many = [f"docs/page{i}.md" for i in range(12)] + ["package.json"]
+    for files in (many, ["README.md"], None):
+        assert "content" not in f.lenses_for_all(files)
+    assert "content" not in f.LENS_ROLES
+
+
+def test_all_unreadable_file_list_runs_legal_too(tmp_path):
+    def broken(repo, pr):
+        raise RuntimeError("gh failed")
+
+    d = Script(*[lens_env("Pavo", "pm")] * 6)
+    rc = f.main(["--repo", "o/r", "--pr", "7", "--lens", "all", "--task-entity-id",
+                 "ent_x", "--out-dir", str(tmp_path)],
+                dispatch=d, head_resolver=lambda r, p: HEAD,
+                poster=lambda **kw: (True, ""), files_resolver=broken)
+    assert rc == 0
+    assert [c["lens"] for c in d.calls] == [*f.LENS_ORDER, "legal"]
+
+
+@pytest.mark.parametrize(
+    ("query", "failure"),
+    [("files", "timeout"), ("count", "timeout"),
+     ("files", "oserror"), ("count", "oserror")],
+)
+def test_file_list_timeout_runs_every_requirable_lens(
+    monkeypatch, tmp_path, capsys, query, failure,
+):
+    row = json.dumps({"filename": "README.md", "status": "modified"}) + "\n"
+
+    def fake_run(argv, **kw):
+        current = "count" if argv[-1] == ".changed_files" else "files"
+        if current == query:
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(argv, kw["timeout"])
+            raise OSError("synthetic launch failure")
+        return _Proc(stdout="1\n" if current == "count" else row)
+
+    monkeypatch.setattr(f.subprocess, "run", fake_run)
+    d = Script(*[lens_env("Pavo", "pm")] * 6)
+    rc = f.main(["--repo", "o/r", "--pr", "7", "--lens", "all",
+                 "--task-entity-id", "ent_x", "--out-dir", str(tmp_path)],
+                dispatch=d, head_resolver=lambda r, p: HEAD)
+    assert rc == 0
+    assert [c["lens"] for c in d.calls] == [*f.LENS_ORDER, "legal"]
+    error = capsys.readouterr().err
+    assert "could not read the changed files" in error
+    assert "running every lens the approval tool could require" in error
+
+
+@pytest.mark.parametrize("panel_max", ["0", "-1", "abc", "below_floor"])
+def test_all_rejects_panel_max_below_approval_bound(
+    monkeypatch, tmp_path, capsys, panel_max,
+):
+    sys.path.insert(0, str(f.APIS_DIR))
+    import review_panel
+
+    floor_count = sum(lens.always for lens in review_panel.LENSES)
+    monkeypatch.setenv("APIS_PANEL_MAX", str(floor_count - 1) if panel_max == "below_floor"
+                       else panel_max)
+    d = Script()
+    rc, _ = run(tmp_path, d, lens="all")
+    assert rc == 2
+    assert d.calls == []
+    assert "APIS_PANEL_MAX" in capsys.readouterr().err
+
+
+def test_all_accepts_panel_max_at_approval_bound(monkeypatch, tmp_path):
+    sys.path.insert(0, str(f.APIS_DIR))
+    import review_panel
+
+    monkeypatch.setenv("APIS_PANEL_MAX", str(sum(lens.always for lens in review_panel.LENSES)))
+    d = Script(*[lens_env("Pavo", "pm")] * 5)
+    rc, _ = run(tmp_path, d, lens="all")
+    assert rc == 0
+    assert [c["lens"] for c in d.calls] == list(f.LENS_ORDER)
+
+
+# --- resolve_changed_files: renames and empty lists (security review, PR #1787) ---
+class _Proc:
+    def __init__(self, stdout="", returncode=0, stderr=""):
+        self.stdout, self.returncode, self.stderr = stdout, returncode, stderr
+
+
+def _fake_gh(monkeypatch, stdout, returncode=0, changed_files="auto"):
+    """Fake `gh`: the files listing returns *stdout*; the PR read returns
+    *changed_files* ("auto" = the number of non-blank rows in *stdout*)."""
+    calls = []
+    if changed_files == "auto":
+        changed_files = sum(1 for line in stdout.splitlines() if line.strip())
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        if argv[-1] == ".changed_files":
+            return _Proc(stdout=json.dumps(changed_files) + "\n")
+        return _Proc(stdout=stdout, returncode=returncode)
+
+    monkeypatch.setattr(f.subprocess, "run", fake_run)
+    return calls
+
+
+def test_rename_out_of_a_legal_path_keeps_the_old_path_and_selects_legal(monkeypatch):
+    rows = [{"filename": "src/deps.json", "previous_filename": "package.json", "status": "renamed"},
+            {"filename": "README.md", "previous_filename": None, "status": "modified"}]
+    _fake_gh(monkeypatch, "\n".join(json.dumps(r) for r in rows) + "\n")
+    paths = f.resolve_changed_files("o/r", 7)
+    assert paths == ["src/deps.json", "package.json", "README.md"]
+    assert "legal" in f.lenses_for_all(paths)
+    assert "legal" not in f.lenses_for_all(["src/deps.json", "README.md"])
+
+
+def test_file_list_query_asks_for_previous_filename_and_status(monkeypatch):
+    calls = _fake_gh(monkeypatch, json.dumps({"filename": "a.py", "status": "modified"}) + "\n")
+    f.resolve_changed_files("o/r", 7)
+    assert "previous_filename" in " ".join(calls[0])
+    assert "status" in " ".join(calls[0])
+
+
+def test_empty_file_list_is_unreadable_and_runs_every_lens(monkeypatch):
+    _fake_gh(monkeypatch, "\n")
+    with pytest.raises(RuntimeError, match="empty"):
+        f.resolve_changed_files("o/r", 7)
+
+
+def test_non_json_or_nameless_row_is_unreadable(monkeypatch):
+    for out in ("package.json\n", json.dumps({"previous_filename": "x"}) + "\n", "[1]\n"):
+        _fake_gh(monkeypatch, out)
+        with pytest.raises(RuntimeError, match="could not read"):
+            f.resolve_changed_files("o/r", 7)
+
+
+def test_failed_gh_call_still_raises(monkeypatch):
+    _fake_gh(monkeypatch, "", returncode=1)
+    with pytest.raises(RuntimeError, match="could not list"):
+        f.resolve_changed_files("o/r", 7)
+
+
+# --- second review round on 69cfae19: completeness, single source, fallback ---
+def test_file_list_shorter_than_the_prs_changed_files_is_unreadable(monkeypatch):
+    rows = [json.dumps({"filename": "README.md", "status": "modified"})]
+    _fake_gh(monkeypatch, "\n".join(rows) + "\n", changed_files=2)
+    with pytest.raises(RuntimeError, match="not complete"):
+        f.resolve_changed_files("o/r", 7)
+
+
+def test_file_list_at_the_api_cap_is_unreadable(monkeypatch):
+    rows = [json.dumps({"filename": f"f{i}.py", "status": "modified"}) for i in range(3000)]
+    _fake_gh(monkeypatch, "\n".join(rows) + "\n")  # count matches, but at the cap
+    with pytest.raises(RuntimeError, match="not complete"):
+        f.resolve_changed_files("o/r", 7)
+
+
+def test_pr_with_no_readable_file_count_is_unreadable(monkeypatch):
+    _fake_gh(monkeypatch, json.dumps({"filename": "a.py", "status": "modified"}) + "\n", changed_files=None)
+    with pytest.raises(RuntimeError, match="not complete"):
+        f.resolve_changed_files("o/r", 7)
+
+
+@pytest.mark.parametrize("row", [
+    {"filename": "src/deps.json", "status": "renamed", "previous_filename": None},
+    {"filename": "src/deps.json", "status": "renamed", "previous_filename": 7},
+    {"filename": "src/deps.json", "status": "renamed", "previous_filename": ""},
+    {"filename": "src/deps.json", "status": "renamed", "previous_filename": "  "},
+    {"filename": "", "status": "modified"},
+    {"filename": None, "status": "modified"},
+    {"filename": " package.json", "status": "modified"},
+    {"filename": "package.json ", "status": "modified"},
+    {"filename": "package.json", "status": "weird"},
+    {"filename": "package.json", "status": ["modified"]},
+    {"filename": "package.json", "status": "copied", "previous_filename": None},
+    {"filename": "package.json", "status": "modified", "previous_filename": 7},
+    {"filename": "package.json"},
+    ["package.json"],
+])
+def test_malformed_rows_fail_closed_in_both_file_readers(monkeypatch, row):
+    sys.path.insert(0, str(f.APIS_DIR))
+    import review_scope
+
+    _fake_gh(monkeypatch, json.dumps(row) + "\n")
+    with pytest.raises(RuntimeError, match="could not read"):
+        f.resolve_changed_files("o/r", 7)
+    assert "legal" in f.lenses_for_all(None)
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return [row]
+
+    class Client:
+        async def get(self, *_args, **_kwargs):
+            return Response()
+
+    with pytest.raises(ValueError):
+        asyncio.run(review_scope.fetch_pr_files(
+            Client(), api_base="https://api.github.com", repo="o/r", pr=7, headers={}
+        ))
+
+
+def test_valid_rename_has_identical_paths_in_both_file_readers(monkeypatch):
+    sys.path.insert(0, str(f.APIS_DIR))
+    import review_scope
+
+    row = {"filename": "src/deps.json", "status": "renamed", "previous_filename": "package.json"}
+    _fake_gh(monkeypatch, json.dumps(row) + "\n")
+    fly_paths = f.resolve_changed_files("o/r", 7)
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return [row]
+
+    class Client:
+        async def get(self, *_args, **_kwargs):
+            return Response()
+
+    shared_paths, count = asyncio.run(review_scope.fetch_pr_files(
+        Client(), api_base="https://api.github.com", repo="o/r", pr=7, headers={}
+    ))
+    assert count == 1
+    assert set(fly_paths) == set(shared_paths) == {"src/deps.json", "package.json"}
+
+
+def test_shared_file_reader_rejects_a_non_list_response():
+    sys.path.insert(0, str(f.APIS_DIR))
+    import review_scope
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"message": "error"}
+
+    class Client:
+        async def get(self, *_args, **_kwargs):
+            return Response()
+
+    with pytest.raises(ValueError, match="not a list"):
+        asyncio.run(review_scope.fetch_pr_files(
+            Client(), api_base="https://api.github.com", repo="o/r", pr=7, headers={}
+        ))
+
+
+def test_lens_roles_match_the_review_panel_registry():
+    sys.path.insert(0, str(f.APIS_DIR))
+    import review_panel
+
+    registry = {lens.lens: lens.agent for lens in review_panel.LENSES}
+    for name, role in f.LENS_ROLES.items():
+        assert registry.get(name) == role, (name, role, registry.get(name))
+
+
+def test_unreadable_list_runs_every_requirable_lens_the_runner_has():
+    sys.path.insert(0, str(f.APIS_DIR))
+    import review_panel
+
+    got = f.lenses_for_all(None)
+    want = review_panel.every_requirable_lens() & f.LENS_ROLES.keys()
+    assert set(got) == set(want) | set(f.LENS_ORDER)
+    assert "legal" in got
 
 
 # --------------------------------------------------------------------------

@@ -14,7 +14,7 @@ Neotoma env file is `~/.config/neotoma/.env`). Never print or read that file.
 cd ~/ateles-rc-src
 # source the Neotoma env file here with set -a / set +a, then:
 .venv/bin/python execution/scripts/fly_lens_review.py \
-    --repo <owner/name> --pr <n> --lens <pm|arch|security|qa|ux|all> \
+    --repo <owner/name> --pr <n> --lens <pm|arch|security|qa|ux|legal|all> \
     --task-entity-id ent_<neotoma task> \
     [--extra-brief round2-notes.md] [--out-dir <dir>] [--post]
 ```
@@ -24,7 +24,12 @@ credential-read hook refuses an inline interpreter whose source mentions the
 env file.
 
 Lens to role: pm=pavo, arch=waxwing, security=falco, qa=phoenicurus,
-ux=accipiter. `all` runs them one after another.
+ux=accipiter, legal=buteo. `all` runs, one after another, the lenses the
+approval tool requires for the PR's current diff: the five bootstrap lenses
+(pm, arch, security, qa, ux), plus legal when the diff touches a legal path
+such as `package.json` (the same `review_panel.approval_floor` selection
+`approve_pr_as_app.py` uses). content/Corvus is never run. If the changed-file
+list cannot be read, `all` also runs legal.
 
 ## What it does
 
