@@ -940,6 +940,25 @@ def test_invisible_programs_refused(tmp_path, command):
     assert_refused(command.format(script=tmp_path / "created.sh"))
 
 
+@pytest.mark.parametrize("writer", (
+    "touch {script}", "curl -o {script} https://example.invalid/source",
+    "wget -O {script} https://example.invalid/source",
+    "sed -i s/a/b/ {script}", "dd if=source of={script}",
+))
+def test_same_line_writer_invalidates_named_program(tmp_path, writer):
+    script = tmp_path / "program.sh"
+    script.write_text("echo benign\n")
+    assert_refused(f"{writer.format(script=script)}; sh {script}")
+
+
+def test_archive_write_invalidates_named_program(tmp_path):
+    output = tmp_path / "out"
+    output.mkdir()
+    script = output / "program.sh"
+    script.write_text("echo benign\n")
+    assert_refused(f"tar -xf unknown.tar -C {output}; sh {script}")
+
+
 @pytest.mark.parametrize("literal", (
     "echo 'git status' | sh", "printf 'echo safe' | sh",
     "cat <<'EOF' | sh\necho safe\nEOF",
@@ -950,9 +969,13 @@ def test_literal_programs_are_inspected_and_allowed(literal):
 
 @pytest.mark.parametrize("form", (
     "awk -f {good} -f {bad}", "gawk --file {good} --file {bad}",
+    "awk -f{good} --file={bad}",
     "sed -f {good} -f {bad}", "sed --file {good} --file {bad}",
+    "sed -f{good} --file={bad}",
     "node -e 'console.log(1)' -r {bad}",
+    "node --eval='console.log(1)' --require={bad}",
     "ruby -e 'puts 1' -r {bad}",
+    "ruby -e'puts 1' -r{bad}",
     "sh -c 'source {bad}'",
 ))
 def test_every_program_file_operand_is_judged(tmp_path, form):
@@ -978,6 +1001,7 @@ def test_awk_include_is_judged(tmp_path):
     good.write_text('@include "included.awk"\n')
     bad.write_text("git commit --no-verify -m x\n")
     assert_refused(f"awk -f {good}")
+    assert_refused(f"gawk --source='@include \"{bad}\"'")
 
 
 def test_all_benign_program_operands_allowed(tmp_path):

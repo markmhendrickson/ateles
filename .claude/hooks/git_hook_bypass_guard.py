@@ -1168,6 +1168,11 @@ def _script_file_violation(runner: str, tail: list[Word], is_shell: bool,
 def _inline_program_violation(runner: str, body: str, depth: int) -> str | None:
     if _SHELLS.match(runner):
         return _judge_program_body(body, depth)
+    if _AWKS.match(runner):
+        for include in re.findall(r'@include\s+["\']([^"\']+)["\']', body):
+            hit = _program_file_violation(runner, Word(include), depth + 1)
+            if hit:
+                return hit
     if _mentions_protected_text(body) or _HOOK_BYPASS_TEXT.search(body) or mentions_git(body):
         return f"{runner} program names a protected path or hook bypass"
     return None
@@ -1193,6 +1198,10 @@ def _program_file_violation(runner: str, script: Word, depth: int,
                 return hit
     if is_shell:
         return _judge_program_body(text, depth)
+    if _AWKS.match(runner):
+        if _mentions_protected_text(text) or _HOOK_BYPASS_TEXT.search(text) or mentions_git(text):
+            return f"{runner} program names a protected path or hook bypass"
+        return None
     return _inline_program_violation(runner, text, depth)
 
 
@@ -1217,10 +1226,23 @@ def _multi_program_violation(runner: str, tail: list[Word], depth: int) -> str |
     while i < len(tail):
         option = tail[i].text
         kind = "file" if option in file_options else "inline" if option in inline_options else ""
+        attached: Word | None = None
+        if not kind:
+            for name in sorted(file_options | inline_options, key=len, reverse=True):
+                suffix = (option[len(name) + 1:] if name.startswith("--") and
+                          option.startswith(name + "=") else
+                          option[len(name):] if len(name) == 2 and
+                          option.startswith(name) and len(option) > 2 else None)
+                if suffix is not None:
+                    kind = "file" if name in file_options else "inline"
+                    attached = Word(suffix, tail[i].expanded, tail[i].unquoted_expansion,
+                                    tail[i].lead_expansion, tail[i].unquoted,
+                                    tail[i].write_glob, tail[i].quoted)
+                    break
         if kind:
-            if i + 1 >= len(tail):
+            if attached is None and i + 1 >= len(tail):
                 return f"{runner} program operand missing"
-            value = tail[i + 1]
+            value = attached or tail[i + 1]
             if kind == "file":
                 hit = _program_file_violation(runner, value, depth)
             elif value.expanded or value.globbed or value.braced:
@@ -1229,7 +1251,7 @@ def _multi_program_violation(runner: str, tail: list[Word], depth: int) -> str |
                 hit = _inline_program_violation(runner, value.text, depth)
             if hit:
                 return hit
-            i += 2
+            i += 1 if attached is not None else 2
             continue
         i += 1
     return None
@@ -1459,6 +1481,7 @@ def _judge(command: str, depth: int, in_substitution: bool) -> str | None:
         if hit:
             return hit
     written_files: set[str] = set()
+    written_trees: set[str] = set()
     for index, cmd in enumerate(commands):
         if in_substitution and _is_git_invocation(cmd):
             return "command or process substitution around git"
@@ -1471,8 +1494,13 @@ def _judge(command: str, depth: int, in_substitution: bool) -> str | None:
                 script = _script_operand(stripped[1:], bool(_SHELLS.match(runner)))
             else:
                 script = None
-            if script and os.path.abspath(os.path.expanduser(script.text)) in written_files:
-                return "program text cannot be inspected"
+            if script:
+                script_path = os.path.abspath(os.path.expanduser(script.text))
+                if script_path in written_files or any(
+                    script_path == tree or script_path.startswith(tree.rstrip("/") + "/")
+                    for tree in written_trees
+                ):
+                    return "program text cannot be inspected"
         producer = commands[index - 1] if cmd.pipe_in and index else None
         pipe_program = _literal_pipe_program(producer) if producer else None
         hit = command_violation(cmd, whole, depth, whole_protected, pipe_program)
@@ -1481,10 +1509,28 @@ def _judge(command: str, depth: int, in_substitution: bool) -> str | None:
         for op, target in cmd.redirects:
             if ">" in op:
                 written_files.add(os.path.abspath(os.path.expanduser(target.text)))
-        if stripped and os.path.basename(stripped[0].text) in {"tee", "cp", "mv", "install"}:
-            for target in stripped[1:]:
-                if not target.text.startswith("-"):
-                    written_files.add(os.path.abspath(os.path.expanduser(target.text)))
+        if stripped:
+            writer = os.path.basename(stripped[0].text)
+            args = [w.text for w in stripped[1:]]
+            if writer in {"tee", "cp", "mv", "install", "ln", "rsync", "touch", "truncate"}:
+                for target in args:
+                    if not target.startswith("-"):
+                        written_files.add(os.path.abspath(os.path.expanduser(target)))
+            if writer == "sed" and any(a == "-i" or a.startswith("--in-place") for a in args):
+                for target in args:
+                    if not target.startswith("-"):
+                        written_files.add(os.path.abspath(os.path.expanduser(target)))
+            if writer == "dd":
+                for arg in args:
+                    if arg.startswith("of="):
+                        written_files.add(os.path.abspath(os.path.expanduser(arg[3:])))
+            if writer in {"curl", "wget"}:
+                for j, arg in enumerate(args[:-1]):
+                    if arg in {"-o", "-O", "--output", "--output-document"}:
+                        written_files.add(os.path.abspath(os.path.expanduser(args[j + 1])))
+            if writer in _ARCHIVE_TOOLS:
+                for target in _tree_destinations(writer, args):
+                    written_trees.add(os.path.abspath(os.path.expanduser(target)))
     return None
 
 
