@@ -931,6 +931,24 @@ def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None
     return None
 
 
+def _strip_command_prefix(words: list[Word], *, wrappers: bool = False,
+                          assignments: bool = True) -> list[Word]:
+    """Find the executable after shell control words, assignments and wrappers."""
+    rest = list(words)
+    while rest:
+        head = rest[0]
+        if head.expanded:
+            break
+        base = os.path.basename(head.text)
+        if head.text in _RESERVED_START or (assignments and _ASSIGNMENT.match(head.text)) or (
+            wrappers and base in _WRAPPERS
+        ):
+            rest.pop(0)
+            continue
+        break
+    return rest
+
+
 def _is_git_binary_word(text: str) -> bool:
     base = os.path.basename(text)
     return base == "git" or bool(re.fullmatch(rf"git-(?:{_GIT_DASHED})", base))
@@ -938,11 +956,10 @@ def _is_git_binary_word(text: str) -> bool:
 
 def command_violation(cmd: SimpleCommand, whole_mentions_git: bool) -> str | None:
     words = list(cmd.words)
-    hit = _direct_write_violation(cmd, words)
+    hit = _direct_write_violation(cmd, _strip_command_prefix(words, wrappers=True))
     if hit:
         return hit
-    while words and not words[0].expanded and words[0].text in _RESERVED_START:
-        words.pop(0)
+    words = _strip_command_prefix(words, assignments=False)
     i = 0
     while i < len(words) and _ASSIGNMENT.match(words[i].text):
         i += 1
@@ -1013,9 +1030,7 @@ _MAX_DEPTH = 4
 
 
 def _is_git_invocation(cmd: SimpleCommand) -> bool:
-    words = [w for w in cmd.words if not _ASSIGNMENT.match(w.text)]
-    while words and not words[0].expanded and words[0].text in _RESERVED_START:
-        words.pop(0)
+    words = _strip_command_prefix(list(cmd.words))
     if not words:
         return False
     base = os.path.basename(words[0].text)

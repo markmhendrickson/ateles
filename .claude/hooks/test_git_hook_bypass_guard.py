@@ -479,6 +479,31 @@ def test_direct_write_to_hook_or_config_refused(path, writer):
     assert_refused(writer.format(path=path))
 
 
+@pytest.mark.parametrize("prefix", (
+    "SAFE=1", "if", "then", "do", "!", "time", "env", "command",
+    "builtin", "exec", "nice", "nohup",
+))
+@pytest.mark.parametrize("target", (".git/config", ".git/con*", "$TARGET"))
+@pytest.mark.parametrize("writer", (
+    "tee {target}", "cp source {target}", "mv source {target}",
+    "sed -i s/a/b/ {target}", "install source {target}", "cd {target}",
+))
+def test_prefixed_writers_refuse_protected_targets(prefix, target, writer):
+    assert_refused(f"{prefix} {writer.format(target=target)}")
+
+
+@pytest.mark.parametrize("prefix", (
+    "SAFE=1", "if", "then", "do", "!", "time", "env", "command",
+    "builtin", "exec", "nice", "nohup",
+))
+@pytest.mark.parametrize("writer", (
+    "tee src/output", "cp source src/output", "mv source src/output",
+    "sed -i s/a/b/ src/output", "install source src/output", "cd src",
+))
+def test_prefixed_writers_allow_ordinary_literal_targets(prefix, writer):
+    assert_allowed(f"{prefix} {writer}")
+
+
 @pytest.mark.parametrize("path", PROTECTED_PATHS)
 def test_plain_read_of_hook_or_config_allowed(path):
     assert_allowed(f"cat {path}")
