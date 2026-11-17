@@ -528,13 +528,6 @@ class Notifier:
                         return False
                     if not self._persist_queue(items, path):
                         return False
-                    # The queue lock excludes drainers until the held receipt
-                    # is recorded. A failed journal write leaves a visible
-                    # notice, never a held key without one.
-                    if dedupe_keys and not self._mark_dedupe_held(
-                        dedupe_keys, handler, message
-                    ):
-                        return False
                     if dropped:
                         other_path = (
                             self._email_path if path == self._digest_path
@@ -548,6 +541,14 @@ class Notifier:
                         self._release_held_messages(
                             item for item in evicted if item not in retained
                         )
+                    # The queue lock excludes drainers until the held receipt
+                    # is recorded. A failed journal write leaves a visible
+                    # notice, never a held key without one. Evicted receipts
+                    # are reconciled even when this new receipt cannot be made.
+                    if dedupe_keys and not self._mark_dedupe_held(
+                        dedupe_keys, handler, message
+                    ):
+                        return False
                     return True
             except Exception as exc:  # noqa: BLE001
                 # Losing the queue write must not lose the alert: say so loudly.
