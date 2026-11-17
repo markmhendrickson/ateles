@@ -855,6 +855,8 @@ def test_retryable_held_state_table(tmp_path, monkeypatch, journal, queue, locke
 
 @pytest.mark.parametrize("entry", ["bad", ["bad"], 17, None,
                                     {"state": "held", "held_message": []},
+                                    {"state": "held", "held_message": "⚠ [apis] usage crossed", "handler": 7},
+                                    {"state": "pending", "pending_at": []},
                                     {"state": "delivered", "notified_at": 7}])
 def test_malformed_journal_entry_replaced_on_retryable_send(tmp_path, entry):
     sent = []

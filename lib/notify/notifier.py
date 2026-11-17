@@ -875,6 +875,9 @@ class Notifier:
         entry = self._dedupe_journal.get(key)
         if entry is None:
             return False
+        if not isinstance(entry, dict) or not isinstance(entry.get("handler", ""), str):
+            self.release_dedupe(key)
+            return False
         if isinstance(entry, dict) and entry.get("state") == "held" \
                 and isinstance(entry.get("held_message"), str):
             # A held key suppresses only while its notice survives in either
@@ -911,9 +914,6 @@ class Notifier:
                 entry = self._dedupe_journal.get(key)
                 if entry is None:
                     return False
-        if not isinstance(entry, dict) or not isinstance(entry.get("handler", ""), str):
-            self.release_dedupe(key)
-            return False
         state = entry.get("state")
         if state == "held" and not isinstance(entry.get("held_message"), str):
             self.release_dedupe(key)
