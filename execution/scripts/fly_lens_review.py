@@ -58,8 +58,10 @@ LENS_ROLES: dict[str, str] = {
     "security": "falco",
     "qa": "phoenicurus",
     "ux": "accipiter",
-    "legal": "buteo",  # same mapping as approve_pr_as_app.LENS_AGENTS
+    "legal": "buteo",
 }
+# Each entry must equal review_panel.LENSES' lens -> agent mapping; a test
+# (test_lens_roles_match_the_review_panel_registry) asserts it.
 # The five bootstrap lenses `--lens all` always runs, in this order. `legal`
 # is appended only when the approval floor requires it for the PR's diff
 # (see `lenses_for_all`); `content`/Corvus is never run (bootstrap exclusion).
@@ -139,9 +141,11 @@ def resolve_changed_files(repo: str, pr: int) -> list[str]:
             f"(rc={proc.returncode}): {(proc.stderr or '').strip()[:200]}"
         )
     paths: list[str] = []
+    rows_seen = 0
     for line in (proc.stdout or "").splitlines():
         if not line.strip():
             continue
+        rows_seen += 1
         try:
             row = json.loads(line)
         except ValueError:
@@ -158,6 +162,26 @@ def resolve_changed_files(repo: str, pr: int) -> list[str]:
                 paths.append(value.strip())
     if not paths:
         raise RuntimeError(f"the changed-file list of {repo}#{pr} came back empty")
+    # The same completeness rule the approval tool applies
+    # (review_scope.file_list_problem): a list at the files API's cap, or one
+    # whose row count differs from the PR's own changed_files, is not trusted.
+    count = subprocess.run(
+        ["gh", "api", f"repos/{repo}/pulls/{pr}", "--jq", ".changed_files"],
+        capture_output=True, text=True, timeout=60,
+    )
+    expected: object = None
+    if count.returncode == 0:
+        try:
+            expected = json.loads((count.stdout or "").strip())
+        except ValueError:
+            expected = None
+    if str(APIS_DIR) not in sys.path:
+        sys.path.insert(0, str(APIS_DIR))
+    import review_scope  # noqa: PLC0415 - daemon module, stdlib only
+
+    problem = review_scope.file_list_problem(rows_seen, expected)
+    if problem:
+        raise RuntimeError(f"the changed-file list of {repo}#{pr} is not complete: {problem}")
     return paths
 
 
@@ -180,7 +204,12 @@ def lenses_for_all(changed_files: list[str] | None) -> list[str]:
               if name not in LENS_ORDER
               and name not in review_panel.APPROVAL_EXCLUDED_LENSES]
     if changed_files is None:
-        return [*LENS_ORDER, *extras]
+        requirable = review_panel.every_requirable_lens()
+        missing = sorted(requirable - LENS_ROLES.keys())
+        if missing:
+            print(f"warning: the approval tool could require {', '.join(missing)}, "
+                  "which this runner cannot dispatch", file=sys.stderr)
+        return [*LENS_ORDER, *(name for name in extras if name in requirable)]
     max_panel = int(os.environ.get("APIS_PANEL_MAX", "6"))
     if max_panel < 1:  # select_panel would silently drop lenses
         raise ValueError(f"APIS_PANEL_MAX={max_panel}")

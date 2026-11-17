@@ -306,11 +306,17 @@ class _Proc:
         self.stdout, self.returncode, self.stderr = stdout, returncode, stderr
 
 
-def _fake_gh(monkeypatch, stdout, returncode=0):
+def _fake_gh(monkeypatch, stdout, returncode=0, changed_files="auto"):
+    """Fake `gh`: the files listing returns *stdout*; the PR read returns
+    *changed_files* ("auto" = the number of non-blank rows in *stdout*)."""
     calls = []
+    if changed_files == "auto":
+        changed_files = sum(1 for line in stdout.splitlines() if line.strip())
 
     def fake_run(argv, **kw):
         calls.append(argv)
+        if argv[-1] == ".changed_files":
+            return _Proc(stdout=json.dumps(changed_files) + "\n")
         return _Proc(stdout=stdout, returncode=returncode)
 
     monkeypatch.setattr(f.subprocess, "run", fake_run)
@@ -350,3 +356,43 @@ def test_failed_gh_call_still_raises(monkeypatch):
     _fake_gh(monkeypatch, "", returncode=1)
     with pytest.raises(RuntimeError, match="could not list"):
         f.resolve_changed_files("o/r", 7)
+
+
+# --- second review round on 69cfae19: completeness, single source, fallback ---
+def test_file_list_shorter_than_the_prs_changed_files_is_unreadable(monkeypatch):
+    rows = [json.dumps({"filename": "README.md"})]
+    _fake_gh(monkeypatch, "\n".join(rows) + "\n", changed_files=2)
+    with pytest.raises(RuntimeError, match="not complete"):
+        f.resolve_changed_files("o/r", 7)
+
+
+def test_file_list_at_the_api_cap_is_unreadable(monkeypatch):
+    rows = [json.dumps({"filename": f"f{i}.py"}) for i in range(3000)]
+    _fake_gh(monkeypatch, "\n".join(rows) + "\n")  # count matches, but at the cap
+    with pytest.raises(RuntimeError, match="not complete"):
+        f.resolve_changed_files("o/r", 7)
+
+
+def test_pr_with_no_readable_file_count_is_unreadable(monkeypatch):
+    _fake_gh(monkeypatch, json.dumps({"filename": "a.py"}) + "\n", changed_files=None)
+    with pytest.raises(RuntimeError, match="not complete"):
+        f.resolve_changed_files("o/r", 7)
+
+
+def test_lens_roles_match_the_review_panel_registry():
+    sys.path.insert(0, str(f.APIS_DIR))
+    import review_panel
+
+    registry = {lens.lens: lens.agent for lens in review_panel.LENSES}
+    for name, role in f.LENS_ROLES.items():
+        assert registry.get(name) == role, (name, role, registry.get(name))
+
+
+def test_unreadable_list_runs_every_requirable_lens_the_runner_has():
+    sys.path.insert(0, str(f.APIS_DIR))
+    import review_panel
+
+    got = f.lenses_for_all(None)
+    want = review_panel.every_requirable_lens() & f.LENS_ROLES.keys()
+    assert set(got) == set(want) | set(f.LENS_ORDER)
+    assert "legal" in got
