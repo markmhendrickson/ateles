@@ -14,10 +14,15 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
 import turdus  # noqa: E402
+
+
+_AUTH_PASS = "mx.google.com; dmarc=pass header.from=example.com"
 
 
 # ── pure helpers ─────────────────────────────────────────────────────────────
@@ -79,7 +84,7 @@ def _run(coro):
 def _op_msg(**over):
     base = {
         "id": "m1",
-        "sender": "Mark <markmhendrickson@gmail.com>",
+        "sender": "Operator <op@example.com>",
         "subject": "Re: [Ateles] PR markmhendrickson/neotoma#1902 is READY TO MERGE",
     }
     base.update(over)
@@ -87,7 +92,11 @@ def _op_msg(**over):
 
 
 def _wire(monkeypatch, *, body, secret="s3cret", posted=None):
-    monkeypatch.setattr(turdus, "OPERATOR_EMAIL", "markmhendrickson@gmail.com")
+    monkeypatch.setattr(turdus, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.delenv("ATELES_MAIL_AUTHSERV_ID", raising=False)
+    monkeypatch.setattr(turdus.email_channel, "_fetch_auth_results",
+                        lambda mid: [_AUTH_PASS])
     monkeypatch.setattr(turdus, "APIS_APPROVE_EMAIL_SECRET", secret)
     monkeypatch.setattr(turdus, "DRY_RUN", False)
     monkeypatch.setattr(turdus, "_read_message_body", lambda mid: body)
@@ -110,7 +119,60 @@ def test_operator_approve_routes_to_apis(monkeypatch):
     )
     handled = _run(turdus._maybe_handle_swarm_approval(_op_msg(), _StubNotifier()))
     assert handled is True
-    assert posted == [("markmhendrickson/neotoma", 1902, "markmhendrickson@gmail.com")]
+    assert posted == [("markmhendrickson/neotoma", 1902, "op@example.com")]
+
+
+@pytest.mark.parametrize("kind", ("swarm", "release"))
+@pytest.mark.parametrize("evidence", (
+    ["mx.google.com; dmarc=fail header.from=example.com"],
+    [],
+    ["untrusted.example; dmarc=pass header.from=example.com"],
+    None,
+    "fetch_error",
+))
+def test_approval_authentication_failure_never_posts(monkeypatch, kind, evidence, caplog):
+    posted = []
+    _wire(monkeypatch, body=(
+        "Approve\n\nswarm-approve: markmhendrickson/neotoma#1902"
+        if kind == "swarm" else
+        "approve v1.2.3\nrelease-approve: v1.2.3"
+    ), posted=posted)
+    if evidence == "fetch_error":
+        def fail_fetch(_mid):
+            raise OSError("synthetic metadata read failure")
+        monkeypatch.setattr(turdus.email_channel, "_fetch_auth_results", fail_fetch)
+    else:
+        monkeypatch.setattr(turdus.email_channel, "_fetch_auth_results",
+                            lambda _mid: evidence)
+
+    async def fake_release_post(version, sender):
+        posted.append((version, sender))
+        return True
+
+    monkeypatch.setattr(turdus, "_post_release_approval", fake_release_post)
+    msg = _op_msg(subject=(
+        "Re: [Ateles] PR markmhendrickson/neotoma#1902 is READY TO MERGE"
+        if kind == "swarm" else "Re: Release v1.2.3 ready to approve"
+    ))
+    handler = (turdus._maybe_handle_swarm_approval if kind == "swarm"
+               else turdus._maybe_handle_release_approval)
+    assert _run(handler(msg, _StubNotifier())) is False
+    assert posted == []
+    assert "sender authentication missing, failed, or unreadable" in caplog.text
+
+
+def test_release_approval_authenticated_sender_routes(monkeypatch):
+    posted = []
+    _wire(monkeypatch, body="approve v1.2.3\nrelease-approve: v1.2.3")
+
+    async def fake_post(version, sender):
+        posted.append((version, sender))
+        return True
+
+    monkeypatch.setattr(turdus, "_post_release_approval", fake_post)
+    msg = _op_msg(subject="Re: Release v1.2.3 ready to approve")
+    assert _run(turdus._maybe_handle_release_approval(msg, _StubNotifier())) is True
+    assert posted == [("v1.2.3", "op@example.com")]
 
 
 def test_non_operator_sender_ignored(monkeypatch):

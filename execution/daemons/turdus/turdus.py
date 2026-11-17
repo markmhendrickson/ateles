@@ -64,6 +64,7 @@ from lib.daemon_runtime import (  # noqa: E402
     SSEClient,  # noqa: F401 — imported for consistency; Turdus uses polling not SSE
 )
 from lib.notify import Notifier, Priority  # noqa: E402
+from lib.approval import email_channel  # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -812,6 +813,19 @@ async def _post_email_approval(repository: str, pr_number: int, sender: str) -> 
         return False
 
 
+def _approval_sender_authenticated(message_id: str) -> bool:
+    """Require the receiving server's authenticated operator-domain verdict."""
+    try:
+        auth_results = email_channel._fetch_auth_results(message_id)
+        if auth_results is not None and email_channel.sender_domain_authenticated(auth_results):
+            return True
+    except Exception:  # noqa: BLE001 — an unreadable verdict cannot approve
+        pass
+    log.warning(f"[{DAEMON_NAME}] approval reply refused — sender authentication "
+                "missing, failed, or unreadable")
+    return False
+
+
 async def _maybe_handle_swarm_approval(msg: dict, notifier: Notifier) -> bool:
     """If ``msg`` is an operator APPROVE reply to a swarm merge-ready email,
     resolve the PR and POST the approval to Apis. Returns True when handled
@@ -823,7 +837,8 @@ async def _maybe_handle_swarm_approval(msg: dict, notifier: Notifier) -> bool:
          match the bare address).
       2. The subject carries the merge-ready marker (cheap pre-filter before we
          spend a +read body fetch).
-      3. The body (fetched via +read) contains the swarm-approve correlation
+      3. Gmail's Authentication-Results authorizes the operator's domain.
+      4. The body (fetched via +read) contains the swarm-approve correlation
          token (→ the exact PR) AND an unquoted APPROVE.
     """
     if not OPERATOR_EMAIL:
@@ -833,6 +848,8 @@ async def _maybe_handle_swarm_approval(msg: dict, notifier: Notifier) -> bool:
         return False
     subject = msg.get("subject", "") or ""
     if _MERGE_READY_SUBJECT_MARKER not in subject:
+        return False
+    if not _approval_sender_authenticated(msg.get("id", "")):
         return False
 
     body = _read_message_body(msg.get("id", ""))
@@ -948,7 +965,8 @@ async def _maybe_handle_release_approval(msg: dict, notifier: Notifier) -> bool:
     Guards, all must hold:
       1. OPERATOR_EMAIL configured AND the sender matches it (bare address).
       2. Subject carries the release-ready marker (cheap pre-filter).
-      3. Body carries the `release-approve: <version>` token AND the operator's
+      3. Gmail's Authentication-Results authorizes the operator's domain.
+      4. Body carries the `release-approve: <version>` token AND the operator's
          own unquoted text says `approve <that exact version>`.
     """
     if not OPERATOR_EMAIL:
@@ -958,6 +976,8 @@ async def _maybe_handle_release_approval(msg: dict, notifier: Notifier) -> bool:
         return False
     subject = msg.get("subject", "") or ""
     if _RELEASE_READY_SUBJECT_MARKER.lower() not in subject.lower():
+        return False
+    if not _approval_sender_authenticated(msg.get("id", "")):
         return False
 
     body = _read_message_body(msg.get("id", ""))
