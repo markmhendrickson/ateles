@@ -72,24 +72,37 @@ def test_child_env_keeps_unrelated_variables(monkeypatch, fake_cli):
     assert calls[0]["env"]["BTC_WALLET_TEST_SETTING"] == "keep-me"
 
 
-def test_credit_balance_output_is_an_unknown_outcome(fake_cli):
+# The refusal is matched without regard to case: a casing variant must still be
+# the unknown case, never a terminal "failed".
+REFUSAL_VARIANTS = [
+    "Credit balance is too low",
+    "credit balance is too low",
+    "CREDIT BALANCE IS TOO LOW",
+    "Error: Credit Balance Is Too Low.",
+]
+
+
+@pytest.mark.parametrize("refusal", REFUSAL_VARIANTS)
+def test_credit_balance_output_is_an_unknown_outcome(fake_cli, refusal):
     # --print shows no tool calls, so the refusal cannot prove nothing was sent.
     _, reply = fake_cli
-    reply["stdout"] = "Credit balance is too low\n"
+    reply["stdout"] = refusal + "\n"
 
     with pytest.raises(btc_transfer.PaymentOutcomeUnknown, match="outcome unknown"):
         _handler().execute({"summary": "Yoga"})
 
 
-def test_credit_balance_on_stderr_is_an_unknown_outcome(fake_cli):
+@pytest.mark.parametrize("refusal", REFUSAL_VARIANTS)
+def test_credit_balance_on_stderr_is_an_unknown_outcome(fake_cli, refusal):
     _, reply = fake_cli
-    reply["stderr"] = "Credit balance is too low\n"
+    reply["stderr"] = refusal + "\n"
 
     with pytest.raises(btc_transfer.PaymentOutcomeUnknown, match="Credit balance is too low"):
         _handler().execute({"summary": "Yoga"})
 
 
-def test_credit_refusal_holds_the_obligation_as_unknown(env, monkeypatch):
+@pytest.mark.parametrize("refusal", REFUSAL_VARIANTS)
+def test_credit_refusal_holds_the_obligation_as_unknown(env, monkeypatch, refusal):
     """Through the payment loop, with the real handler and a CLI that prints
     only the refusal: the journal keeps the intent with no outcome, and the
     next tick neither closes nor re-executes it."""
@@ -103,7 +116,7 @@ def test_credit_refusal_holds_the_obligation_as_unknown(env, monkeypatch):
 
     def refusing_cli(args, **kwargs):
         return subprocess.CompletedProcess(
-            args, 0, stdout="Credit balance is too low\n", stderr=""
+            args, 0, stdout=refusal + "\n", stderr=""
         )
 
     def refuse(match):

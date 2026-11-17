@@ -143,9 +143,11 @@ class BtcTransferHandler(PaymentHandler):
         )
 
         payment_result = _parse_payment_result(output)
-        if payment_result is None and _CREDIT_BALANCE_TOO_LOW in (
+        # Case-folded: a refusal in any casing is still the unknown case, so it
+        # must never fall through to the terminal "failed" return below.
+        if payment_result is None and _CREDIT_BALANCE_TOO_LOW.casefold() in (
             output + (result.stderr or "")
-        ):
+        ).casefold():
             # A wallet call before the refusal cannot be ruled out, so this is
             # the unknown case, not a failure: the chain is checked before any
             # retry or manual payment.
