@@ -64,14 +64,15 @@ A git invocation the lexer cannot read fully (unbalanced quoting, an
 unterminated substitution or heredoc) is refused, as is a command or process
 substitution, an inline interpreter program (``python -c``, ``perl -e``,
 ``ruby -e``, ``node -e``, ``sh|bash|zsh -c``, ``eval``, ``source``) or a
-heredoc, here-string or pipe feeding a shell or interpreter, whose text
-mentions git. Commands that neither invoke git nor feed git to an interpreter
-are allowed without further inspection; text that merely mentions a flag (a
+heredoc or here-string feeding a shell, whose body is judged by this guard.
+Tree writes into protected directories or their ancestors are refused.
+Commands that neither invoke git nor write protected paths are allowed;
+text that merely mentions a flag (a
 commit message, PR body, grep pattern, a heredoc written to a file) is data.
 
 This is a tripwire against accidental bypass, not a sandbox. A script written
-to disk and then run, a sourced file, or an alias defined outside the command
-can still reach git unseen. The real controls are the prepare child's
+to disk and then run, or an alias defined outside the command can still reach
+git unseen. The real controls are the prepare child's
 allowlisted environment and the release checks that run after the agent.
 
 There is no override. Skipping hooks has no approved form: the approved way to
@@ -872,7 +873,57 @@ def _enters_protected_dir(path: str) -> bool:
 
 
 _DIRECT_WRITERS = frozenset({"tee", "sed", "cp", "mv", "ln", "install", "rsync",
-                             "rm", "touch", "truncate", "chmod", "chown", "mkdir", "dd"})
+                             "rm", "touch", "truncate", "chmod", "chown", "mkdir", "dd",
+                             "tar", "bsdtar", "gtar", "unzip", "ditto", "cpio", "pax", "jar"})
+
+
+def _tree_write_target(path: str) -> bool:
+    """A tree writer can replace a protected file below this destination."""
+    forms, unresolved = _path_forms(path)
+    protected = [Path.cwd() / ".git/config", Path.cwd() / ".git/hooks",
+                 Path.cwd() / ".husky", Path.home() / ".gitconfig",
+                 Path.home() / ".config/git", Path.home() / ".config/husky"]
+    protected_paths = [str(p.resolve(strict=False)).casefold() for p in protected]
+    for form in forms:
+        if _matches_protected_path(form) or re.search(r"(?:^|/)\.git$", form):
+            return True
+        if any(item == form or item.startswith(form.rstrip("/") + "/")
+               for item in protected_paths):
+            return True
+    return unresolved and _enters_protected_dir(path)
+
+
+def _tree_destinations(base: str, args: list[str]) -> list[str]:
+    """Destinations of commands that copy or extract directory contents."""
+    flags = [arg for arg in args if arg.startswith("-")]
+    recursive = any(arg in ("-r", "-R", "-a", "--recursive", "--archive") or
+                    (arg.startswith("-") and not arg.startswith("--") and
+                     any(ch in arg[1:] for ch in "rRa")) for arg in flags)
+    if base in {"cp", "rm", "chmod", "chown"} and recursive:
+        return args[-1:] if base == "cp" else [a for a in args if not a.startswith("-")]
+    if base in {"mv", "rsync", "ditto"}:
+        return args[-1:]
+    if base in {"tar", "bsdtar", "gtar"}:
+        extracting = any(arg in ("--extract", "--get") or
+                         (arg.startswith("-") and not arg.startswith("--") and "x" in arg[1:])
+                         for arg in flags)
+        if extracting:
+            return ([args[i + 1] for i, arg in enumerate(args[:-1])
+                     if arg in ("-C", "--directory")]
+                    or [arg.split("=", 1)[1] for arg in args
+                        if arg.startswith("--directory=")]
+                    or ["."])
+    if base == "unzip" and not any(a in ("-l", "-t", "-v", "-Z") for a in flags):
+        return [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "-d"] or ["."]
+    if base in {"cpio", "pax"} and any(
+        arg in ("-i", "-r", "--extract") or
+        (arg.startswith("-") and not arg.startswith("--") and any(ch in arg[1:] for ch in "ir"))
+        for arg in flags
+    ):
+        return [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "-D"] or ["."]
+    if base == "jar" and args and "x" in args[0]:
+        return ["."]
+    return []
 
 
 def _wrapped_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None:
@@ -917,6 +968,9 @@ def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None
                for w in words[1:]):
             return f"{base} target assembled by shell expansion"
     args = [w.text for w in words[1:]]
+    for target in _tree_destinations(base, args):
+        if _tree_write_target(target):
+            return f"{base} writing a tree containing protected hook or git config path {target}"
     targets: list[str] = []
     if base == "tee":
         targets = [arg for arg in args if not arg.startswith("-")]
@@ -985,7 +1039,74 @@ def _is_git_binary_word(text: str) -> bool:
     return base == "git" or bool(re.fullmatch(rf"git-(?:{_GIT_DASHED})", base))
 
 
-def command_violation(cmd: SimpleCommand, whole_mentions_git: bool) -> str | None:
+def _mentions_protected_text(body: str) -> bool:
+    return bool(re.search(r"(?:^|[^\w])(?:~/?|\.git(?:/|\b)|\.husky(?:/|\b)|"
+                          r"\.gitconfig\b|\.config/(?:git|husky)(?:/|\b))", body))
+
+
+def _judge_program_body(body: str, depth: int) -> str | None:
+    if body.strip() != "git status" and _code_mentions_git(body, depth + 1):
+        return "nested program invokes git outside the allowed status inspection"
+    return _judge(body, depth + 1, False)
+
+
+def _nested_program_violation(cmd: SimpleCommand, rest: list[Word], depth: int) -> tuple[bool, str | None]:
+    """Judge bodies run by shells, evaluators, and inline interpreters."""
+    if not rest:
+        return False, None
+    if depth >= _MAX_DEPTH:
+        return True, "nested program exceeds inspection depth"
+    base = os.path.basename(rest[0].text)
+    if base in {"source", "."} and len(rest) > 1:
+        script = rest[1]
+        if script.expanded or script.globbed or script.braced:
+            return True, "sourced script assembled by the shell"
+        path = Path(script.text)
+        if path.name.startswith(".env") or path.suffix in {".key", ".pem"}:
+            return True, "sourced credential or environment file"
+        try:
+            return True, _judge_program_body(path.read_text(), depth)
+        except (OSError, UnicodeError):
+            return True, "sourced script cannot be read"
+    if base == "eval":
+        body = rest[1:]
+        if any(w.expanded or w.globbed or w.braced for w in body):
+            return True, "eval body assembled by the shell"
+        return True, _judge_program_body(" ".join(w.text for w in body), depth)
+    starts = [0]
+    if base in _WRAPPERS or base == "find":
+        starts += [i for i, w in enumerate(rest[1:], 1)
+                   if _SHELLS.match(os.path.basename(w.text)) or
+                   _INTERPRETERS.match(os.path.basename(w.text))]
+    for start in starts:
+        runner = os.path.basename(rest[start].text)
+        is_shell = bool(_SHELLS.match(runner))
+        if not is_shell and not _INTERPRETERS.match(runner):
+            continue
+        tail = rest[start + 1:]
+        for i, option in enumerate(tail):
+            name = option.text
+            is_program = name in _INTERPRETER_PROGRAM_OPTIONS or (
+                is_shell and name.startswith("-") and not name.startswith("--") and "c" in name[1:])
+            if not is_program:
+                continue
+            if i + 1 >= len(tail):
+                return True, "nested program body missing"
+            body = tail[i + 1]
+            if body.expanded or body.globbed or body.braced:
+                return True, "nested program body assembled by the shell"
+            if is_shell:
+                return True, _judge_program_body(body.text, depth)
+            if _mentions_protected_text(body.text) or mentions_git(body.text):
+                return True, f"{runner} inline program names a protected path or git"
+            return True, None
+        if is_shell and cmd.stdin and _reads_program_from_stdin(rest[start:]):
+            return True, next((hit for body in cmd.stdin
+                               if (hit := _judge_program_body(body, depth))), None)
+    return False, None
+
+
+def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int = 0) -> str | None:
     words = list(cmd.words)
     stripped = _strip_command_prefix(words, wrappers=True)
     hit = _direct_write_violation(cmd, stripped) or _wrapped_write_violation(cmd, stripped)
@@ -1005,6 +1126,10 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool) -> str | Non
     base = os.path.basename(head.text)
     own_mentions = _words_mention_git(rest[1:], cmd.stdin)
     any_expanded = any(w.expanded for w in rest[1:])
+
+    nested_checked, nested_hit = _nested_program_violation(cmd, rest, depth)
+    if nested_hit:
+        return nested_hit
 
     if head.expanded or head.braced or head.globbed:
         if whole_mentions_git or _looks_like_git(head, rest[1:]):
@@ -1028,16 +1153,16 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool) -> str | Non
                 return f"env {hit}"
         if base == "command" and len(rest) > 1 and rest[1].text in ("-v", "-V"):
             return None
-        if own_mentions or (any_expanded and whole_mentions_git):
+        if (own_mentions and not nested_checked) or (any_expanded and whole_mentions_git and not nested_checked):
             return f"{base} wrapping git (run plain git instead)"
         return None
     if base == "find" and any(w.text in ("-exec", "-execdir", "-ok", "-okdir") for w in rest):
-        if own_mentions:
+        if own_mentions and not nested_checked:
             return "find -exec running git"
         return None
     is_shell = bool(_SHELLS.match(base))
     if is_shell or _INTERPRETERS.match(base) or base in _EVALUATORS:
-        if own_mentions:
+        if own_mentions and not nested_checked:
             return f"{base} running a program that mentions git"
         program_assembled = (any_expanded if base in _EVALUATORS
                              else _program_word_expanded(rest, is_shell))
@@ -1106,7 +1231,7 @@ def _judge(command: str, depth: int, in_substitution: bool) -> str | None:
     for cmd in commands:
         if in_substitution and _is_git_invocation(cmd):
             return "command or process substitution around git"
-        hit = command_violation(cmd, whole)
+        hit = command_violation(cmd, whole, depth)
         if hit:
             return hit
     return None

@@ -793,7 +793,8 @@ def test_real_read_unauthenticated_operator_attended_is_held(monkeypatch, tmp_pa
     assert key not in result.approved
 
 
-def test_real_read_partial_failure_holds_every_payment(monkeypatch, tmp_path):
+@pytest.mark.parametrize("failure", ("metadata", "body_missing", "body_empty"))
+def test_real_read_partial_failure_holds_every_payment(monkeypatch, tmp_path, failure):
     """m1 (authenticated ATTENDED) loads; m2 fails. Monedula must hold, not act
     on the half it could read."""
     h = _Handler("therapy", label="Studio Example", amount=60)
@@ -803,8 +804,10 @@ def test_real_read_partial_failure_holds_every_payment(monkeypatch, tmp_path):
     _arm_email(monkeypatch)
     monkeypatch.setattr(_ec, "gws_json", _fake_gws(
         tok,
-        auth_by_id={"m1": [_GOOGLE_PASS], "m2": [_GOOGLE_PASS]},
-        body_by_id={"m1": "ATTENDED", "m2": None}))
+        auth_by_id={"m1": [_GOOGLE_PASS],
+                    "m2": None if failure == "metadata" else [_GOOGLE_PASS]},
+        body_by_id={"m1": "ATTENDED",
+                    "m2": {} if failure == "body_empty" else None}))
     outcome = _ec.read_replies_with_status([tok])
     assert outcome.kind == "transport_error"
     assert outcome.texts == []

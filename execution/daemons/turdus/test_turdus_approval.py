@@ -263,7 +263,7 @@ def test_two_mailbox_approval_effect(monkeypatch, tmp_path, kind, auth):
         assert len(notifier.sent) == 1
         assert ("v1.2.3" if kind == "release" else "o/r#7") in notifier.sent[0]
         assert "Telegram" in notifier.sent[0]
-    assert "approval-1" in state["processed_ids"]
+    assert ("approval-1" in state.get("processed_ids", [])) == (auth != "unreadable")
     _run(turdus.poll_once(notifier, state))
     assert len([c for c in calls if c[0] == "posted"]) == len(posts)
     assert len(notifier.sent) == 1
@@ -652,9 +652,10 @@ def test_approval_message_recorded_for_dedup(monkeypatch):
     assert [m for m in notifier.sent if "invoice(s)" in m] == []
 
 
+@pytest.mark.parametrize("failure", ("metadata", "body_none", "body_empty", "body_missing"))
 @pytest.mark.parametrize("kind", ("release", "pr"))
 def test_unreadable_authenticated_reply_notices_once_then_routes_once(
-    monkeypatch, tmp_path, kind
+    monkeypatch, tmp_path, kind, failure
 ):
     monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
     monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
@@ -664,7 +665,13 @@ def test_unreadable_authenticated_reply_notices_once_then_routes_once(
     monkeypatch.setattr(turdus, "DRY_RUN", False)
     monkeypatch.setattr(turdus, "_poll_gmail_messages", lambda *_: [])
     monkeypatch.setattr(email_channel, "_gws", lambda: "/synthetic/gws")
-    monkeypatch.setattr(email_channel, "_fetch_auth_results", lambda _mid: [_AUTH_PASS])
+    metadata_attempts = []
+
+    def auth(_mid):
+        metadata_attempts.append(_mid)
+        return None if failure == "metadata" and len(metadata_attempts) == 1 else [_AUTH_PASS]
+
+    monkeypatch.setattr(email_channel, "_fetch_auth_results", auth)
     subject = ("Re: Release v1.2.3 ready to approve" if kind == "release" else
                "Re: [Ateles] PR o/r#7 is READY TO MERGE")
     body = ("approve v1.2.3\nrelease-approve: v1.2.3" if kind == "release" else
@@ -680,7 +687,10 @@ def test_unreadable_authenticated_reply_notices_once_then_routes_once(
                                   "subject": subject}]} if matches else {"messages": []}
         if "+read" in args:
             read_attempts.append(args)
-            return None if len(read_attempts) < 3 else {"body_text": body}
+            if len(read_attempts) == 1:
+                return {"body_none": None, "body_empty": {},
+                        "body_missing": {"id": "approval-1"}}.get(failure, {"body_text": body})
+            return {"body_text": body}
         raise AssertionError(args)
 
     async def post(*args):
@@ -695,7 +705,7 @@ def test_unreadable_authenticated_reply_notices_once_then_routes_once(
         notifier = _StubNotifier()
         state = _run(turdus.poll_once(notifier, turdus._load_state()))
         notices.extend(m for m in notifier.sent if "could not be read yet" in m)
-        if poll < 2:
+        if poll < 1:
             assert "approval-1" not in state.get("processed_ids", [])
             assert posts == []
         else:

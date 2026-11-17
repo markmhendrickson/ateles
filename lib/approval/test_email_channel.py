@@ -692,8 +692,11 @@ class TestSenderDomainAuthentication:
     def test_unreadable_metadata_response_is_not_ok(self, monkeypatch):
         """We could not read the authentication result at all: that is a read
         failure, never an 'ok, nothing authenticated' and never a pass."""
-        assert self._run(monkeypatch, None).kind != "ok"
-        assert self._run(monkeypatch, {"unexpected": True}).kind != "ok"
+        for response in (None, {"unexpected": True}):
+            outcome = self._run(monkeypatch, response)
+            assert outcome.kind == "transport_error"
+            assert [reply.message_id for reply in outcome.unreadable_replies] == ["m1"]
+            assert outcome.rejected_replies == ()
 
     def test_fail_open_wrapper_also_drops_unauthenticated(self, monkeypatch):
         monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")

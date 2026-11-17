@@ -187,10 +187,11 @@ A prepared release candidate always gets a Telegram notification with the full
 rendered notes, RC PR link and `approve/skip` instruction. If `OPERATOR_EMAIL`
 and an existing `ATELES_SWARM_GWS_CONFIG_DIR` are configured, the prepare agent
 first sends the same notes via `gws gmail +send` (subject `🚀 Release <TAG> ready
-to approve`) from the swarm mailbox. A missing directory prevents the email;
-a send failure is reported in the Telegram notification. In either case the
-notification says that email approval is unavailable and to approve through
-Telegram instead. The release is never blocked on email.
+to approve`) from the swarm mailbox. When that email is delivered, the
+Telegram notification offers approval by email reply or through Telegram.
+When the mailbox is not configured or delivery fails, the notification says
+email approval is unavailable and offers Telegram only. The release is never
+blocked on email.
 
 ## Approval routing — two channels
 
@@ -203,6 +204,10 @@ See the Ateles SOUL.md "Release approval" section.
 
 **Email reply** — the operator replies `approve <version>` to the RC email. The
 routing mirrors the swarm PR-approve flow:
+
+If authentication metadata or the reply body cannot be read, Turdus leaves
+the reply pending, sends one Telegram notice naming the release, and retries
+on the next poll. A readable authentication failure is rejected and handled.
 
 ```
 reply "approve <version>" to the RC email

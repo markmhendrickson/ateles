@@ -42,6 +42,88 @@ def assert_allowed(command: str) -> None:
     assert proc.stdout.strip() == ""
 
 
+@pytest.mark.parametrize("writer", (
+    "cp -R source/. {target}", "cp -a source/. {target}",
+    "rsync -a source/ {target}", "mv source {target}",
+    "tar -xf archive.tar -C {target}", "unzip archive.zip -d {target}",
+    "ditto source {target}", "cpio -i -D {target}",
+))
+@pytest.mark.parametrize("target", (
+    ".git/", ".git/hooks/", ".husky/", ".", "~", "$DEST",
+))
+def test_tree_writers_refuse_protected_ancestors_and_assembled_destinations(writer, target):
+    assert_refused(writer.format(target=target))
+
+
+@pytest.mark.parametrize("writer", (
+    "cp -R source/. {target}", "cp -a source/. {target}",
+    "rsync -a source/ {target}", "mv source {target}",
+    "tar -xf archive.tar -C {target}", "unzip archive.zip -d {target}",
+    "ditto source {target}", "cpio -i -D {target}",
+))
+@pytest.mark.parametrize("target", ("src/out/", "/tmp/ateles-guard-out/"))
+def test_tree_writers_allow_unprotected_destinations(writer, target):
+    assert_allowed(writer.format(target=target))
+
+
+def test_archive_default_destination_and_list_only():
+    assert_refused("tar -xf archive.tar")
+    assert_allowed("tar -tf archive.tar")
+    assert_allowed("tar -xf archive.tar -C src/out")
+
+
+@pytest.mark.parametrize("shell", ("sh", "bash", "zsh", "dash", "ksh"))
+@pytest.mark.parametrize("body", (
+    "printf x > .git/config", "cp source .git/hooks/pre-commit",
+    "tee .husky/pre-commit", "sed -i s/a/b/ .git/config",
+    "cp -R source/. .git/",
+))
+def test_nested_shell_bodies_refuse_protected_writes(shell, body):
+    assert_refused(f'{shell} -ec "{body}"')
+
+
+@pytest.mark.parametrize("form", (
+    'eval "{body}"', 'env bash -c "{body}"',
+    'xargs sh -c "{body}"', 'find src -exec sh -c "{body}" ;',
+    "bash <<< '{body}'", "sh <<'EOF'\n{body}\nEOF",
+))
+@pytest.mark.parametrize("body", (
+    "printf x > .git/config", "cp source .git/hooks/pre-commit",
+    "tee .husky/pre-commit", "cp -R source/. .git/",
+))
+def test_other_nested_shell_forms_refuse_protected_writes(form, body):
+    assert_refused(form.format(body=body))
+
+
+@pytest.mark.parametrize("form", (
+    'bash -lc "{body}"', 'eval "{body}"', 'env sh -c "{body}"',
+    'xargs sh -c "{body}"', 'find src -exec sh -c "{body}" ;',
+    "bash <<< '{body}'", "sh <<'EOF'\n{body}\nEOF",
+))
+def test_nested_shell_forms_allow_ordinary_write(form):
+    assert_allowed(form.format(body="printf x > src/out"))
+
+
+@pytest.mark.parametrize("command", (
+    'bash -c "git status"', 'bash -c "git commit --no-verify -m x"',
+    'sh -c "$CMD"', 'python -c "open(\".git/config\", \"w\")"',
+    'perl -e "open .husky/pre-commit"', 'node -e "require(\"fs\").writeFileSync(\".git/config\", \"x\")"',
+))
+def test_nested_git_and_unparseable_programs(command):
+    if command == 'bash -c "git status"':
+        assert_allowed(command)
+    else:
+        assert_refused(command)
+
+
+def test_sourced_script_is_judged(tmp_path):
+    script = tmp_path / "guard-script.sh"
+    script.write_text("printf x > .git/config\n")
+    assert_refused(f"source {script}")
+    script.write_text("printf x > src/out\n")
+    assert_allowed(f". {script}")
+
+
 # --- the bypasses review rounds found past the denylist ---------------------
 
 # Options the shell assembles, and env -S / --split-string.

@@ -572,7 +572,7 @@ def read_replies_with_status(
             if auth_results is None:
                 saw_transport_error = True
                 transport_detail = "gws_auth_metadata_failed"
-                rejected_replies.append(ApprovalReply(mid, subject, authenticated=False))
+                unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
             if not sender_domain_authenticated(auth_results):
                 log.warning(
@@ -589,7 +589,10 @@ def read_replies_with_status(
                 continue
             body_data = gws_json(["gmail", "+read", "--id", mid, "--headers",
                                   "--format", "json"], timeout=30)
-            if body_data is None:
+            if not isinstance(body_data, dict) or not any(
+                isinstance(body_data.get(key), str) and body_data[key].strip()
+                for key in ("body_text", "body", "text", "plain", "body_html", "snippet")
+            ):
                 saw_transport_error = True
                 transport_detail = "gws_read_failed"
                 unreadable_replies.append(ApprovalReply(mid, subject))
