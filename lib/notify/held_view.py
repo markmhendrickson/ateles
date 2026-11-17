@@ -100,10 +100,13 @@ def snapshot_path(main: Path) -> Path:
 def file_lock(lock_path: Path, blocking: bool = True, fail_open: bool = True):
     """flock a sidecar file; yields True to proceed, False if busy.
 
-    Fail-open: any locking error yields True, because a notification must
-    never crash or hang its caller. A blocking wait is bounded for the same
-    reason. Non-blocking returns False only when another process holds it.
+    Fail-open by default: any locking error yields True, because a
+    notification must never crash or hang its caller. A blocking wait is
+    bounded for the same reason. Non-blocking returns False only when another
+    process holds it. With ``fail_open=False`` (single-owner sends), a lock
+    that cannot be taken yields False instead, and the caller retries later.
     """
+    action = "proceeding unlocked" if fail_open else "not proceeding; retried later"
     fd = None
     held = False
     busy = False
@@ -124,13 +127,13 @@ def file_lock(lock_path: Path, blocking: bool = True, fail_open: bool = True):
                             break
                         if time.monotonic() >= deadline:
                             log.warning(
-                                "[notify] lock %s busy — proceeding unlocked", lock_path
+                                "[notify] lock %s busy — %s", lock_path, action
                             )
                             break
                         time.sleep(0.02)
             except Exception as exc:  # noqa: BLE001
                 log.warning(
-                    "[notify] could not lock %s (%s) — proceeding unlocked", lock_path, exc
+                    "[notify] could not lock %s (%s) — %s", lock_path, exc, action
                 )
         yield not busy and (held or fail_open)
     finally:
