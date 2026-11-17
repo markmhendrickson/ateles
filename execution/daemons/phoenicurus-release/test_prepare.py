@@ -15,6 +15,8 @@ Run: pytest execution/daemons/phoenicurus-release/test_prepare.py -v
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 import prepare
@@ -300,7 +302,8 @@ def test_rc_email_absent_swarm_directory_uses_telegram_only(monkeypatch, tmp_pat
     assert "gws gmail +send" not in prompt
     assert "Do not run gws" in prompt
     assert "Email approval unavailable; approve through Telegram instead." in prompt
-    assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" not in prepare._agent_env()
+    chosen = prepare._agent_env()["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"]
+    assert chosen != str(tmp_path) and os.listdir(chosen) == []
 
 
 def test_rc_email_send_failure_is_in_telegram_instructions(monkeypatch, tmp_path):
@@ -440,16 +443,24 @@ def test_agent_env_maps_swarm_gws_config(monkeypatch, tmp_path):
     assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == str(tmp_path)
 
 
-def test_agent_env_invents_no_gws_config_when_unset(monkeypatch):
+def test_agent_env_blocks_default_gws_login_when_swarm_dir_absent(monkeypatch, tmp_path):
     # The mapping is the shared email_channel helper, called rather than copied.
     from lib.approval import email_channel
     assert prepare.gws_config_dir_env is email_channel.gws_config_dir_env
-    monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR", raising=False)
-    monkeypatch.delenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", raising=False)
-    env = prepare._agent_env()
-    assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" not in env
-    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", "")
-    assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" not in prepare._agent_env()
+    ambient = tmp_path / "operator-gws"
+    ambient.mkdir()
+    (ambient / "credentials.json").write_text("{}")
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", str(ambient))
+    for swarm in (None, "", str(tmp_path / "missing-swarm-dir")):
+        if swarm is None:
+            monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR", raising=False)
+        else:
+            monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", swarm)
+        chosen = prepare._agent_env()["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"]
+        # Never the ambient (operator) directory, never gws's default: an
+        # existing, empty directory, so gws has no login to send with.
+        assert chosen != str(ambient)
+        assert os.path.isdir(chosen) and os.listdir(chosen) == []
 
 
 def test_agent_env_keeps_only_needed_release_additions(monkeypatch):
@@ -459,7 +470,8 @@ def test_agent_env_keeps_only_needed_release_additions(monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/synthetic/claude")
     env = prepare._agent_env()
     assert env["PATH"] == "/synthetic/bin"
-    assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" not in env
+    assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] != "/synthetic/gws"
+    assert os.listdir(env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"]) == []
     assert env["CLAUDE_CONFIG_DIR"] == "/synthetic/claude"
 
 

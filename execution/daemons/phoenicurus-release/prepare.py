@@ -1151,7 +1151,20 @@ def _agent_env() -> dict:
     # The RC email goes out through gws as the swarm mailbox when one is
     # configured and present: never inherit the ambient operator account.
     env.pop("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", None)
-    env.update(gws_config_dir_env(require_existing=True))
+    swarm_gws = gws_config_dir_env(require_existing=True)
+    if swarm_gws:
+        env.update(swarm_gws)
+    else:
+        # No swarm mailbox: an unset variable would let gws fall back to its
+        # default login, which on the operator host is the operator's own
+        # mailbox. Point it at an empty directory so any gws call the agent
+        # makes anyway fails for want of a login rather than sending as the
+        # operator. The prompt also tells the agent not to run gws.
+        import tempfile
+
+        env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] = tempfile.mkdtemp(
+            prefix="phoenicurus-prepare-no-gws-"
+        )
 
     oauth = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
     api_key = os.environ.get("ANTHROPIC_API_KEY")
