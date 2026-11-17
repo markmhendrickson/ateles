@@ -38,6 +38,7 @@ for _p in (str(_REPO_ROOT), str(_SCRIPTS), str(_DAEMON_DIR)):
 
 import approve_pr_as_app as target  # noqa: E402
 import lens_authors  # noqa: E402
+import post_lens_verdict  # noqa: E402
 import swarm_dispatch  # noqa: E402
 from review_panel import LENSES, select_panel  # noqa: E402
 
@@ -160,6 +161,7 @@ class _FakeClient:
         workflow_runs: "list[dict] | None" = None,
         actions_status: int = 200,
         default_branch: "str | None" = BASE_REF,
+        repo_owner: "dict | None" = None,
         checks_total: "int | None" = None,
         checks_page_status: "dict[int, int] | None" = None,
         pr_mergeable: "bool | None" = True,
@@ -177,6 +179,7 @@ class _FakeClient:
         self.workflow_runs = workflow_runs or []
         self.actions_status = actions_status
         self.default_branch = default_branch
+        self.repo_owner = repo_owner if repo_owner is not None else {"login": swarm_dispatch._OPERATOR_LOGIN, "type": "User"}
         self.checks_total = checks_total
         self.checks_page_status = checks_page_status or {}
         self.check_pages: list[int] = []
@@ -271,7 +274,7 @@ class _FakeClient:
         if url == f"{target.GITHUB_API}/repos/{REPO}":
             if self.default_branch is None:
                 return _FakeResponse({"message": "Not Found"}, status_code=404)
-            return _FakeResponse({"default_branch": self.default_branch})
+            return _FakeResponse({"default_branch": self.default_branch, "owner": self.repo_owner})
         if url.endswith("/actions/runs"):
             if self.actions_status >= 400:
                 return _FakeResponse({"message": "error"}, status_code=self.actions_status)
@@ -3010,7 +3013,7 @@ class TestOnlySwarmAuthoredLensCommentsAreRead:
         def _boom():
             raise RuntimeError("identity source unreadable")
 
-        monkeypatch.setattr(target, "lens_comment_authors", _boom)
+        monkeypatch.setattr(target, "lens_comment_authors_resolution", _boom)
         code, client = await self._run(monkeypatch, _all_clear_comments(ALL_FOUR), lenses=ALL_FOUR)
         assert code == 1
         assert client.posted == []
@@ -5063,6 +5066,66 @@ class TestRoundCap:
         assert code == 1 and client.posted == []
         assert "round order indeterminate" in capsys.readouterr().out
 
+    async def test_poster_preserves_return_episode_and_approval_refuses_fifth_round(
+        self, monkeypatch, capsys
+    ):
+        class GitHubComments:
+            def __init__(self):
+                self.head = ROUND_HEADS[0]
+                self.comments = []
+                self.methods = []
+
+            def get(self, url, headers=None, params=None):
+                if url.endswith(f"/pulls/{PR}"):
+                    return _FakeResponse({"state": "open", "merged_at": None, "head": {"sha": self.head}})
+                if url.endswith(f"/issues/{PR}/comments"):
+                    return _FakeResponse(self.comments if (params or {}).get("page", 1) == 1 else [])
+                if "/issues/comments/" in url:
+                    return _FakeResponse(next(row for row in self.comments if str(row["id"]) == url.rsplit("/", 1)[1]))
+                raise AssertionError(url)
+
+            def post(self, url, headers=None, json=None):
+                self.methods.append("POST")
+                row = _comment(100 + len(self.comments), json["body"])
+                self.comments.append(row)
+                return _FakeResponse(row, 201)
+
+            def patch(self, url, headers=None, json=None):
+                self.methods.append("PATCH")
+                row = next(row for row in self.comments if str(row["id"]) == url.rsplit("/", 1)[1])
+                row["body"] = json["body"]
+                return _FakeResponse(row)
+
+        github = GitHubComments()
+        identity = post_lens_verdict.Identity("synthetic-token", SWARM_LOGIN, "test")
+        sequence = [
+            (ROUND_HEADS[0], "BLOCKED"),
+            (ROUND_HEADS[1], "SIGNED_OFF"),
+            (ROUND_HEADS[0], "BLOCKED"),
+            (ROUND_HEADS[2], "BLOCKED"),
+            (HEAD, "SIGNED_OFF"),
+        ]
+        for index, (head, verdict) in enumerate(sequence):
+            github.head = head
+            body = f"**🤖 Pavo — Ateles swarm, pm review**\n**{verdict}**\n"
+            post_lens_verdict.post_verdict(
+                github, repo=REPO, pr=PR, lens="pm", body_text=body,
+                expected_head=head, identity=identity,
+            )
+            if index == 0:
+                post_lens_verdict.post_verdict(
+                    github, repo=REPO, pr=PR, lens="pm", body_text=body,
+                    expected_head=head, identity=identity,
+                )
+        assert github.methods == ["POST", "PATCH", "POST", "POST", "POST", "POST"]
+        assert len(github.comments) == 5
+        records = swarm_dispatch.lens_records(github.comments)
+        assert [record.head for record in records["pm"]] == [head for head, _ in sequence]
+        comments = github.comments + _all_clear_comments(ALL_FOUR)
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 1 and client.posted == []
+        assert "round 5 of 3" in capsys.readouterr().out
+
 
 def _operator_override(id_=1200, *, author=None, reason="The review has exceeded the cap for a documented reason.",
                        edited=False, other_pr=False, bot=False):
@@ -5163,12 +5226,67 @@ class TestRoundCapOverride:
         with pytest.raises(TypeError):
             await target.run(REPO, PR, ALL_FOUR, apply=False, override_round_cap=True)
 
+    async def test_environment_cannot_redefine_repository_owner(self, monkeypatch):
+        monkeypatch.setenv("APIS_OPERATOR_LOGIN", OTHER_LOGIN)
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        code, client = await self._run(monkeypatch, comments + [_operator_override(author=OTHER_LOGIN)])
+        assert code == 1 and client.posted == []
+
+    async def test_organization_owner_has_no_override(self, monkeypatch, capsys):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        client = _FakeClient(comments=comments + [_operator_override()], check_runs=_green_checks(),
+                             repo_owner={"login": swarm_dispatch._OPERATOR_LOGIN, "type": "Organization"})
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        assert await target.run(REPO, PR, ALL_FOUR, apply=True) == 1
+        assert client.posted == [] and "organization-owned" in capsys.readouterr().out
+
+    async def test_unreadable_owner_has_no_override(self, monkeypatch, capsys):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        client = _FakeClient(comments=comments + [_operator_override()], check_runs=_green_checks(),
+                             repo_owner={})
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        assert await target.run(REPO, PR, ALL_FOUR, apply=True) == 1
+        assert client.posted == [] and "override unavailable" in capsys.readouterr().out
+
     async def test_override_does_not_lift_blocking_lens(self, monkeypatch):
         comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
         comments += [_operator_override(), _comment(1100,
             _lens_comment_body("pm", target.LENS_AGENTS["pm"], verdict="BLOCKED"))]
         code, client = await self._run(monkeypatch, comments)
         assert code == 1 and client.posted == []
+
+
+@pytest.mark.asyncio
+class TestPartialLensIdentityHistory:
+    _run = TestRoundCap._run
+
+    async def test_unresolved_historical_lens_refuses_clear_current_head(self, monkeypatch, capsys):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        monkeypatch.setattr(
+            target, "lens_comment_authors_resolution",
+            lambda: lens_authors.Resolution(SWARM_AUTHORS, ("the account behind PAVO_AGENT_PAT",)),
+        )
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 1 and client.posted == []
+        assert "round order indeterminate: lens identity unresolved for pm" in capsys.readouterr().out
+
+    async def test_complete_resolution_preserves_existing_clear_path(self, monkeypatch):
+        monkeypatch.setattr(
+            target, "lens_comment_authors_resolution",
+            lambda: lens_authors.Resolution(SWARM_AUTHORS),
+        )
+        code, client = await self._run(monkeypatch, _all_clear_comments(ALL_FOUR))
+        assert code == 0 and len(client.posted) == 1
+
+    async def test_valid_owner_override_can_lift_unknown_history(self, monkeypatch):
+        monkeypatch.setattr(
+            target, "lens_comment_authors_resolution",
+            lambda: lens_authors.Resolution(SWARM_AUTHORS, ("the account behind PAVO_AGENT_PAT",)),
+        )
+        code, client = await self._run(monkeypatch, _all_clear_comments(ALL_FOUR) + [_operator_override()])
+        assert code == 0 and len(client.posted) == 1
 
 
 # ── Approval tool fails closed on an unreadable review scope (ateles#1674) ──
@@ -5579,9 +5697,9 @@ class TestRateLimitOnTheUrllibPaths:
 
         def _resolve():
             lens_authors._note_rate_limit("GitHub rate limit hit (core): resets 2027-01-15.")
-            return frozenset()
+            return lens_authors.Resolution(frozenset())
 
-        monkeypatch.setattr(target, "lens_comment_authors", _resolve)
+        monkeypatch.setattr(target, "lens_comment_authors_resolution", _resolve)
         try:
             with pytest.raises(target.GitHubRateLimited) as ei:
                 await target.run(REPO, PR, ALL_FOUR, apply=True)

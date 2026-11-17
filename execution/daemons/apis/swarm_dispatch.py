@@ -2635,9 +2635,13 @@ def lens_comment_authors_resolution() -> lens_authors.Resolution:
 
 
 def lens_comment_authors() -> frozenset[str]:
-    """`lens_comment_authors_resolution().authors`; empty means no comment is
-    read as a lens verdict."""
-    return lens_comment_authors_resolution().authors
+    """Admitted authors only when every configured source resolved.
+
+    Call `lens_comment_authors_resolution` where the reason for a failure is
+    needed. A partial set must never shrink historical verdicts silently.
+    """
+    resolution = lens_comment_authors_resolution()
+    return resolution.authors if resolution.complete else frozenset()
 
 
 def lens_explicit_objection(body: str, *, lens_agent: str) -> str | None:
@@ -4282,7 +4286,10 @@ def _original_lens_body(body: str) -> str:
 
 
 def lens_records(comments: list[dict]) -> dict[str, list[review_carry.LensRecord]]:
-    """Every lens verdict on the PR, per lens in comment order, at its own head.
+    """Every lens verdict comment on the PR, per lens in comment order.
+
+    Repeated lens/head pairs at different positions remain separate records;
+    only the round counter groups contiguous records for one head.
 
     The one reader both the panel dispatch and the approval gate use to decide
     what an earlier head's sign-off is: `sign_off_is_warranted` for `cleared`

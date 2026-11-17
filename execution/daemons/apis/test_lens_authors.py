@@ -159,6 +159,13 @@ class TestConfiguredIdentities:
         assert resolution.failed == ("the swarm App's bot login",)
         assert not resolution.complete
 
+    def test_partial_resolution_never_yields_a_subset_to_legacy_readers(self, monkeypatch):
+        monkeypatch.setattr(
+            sd, "lens_comment_authors_resolution",
+            lambda: lens_authors.Resolution(frozenset({SWARM}), ("the account behind PAVO_AGENT_PAT",)),
+        )
+        assert sd.lens_comment_authors() == frozenset()
+
     def test_a_complete_resolution_needs_an_identity_and_no_failed_source(self):
         assert lens_authors.Resolution(frozenset({SWARM})).complete
         assert not lens_authors.Resolution(frozenset()).complete

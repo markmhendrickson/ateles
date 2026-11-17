@@ -57,11 +57,10 @@ who commented (`approve_pr_as_app._check_approver_identities`), and a comment is
 not a push, so "approval of the most recent reviewable push" is unaffected.
 Only a PR the App itself opened is refused, as it should be.
 
-Idempotent: one verdict comment per (identity, lens, head). A second post for
-the same head edits that comment in place instead of adding a duplicate (the
-contract `harness_lens_runner.post_verdict` follows). Two or more existing
-matches are refused rather than guessed between. The comment is read back and
-must match what was sent.
+An unchanged-head retry edits the existing comment only while it remains the
+latest lens verdict on the PR. Once another verdict is posted, a return to the
+same head creates a new comment, preserving each review episode in history.
+The marker format is unchanged. The comment is read back and must match.
 
 This tool never prints, logs, or writes a token or key. Exit 0: posted (or
 dry run clear). Exit 1: refused or failed, nothing posted unless the output
@@ -316,19 +315,17 @@ def _comments(client: httpx.Client, repo: str, pr: int, identity: Identity) -> l
 
 
 def _existing_for_head(comments: list[dict], *, login: str, marker: str) -> dict | None:
-    matches = [
-        c
-        for c in comments
-        if str(((c.get("user") or {}).get("login")) or "").casefold() == login.casefold()
-        and (str(c.get("body") or "").splitlines() or [""])[0].strip() == marker
-    ]
-    if len(matches) > 1:
-        ids = ", ".join(str(c.get("id")) for c in matches)
-        raise Refusal(
-            f"{len(matches)} comments by {login} already carry {marker} ({ids}); "
-            "refusing to choose one to edit"
-        )
-    return matches[0] if matches else None
+    # GitHub's issue comments API returns creation order, including across
+    # pages. Only the final verdict can be retried without rewriting history.
+    for comment in reversed(comments):
+        first = (str(comment.get("body") or "").splitlines() or [""])[0].strip()
+        if not swarm_dispatch._LENS_MARKER_RE.search(str(comment.get("body") or "")):
+            continue
+        if (first == marker and
+                str(((comment.get("user") or {}).get("login")) or "").casefold() == login.casefold()):
+            return comment
+        return None
+    return None
 
 
 def post_verdict(
@@ -342,7 +339,7 @@ def post_verdict(
     identity: Identity,
     dry_run: bool = False,
 ) -> str:
-    """Validate, then post (or edit in place) the lens verdict. Returns a result line."""
+    """Validate, then post a new episode or edit the latest verdict retry."""
     pr_data = _fetch_pr(client, repo, pr, identity)
     state = str(pr_data.get("state") or "").lower()
     if state != "open" or pr_data.get("merged_at"):

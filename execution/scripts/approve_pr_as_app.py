@@ -146,9 +146,11 @@ all-clear episode continues the round. Verdicts are ordered by UTC creation
 time, integer comment id, then source order. Missing or malformed timestamps,
 or timestamp ties without usable comment ids, refuse approval because the
 round order is unknown. The cap uses the whole PR history. A
-fourth round is refused unless the operator posted an unedited,
+fourth round is refused unless the repository's human owner posted an unedited,
 PR-specific `/override-round-cap` comment with a reason of at least 20
-characters. The override lifts only this cap; every other gate still binds.
+characters. `APIS_OPERATOR_LOGIN` is not authority for this override. A
+partial lens identity resolution makes round order indeterminate; a valid
+override lifts only this uncertainty or the cap. Every other gate still binds.
 
 Usage:
     python3 execution/scripts/approve_pr_as_app.py --repo <owner/name> --pr <n> \\
@@ -263,13 +265,12 @@ from swarm_dispatch import (  # noqa: E402
     _reviewer_app_private_key_pem,
     body_has_blocking_findings,
     compose_lens_review_marker,
-    lens_comment_authors,
+    lens_comment_authors_resolution,
     lens_explicit_objection,
     lens_own_verdict,
     lens_records,
     output_has_blocking_verdict,
     sign_off_is_warranted,
-    _OPERATOR_LOGIN,
 )
 
 # lens short-name -> owning agent, mirroring review_panel.LENSES. Imported by
@@ -509,6 +510,43 @@ async def _fetch_pr(client: httpx.AsyncClient, repo: str, pr: int) -> dict:
     resp = await client.get(f"{GITHUB_API}/repos/{repo}/pulls/{pr}", headers=_github_headers(repo))
     resp.raise_for_status()
     return resp.json() or {}
+
+
+async def _repository_operator(client: httpx.AsyncClient, repo: str) -> tuple[str, str]:
+    """Read the PR repository's human owner from GitHub, never caller config.
+
+    `APIS_OPERATOR_LOGIN` is useful elsewhere but cannot confer override
+    authority. An unreadable owner or organization disables the override.
+    """
+    try:
+        resp = await client.get(f"{GITHUB_API}/repos/{repo}", headers=_github_headers(repo))
+        resp.raise_for_status()
+        owner = (resp.json() or {}).get("owner") or {}
+    except Exception:  # noqa: BLE001 — an unknown owner cannot authorize
+        return "", "repository owner could not be read"
+    if owner.get("type") != "User":
+        return "", "repository owner is not a User; organization-owned repositories have no override"
+    login = owner.get("login")
+    if not isinstance(login, str) or not login:
+        return "", "repository owner login could not be read"
+    return login, ""
+
+
+def _unresolved_lens_reason(resolution: lens_authors.Resolution) -> str:
+    """Name every unresolved source, including the lens behind an agent PAT."""
+    failures = list(resolution.failed)
+    if getattr(resolution, "partial", False) and not failures:
+        failures.append("partial identity resolution")
+    if not failures:
+        failures.append("no complete identity resolution")
+    named = []
+    for failure in failures:
+        lens = next(
+            (lens for lens, agent in LENS_AGENTS.items() if f"{agent.upper()}_AGENT_PAT" in failure),
+            "swarm",
+        )
+        named.append(f"{lens} ({failure})")
+    return "round order indeterminate: lens identity unresolved for " + ", ".join(named)
 
 
 async def _fetch_issue_comments(client: httpx.AsyncClient, repo: str, pr: int) -> list[dict]:
@@ -2536,10 +2574,10 @@ async def run(
         # identity wrote it (`lens_authors`; fails closed). Resolved once for
         # the whole run so every read below agrees.
         try:
-            authors = await asyncio.to_thread(lens_comment_authors)
+            resolution = await asyncio.to_thread(lens_comment_authors_resolution)
         except Exception as exc:  # noqa: BLE001 — unreadable identities admit nobody
-            print(f"lens comment identities unreadable ({exc.__class__.__name__})")
-            authors = frozenset()
+            resolution = lens_authors.Resolution(frozenset(), (f"lookup raised {exc.__class__.__name__}",))
+        authors = resolution.authors
         _limit_notice = lens_authors.rate_limit_notice()
         if _limit_notice:
             raise GitHubRateLimited(_limit_notice)
@@ -2552,8 +2590,16 @@ async def run(
             lens_records(lens_authors.scope_lens_comments(comments, authors)),
             head_sha,
         )
-        override = review_rounds.operator_override(comments, _OPERATOR_LOGIN, repo, pr) if rounds.capped else None
+        identity_gap = not resolution.complete or bool(getattr(resolution, "partial", False))
+        owner_login, owner_error = (await _repository_operator(client, repo)
+                                    if rounds.capped or identity_gap else ("", ""))
+        override = (review_rounds.operator_override(comments, owner_login, repo, pr)
+                    if owner_login and (rounds.capped or identity_gap) else None)
         print(rounds.describe())
+        if identity_gap:
+            print(_unresolved_lens_reason(resolution))
+        if owner_error:
+            print(f"round-cap override unavailable: {owner_error}")
         if override:
             print(
                 f"round cap OVERRIDDEN by the operator ({override['html_url']})\n"
@@ -2647,7 +2693,7 @@ async def run(
             and no_non_required_blocks
             and not unadmitted
             and checks_green
-            and (not rounds.refused or override is not None)
+            and (not rounds.refused and not identity_gap or override is not None)
         )
 
         print(f"head_sha={head_sha}")
@@ -2661,7 +2707,7 @@ async def run(
         print(
             "round cap: "
             + (f"OVERRIDDEN by the operator ({override['html_url']})" if override
-               else "INDETERMINATE (refusing)" if rounds.indeterminate_head
+               else "INDETERMINATE (refusing)" if rounds.indeterminate_head or identity_gap
                else "REACHED (split or cut scope)" if rounds.refused else "OK")
         )
         print(f"overall: {'PASS' if overall_pass else 'FAIL'}")
@@ -2703,8 +2749,10 @@ async def run(
 
         if override:
             fresh_comments = await _fetch_issue_comments(client, repo, pr)
-            fresh_override = review_rounds.operator_override(fresh_comments, _OPERATOR_LOGIN, repo, pr)
-            if fresh_override != override:
+            fresh_owner, fresh_owner_error = await _repository_operator(client, repo)
+            fresh_override = (review_rounds.operator_override(fresh_comments, fresh_owner, repo, pr)
+                              if fresh_owner and not fresh_owner_error else None)
+            if fresh_owner != owner_login or fresh_override != override:
                 print("refusing to approve: operator round-cap override changed or vanished. Submitting nothing.")
                 return 1
 

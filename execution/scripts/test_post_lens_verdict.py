@@ -90,10 +90,21 @@ class _Client:
     def _write(self, method, url, headers, json):
         self._note(headers)
         self.writes.append((method, url, json))
+        comment_id = int(url.rsplit("/", 1)[1]) if method == "PATCH" else 555 + len(self.writes)
         self._last = {
-            "id": 555, "body": json["body"], "html_url": f"https://github.com/{REPO}/pull/{PR}#issuecomment-555",
+            "id": comment_id, "body": json["body"],
+            "html_url": f"https://github.com/{REPO}/pull/{PR}#issuecomment-{comment_id}",
             "user": {"login": self.author_login},
+            "created_at": f"2026-11-17T00:00:{len(self.comments):02d}Z",
         }
+        if method == "POST":
+            self.comments.append(self._last)
+        else:
+            for index, row in enumerate(self.comments):
+                if row.get("id") == comment_id:
+                    self._last["created_at"] = row.get("created_at", self._last["created_at"])
+                    self.comments[index] = self._last
+                    break
         return _Resp(self._last, self.post_status)
 
     def post(self, url, headers=None, json=None):
@@ -270,12 +281,17 @@ def test_a_second_post_for_the_same_head_edits_in_place(monkeypatch, tmp_path, c
     assert "edited:" in capsys.readouterr().out
 
 
-def test_two_existing_matches_are_refused(monkeypatch, tmp_path):
+def test_two_existing_matches_form_history_and_a_new_episode(monkeypatch, tmp_path):
     marker = swarm_dispatch.compose_lens_review_marker("arch", HEAD)
-    rows = [{"id": i, "body": marker + "\nold\n", "user": {"login": APP_LOGIN}} for i in (41, 42)]
+    rows = [{"id": 41, "body": marker + "\nold\n", "user": {"login": APP_LOGIN}},
+            {"id": 42, "body": swarm_dispatch.compose_lens_review_marker("pm", OTHER_HEAD),
+             "user": {"login": APP_LOGIN}},
+            {"id": 43, "body": marker + "\nold again\n", "user": {"login": APP_LOGIN}},
+            {"id": 44, "body": swarm_dispatch.compose_lens_review_marker("qa", OTHER_HEAD),
+             "user": {"login": APP_LOGIN}}]
     client = _Client(comments=rows)
-    assert _run(monkeypatch, tmp_path, client) == 1
-    assert client.writes == []
+    assert _run(monkeypatch, tmp_path, client) == 0
+    assert client.writes[0][0] == "POST"
 
 
 def test_another_accounts_comment_is_not_edited(monkeypatch, tmp_path):

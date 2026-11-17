@@ -1,7 +1,9 @@
 """Count review rounds from ordered episodes of author-scoped lens verdicts.
 
 Contiguous verdicts for one head form an episode; returning to that head after
-another head forms another episode. An episode after a blocking or unreadable
+another head forms another episode because the poster keeps the return as a
+new comment. Repeated lens/head comments at different history positions remain
+distinct records. An episode after a blocking or unreadable
 episode starts a round, while an episode after an all-clear one stays in the
 same round. Timestamp ties use integer GitHub comment ids, then source order.
 Missing timestamps or ids needed to resolve a tie make order indeterminate and
