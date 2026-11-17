@@ -863,6 +863,14 @@ def test_malformed_journal_entry_replaced_on_retryable_send(tmp_path, entry):
     n = _notifier(tmp_path, NO_SILENCE, sent)
     key = "provider-usage-threshold:cursor:50"
     n._dedupe_path.write_text(json.dumps({key: entry}))
+    if isinstance(entry, dict) and entry.get("handler") == 7:
+        n._digest_path.write_text(json.dumps([entry["held_message"]]))
+        assert not n.send("usage crossed", Priority.WARN, handler="apis",
+                          dedupe_key=key, retryable=True)
+        assert n.flush_digest()
+        assert len(sent) == 1
+        assert n._dedupe_journal[key]["state"] == "delivered"
+        return
     assert n.send("usage crossed", Priority.WARN, handler="apis",
                   dedupe_key=key, retryable=True)
     assert len(sent) == 1

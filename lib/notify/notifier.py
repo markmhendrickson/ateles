@@ -875,6 +875,18 @@ class Notifier:
         entry = self._dedupe_journal.get(key)
         if entry is None:
             return False
+        if isinstance(entry, dict) and entry.get("state") == "held" \
+                and isinstance(entry.get("held_message"), str) \
+                and not isinstance(entry.get("handler", ""), str):
+            def normalize_held(journal: dict[str, Any]) -> bool:
+                current = journal.get(key)
+                if not isinstance(current, dict) or current.get("state") != "held":
+                    return False
+                journal[key] = {**current, "handler": ""}
+                return True
+            if not self._update_dedupe_journal(normalize_held):
+                return False
+            entry = self._dedupe_journal.get(key)
         if not isinstance(entry, dict) or not isinstance(entry.get("handler", ""), str):
             self.release_dedupe(key)
             return False
