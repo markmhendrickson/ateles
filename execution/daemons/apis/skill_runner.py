@@ -4162,6 +4162,7 @@ async def _run_skill_once(
                 codex_outer_sandboxed=codex_outer_sandboxed,
                 delivery=fly_delivery,
                 neotoma_tools_granted=bool(allowed_mcp_servers(agent_def.tools)),
+                neotoma_tool_grant=allowed_mcp_servers(agent_def.tools),
                 # A read-only check keeps the local contract but takes the
                 # read-class Fly token: the delivery contract would make
                 # build_job refuse it (no delivery plan) and send it home.

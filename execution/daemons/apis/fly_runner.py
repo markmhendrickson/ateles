@@ -2102,6 +2102,7 @@ class FlyJob:
     # "proxy" when the CLI's Neotoma MCP server is the runner's loopback
     # signing proxy (run_job.py signs each request with the role's key).
     neotoma_mcp: str = ""
+    neotoma_tool_allowlist: tuple[str, ...] | str | None = None
     probe_env_names: list[str] = field(default_factory=list)
     # Claude's system prompt, shipped as a job file instead of an argument.
     system_prompt: str = field(repr=False, default="")
@@ -2134,15 +2135,44 @@ def login_machine_setting(provider: str) -> str:
     return f"APIS_FLY_{provider.upper()}_MACHINE_ID"
 
 
-def runner_argv(provider: str, cmd: list[str], mcp_config_path: str | None) -> list[str]:
+def runner_argv(provider: str, cmd: list[str], mcp_config_path: str | None, *,
+                codex_neotoma_proxy: bool = False,
+                codex_enabled_tools: tuple[str, ...] | None = None) -> list[str]:
     """The local argv rewritten for the runner image: the binary by name, and
     the Mac's temporary MCP config path (which may name the shared bearer)
-    replaced by a placeholder ``run_job.py`` fills from the role's own token."""
+    replaced by a placeholder ``run_job.py`` fills from the role's own token.
+
+    ``codex_neotoma_proxy``: give a codex job the runner's loopback signing
+    proxy as its Neotoma MCP server, through ``-c`` config overrides (Codex
+    has no ``--mcp-config``). ``codex_enabled_tools`` is the role's grant
+    (``None`` for the server's whole tool set)."""
     argv = [RUNNER_BINARIES[provider], *cmd[1:]]
     slot = mcp_config_slot(argv, mcp_config_path)
     if slot is not None:
         argv[slot] = MCP_CONFIG_PLACEHOLDER
+    if codex_neotoma_proxy:
+        if provider != "codex" or argv[1:2] != ["exec"]:
+            raise FlyIneligible("the codex command is not the expected shape for Neotoma tools")
+        argv = [*argv[:2], *codex_neotoma_proxy_overrides(codex_enabled_tools), *argv[2:]]
     return argv
+
+
+def codex_neotoma_proxy_overrides(enabled_tools: tuple[str, ...] | None) -> list[str]:
+    """The ``-c`` overrides declaring Codex's Neotoma MCP server on Fly. The
+    URL is the placeholder, which ``run_job.py`` fills with the loopback
+    signing proxy (``CODEX_PROXY_URL_KEY``), so no credential is ever in argv.
+    The rest mirrors the Mac's isolated Codex config: the role's tool grant,
+    prompt approval by default and only the known reads preapproved."""
+    from skill_runner import _codex_read_approvals
+
+    server = f"mcp_servers.{CODEX_NEOTOMA_SERVER}"
+    out = ["-c", MCP_CONFIG_PLACEHOLDER, "-c", f"{server}.required=true"]
+    if enabled_tools is not None:
+        out += ["-c", f"{server}.enabled_tools={json.dumps(list(enabled_tools))}"]
+    out += ["-c", f'{server}.default_tools_approval_mode="prompt"']
+    for tool in _codex_read_approvals(enabled_tools):
+        out += ["-c", f'{server}.tools.{tool}.approval_mode="approve"']
+    return out
 
 
 def mcp_config_slot(argv: list[str], mcp_config_path: str | None) -> int | None:
@@ -2159,8 +2189,14 @@ def mcp_config_slot(argv: list[str], mcp_config_path: str | None) -> int | None:
 
 # Providers whose CLI reaches Neotoma on Fly through the runner's loopback
 # signing proxy when the role ships its AAuth key (no static bearer is ever
-# minted for it). Codex and Cursor have no per-run MCP config path.
-FLY_NEOTOMA_PROXY_PROVIDERS = frozenset({"claude"})
+# minted for it). Claude takes it through ``--mcp-config``, Codex through
+# ``-c mcp_servers...`` overrides. Cursor stays refused: it cannot deny a
+# single MCP tool.
+FLY_NEOTOMA_PROXY_PROVIDERS = frozenset({"claude", "codex"})
+# Codex's Neotoma MCP server id (skill_runner.CODEX_NEOTOMA_SERVER_ID; a test
+# asserts equality) and the override key run_job.py fills with the proxy URL.
+CODEX_NEOTOMA_SERVER = "mcpsrv_neotoma"
+CODEX_PROXY_URL_KEY = f"mcp_servers.{CODEX_NEOTOMA_SERVER}.url"
 
 # Providers whose seated, read-only run may go to Fly with no Neotoma tools.
 # Cursor stays on the Mac (it cannot deny a single MCP tool).
@@ -2371,6 +2407,7 @@ def build_job(
     config: FlyConfig | None = None,
     delivery: dict | None = None,
     neotoma_tools_granted: bool = False,
+    neotoma_tool_grant: dict | None = None,
     github_delivery_contract: bool = False,
     github_read_only: bool = False,
     default_timeout: int | None = None,
@@ -2385,7 +2422,11 @@ def build_job(
 
     ``delivery``: a builder's delivery spec (``DELIVERY_SPEC_KEYS``). The job
     then carries no read-class token; a delivery token for the one repository
-    is minted at launch instead, and never reaches the CLI."""
+    is minted at launch instead, and never reaches the CLI.
+
+    ``neotoma_tool_grant``: the role's ``allowed_mcp_servers`` grant. A codex
+    job given Neotoma tools needs it to carry the role's tool allowlist; when
+    it is absent the job is refused rather than given the whole tool set."""
     from skill_runner import neotoma_token_env_name
 
     config = config or FlyConfig.from_env()
@@ -2518,7 +2559,20 @@ def build_job(
         raise FlyIneligible(
             "a job that delivers to GitHub needs a delivery plan and the PR-opener "
             "token; it cannot run on Fly without one")
-    argv = runner_argv(provider, cmd, mcp_config_path)
+    codex_proxy = bool(provider == "codex" and jwk_text and neotoma_tools_granted
+                       and not owns_pending_gate)
+    codex_tools: tuple[str, ...] | None = None
+    if codex_proxy:
+        grant = neotoma_tool_grant if isinstance(neotoma_tool_grant, dict) else {}
+        if CODEX_NEOTOMA_SERVER not in grant:
+            raise FlyIneligible(
+                f"role {role!r} is granted Neotoma tools but its codex tool grant was not "
+                "provided")
+        codex_tools = grant[CODEX_NEOTOMA_SERVER]
+        if codex_tools is not None:
+            codex_tools = tuple(codex_tools)
+    argv = runner_argv(provider, cmd, mcp_config_path, codex_neotoma_proxy=codex_proxy,
+                       codex_enabled_tools=codex_tools)  # fmt: skip
     if owns_pending_gate:
         argv = without_neotoma_mcp(provider, argv)
     argv, system_prompt = externalize_system_prompt(provider, argv)
@@ -2555,6 +2609,8 @@ def build_job(
         neotoma_tools_unavailable=bool(neotoma_tools_granted and not own_token
                                        and not neotoma_mcp),
         neotoma_mcp=neotoma_mcp,
+        neotoma_tool_allowlist=(codex_tools if codex_tools is not None else "all"
+                               ) if codex_proxy else None,
         probe_env_names=probe,
         system_prompt=system_prompt,
         delivery=delivery,
@@ -2624,6 +2680,8 @@ def job_files(job: FlyJob, config: FlyConfig) -> list[dict]:
         "neotoma_base_url": job.neotoma_base_url,
         "probe_env_names": job.probe_env_names,
         **({"neotoma_mcp": job.neotoma_mcp} if job.neotoma_mcp else {}),
+        **({"neotoma_tool_allowlist": job.neotoma_tool_allowlist}
+           if job.provider == "codex" and job.neotoma_mcp == "proxy" else {}),
         **({"delivery": job.delivery} if job.delivery is not None else {}),
     }
     if job.provider == "claude" and job.login:
