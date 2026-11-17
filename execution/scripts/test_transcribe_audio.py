@@ -917,6 +917,219 @@ def test_no_speech_marker_is_not_run_through_stutter_cleanup(tmp_path, monkeypat
     assert result["silence"] is True
 
 
+def _stub_chunked_local_memo(monkeypatch, tmp_path, *, chunks, segments=None):
+    """Stub whisper binaries and the chunker so a long mono memo runs locally."""
+    import chunked_whisper as cw
+    import local_whisper as lw
+
+    model = tmp_path / lw.DEFAULT_MODEL_NAME
+    model.write_bytes(b"x")
+    monkeypatch.setattr(lw, "resolve_whisper_cli", lambda env=None: "/bin/true")
+    monkeypatch.setattr(lw, "resolve_ffmpeg", lambda env=None: "/bin/true")
+    monkeypatch.setattr(lw, "resolve_model_path", lambda env=None: model)
+    monkeypatch.setattr(lw, "measure_sustained_rms_db", lambda *_a, **_k: -30.0)
+    def fake_convert(audio_path, dest_dir, **_kw):
+        wav = Path(dest_dir) / "x.16k.wav"
+        wav.write_bytes(b"RIFF")
+        return wav
+
+    monkeypatch.setattr(lw, "convert_to_wav16k_mono", fake_convert)
+    monkeypatch.setattr(
+        lw, "_wav_duration_seconds", lambda _wav: cw.CHUNK_SECONDS + 1.0
+    )
+    monkeypatch.setattr(
+        cw,
+        "whisper_cli_asr",
+        lambda *_a, **_k: lambda *_a, **_k: pytest.fail(
+            "fake chunker unexpectedly ran ASR"
+        ),
+    )
+    monkeypatch.setattr(
+        cw,
+        "transcribe_track",
+        lambda *_a, **_k: {
+            "segments": list(segments or []),
+            "chunks": list(chunks),
+        },
+    )
+    monkeypatch.setattr(ta, "get_audio_channel_count", lambda _: 1)
+    monkeypatch.setattr(ta, "get_audio_duration", lambda _: 121.0)
+    monkeypatch.setenv("RECORD_MEETING_DIARIZE", "0")
+
+
+def test_all_withheld_chunked_memo_keeps_rejected_text_in_raw_response(
+    tmp_path, monkeypatch
+):
+    """Non-diarized memo: every chunk withheld → markers + text in raw_response."""
+    _stub_chunked_local_memo(
+        monkeypatch,
+        tmp_path,
+        chunks=[
+            {
+                "kind": "chunk",
+                "index": 0,
+                "start": 0.0,
+                "end": 121.0,
+                "status": "screened: repeated_phrase",
+                "reason": "repeated_phrase",
+                "detail": "synthetic loop",
+                "withheld_text": "loop loop loop",
+            }
+        ],
+    )
+    audio = tmp_path / "all-withheld.m4a"
+    audio.write_bytes(b"x")
+
+    result = ta.transcribe_audio_file(audio, backend="local", use_diarization=False)
+
+    assert "[SPEECH WITHHELD" in result["transcription_text"]
+    assert "raw_response" in result
+    chunk = result["raw_response"]["chunks"][0]
+    assert chunk["status"] == "screened: repeated_phrase"
+    assert chunk["withheld_text"] == "loop loop loop"
+    assert chunk["reason"] == "repeated_phrase"
+    ta._validate_transcription_result(result, paired=False)
+
+
+def test_mixed_kept_and_withheld_chunked_memo_keeps_rejected_text_in_raw_response(
+    tmp_path, monkeypatch
+):
+    """Non-diarized memo: kept + withheld chunks both reach stored raw_response."""
+    _stub_chunked_local_memo(
+        monkeypatch,
+        tmp_path,
+        segments=[{"start": 0.0, "end": 2.0, "text": "Usable opening."}],
+        chunks=[
+            {
+                "kind": "chunk",
+                "index": 0,
+                "start": 0.0,
+                "end": 120.0,
+                "status": "ok",
+            },
+            {
+                "kind": "chunk",
+                "index": 1,
+                "start": 120.0,
+                "end": 121.0,
+                "status": "screened: foreign_diacritic",
+                "reason": "foreign_diacritic",
+                "detail": "unexpected language",
+                "withheld_text": "rejected words",
+            },
+        ],
+    )
+    audio = tmp_path / "mixed.m4a"
+    audio.write_bytes(b"x")
+
+    result = ta.transcribe_audio_file(audio, backend="local", use_diarization=False)
+
+    assert "Usable opening." in result["transcription_text"]
+    assert "[SPEECH WITHHELD" in result["transcription_text"]
+    chunks = result["raw_response"]["chunks"]
+    assert chunks[0]["status"] == "ok"
+    assert chunks[1]["status"] == "screened: foreign_diacritic"
+    assert chunks[1]["withheld_text"] == "rejected words"
+    ta._validate_transcription_result(result, paired=False)
+
+
+def test_stored_chunk_evidence_with_seam_records_validates(tmp_path, monkeypatch):
+    """The chunker's seam records survive storage and pass the result contract."""
+    _stub_chunked_local_memo(
+        monkeypatch,
+        tmp_path,
+        segments=[{"start": 0.0, "end": 2.0, "text": "Usable opening."}],
+        chunks=[
+            {"kind": "chunk", "index": 0, "start": 0.0, "end": 120.0, "status": "ok"},
+            {"kind": "chunk", "index": 1, "start": 120.0, "end": 121.0,
+             "status": "screened: foreign_diacritic", "reason": "foreign_diacritic",
+             "detail": "unexpected language", "withheld_text": "rejected words"},
+            {"kind": "seam", "at": 120.0, "replaced": False},
+        ],
+    )
+    audio = tmp_path / "seam.m4a"
+    audio.write_bytes(b"x")
+
+    result = ta.transcribe_audio_file(audio, backend="local", use_diarization=False)
+
+    assert result["raw_response"]["chunks"][2] == {
+        "kind": "seam", "at": 120.0, "replaced": False,
+    }
+    ta._validate_transcription_result(result, paired=False)
+    broken = json.loads(json.dumps(result))
+    del broken["raw_response"]["chunks"][1]["withheld_text"]
+    with pytest.raises(Exception, match="withheld chunk keeps its text and reason"):
+        ta._validate_transcription_result(broken, paired=False)
+
+
+_SIDECAR_RESULT = {
+    "transcription_text": "Usable opening.",
+    "raw_response": {"chunks": [{
+        "kind": "chunk", "index": 0, "start": 0.0, "end": 121.0,
+        "status": "screened: repeated_phrase", "reason": "repeated_phrase",
+        "detail": "synthetic loop", "withheld_text": "withheld private words",
+    }]},
+}
+
+
+def _sidecar_paths(audio):
+    return (audio.with_suffix(audio.suffix + ".transcript.txt"),
+            audio.with_suffix(audio.suffix + ".stt_raw.json"))
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_sidecars_are_no_broader_than_a_private_recording(tmp_path, replace):
+    """A 0600 recording yields 0600 sidecars, fresh or replacing a 0644 one."""
+    audio = tmp_path / "private.m4a"
+    audio.write_bytes(b"synthetic")
+    audio.chmod(0o600)
+    old_umask = os.umask(0o022)
+    try:
+        if replace:
+            for path in _sidecar_paths(audio):
+                path.write_text("stale", encoding="utf-8")
+                path.chmod(0o644)
+        ta._write_transcript_sidecars(audio, _SIDECAR_RESULT)
+    finally:
+        os.umask(old_umask)
+    txt, raw = _sidecar_paths(audio)
+    assert txt.stat().st_mode & 0o777 == 0o600
+    assert raw.stat().st_mode & 0o777 == 0o600
+    assert txt.read_text(encoding="utf-8") == "Usable opening."
+    assert "withheld private words" in raw.read_text(encoding="utf-8")
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(
+        [audio.name, txt.name, raw.name])
+
+
+def test_sidecars_follow_a_group_readable_recording_mode(tmp_path):
+    audio = tmp_path / "shared.m4a"
+    audio.write_bytes(b"synthetic")
+    audio.chmod(0o640)
+    ta._write_transcript_sidecars(audio, _SIDECAR_RESULT)
+    for path in _sidecar_paths(audio):
+        assert path.stat().st_mode & 0o777 == 0o640
+
+
+def test_sidecars_fall_back_to_0600_when_the_recording_mode_is_unreadable(
+    tmp_path, monkeypatch
+):
+    audio = tmp_path / "unreadable.m4a"
+    audio.write_bytes(b"synthetic")
+    audio.chmod(0o644)
+    real_stat = os.stat
+
+    def fake_stat(path, *args, **kwargs):
+        if Path(path) == audio:
+            raise PermissionError("synthetic")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(ta.os, "stat", fake_stat)
+    ta._write_transcript_sidecars(audio, _SIDECAR_RESULT)
+    monkeypatch.undo()
+    for path in _sidecar_paths(audio):
+        assert path.stat().st_mode & 0o777 == 0o600
+
+
 @pytest.mark.parametrize('store_only', [False, True])
 def test_denied_store_recovers_cached_pair_without_asr(tmp_path, monkeypatch, store_only):
     audio = tmp_path / 'sample remote.wav'

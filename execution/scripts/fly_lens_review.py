@@ -78,6 +78,15 @@ DEFAULT_POST = SCRIPT_DIR / "post_lens_verdict.py"
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 VERDICT_RE = re.compile(r"^\*\*(SIGNED_OFF|APPROVE|BLOCKED|REQUEST_CHANGES)\*\*\s*$")
+# A lens header written with a colon after the name instead of the contract's
+# dash (`**🤖 Pavo: Ateles swarm, pm lens panelist**`). The model avoids em
+# dashes by house style, so it writes this shape; the gate reader
+# (`swarm_dispatch._OWN_HEADER_RE`) accepts dashes only. Name and role follow
+# that pattern's groups, with the colon excluded from the name.
+COLON_HEADER_RE = re.compile(
+    r"^\*\*🤖\s*(?P<name>[^\s:—–-](?:[^:—–\-\n]*[^\s:—–\-\n])?)\s*:\s*Ateles swarm,"
+    r"\s*(?P<role>\S(?:[^\n]*?\S)?)\s*\*\*\s*$"
+)
 # A deterministic refusal at the router: do not retry, fall back at once.
 REFUSAL_HINTS = ("refus", "not eligible", "not pinnable", "no provider", "headroom")
 QUEUE_HINTS = ("queue", "waited", "wait ")
@@ -249,7 +258,9 @@ of the repository, not from the PR). Apply its review criteria.
   recorded privately." and give the details only in your final reply.
 
 ## Output (your entire reply is the verdict body)
-- Line 1: your attribution header, e.g. `**🤖 {role.capitalize()} — Ateles swarm, {lens} lens panelist**`
+- Line 1: your attribution header, e.g. `**🤖 {role.capitalize()} — Ateles swarm, {lens} lens panelist**`.
+  The separator after your name must be the dash character shown (—), not a
+  colon or any other character.
 - Line 2: one verdict token in bold: `**SIGNED_OFF**` (`**APPROVE**` for the
   security lens) if you approve, or `**BLOCKED**` if any finding must be fixed
   before merge.
@@ -319,6 +330,22 @@ def extract_verdict(stdout: str) -> str | None:
     return None
 
 
+def normalize_header(body: str, *, role: str) -> str:
+    """Rewrite a colon-separated line 1 into the contract's dash form.
+
+    Only line 1 changes, and only when it is this lens's own header in the
+    colon shape (`**🤖 <Name>: Ateles swarm, <role>**` with <Name> equal to
+    *role*). A header naming another agent, or any other line, is left as
+    it is, so the gate reader still refuses it. Every byte after line 1 is
+    kept.
+    """
+    first, sep, rest = body.partition("\n")
+    m = COLON_HEADER_RE.match(first)
+    if not m or m.group("name").strip().lower() != role.strip().lower():
+        return body
+    return f"**🤖 {m.group('name')} — Ateles swarm, {m.group('role')}**{sep}{rest}"
+
+
 def classify_failure(env: dict[str, Any]) -> str:
     """'deterministic', 'refusal', 'queue', or 'mechanical' (retry once)."""
     text = " ".join(str(env.get(k, "")) for k in ("reason", "error", "stderr")).lower()
@@ -364,6 +391,7 @@ def run_lens(*, lens: str, repo: str, pr: int, head: str, task_entity_id: str,
         if env.get("ok"):
             body = extract_verdict(str(env.get("stdout", "")))
             if body is not None:
+                body = normalize_header(body, role=role)
                 path = out_dir / f"{lens}.verdict.md"
                 path.write_text(body)
                 token = VERDICT_RE.search(body.splitlines()[1]).group(1)  # type: ignore[union-attr]

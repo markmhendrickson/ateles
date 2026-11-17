@@ -84,13 +84,21 @@ def has_repeat_loop(text: str) -> bool:
     return collapse_repeats(text)[1] > 0
 
 
-def whisper_cli_asr(cli: str, model: Path, *, threads: int | None = None) -> AsrFn:
+def whisper_cli_asr(
+    cli: str,
+    model: Path,
+    *,
+    threads: int | None = None,
+    initial_prompt: str | None = None,
+) -> AsrFn:
     """Real ASR: one whisper-cli process per call, timed segments from its JSON."""
 
     def run(wav: Path, language: str | None, extra: list[str]) -> tuple[list[dict], str | None]:
         stem = wav.with_suffix(".asr")
         cmd = [cli, "-m", str(model), "-f", str(wav), "--output-json", "--output-file", str(stem),
                "--no-prints", "-l", language or "auto", *extra]
+        if initial_prompt:
+            cmd += ["--prompt", initial_prompt]
         if threads and threads > 0:
             cmd += ["-t", str(threads)]
         proc = run_guarded(cmd, timeout=WHISPER_CALL_TIMEOUT_SECONDS)
@@ -99,7 +107,10 @@ def whisper_cli_asr(cli: str, model: Path, *, threads: int | None = None) -> Asr
             tail = ((proc.stderr or "").strip().splitlines() or [""])[-1][:200]
             raise RuntimeError(f"whisper-cli failed (exit {proc.returncode}): {tail}")
         data = json.loads(out.read_text(encoding="utf-8"))
-        return timed_segments_from_json(data), detected_language_from_json(data)
+        return (
+            timed_segments_from_json(data, source=out),
+            detected_language_from_json(data),
+        )
 
     return run
 

@@ -396,3 +396,63 @@ def test_unreadable_list_runs_every_requirable_lens_the_runner_has():
     want = review_panel.every_requirable_lens() & f.LENS_ROLES.keys()
     assert set(got) == set(want) | set(f.LENS_ORDER)
     assert "legal" in got
+
+
+# --------------------------------------------------------------------------
+# Colon-separated header from a Fly lens run (2026-11-16)
+# --------------------------------------------------------------------------
+COLON = "**\U0001F916 Pavo: Ateles swarm, pm lens panelist**"
+REST = "\n**SIGNED_OFF**\n\nFine: no change needed — see `a: b`.\n"
+
+
+def _swarm_dispatch():
+    apis = Path(__file__).resolve().parent.parent / "daemons" / "apis"
+    if str(apis) not in sys.path:
+        sys.path.insert(0, str(apis))
+    import swarm_dispatch
+    return swarm_dispatch
+
+
+def test_colon_header_normalized_and_accepted_by_gate_reader(tmp_path):
+    sd = _swarm_dispatch()
+    # the reply as the Fly run returned it is refused by the gate reader
+    assert (sd.describe_gate_verdict_position(COLON + REST, lens_agent="pavo")
+            == "first line is not the lens header")
+    d = Script(ok_env(COLON + REST))
+    rc, _ = run(tmp_path, d, "--post")
+    assert rc == 0
+    body = (tmp_path / "pm.verdict.md").read_text()
+    assert body.splitlines()[0] == "**\U0001F916 Pavo — Ateles swarm, pm lens panelist**"
+    assert sd.lens_own_verdict(body, lens_agent="pavo") == "signed_off"
+    assert (sd.describe_gate_verdict_position(body, lens_agent="pavo")
+            == "the reply carries a second header or a second verdict line")
+
+
+def test_colon_header_naming_another_agent_is_not_rewritten(tmp_path):
+    sd = _swarm_dispatch()
+    other = "**\U0001F916 Waxwing: Ateles swarm, pm lens panelist**" + REST
+    assert f.normalize_header(other, role="pavo") == other
+    d = Script(ok_env(other))
+    run(tmp_path, d)
+    body = (tmp_path / "pm.verdict.md").read_text()
+    assert body == other
+    assert sd.lens_own_verdict(body, lens_agent="pavo") is None
+    assert (sd.describe_gate_verdict_position(body, lens_agent="pavo")
+            == "first line is not the lens header")
+
+
+def test_colon_header_normalization_keeps_rest_byte_identical():
+    out = f.normalize_header(COLON + REST, role="pavo")
+    first, _, rest = out.partition("\n")
+    assert first == "**\U0001F916 Pavo — Ateles swarm, pm lens panelist**"
+    assert "\n" + rest == REST
+    # a dash header and any later colon line are left untouched
+    assert f.normalize_header(GOOD, role="pavo") == GOOD
+    later = GOOD + COLON + "\n"
+    assert f.normalize_header(later, role="pavo") == later
+
+
+def test_brief_requires_the_dash_separator(tmp_path):
+    run(tmp_path, Script(ok_env()))
+    brief = (tmp_path / "pm.brief.md").read_text()
+    assert "must be the dash character shown" in brief
