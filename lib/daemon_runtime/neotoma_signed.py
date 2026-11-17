@@ -70,11 +70,13 @@ comes from ``NEOTOMA_OPERATOR_ATTESTED_SUBS``, and swarm identities stay at
 
 from __future__ import annotations
 
+import asyncio
 import json
 import concurrent.futures
 import logging
 import multiprocessing
 import os
+import random
 import re
 import signal
 import subprocess
@@ -85,7 +87,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable, Mapping
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -594,6 +596,222 @@ def signed_request(
     return result
 
 
+# ── Bounded retry for signed requests ────────────────────────────────────────
+#
+# The hosted instance occasionally refuses a signed request while it is busy:
+# its admission lookup fails transiently, and proxies in front of it return the
+# odd 502/503. A repeat with the SAME idempotency key and body succeeds. This is
+# the one place that decides whether, and when, a signed request is repeated;
+# :func:`signed_request_with_retry` and :class:`NeotomaWriter` both use it.
+# Rule: a failure that left no effect is retried with backoff, and one that
+# states its own retry time is deferred to it (docs/foundation/failure_posture.md,
+# rule 8).
+
+ADMISSION_UNAVAILABLE = "ADMISSION_UNAVAILABLE"
+AUTH_REQUIRED = "AUTH_REQUIRED"
+_RETRYABLE_STATUSES = frozenset({502, 503})
+
+
+def response_error_code(data: object) -> "str | None":
+    """The error code a Neotoma error body names, in any of its shapes; None if none."""
+    if isinstance(data, (str, bytes)):
+        try:
+            data = json.loads(data) if data else None
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(data, Mapping):
+        return None
+    error = data.get("error")
+    candidates = (
+        data.get("error_code"),
+        data.get("code"),
+        error.get("code") if isinstance(error, Mapping) else error,
+    )
+    for value in candidates:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _retry_after_seconds(value: object) -> "float | None":
+    """A ``Retry-After`` value in seconds (delta-seconds form only); None if unusable."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        seconds = float(str(value).strip())
+    except ValueError:
+        return None  # an HTTP-date is not honoured; the normal backoff applies
+    return seconds if seconds >= 0 and seconds == seconds and seconds != float("inf") else None
+
+
+def _body_retry_after(data: object) -> "float | None":
+    """A retry time the error body states (``retry_after`` seconds), when the
+    transport does not surface the header (the signing helper returns no headers)."""
+    if not isinstance(data, Mapping):
+        return None
+    error = data.get("error")
+    for src in (data, error if isinstance(error, Mapping) else None):
+        if isinstance(src, Mapping) and "retry_after" in src:
+            return _retry_after_seconds(src.get("retry_after"))
+    return None
+
+
+def _has_idempotency_key(body: object) -> bool:
+    key = body.get("idempotency_key") if isinstance(body, Mapping) else None
+    return isinstance(key, str) and bool(key.strip())
+
+
+@dataclass(frozen=True)
+class SignedRetryPolicy:
+    """How a signed request that the server briefly refused is repeated.
+
+    At most ``max_attempts`` attempts in total, jittered exponential backoff
+    capped at ``max_delay_s``, a stated ``Retry-After`` honoured up to
+    ``retry_after_cap_s``, and no attempt starting more than ``total_bound_s``
+    after the first or after the caller's deadline.
+    """
+
+    max_attempts: int = 3
+    base_delay_s: float = 0.5
+    max_delay_s: float = 4.0
+    retry_after_cap_s: float = 10.0
+    total_bound_s: float = 20.0
+    # Transition measure: until the server change that answers a failed
+    # admission lookup with 503 ADMISSION_UNAVAILABLE is deployed everywhere,
+    # the same transient failure still reads as 401 AUTH_REQUIRED ("Missing
+    # Bearer token") on a signed request. It is repeated ONCE; a second 401 is
+    # a real refusal and goes back to the caller. Remove when every instance
+    # answers 503 for this case.
+    auth_required_retries: int = 1
+
+    def repeatable(self, method: str, body: object) -> bool:
+        """Only a GET, or a write that carries an idempotency key, is safe to repeat."""
+        if str(method or "").upper() == "GET":
+            return True
+        return _has_idempotency_key(body)
+
+    def begin(self, method: str, body: object, *, deadline: "float | None" = None,
+              clock: Any = None, rng: Any = None, label: str = "") -> "_SignedRetry":
+        return _SignedRetry(self, self.repeatable(method, body), deadline,
+                            clock or time.monotonic, rng, label)
+
+
+DEFAULT_SIGNED_RETRY_POLICY = SignedRetryPolicy()
+
+
+class _SignedRetry:
+    """One logical request's retry state under a :class:`SignedRetryPolicy`."""
+
+    def __init__(self, policy, repeatable, deadline, clock, rng, label):
+        self.policy = policy
+        self.repeatable = repeatable
+        self.deadline = deadline
+        self.clock = clock
+        self.rng = rng or random.random
+        self.label = label
+        self.started = clock()
+        self.attempt = 1
+        self.auth_retries = 0
+
+    def next_delay(self, status: "int | None", error_code: "str | None",
+                   retry_after: "float | None" = None) -> "float | None":
+        """The delay before the next attempt, or None when the answer stands.
+
+        Logs one line per retry with the status, error code and attempt number,
+        never a body, header, signature or token.
+        """
+        if not self.repeatable or self.attempt >= self.policy.max_attempts:
+            return None
+        stated = None
+        if status == 503 and error_code == ADMISSION_UNAVAILABLE:
+            stated = retry_after
+        elif status in _RETRYABLE_STATUSES:
+            pass
+        elif status == 401 and error_code == AUTH_REQUIRED \
+                and self.auth_retries < self.policy.auth_required_retries:
+            self.auth_retries += 1
+        else:
+            return None
+        backoff = min(self.policy.max_delay_s,
+                      self.policy.base_delay_s * (2 ** (self.attempt - 1)))
+        delay = backoff * (0.5 + 0.5 * self.rng())  # jitter within [backoff/2, backoff]
+        if stated is not None:
+            delay = min(max(stated, 0.0), self.policy.retry_after_cap_s)
+        start_at = self.clock() + delay
+        if start_at > self.started + self.policy.total_bound_s:
+            return None
+        if self.deadline is not None and start_at >= self.deadline:
+            return None
+        self.attempt += 1
+        log.warning(
+            "signed request%s: HTTP %s code=%s; retrying as attempt %d/%d in %.2fs "
+            "with the same idempotency key",
+            f" {self.label}" if self.label else "", status, error_code or "-",
+            self.attempt, self.policy.max_attempts, delay,
+        )
+        return delay
+
+
+def signed_request_with_retry(
+    method: str,
+    url: str,
+    body: "dict | None" = None,
+    agent_name: str = "",
+    timeout: float = 20,
+    *,
+    sub: "str | None" = None,
+    deadline: float | None = None,
+    cancelled: Any = None,
+    clock: Any = None,
+    principal_pin: "PrincipalPin | None" = None,
+    policy: "SignedRetryPolicy | None" = None,
+    sleep: Any = None,
+    rng: Any = None,
+) -> "tuple[int, dict]":
+    """:func:`signed_request`, repeated under :class:`SignedRetryPolicy`.
+
+    Every attempt sends the same body (so the same idempotency key) and is a
+    fresh signature under one :class:`PrincipalPin` (the caller's, or one made
+    here for this logical request), so an attempt that resolves a different
+    principal fails with ``identity_changed``. No attempt starts at or after
+    ``deadline``. Returns the last ``(status, body)``; an error that is not a
+    retryable server answer propagates unchanged.
+    """
+    policy = policy or DEFAULT_SIGNED_RETRY_POLICY
+    clock = clock or time.monotonic
+    sleep = sleep or time.sleep
+    pin = principal_pin if principal_pin is not None else PrincipalPin()
+    retry = policy.begin(method, body, deadline=deadline, clock=clock, rng=rng,
+                         label=f"{str(method).upper()} {_url_path(url)}")
+    while True:
+        try:
+            status, data = signed_request(
+                method, url, body, agent_name=agent_name, timeout=timeout, sub=sub,
+                deadline=deadline, cancelled=cancelled, clock=clock, principal_pin=pin,
+            )
+        except SignedRequestError as exc:
+            # A proxy's 502/503 is usually an HTML page: the helper reports it as
+            # a received, non-JSON response carrying its status.
+            if not (exc.response_received is True and exc.http_status in _RETRYABLE_STATUSES):
+                raise
+            delay = retry.next_delay(exc.http_status, None)
+            if delay is None:
+                raise
+        else:
+            delay = retry.next_delay(status, response_error_code(data), _body_retry_after(data))
+            if delay is None:
+                return status, data
+        sleep(delay)
+
+
+def _url_path(url: str) -> str:
+    """The path of ``url`` only, for a log line: never its query string."""
+    try:
+        return urlsplit(str(url)).path or "/"
+    except ValueError:
+        return "/"
+
+
 # ── Signed write client (ateles#1270 step 2a) ────────────────────────────────
 
 SWARM_SUB_SUFFIX = "@ateles-swarm"
@@ -1091,6 +1309,7 @@ class NeotomaWriter:
         bearer: "str | None" = None,
         keys_dir: "str | Path | None" = None,
         timeout: float = 15.0,
+        retry_policy: "SignedRetryPolicy | None" = None,
     ) -> None:
         name = str(agent_name or "").strip().lower()
         if not name:
@@ -1105,6 +1324,9 @@ class NeotomaWriter:
         self._bearer = bearer if bearer is not None else os.environ.get(_BEARER_ENV)
         self._keys_dir = keys_dir
         self.timeout = timeout
+        self.retry_policy = retry_policy or DEFAULT_SIGNED_RETRY_POLICY
+        self._sleep = time.sleep
+        self._asleep = asyncio.sleep
         self._signer: "HttpSigSigner | None" = None
 
     # ── request construction (shared by the sync and async paths) ──
@@ -1225,6 +1447,35 @@ class NeotomaWriter:
                 reason=f"could not sign ({exc})",
             )
 
+    # ── bounded retry of a briefly refused signed write ──
+
+    def _begin_retry(self, path: str, body: dict) -> "_SignedRetry":
+        return self.retry_policy.begin("POST", body, label=f"{self.sub} /{_write_path(path)}")
+
+    @staticmethod
+    def _retry_delay(retry: "_SignedRetry", attempt: _Attempt, resp: Any) -> "float | None":
+        """Delay before repeating a SIGNED attempt the server briefly refused, else None.
+
+        Only signed attempts are repeated here; a bearer write keeps its single
+        attempt. :class:`SignedRetryPolicy` refuses a write without an
+        idempotency key.
+        """
+        if not attempt.signed:
+            return None
+        return retry.next_delay(
+            resp.status_code,
+            response_error_code(resp.text),
+            _retry_after_seconds(resp.headers.get("retry-after")),
+        )
+
+    def _resigned(self, attempt: _Attempt) -> _Attempt:
+        """The same write, same body and idempotency key, under a fresh signature.
+
+        The signer is loaded once per writer, so every attempt signs as the same
+        principal with the same key.
+        """
+        return self._signed_attempt(attempt.path, attempt.body, attempt.governance)
+
     def _after_response(
         self, attempt: _Attempt, status: int, text: str
     ) -> "WriteResult | _Attempt":
@@ -1272,8 +1523,14 @@ class NeotomaWriter:
                     types[eid] = await self._alookup_type(client, eid)
             referenced = [(types[eid], fld) for eid, fld in ids]
             attempt = self._first_attempt(path, body, entity_types, referenced)
+            retry = self._begin_retry(path, body)
             while True:
                 resp = await client.post(attempt.url, headers=attempt.headers, content=attempt.content)
+                delay = self._retry_delay(retry, attempt, resp)
+                if delay is not None:
+                    await self._asleep(delay)
+                    attempt = self._resigned(attempt)
+                    continue
                 nxt = self._after_response(attempt, resp.status_code, resp.text)
                 if isinstance(nxt, WriteResult):
                     return nxt
@@ -1343,8 +1600,14 @@ class NeotomaWriter:
                     types[eid] = self._lookup_type(client, eid)
             referenced = [(types[eid], fld) for eid, fld in ids]
             attempt = self._first_attempt(path, body, entity_types, referenced)
+            retry = self._begin_retry(path, body)
             while True:
                 resp = client.post(attempt.url, headers=attempt.headers, content=attempt.content)
+                delay = self._retry_delay(retry, attempt, resp)
+                if delay is not None:
+                    self._sleep(delay)
+                    attempt = self._resigned(attempt)
+                    continue
                 nxt = self._after_response(attempt, resp.status_code, resp.text)
                 if isinstance(nxt, WriteResult):
                     return nxt
