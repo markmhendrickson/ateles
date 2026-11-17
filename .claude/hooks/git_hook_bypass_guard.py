@@ -871,6 +871,39 @@ def _enters_protected_dir(path: str) -> bool:
                for form in forms)
 
 
+_DIRECT_WRITERS = frozenset({"tee", "sed", "cp", "mv", "ln", "install", "rsync",
+                             "rm", "touch", "truncate", "chmod", "chown", "mkdir", "dd"})
+
+
+def _wrapped_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None:
+    """A writer reached past a wrapper's own options, or under an assembled name.
+
+    Prefix stripping removes a wrapper word but not the wrapper's own options
+    or operands (a nice priority, a timeout duration, a lock file), and
+    wrappers this guard does not list (setsid, ionice, chroot) take their own
+    arguments too. So unless the command only reads, every later writer word
+    is judged as if it were the command. A command name the shell assembles
+    cannot be known, so it may not take a protected path as an argument.
+    """
+    if not words:
+        return None
+    head = words[0]
+    if head.expanded or head.braced or head.globbed:
+        for w in words[1:]:
+            if not w.expanded and (_protected_path(w.text) or _enters_protected_dir(w.text)):
+                return f"a command name assembled by the shell, given protected path {w.text}"
+        return None
+    if os.path.basename(head.text) in _GIT_WORD_READERS:
+        return None
+    for j in range(1, len(words)):
+        w = words[j]
+        if not w.expanded and os.path.basename(w.text) in (_DIRECT_WRITERS | {"cd", "pushd"}):
+            hit = _direct_write_violation(cmd, words[j:])
+            if hit:
+                return hit
+    return None
+
+
 def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None:
     for op, target in cmd.redirects:
         if ">" in op and (target.expanded or target.write_glob
@@ -879,9 +912,7 @@ def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None
     if not words:
         return None
     base = os.path.basename(words[0].text)
-    writers = {"tee", "sed", "cp", "mv", "ln", "install", "rsync",
-               "rm", "touch", "truncate", "chmod", "chown", "mkdir", "dd"}
-    if base in writers or base in {"cd", "pushd"}:
+    if base in _DIRECT_WRITERS or base in {"cd", "pushd"}:
         if any(w.expanded or w.write_glob
                for w in words[1:]):
             return f"{base} target assembled by shell expansion"
@@ -956,7 +987,8 @@ def _is_git_binary_word(text: str) -> bool:
 
 def command_violation(cmd: SimpleCommand, whole_mentions_git: bool) -> str | None:
     words = list(cmd.words)
-    hit = _direct_write_violation(cmd, _strip_command_prefix(words, wrappers=True))
+    stripped = _strip_command_prefix(words, wrappers=True)
+    hit = _direct_write_violation(cmd, stripped) or _wrapped_write_violation(cmd, stripped)
     if hit:
         return hit
     words = _strip_command_prefix(words, assignments=False)

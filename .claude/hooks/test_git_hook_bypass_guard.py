@@ -504,6 +504,50 @@ def test_prefixed_writers_allow_ordinary_literal_targets(prefix, writer):
     assert_allowed(f"{prefix} {writer}")
 
 
+# A wrapper's own options and operands, and wrappers the guard does not list,
+# sit between the wrapper and the writer, so prefix stripping alone misses it.
+WRAPPED_PREFIXES = (
+    "env -i", "env -u NAME", "env -i NAME=1", "nice -n 5", "command -p", "time -p",
+    "timeout 5", "flock /tmp/lockfile", "stdbuf -o L", "setsid", "ionice -c 3",
+    "chroot /", "sudo -u someone",
+)
+
+
+@pytest.mark.parametrize("prefix", WRAPPED_PREFIXES)
+@pytest.mark.parametrize("target", (".git/config", ".git/con*", "$TARGET"))
+@pytest.mark.parametrize("writer", (
+    "tee {target}", "cp source {target}", "mv source {target}",
+    "sed -i s/a/b/ {target}", "install source {target}", "cd {target}",
+))
+def test_writers_behind_wrapper_options_refuse_protected_targets(prefix, target, writer):
+    assert_refused(f"{prefix} {writer.format(target=target)}")
+
+
+@pytest.mark.parametrize("prefix", WRAPPED_PREFIXES)
+@pytest.mark.parametrize("writer", (
+    "tee src/output", "cp source src/output", "mv source src/output",
+    "sed -i s/a/b/ src/output", "install source src/output", "cd src",
+))
+def test_writers_behind_wrapper_options_allow_ordinary_targets(prefix, writer):
+    assert_allowed(f"{prefix} {writer}")
+
+
+@pytest.mark.parametrize("name", ("$WRITER", '"$WRITER"', "${WRITER}", "$(which tee)", "`which tee`"))
+@pytest.mark.parametrize("target", (".git/config", ".git/hooks/pre-commit", ".husky/pre-commit", ".git"))
+def test_assembled_command_name_may_not_take_protected_path(name, target):
+    assert_refused(f"{name} {target}")
+
+
+@pytest.mark.parametrize("name", ("$WRITER", '"$WRITER"'))
+def test_assembled_command_name_with_ordinary_path_allowed(name):
+    assert_allowed(f"{name} src/output")
+
+
+@pytest.mark.parametrize("reader", ("cat", "grep x", "head -1", "ls"))
+def test_readers_naming_a_writer_word_are_not_refused(reader):
+    assert_allowed(f"{reader} tee .git/config")
+
+
 @pytest.mark.parametrize("path", PROTECTED_PATHS)
 def test_plain_read_of_hook_or_config_allowed(path):
     assert_allowed(f"cat {path}")
