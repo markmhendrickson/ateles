@@ -491,13 +491,14 @@ class _FakeProxyModule:
 
     def __init__(self, health=None, port=43210):
         self.health, self.port = health, port
-        self.constructed, self.stopped, self.signs = [], [], []
+        self.constructed, self.stopped, self.signs, self.allowed_tools = [], [], [], []
         module = self
 
         class Proxy:
             def __init__(self, upstream_base, sign, *, allowed_peer_uid=None, **kw):
                 module.constructed.append((upstream_base, allowed_peer_uid))
                 module.signs.append(sign)
+                module.allowed_tools.append(kw.get("allowed_tools"))
 
             def start(self):
                 return module.port
@@ -666,6 +667,26 @@ def _assert_role_signed(request: dict, jwk: dict, authority: str) -> None:
 
 
 class TestNeotomaProxyJob:
+    @pytest.mark.parametrize("grant,expected", [
+        (["retrieve_entities", "store"], ("retrieve_entities", "store")),
+        (None, None),
+    ])
+    def test_job_grant_is_carried_to_proxy_constructor(self, tmp_path, monkeypatch, grant, expected):
+        job_dir = tmp_path / "job"
+        spec = {"neotoma_mcp": "proxy", "provider": "codex"}
+        if grant is not None:
+            spec["neotoma_tool_allowlist"] = grant
+        _write_job(job_dir, secrets={"NEOTOMA_AAUTH_PRIVATE_JWK": "synthetic-key"}, spec=spec)
+        job = run_job.load_job(job_dir)
+        module = _FakeProxyModule()
+        _use_proxy(monkeypatch, module)
+        monkeypatch.setattr(run_job, "_role_signer", lambda job: type(
+            "Signer", (), {"sign_headers": lambda self, **kw: {}})())
+        proxy, port, problem = run_job.start_neotoma_proxy(job, _CHILD_IDENT)
+        assert problem == "" and port == module.port and proxy is not None
+        assert module.allowed_tools == [expected]
+        proxy.stop()
+
     def test_a_request_through_the_configured_url_reaches_neotoma_role_signed(
             self, tmp_path, monkeypatch):
         """The job's own proxy start and CLI config, end to end: a request sent

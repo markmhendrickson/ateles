@@ -183,6 +183,10 @@ def _safe_reason(reason) -> str:
     return "unrecognized"
 
 
+def _invalid_json_constant(value: str):
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
 def health_check(
     upstream_base: str,
     sign: Signer,
@@ -274,6 +278,7 @@ class NeotomaSigningProxy:
         *,
         connect: Optional[Callable[[], http.client.HTTPConnection]] = None,
         allowed_peer_uid: Optional[int] = None,
+        allowed_tools: Optional[Sequence[str]] = None,
         allow_any_peer_for_tests: bool = False,
     ) -> None:
         parts = _parse_upstream_base(upstream_base)
@@ -283,6 +288,7 @@ class NeotomaSigningProxy:
         self.upstream_url = upstream_base + MCP_PATH
         self._sign = sign
         self.allowed_peer_uid = allowed_peer_uid
+        self.allowed_tools = frozenset(allowed_tools) if allowed_tools is not None else None
         if connect is None:
             host, port = parts.hostname, parts.port
 
@@ -395,6 +401,19 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             if len(body) != length:
                 return self._reject(400, method, path)
 
+        if method == "POST" and self.proxy.allowed_tools is not None:
+            try:
+                request = json.loads(body, parse_constant=_invalid_json_constant)
+            except (ValueError, UnicodeDecodeError):
+                request = None
+            if not isinstance(request, dict):
+                return self._reject_rpc(method, path, None, len(body))
+            if request.get("method") == "tools/call":
+                params = request.get("params")
+                name = params.get("name") if isinstance(params, dict) else None
+                if not isinstance(name, str) or name not in self.proxy.allowed_tools:
+                    return self._reject_rpc(method, path, request.get("id"), len(body))
+
         headers = {}
         for name in FORWARDED_REQUEST_HEADERS:
             value = self.headers.get(name)
@@ -472,6 +491,22 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             log.info("neotoma proxy %s %s client went away after %d bytes", method, path, bytes_out)
             return
         log.info("neotoma proxy %s %s %d in=%d out=%d", method, path, status, bytes_in, bytes_out)
+
+    def _reject_rpc(self, method: str, path: str, request_id, bytes_in: int) -> None:
+        if isinstance(request_id, bool) or not isinstance(request_id, (str, int, float, type(None))):
+            request_id = None
+        payload = json.dumps({
+            "jsonrpc": "2.0", "id": request_id,
+            "error": {"code": -32003, "message": "Neotoma tool not granted"},
+        }, separators=(",", ":")).encode()
+        self.close_connection = True
+        self.send_response(403)
+        self.send_header("Content-Type", DEFAULT_CONTENT_TYPE)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(payload)
+        log.info("neotoma proxy %s %s 403 in=%d out=%d", method, path, bytes_in, len(payload))
 
     def _reject(
         self,

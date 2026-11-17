@@ -604,6 +604,11 @@ def test_key_only_codex_job_gets_the_signing_proxy_through_config_overrides(
     job = _codex_neotoma_job(neotoma_tool_grant={"mcpsrv_neotoma": ("retrieve_entities", "store")})
     assert job.neotoma_mcp == "proxy" and job.neotoma_tools_unavailable is False
     assert job.neotoma_jwk_name == fly_runner.AAUTH_JWK_JOB_NAME
+    assert job.neotoma_tool_allowlist == ("retrieve_entities", "store")
+    spec = json.loads(base64.b64decode(next(
+        f["raw_value"] for f in fly_runner.job_files(job, fly_runner.FlyConfig.from_env())
+        if f["guest_path"].endswith("/job.json"))))
+    assert spec["neotoma_tool_allowlist"] == ["retrieve_entities", "store"]
     i = job.argv.index(fly_runner.MCP_CONFIG_PLACEHOLDER)
     assert job.argv[i - 1] == "-c" and job.argv[:2] == ["codex", "exec"]
     assert job.argv[-1] == "-"  # the prompt-from-stdin marker stays last
@@ -626,6 +631,10 @@ def test_codex_job_with_a_whole_server_grant_has_no_tool_allowlist(fly_env, monk
     monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
     job = _codex_neotoma_job(neotoma_tool_grant={"mcpsrv_neotoma": None})
     assert job.neotoma_mcp == "proxy"
+    spec = json.loads(base64.b64decode(next(
+        f["raw_value"] for f in fly_runner.job_files(job, fly_runner.FlyConfig.from_env())
+        if f["guest_path"].endswith("/job.json"))))
+    assert "neotoma_tool_allowlist" in spec and spec["neotoma_tool_allowlist"] is None
     assert "mcp_servers.mcpsrv_neotoma.enabled_tools" not in _codex_overrides(job.argv)
 
 

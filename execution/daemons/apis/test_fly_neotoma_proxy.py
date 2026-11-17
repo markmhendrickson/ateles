@@ -10,6 +10,7 @@ import http.client
 import importlib.util
 import io
 import json
+import logging
 import sys
 import threading
 import time
@@ -141,6 +142,103 @@ def _client(port):
 
 def _lower(headers):
     return {k.lower(): v for k, v in headers.items()}
+
+
+def _in_memory_mcp_request(body, allowed_tools):
+    sign_calls, upstream_requests = [], []
+
+    class Connection:
+        def request(self, method, path, *, body, headers):
+            upstream_requests.append((method, path, body, headers))
+
+        def getresponse(self):
+            response = http.client.HTTPResponse(_MemorySocket(
+                b'HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{"ok":true}'
+            ))
+            response.begin()
+            return response
+
+        def close(self):
+            pass
+
+    def sign(method, url, body, content_type):
+        sign_calls.append((method, url, body, content_type))
+        return dict(SIGNATURE)
+
+    proxy = neotoma_proxy.NeotomaSigningProxy(
+        UPSTREAM_BASE, sign, connect=Connection, allow_any_peer_for_tests=True,
+    )
+    proxy.allowed_tools = frozenset(allowed_tools) if allowed_tools is not None else None
+    handler = neotoma_proxy._ProxyHandler.__new__(neotoma_proxy._ProxyHandler)
+    handler.proxy = proxy
+    handler.command = "POST"
+    handler.path = "/mcp"
+    handler.headers = {"Content-Length": str(len(body)), "Content-Type": "application/json"}
+    handler.rfile = io.BytesIO(body)
+    handler.wfile = io.BytesIO()
+    handler.request_version = "HTTP/1.1"
+    handler.requestline = "POST /mcp HTTP/1.1"
+    handler.close_connection = False
+    handler._handle()
+    response = http.client.HTTPResponse(_MemorySocket(handler.wfile.getvalue()))
+    response.begin()
+    return response.status, response.read(), sign_calls, upstream_requests
+
+
+def test_proxy_constructor_preserves_tool_grant():
+    proxy = neotoma_proxy.NeotomaSigningProxy(
+        UPSTREAM_BASE, lambda *args: {}, allowed_tools=("store",),
+        allow_any_peer_for_tests=True,
+    )
+    assert proxy.allowed_tools == frozenset({"store"})
+
+
+def test_granted_tool_is_signed_and_forwarded():
+    body = b'{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"store","arguments":{}}}'
+    status, _, sign_calls, upstream_requests = _in_memory_mcp_request(body, ("retrieve_entities", "store"))
+    assert status == 200
+    assert sign_calls == [("POST", UPSTREAM_BASE + "/mcp", body, "application/json")]
+    assert upstream_requests[0][2] == body
+    assert upstream_requests[0][3]["signature"] == SIGNATURE["signature"]
+
+
+@pytest.mark.parametrize("body,request_id", [
+    (b'{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"delete_all"}}', 7),
+    (b'{"jsonrpc":"2.0","id":"case","method":"tools/call","params":{"name":"Store"}}', "case"),
+    (b'{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"store "}}', 9),
+    (b'{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{}}', 10),
+    (b'{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":42}}', 11),
+    (b'[{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"store"}}]', None),
+    (b'not-json', None),
+])
+def test_disallowed_or_unreadable_request_never_reaches_signer_or_upstream(
+    body, request_id, caplog
+):
+    caplog.set_level(logging.INFO, logger="neotoma_proxy")
+    status, payload, sign_calls, upstream_requests = _in_memory_mcp_request(
+        body, ("retrieve_entities", "store"))
+    assert status == 403
+    error = json.loads(payload)
+    assert error["jsonrpc"] == "2.0" and error["id"] == request_id
+    assert error["error"]["code"] == -32003
+    assert upstream_requests == [] and sign_calls == []
+    assert f"neotoma proxy POST /mcp 403 in={len(body)} out=" in caplog.text
+    assert body.decode() not in caplog.text
+
+
+@pytest.mark.parametrize("method", ["initialize", "tools/list"])
+def test_non_call_methods_are_forwarded_with_allowlist(method):
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method}).encode()
+    status, _, sign_calls, upstream_requests = _in_memory_mcp_request(body, ("store",))
+    assert status == 200
+    assert len(sign_calls) == 1 and upstream_requests[0][2] == body
+
+
+def test_no_allowlist_keeps_ungranted_tool_forwarding():
+    body = b'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"delete_all"}}'
+    status, _, sign_calls, upstream_requests = _in_memory_mcp_request(body, None)
+    assert status == 200
+    assert len(sign_calls) == 1 and upstream_requests[0][2] == body
 
 
 def test_requires_a_peer_uid_unless_testing():
