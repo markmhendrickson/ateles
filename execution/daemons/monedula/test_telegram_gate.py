@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import monedula  # noqa: E402
 import consent_email  # noqa: E402
+import payment_journal  # noqa: E402
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -127,6 +128,31 @@ def _install_handlers(monkeypatch, handlers):
     fake_mod = types.ModuleType("handlers")
     fake_mod.load_handlers = lambda strandings=None: handlers
     monkeypatch.setitem(sys.modules, "handlers", fake_mod)
+
+
+def _journal_failure_observers(monkeypatch: pytest.MonkeyPatch):
+    """Keep the real settlement path, while recording any attempt to reach it."""
+    handler = _RecordingHandler("therapy")
+    _install_handlers(monkeypatch, [handler])
+    polls: list[int] = []
+    resolutions: list[str] = []
+    notifications: list[str] = []
+    real_resolve = monedula._resolve_sessions
+
+    def record_resolve(triggered, state):
+        resolutions.append(state)
+        return real_resolve(triggered, state)
+
+    monkeypatch.setattr(monedula, "_resolve_sessions", record_resolve)
+    monkeypatch.setattr(
+        monedula, "_notify", lambda message, **kwargs: notifications.append(message)
+    )
+    return handler, polls, resolutions, notifications
+
+
+def _attended_therapy(polls: list[int]) -> monedula.TelegramPollResult:
+    polls.append(1)
+    return monedula.TelegramPollResult(kind="reply", text="attended therapy")
 
 
 # ── 1. Poll layer: telegram_poll_approval structured outcomes ────────────────
@@ -629,6 +655,103 @@ def test_partial_approval_executes_only_the_named_handler(
     assert any(
         m.startswith(f"📋 Monedula results for {yesterday_str}:") for m in sent_messages
     ), "a partial approval must still confirm what was paid"
+
+
+# ── Telegram journal failures hold payments at every read/write ───────────────
+
+
+def test_telegram_initial_journal_read_failure_blocks_before_preview(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
+) -> None:
+    handler, polls, resolutions, notifications = _journal_failure_observers(monkeypatch)
+    monkeypatch.setattr(
+        monedula,
+        "telegram_poll_approval",
+        lambda *a, **k: _attended_therapy(polls),
+    )
+    real_apply = monedula._apply_session_journal
+
+    def corrupt_after_session_read(triggered, *, reconcile):
+        result = real_apply(triggered, reconcile=reconcile)
+        consent_email.journal_path().write_text("{not json")
+        return result
+
+    monkeypatch.setattr(monedula, "_apply_session_journal", corrupt_after_session_read)
+
+    assert monedula.main() is False
+    assert sent_messages == []
+    assert polls == []
+    assert handler.execute_calls == []
+    assert resolutions == []
+    assert not monedula.STATE_FILE.exists()
+    assert any("payment_journal_unreadable" in msg for msg in notifications)
+
+
+def test_telegram_journal_reload_failure_blocks_before_execution(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
+) -> None:
+    handler, polls, resolutions, notifications = _journal_failure_observers(monkeypatch)
+
+    def corrupt_during_poll(*args, **kwargs):
+        consent_email.journal_path().write_text("{not json")
+        return _attended_therapy(polls)
+
+    monkeypatch.setattr(monedula, "telegram_poll_approval", corrupt_during_poll)
+
+    assert monedula.main() is False
+    assert len(polls) == 1
+    assert len(sent_messages) == 1  # preview reached, then journal reload failed
+    assert handler.execute_calls == []
+    assert resolutions == []
+    assert not monedula.STATE_FILE.exists()
+    assert any("payment_journal_unreadable" in msg for msg in notifications)
+
+
+def test_telegram_record_intent_failure_blocks_before_execution(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
+) -> None:
+    handler, polls, resolutions, notifications = _journal_failure_observers(monkeypatch)
+    monkeypatch.setattr(
+        monedula,
+        "telegram_poll_approval",
+        lambda *a, **k: _attended_therapy(polls),
+    )
+
+    def fail_intent(*args, **kwargs):
+        raise payment_journal.JournalError("intent write failed")
+
+    monkeypatch.setattr(payment_journal, "record_intent", fail_intent)
+
+    assert monedula.main() is False
+    assert len(polls) == 1
+    assert handler.execute_calls == []
+    assert resolutions == []
+    assert not monedula.STATE_FILE.exists()
+    assert any("payment_journal_unreadable" in msg for msg in notifications)
+
+
+def test_telegram_record_outcome_failure_reports_unknown_without_settlement(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
+) -> None:
+    handler, polls, resolutions, notifications = _journal_failure_observers(monkeypatch)
+    monkeypatch.setattr(
+        monedula,
+        "telegram_poll_approval",
+        lambda *a, **k: _attended_therapy(polls),
+    )
+
+    def fail_outcome(*args, **kwargs):
+        raise payment_journal.JournalError("outcome write failed")
+
+    monkeypatch.setattr(payment_journal, "record_outcome", fail_outcome)
+
+    assert monedula.main() is False
+    assert len(polls) == 1
+    assert len(handler.execute_calls) == 1
+    assert "settled" not in resolutions
+    assert not monedula.STATE_FILE.exists()
+    assert any("payment outcome UNKNOWN" in msg for msg in notifications)
+    assert any("payment_journal_unreadable" in msg for msg in notifications)
 
 
 # ── 5. Dead-gate detector ─────────────────────────────────────────────────────
