@@ -298,10 +298,11 @@ def test_agent_prompt_carries_html_email_contract(monkeypatch, tmp_path):
     # (e) The RC PR must be a real link, not a bare URL.
     assert "<a href>" in p
 
-    # (f) The machine-parsed approval token Turdus greps out of the reply.
-    #     It must survive as plain text, so it may not live only in an href.
+    # (f) The visible token enables mailbox discovery; the subject selects
+    #     the release. It must survive in the quoted plain text.
     assert "release-approve: <TAG>" in p
-    assert "NOT only inside an href" in p
+    assert "mailbox" in p and "subject" in p
+    assert "only inside an href" in p
 
 
 def _email_send_command(prompt: str) -> str:
