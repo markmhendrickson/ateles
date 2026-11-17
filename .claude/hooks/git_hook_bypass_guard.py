@@ -78,8 +78,8 @@ allowlisted environment and the release checks that run after the agent.
 There is no override. Skipping hooks has no approved form: the approved way to
 skip tests is SKIP_TESTS, which this hook does not touch.
 
-Fail-open: malformed hook input or an internal error exits 0, logged loudly to
-stderr, so a bug here never wedges the agent. A refusal exits 2.
+Fail-closed: malformed hook input, missing command data or an internal error
+denies with exit 2. Tools outside the prepare agent's guarded matcher pass.
 """
 from __future__ import annotations
 
@@ -1697,23 +1697,35 @@ def guidance(label: str) -> str:
 
 
 def main() -> int:
-    payload = read_hook_input()
-    if not payload:
-        log("FAIL-OPEN: empty or malformed hook input; nothing was judged")
-        return 0
+    try:
+        payload = read_hook_input()
+    except Exception:  # noqa: BLE001 — unreadable hook input denies
+        return deny(guidance("hook input could not be read"))
+    if not isinstance(payload, dict) or not payload:
+        return deny(guidance("hook input could not be read"))
     tool = payload.get("tool_name")
+    if tool not in {"Bash", "Edit", "Write", "MultiEdit"}:
+        return 0
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return deny(guidance("tool input is missing or malformed"))
     if tool in {"Edit", "Write", "MultiEdit"}:
-        path = (payload.get("tool_input") or {}).get("file_path")
-        if isinstance(path, str) and _protected_path(path):
-            return deny(guidance(f"{tool} writing protected hook or git config path {path}"))
+        try:
+            path = tool_input.get("file_path")
+            if not isinstance(path, str):
+                return deny(guidance("file-write path is missing or malformed"))
+            if _protected_path(path):
+                return deny(guidance(f"{tool} writing protected hook or git config path {path}"))
+        except Exception:  # noqa: BLE001 — an unjudged file write denies
+            return deny(guidance("internal guard error while judging file write"))
         return 0
-    if tool != "Bash":
-        return 0
-    command = (payload.get("tool_input") or {}).get("command")
+    command = tool_input.get("command")
     if not isinstance(command, str):
-        log("FAIL-OPEN: Bash hook input has no command string; nothing was judged")
-        return 0
-    label = find_violation(command)
+        return deny(guidance("Bash command is missing or malformed"))
+    try:
+        label = find_violation(command)
+    except Exception:  # noqa: BLE001 — an unjudged Bash command denies
+        return deny(guidance("internal guard error while judging Bash command"))
     if label is None:
         return 0
     log(f"blocking: {label}")
@@ -1723,6 +1735,5 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except Exception as exc:  # noqa: BLE001 — fail open, never wedge the agent
-        log(f"FAIL-OPEN: internal error, command not judged: {type(exc).__name__}: {exc}")
-        sys.exit(0)
+    except Exception:  # noqa: BLE001 — no exception detail in the denial
+        sys.exit(deny(guidance("internal guard error")))

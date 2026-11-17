@@ -738,18 +738,41 @@ def _affirmative_approval(body: str, target: str, *, release: bool) -> bool:
 
 def _send_approval_correction(msg: dict, notifier: Notifier, target: str,
                               exact_form: str) -> None:
-    """Explain an attempted but unrecorded approval once per reply id."""
+    """Explain a readable non-approval once per successfully notified reply id."""
     if msg.get("correction_notified"):
         return
-    authored = email_channel._authored_plain(msg.get("body", ""))
-    if not re.search(r"(?i)\bapprov(?:e|ed|al)\b", authored):
-        return
-    notifier.send(
+    delivered = notifier.send(
         f"{DAEMON_NAME}: no approval was recorded for {target}. Reply with "
         f"exactly `{exact_form}` on one line to approve it.",
-        priority=Priority.INFO, handler=DAEMON_NAME,
+        priority=Priority.BLOCKER, handler=DAEMON_NAME,
     )
-    msg["correction_notified"] = True
+    if delivered:
+        msg["correction_notified"] = True
+
+
+def _approval_target_matches(msg: dict, notifier: Notifier, subject_target: str,
+                             body: str, *, release: bool) -> bool:
+    """Bind the subject target to the token that discovered this reply."""
+    if "correlation_target" in msg:
+        token_target = msg["correlation_target"]
+    elif release:
+        token_target = _parse_release_approve_token(body)
+    else:
+        token = _parse_approve_token(body)
+        token_target = f"{token[0]}#{token[1]}" if token else None
+    if token_target == subject_target:
+        return True
+    if not msg.get("correction_notified"):
+        token_label = token_target or "missing correlation token"
+        delivered = notifier.send(
+            f"{DAEMON_NAME}: no approval was recorded for {subject_target}. "
+            f"The reply's correlation target is {token_label}; "
+            "reply to the matching approval request instead.",
+            priority=Priority.BLOCKER, handler=DAEMON_NAME,
+        )
+        if delivered:
+            msg["correction_notified"] = True
+    return False
 
 
 def _reply_says_approve(body: str, target: str = "") -> bool:
@@ -883,41 +906,48 @@ async def _maybe_handle_swarm_approval(msg: dict, notifier: Notifier) -> bool:
     if authenticated is None:
         authenticated = _approval_sender_authenticated(msg.get("id", ""))
     if not authenticated:
+        if msg.get("correction_notified"):
+            return True
         token = (_parse_approve_token(body) or _parse_approve_token(subject))
         if not token:
             match = re.search(r"\bPR\s+([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)#(\d+)", subject)
             token = (match.group(1), int(match.group(2))) if match else None
         target = f"{token[0]}#{token[1]}" if token else "this PR"
-        notifier.send(
+        delivered = notifier.send(
             f"{DAEMON_NAME}: email approval for {target} could not be accepted "
             "because the reply's sender could not be verified. Approve through "
             "the existing Telegram approval path.",
             priority=Priority.BLOCKER, handler=DAEMON_NAME,
         )
-        return True
+        if delivered:
+            msg["correction_notified"] = True
+        return delivered
     match = re.search(r"\bPR\s+([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)#(\d+)", subject)
-    token = (match.group(1), int(match.group(2))) if match else _parse_approve_token(subject)
-    if not token:
+    subject_token = (match.group(1), int(match.group(2))) if match else _parse_approve_token(subject)
+    if not subject_token:
         log.info(
             f"[{DAEMON_NAME}] operator reply matched merge-ready subject but "
             "carried no swarm-approve token — treating as a normal reply"
         )
         return False
-    if not _reply_says_approve(body, f"{token[0]}#{token[1]}"):
-        _send_approval_correction(msg, notifier, f"{token[0]}#{token[1]}", "approve")
+    target = f"{subject_token[0]}#{subject_token[1]}"
+    if not _approval_target_matches(msg, notifier, target, body, release=False):
+        return False
+    if not _reply_says_approve(body, target):
+        _send_approval_correction(msg, notifier, target, "approve")
         log.info(
-            f"[{DAEMON_NAME}] operator reply to {token[0]}#{token[1]} did not say "
+            f"[{DAEMON_NAME}] operator reply to {target} did not say "
             "APPROVE — not merging (may be a question or a hold)"
         )
         return False
 
-    repository, pr_number = token
+    repository, pr_number = subject_token
     ok = await _post_email_approval(repository, pr_number, sender_addr)
     if ok:
         notifier.send(
             f"{DAEMON_NAME}: operator emailed APPROVE for {repository}#{pr_number} "
             "→ routed to Apis merge gate.",
-            priority=Priority.INFO,
+            priority=Priority.BLOCKER,
             handler=DAEMON_NAME,
         )
         log.info(f"[{DAEMON_NAME}] email-approve routed for {repository}#{pr_number}")
@@ -1010,18 +1040,22 @@ async def _maybe_handle_release_approval(msg: dict, notifier: Notifier) -> bool:
     if authenticated is None:
         authenticated = _approval_sender_authenticated(msg.get("id", ""))
     if not authenticated:
+        if msg.get("correction_notified"):
+            return True
         version = (_parse_release_approve_token(body)
                    or _parse_release_approve_token(subject))
         if not version:
             match = re.search(r"\bRelease\s+(v[0-9][\w.+-]*)", subject, re.IGNORECASE)
             version = match.group(1) if match else "this release"
-        notifier.send(
+        delivered = notifier.send(
             f"{DAEMON_NAME}: email approval for {version} could not be accepted "
             "because the reply's sender could not be verified. Approve through "
             "the existing Telegram approval path.",
             priority=Priority.BLOCKER, handler=DAEMON_NAME,
         )
-        return True
+        if delivered:
+            msg["correction_notified"] = True
+        return delivered
     match = re.search(r"\bRelease\s+(v[0-9][\w.+-]*)", subject, re.IGNORECASE)
     version = match.group(1) if match else _parse_release_approve_token(subject)
     if not version:
@@ -1029,6 +1063,8 @@ async def _maybe_handle_release_approval(msg: dict, notifier: Notifier) -> bool:
             f"[{DAEMON_NAME}] operator reply matched release subject but carried no "
             "release-approve token — treating as a normal reply"
         )
+        return False
+    if not _approval_target_matches(msg, notifier, version, body, release=True):
         return False
     if not _reply_approves_version(body, version):
         _send_approval_correction(msg, notifier, version, f"approve {version}")
@@ -1044,7 +1080,7 @@ async def _maybe_handle_release_approval(msg: dict, notifier: Notifier) -> bool:
         notifier.send(
             f"{DAEMON_NAME}: operator emailed `approve {version}` → routed to the "
             "Apis release-publish gate.",
-            priority=Priority.INFO,
+            priority=Priority.BLOCKER,
             handler=DAEMON_NAME,
         )
         log.info(f"[{DAEMON_NAME}] release-approve routed for {version}")
@@ -1094,13 +1130,14 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
             target = match.group(1) if match else "this PR"
         if target is None:
             continue
-        notifier.send(
+        delivered = notifier.send(
             f"{DAEMON_NAME}: email approval for {target} could not be read yet. "
             "Approve through Telegram instead.",
             priority=Priority.BLOCKER, handler=DAEMON_NAME,
         )
-        unreadable_notice_ids.append(mid)
-        unreadable_notice_set.add(mid)
+        if delivered:
+            unreadable_notice_ids.append(mid)
+            unreadable_notice_set.add(mid)
     if unreadable_notice_ids != state.get("unreadable_notice_ids", []):
         state["unreadable_notice_ids"] = unreadable_notice_ids[-_MAX_PROCESSED_IDS:]
         _save_state(state)
@@ -1117,6 +1154,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
             msg = {"id": reply.message_id, "sender": OPERATOR_EMAIL,
                    "subject": reply.subject, "body": reply.body,
                    "authenticated": reply.authenticated,
+                   "correlation_target": reply.correlation_target,
                    "correction_notified": reply.message_id in correction_id_set}
             try:
                 if await _maybe_handle_release_approval(msg, notifier) or await _maybe_handle_swarm_approval(msg, notifier):

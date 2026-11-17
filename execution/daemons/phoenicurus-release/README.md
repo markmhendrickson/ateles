@@ -39,6 +39,10 @@ that feed git to a shell. Program text the guard cannot inspect is refused.
 An earlier denylist was bypassed in each of three review rounds, which is why
 the guard now allows a known surface instead. It is a tripwire, not a
 sandbox: the guarded command is not an operating-system confinement boundary.
+For Bash, Edit, Write and MultiEdit calls, malformed or empty hook input,
+missing command or file path, and an internal judgement error are refused with
+exit 2 and a fixed denial reason. Other tool names pass through; the prepare
+daemon's `--settings` matcher invokes the guard only for those four tools.
 
 The agent's cwd is the Neotoma checkout, so this repository's own
 `.claude/settings.json` does not reach it; `--settings` is the only way the
@@ -220,10 +224,15 @@ including a different PR or version in a correlation line, is not approval.
 Only operator-authored text counts; quoted, forwarded, original-message and
 signature text never grants approval. Any second instruction, text before or
 after the affirmative, refusal, condition, question, longer sentence, or wrong
-target is a non-approval. For an approval-like readable reply, Turdus sends one
+target is a non-approval. For every readable, authenticated non-approval in an
+approval thread, Turdus sends one
 Telegram correction per message ID naming the target, saying no approval was
 recorded, and giving the exact accepted reply. It never routes that reply.
-Ordinary replies without approval intent receive no correction. If authentication
+This includes ordinary replies, questions, skips and blank authored replies
+above a recognizable quote. The subject target must match the correlation token
+in the reply, including when the token appears only in quoted text; a missing
+or mismatched token refuses approval and sends one notice naming both targets.
+If authentication
 metadata or the reply body cannot be read, if HTML markup is malformed around
 a quote, or if an HTML-only copy of the notification has no identifiable quote
 boundary, Turdus leaves the reply pending, sends one Telegram unreadable notice

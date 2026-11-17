@@ -804,22 +804,46 @@ def test_ordinary_copy_and_cd_allowed(command):
 
 
 def test_non_bash_tool_ignored():
-    proc = run_hook({"tool_name": "Edit", "tool_input": {"command": "git commit --no-verify"}})
+    proc = run_hook({"tool_name": "Read", "tool_input": {"command": "git commit --no-verify"}})
     assert proc.returncode == 0 and proc.stdout.strip() == ""
 
 
 @pytest.mark.parametrize("raw", ["", "not json", "[]", "null"])
-def test_fail_open_on_bad_input_logs_loudly(raw):
+def test_fail_closed_on_bad_input(raw):
     proc = run_hook(raw)
-    assert proc.returncode == 0
-    assert proc.stdout.strip() == ""
-    assert "FAIL-OPEN" in proc.stderr
+    assert proc.returncode == 2
+    output = json.loads(proc.stdout)["hookSpecificOutput"]
+    assert output["permissionDecision"] == "deny"
+    assert "hook input could not be read" in output["permissionDecisionReason"]
 
 
-def test_fail_open_when_command_is_missing():
-    proc = run_hook({"tool_name": "Bash", "tool_input": {}})
-    assert proc.returncode == 0
-    assert "FAIL-OPEN" in proc.stderr
+@pytest.mark.parametrize("payload", [
+    {"tool_name": "Bash"},
+    {"tool_name": "Bash", "tool_input": {}},
+    {"tool_name": "Bash", "tool_input": {"command": 7}},
+])
+def test_fail_closed_when_bash_command_unreadable(payload):
+    proc = run_hook(payload)
+    assert proc.returncode == 2
+    output = json.loads(proc.stdout)["hookSpecificOutput"]
+    assert output["permissionDecision"] == "deny"
+    assert "SKIP_TESTS_REASON" in output["permissionDecisionReason"]
+
+
+def test_internal_judge_error_denies_with_fixed_reason(monkeypatch, capsys):
+    sys.path.insert(0, str(HOOK.parent))
+    import git_hook_bypass_guard as guard  # noqa: PLC0415
+    monkeypatch.setattr(guard, "read_hook_input", lambda: bash("git status"))
+
+    def fail(_command):
+        raise RuntimeError("synthetic private detail")
+
+    monkeypatch.setattr(guard, "find_violation", fail)
+    assert guard.main() == 2
+    output = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+    assert output["permissionDecision"] == "deny"
+    assert "internal guard error" in output["permissionDecisionReason"]
+    assert "synthetic private detail" not in output["permissionDecisionReason"]
 
 
 def test_no_override_env_is_honoured():

@@ -48,6 +48,7 @@ class ApprovalReply:
     subject: str
     body: str = ""
     authenticated: bool = True
+    correlation_target: str | None = None
 
 
 @dataclass(frozen=True)
@@ -704,11 +705,25 @@ def read_replies_with_status(
                          and value.strip()), "")
             body = _authored_plain(plain)
             raw_html = body_data.get("body_html")
+            # Preserve the target from the matched request token before quote
+            # removal. The affirmative must still come from authored text.
+            raw_source = plain + "\n" + (raw_html if isinstance(raw_html, str) else "")
+            token_pattern = (r"release-approve:\s*(v[0-9][0-9A-Za-z.\-+]*)"
+                             if token == "release-approve:" else
+                             r"swarm-approve:\s*([A-Za-z0-9._-]+/[A-Za-z0-9._-]+#\d+)")
+            targets = set(re.findall(token_pattern, raw_source, re.IGNORECASE))
+            correlation_target = next(iter(targets)) if len(targets) == 1 else None
             if not body and isinstance(raw_html, str):
                 body, boundary_seen = _extract_authored_html(raw_html)
                 if body and not boundary_seen and _unmarked_notification_copy(body):
                     body = ""
-            if not body.strip():
+            # A blank authored reply above a recognizable quote is readable:
+            # it is a non-approval, so Turdus owes a correction.
+            blank_quoted_reply = bool(plain and not body and
+                                      (any(line.lstrip().startswith(">") for line in plain.splitlines())
+                                       or any(_ATTRIBUTION.match(line.strip()) or _FORWARD.match(line.strip())
+                                              for line in plain.splitlines())))
+            if not body.strip() and not blank_quoted_reply:
                 saw_transport_error = True
                 transport_detail = "reply_quote_boundary_unknown"
                 unreadable_replies.append(ApprovalReply(mid, subject))
@@ -719,7 +734,8 @@ def read_replies_with_status(
                 except Exception as exc:  # noqa: BLE001
                     log.warning(f"on_reply_message callback failed: {exc}")
             texts.append(f"{subject}\n{body}")
-            replies.append(ApprovalReply(mid, subject, body))
+            replies.append(ApprovalReply(mid, subject, body,
+                                         correlation_target=correlation_target))
 
     # Any fetch failure within the sweep fails the WHOLE read: a verdict set
     # built from only the messages that loaded is incomplete, and acting on it

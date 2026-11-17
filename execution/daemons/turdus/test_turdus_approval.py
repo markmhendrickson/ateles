@@ -24,6 +24,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "phoenicurus-rel
 import turdus  # noqa: E402
 import prepare  # noqa: E402
 from lib.approval import email_channel  # noqa: E402
+from lib.notify import Notifier, Priority  # noqa: E402
+from lib.notify import neotoma_sink  # noqa: E402
 
 
 _AUTH_PASS = "mx.google.com; dmarc=pass header.from=example.com"
@@ -79,6 +81,7 @@ class _StubNotifier:
 
     def send(self, message, priority=None, handler=None):
         self.sent.append(message)
+        return True
 
 
 def _run(coro):
@@ -721,7 +724,8 @@ def test_unreadable_authenticated_reply_notices_once_then_routes_once(
     assert len(posts) == 1
 
 
-def _poll_authored_reply(monkeypatch, tmp_path, kind, body_data, *, polls=1):
+def _poll_authored_reply(monkeypatch, tmp_path, kind, body_data, *, polls=1,
+                         include_token=True):
     """Exercise the real shared reader and both Turdus POST routes with fake gws."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
@@ -735,6 +739,15 @@ def _poll_authored_reply(monkeypatch, tmp_path, kind, body_data, *, polls=1):
     monkeypatch.setattr(email_channel, "_fetch_auth_results", lambda _mid: [_AUTH_PASS])
     subject = ("Re: Release v1.2.3 ready to approve" if kind == "release" else
                "Re: [Ateles] PR o/r#7 is READY TO MERGE")
+    token_text = ("release-approve: v1.2.3" if kind == "release" else
+                  "swarm-approve: o/r#7")
+    if include_token and not any(prefix in str(body_data) for prefix in
+                                 ("release-approve:", "swarm-approve:")):
+        body_data = dict(body_data)
+        if isinstance(body_data.get("body_text"), str):
+            body_data["body_text"] += f"\n> {token_text}"
+        elif isinstance(body_data.get("body_html"), str):
+            body_data["body_html"] += f"<blockquote>{token_text}</blockquote>"
 
     def fake_gws(args, timeout=45):
         if "+triage" in args:
@@ -883,9 +896,32 @@ def test_nonaffirmative_reply_never_posts(monkeypatch, tmp_path, kind, reply):
 def test_conflicting_body_correlation_never_posts(monkeypatch, tmp_path, kind):
     body = ("approve v1.2.3\nrelease-approve: v1.2.4" if kind == "release" else
             "APPROVE\nswarm-approve: o/r#8")
-    posts, _, _ = _poll_authored_reply(monkeypatch, tmp_path, kind,
-                                       {"body_text": body})
+    posts, state, notices = _poll_authored_reply(monkeypatch, tmp_path, kind,
+                                                 {"body_text": body}, polls=2)
     assert posts == []
+    assert state.get("approval_correction_ids") == ["approval-1"]
+    assert len([n for n in notices.sent if "correlation target" in n]) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+def test_missing_correlation_refuses_even_exact_approval(monkeypatch, tmp_path, kind):
+    approval = "approve v1.2.3" if kind == "release" else "approve"
+    posts, state, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind, {"body_text": approval}, polls=2,
+        include_token=False)
+    assert posts == []
+    assert state.get("approval_correction_ids") == ["approval-1"]
+    assert len([n for n in notices.sent if "missing correlation token" in n]) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+def test_quoted_matching_correlation_routes_once(monkeypatch, tmp_path, kind):
+    approval = "approve v1.2.3" if kind == "release" else "approve"
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    posts, state, _ = _poll_authored_reply(
+        monkeypatch, tmp_path, kind, {"body_text": f"{approval}\n> {token}"}, polls=2)
+    assert len(posts) == 1
+    assert state.get("processed_ids") == ["approval-1"]
 
 
 @pytest.mark.parametrize("kind", ("release", "pr"))
@@ -929,11 +965,118 @@ def test_closed_grammar_refuses_other_authored_text(
 
 
 @pytest.mark.parametrize("kind", ("release", "pr"))
-def test_normal_reply_does_not_get_approval_correction(monkeypatch, tmp_path, kind):
+@pytest.mark.parametrize("reply", ("Thank you for the update.", "yes", "skip",
+                                     "Can we wait?", "approve maybe"))
+def test_readable_nonapproval_gets_one_correction(monkeypatch, tmp_path, kind, reply):
     posts, _, notices = _poll_authored_reply(monkeypatch, tmp_path, kind,
-                                              {"body_text": "Thank you for the update."})
+                                              {"body_text": reply}, polls=2)
     assert posts == []
-    assert not any("no approval was recorded" in note for note in notices.sent)
+    assert len([note for note in notices.sent if "no approval was recorded" in note]) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+def test_empty_reply_above_quote_gets_correction(monkeypatch, tmp_path, kind):
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    posts, _, notices = _poll_authored_reply(monkeypatch, tmp_path, kind,
+                                              {"body_text": f"> {token}"}, polls=2)
+    assert posts == []
+    assert len([note for note in notices.sent if "no approval was recorded" in note]) == 1
+
+
+class _Transport:
+    def __init__(self):
+        self.sent = []
+        self.deliver = True
+
+    def notify(self, *, body):
+        if self.deliver:
+            self.sent.append(body)
+        return self.deliver
+
+
+def _real_notifier(monkeypatch, tmp_path, *, silence=False):
+    monkeypatch.setattr(neotoma_sink, "record", lambda **_kw: None)
+    notifier = Notifier(rubric={"silence_start": "00:00", "silence_end": "23:59"})
+    notifier._email_primary = False
+    notifier._digest_path = tmp_path / "held.json"
+    notifier._dedupe_path = tmp_path / "dedupe.json"
+    monkeypatch.setattr(notifier, "_in_silence_window", lambda: silence)
+    transport = _Transport()
+    notifier._apprise = transport
+    return notifier, transport
+
+
+def test_real_notifier_drops_info_and_holds_warn_in_silence(monkeypatch, tmp_path):
+    notifier, transport = _real_notifier(monkeypatch, tmp_path, silence=True)
+    assert notifier.send("synthetic routine", priority=Priority.INFO) is False
+    assert notifier.send("synthetic warning", priority=Priority.WARN) is False
+    assert transport.sent == []
+    assert notifier.send("synthetic approval correction", priority=Priority.BLOCKER)
+    assert transport.sent == ["synthetic approval correction"]
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("case", ("matching", "mismatch", "missing", "ordinary",
+                                    "unreadable", "unauthenticated"))
+def test_approval_notices_use_real_notifier_and_retry_failed_delivery(
+    monkeypatch, tmp_path, kind, case
+):
+    monkeypatch.setattr(turdus, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setattr(turdus, "_poll_gmail_messages", lambda *_: [])
+    monkeypatch.setattr(turdus, "_save_state", lambda _state: None)
+    subject = ("Re: Release v1.2.3 ready to approve" if kind == "release" else
+               "Re: [Ateles] PR o/r#7 is READY TO MERGE")
+    matching = "v1.2.3" if kind == "release" else "o/r#7"
+    other = "v1.2.4" if kind == "release" else "o/r#8"
+    target = None if case == "missing" else other if case == "mismatch" else matching
+    approval = "approve v1.2.3" if kind == "release" else "approve"
+    body = "Thank you for the update." if case == "ordinary" else approval
+    reply = email_channel.ApprovalReply("synthetic-1", subject, body,
+                                        authenticated=case != "unauthenticated",
+                                        correlation_target=target)
+    if case == "unreadable":
+        outcome = email_channel.ReadRepliesOutcome(
+            kind="transport_error", texts=[], unreadable_replies=(reply,))
+    elif case == "unauthenticated":
+        outcome = email_channel.ReadRepliesOutcome(
+            kind="ok", texts=[], rejected_replies=(reply,))
+    else:
+        outcome = email_channel.ReadRepliesOutcome(kind="ok", texts=[], replies=(reply,))
+    monkeypatch.setattr(email_channel, "read_replies_with_status", lambda *_a, **_kw: outcome)
+    posts = []
+
+    async def post(*args):
+        posts.append(args)
+        return True
+
+    monkeypatch.setattr(turdus, "_post_release_approval", post)
+    monkeypatch.setattr(turdus, "_post_email_approval", post)
+    notifier, transport = _real_notifier(monkeypatch, tmp_path, silence=True)
+    state = {"last_message_id": None}
+    if case != "matching":
+        transport.deliver = False
+        state = _run(turdus.poll_once(notifier, state))
+        assert transport.sent == []
+        assert "synthetic-1" not in state.get("approval_correction_ids", [])
+        assert "synthetic-1" not in state.get("unreadable_notice_ids", [])
+        transport.deliver = True
+    state = _run(turdus.poll_once(notifier, state))
+    state = _run(turdus.poll_once(notifier, state))
+    assert len(transport.sent) == 1
+    if case == "matching":
+        assert len(posts) == 1
+        assert "synthetic-1" in state.get("processed_ids", [])
+    else:
+        assert posts == []
+        assert matching in transport.sent[0]
+        if case == "mismatch":
+            assert other in transport.sent[0]
+        if case == "missing":
+            assert "missing correlation token" in transport.sent[0]
+        if case == "unreadable":
+            assert state.get("unreadable_notice_ids") == ["synthetic-1"]
+        elif case != "unauthenticated":
+            assert state.get("approval_correction_ids") == ["synthetic-1"]
 
 
 _BROKEN_QUOTE_HTML = (
