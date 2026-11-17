@@ -67,7 +67,12 @@ def held_notice_line(state: dict) -> str:
         "is unreadable. Inspect it with python3 lib/notify/held_view.py, "
         "repair the file, then run python3 execution/scripts/harness_usage.py refresh."
     ) if int(info.get("usage_snapshot_unreadable", 0)) else ""
-    return "\n".join(part for part in (held_line, recovery_line, usage_line) if part)
+    journal_line = (
+        "[dedupe-journal] The notification dedupe journal is unreadable. "
+        "Reconcile unknown deliveries, then run python3 "
+        "lib/notify/held_view.py --clear-unreadable-journal."
+    ) if info.get("dedupe_journal_unreadable") else ""
+    return "\n".join(part for part in (held_line, recovery_line, usage_line, journal_line) if part)
 
 
 def main() -> int:

@@ -156,6 +156,10 @@ class Priority(str, Enum):
     INFO = "info"
 
 
+class UnreadableDedupeJournal(ValueError):
+    """An existing receipt journal cannot establish whether a key was sent."""
+
+
 def is_actionable_held_notice(message: str) -> bool:
     """True when a persisted queue item is an actionable held notice.
 
@@ -263,7 +267,10 @@ class Notifier:
             log.warning(
                 "[notify] apprise not installed — notifications will be logged only."
             )
-        self._recover_sending_entries()
+        try:
+            self._recover_sending_entries()
+        except UnreadableDedupeJournal:
+            self._hold_unreadable_journal(None, "", "")
 
     # ── Factory ──────────────────────────────────────────────────────────────
 
@@ -350,6 +357,10 @@ class Notifier:
                     message, priority, handler, bypass_silence, dedupe_key, email_eligible,
                     retryable, related_dedupe_keys,
                 )
+        except UnreadableDedupeJournal:
+            if dedupe_key:
+                self._hold_unreadable_journal(dedupe_key, message, handler)
+            return False
         except Exception as exc:  # noqa: BLE001 — a notifier must not break its caller
             log.error("[notify] send failed; notice remains retryable (%s)", exc)
             return False
@@ -457,6 +468,14 @@ class Notifier:
                     return False
                 log.warning("[notify] delivery outcome unknown: %s", exc)
                 return False
+            if (not accepted and retryable and dedupe_key
+                    and dedupe_key.startswith(held_view.UNREADABLE_USAGE_KEY_PREFIX)
+                    and prio == Priority.WARN):
+                held = f"{'⚠' if prio == Priority.WARN else '⚠️'} {full_message}"
+                self._queue_digest(
+                    held, email_eligible, (dedupe_key, *related_dedupe_keys), handler,
+                )
+                return False
             return delivered(accepted)
 
         # Drain any prior held actionable notices before handling this send.
@@ -550,6 +569,7 @@ class Notifier:
     def _queue_digest(
         self, message: str, email_eligible: bool = True,
         dedupe_keys: tuple[str, ...] = (), handler: str = "",
+        record_receipt: bool = True,
     ) -> bool:
         """Append an actionable held notice. Never raises.
 
@@ -594,7 +614,7 @@ class Notifier:
                                 queue[index] = replacement
                                 if not self._persist_queue(queue, existing_path):
                                     return False
-                            return not dedupe_keys or self._mark_dedupe_held(
+                            return not dedupe_keys or not record_receipt or self._mark_dedupe_held(
                                 dedupe_keys, handler, message
                             )
                     if len(items) >= HELD_QUEUE_MAX:
@@ -607,7 +627,7 @@ class Notifier:
                     # is recorded. A failed journal write leaves a visible
                     # notice, never a held key without one. Evicted receipts
                     # are reconciled even when this new receipt cannot be made.
-                    if dedupe_keys and not self._mark_dedupe_held(
+                    if dedupe_keys and record_receipt and not self._mark_dedupe_held(
                         dedupe_keys, handler, message
                     ):
                         return False
@@ -762,6 +782,9 @@ class Notifier:
                     if not free:
                         return False
                     return self._drain()
+        except UnreadableDedupeJournal:
+            self._hold_unreadable_journal(None, "", "")
+            return False
         except Exception as exc:  # noqa: BLE001
             log.error("[notify] held drain failed; queue preserved (%s)", exc)
             return False
@@ -779,8 +802,16 @@ class Notifier:
         delivered_email: list[str] = []
         unrouted = 0
         failed = 0
+        try:
+            self._dedupe_journal
+            journal_readable = True
+        except UnreadableDedupeJournal:
+            journal_readable = False
+            self._hold_unreadable_journal(None, "", "")
 
         for item in main_items:
+            if isinstance(item, dict) and not journal_readable:
+                continue
             if self._held_already_delivered(item):
                 delivered_main.append(item)
                 continue
@@ -803,6 +834,8 @@ class Notifier:
         budget = self._budget_remaining() if self._email_primary and self._notify_to else 0
         email_down = False
         for item in email_items:
+            if isinstance(item, dict) and not journal_readable:
+                continue
             if self._held_already_delivered(item):
                 delivered_email.append(item)
                 continue
@@ -963,7 +996,7 @@ class Notifier:
 
     @property
     def _dedupe_journal(self) -> dict[str, Any]:
-        """Read the persisted dedupe journal. Fail-open: unreadable => empty.
+        """Read the persisted dedupe journal; unreadable denies keyed sends.
 
         Shape: ``{key: {"notified_at": iso8601, "handler": str}}``. A key
         present here has already been reported and is suppressed on every
@@ -971,16 +1004,50 @@ class Notifier:
         """
         with self._notification_lock:
             try:
-                raw = json.loads(self._dedupe_path.read_text())
-                return raw if isinstance(raw, dict) else {}
+                raw = json.loads(held_view.read_text_nofollow(self._dedupe_path))
+                if not isinstance(raw, dict):
+                    raise ValueError("journal is not an object")
+                return raw
             except FileNotFoundError:
                 return {}
-            except Exception as exc:  # noqa: BLE001 — never crash a notification
-                log.warning(
-                    "[notify] dedupe journal unreadable (%s) — treating as empty",
-                    exc,
-                )
-                return {}
+            except Exception as exc:  # noqa: BLE001
+                self._preserve_unreadable_journal()
+                log.warning("[notify] dedupe journal unreadable (%s); keyed sends held", type(exc).__name__)
+                raise UnreadableDedupeJournal("dedupe journal unreadable") from exc
+
+    def _preserve_unreadable_journal(self) -> None:
+        """Keep one bounded forensic copy without exposing its contents."""
+        try:
+            fd = os.open(str(self._dedupe_path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, "rb") as source:
+                raw = source.read()
+            path = self._dedupe_path.with_name(self._dedupe_path.name + ".unreadable")
+            fd, name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+            try:
+                with os.fdopen(fd, "wb") as target:
+                    target.write(raw)
+                os.replace(name, path)
+            except BaseException:
+                os.unlink(name)
+                raise
+        except OSError:
+            pass  # The original remains in place even if copying is denied.
+
+    def _hold_unreadable_journal(self, key: str | None, message: str, handler: str) -> None:
+        """Surface repair once and keep each keyed notice until reconciliation."""
+        repair = ("Dedupe journal unreadable. Inspect the preserved journal, reconcile "
+                  "unknown deliveries, then run python3 lib/notify/held_view.py "
+                  "--clear-unreadable-journal.")
+        self._raise_recovery("dedupe-journal-unreadable", repair, notify=False)
+        self._queue_digest(
+            f"⚠ [notify] {repair}", False, ("dedupe-journal-unreadable",),
+            "notify", record_receipt=False,
+        )
+        if key:
+            self._queue_digest(
+                f"⚠ [{handler or 'notify'}] {message}", False, (key,),
+                handler, record_receipt=False,
+            )
 
     def _dedupe_journal_lock_path(self) -> Path:
         return self._dedupe_path.with_name(f"{self._dedupe_path.name}.lock")
@@ -1030,7 +1097,7 @@ class Notifier:
             log.error("[notify] could not persist dedupe journal (%s)", exc)
             return False
 
-    def _raise_recovery(self, key: str, cause: str) -> None:
+    def _raise_recovery(self, key: str, cause: str, *, notify: bool = True) -> None:
         """Persist uncertain delivery independently of the dedupe receipt."""
         try:
             with held_view.file_lock(held_view.recovery_lock_path(self._digest_path),
@@ -1047,7 +1114,7 @@ class Notifier:
                            "time": self._now_local().isoformat(), "cause": cause}
                     records.append(row)
                     held_view.write_recovery(self._digest_path, records)
-                if row.get("notice_started"):
+                if not notify or row.get("notice_started"):
                     return
                 # This route never uses the held queue or email. The recovery
                 # file remains visible even if this direct transport refuses.
@@ -1062,7 +1129,12 @@ class Notifier:
             log.error("[notify] could not record uncertain alert %r: %s", key, exc)
 
     def _recover_sending_entries(self) -> None:
-        for key, entry in self._dedupe_journal.items():
+        try:
+            entries = self._dedupe_journal.items()
+        except UnreadableDedupeJournal:
+            self._hold_unreadable_journal(None, "", "")
+            return
+        for key, entry in entries:
             if isinstance(entry, dict) and entry.get("state") in (
                 "sending", "delivered_unconfirmed"
             ):
@@ -1334,8 +1406,12 @@ class Notifier:
         """Rename a receipt and its queued notice as one local transition."""
         if old_key == new_key:
             return True
-        if old_key not in self._dedupe_journal:
-            return True
+        try:
+            if old_key not in self._dedupe_journal:
+                return True
+        except UnreadableDedupeJournal:
+            self._hold_unreadable_journal(None, "", "")
+            return False
         if not neotoma_sink.migrate_key(old_key, new_key):
             return False
         try:
@@ -1418,6 +1494,9 @@ class Notifier:
             with self._notification_lock, self._queue_lock() as queue_locked:
                 if not queue_locked:
                     return
+                # Establish that the receipt source is readable before any
+                # held queue item can be removed.
+                self._dedupe_journal
                 queues = {path: held_view.read_queue(path)
                           for path in (self._digest_path, self._email_path)}
                 kept = {path: [item for item in items if not (
@@ -1477,6 +1556,8 @@ class Notifier:
                                 self._persist_queue(queues[previous], previous)
                             raise
             neotoma_sink.resolve(key)
+        except UnreadableDedupeJournal:
+            self._hold_unreadable_journal(None, "", "")
         except Exception as exc:  # noqa: BLE001
             log.warning("[notify] could not clear dedupe key %r (%s)", key, exc)
 
@@ -1560,6 +1641,9 @@ class Notifier:
         """True when ``key`` was already reported and not yet cleared."""
         try:
             return self._is_duplicate(key)
+        except UnreadableDedupeJournal:
+            self._hold_unreadable_journal(None, "", "")
+            return False
         except Exception as exc:  # noqa: BLE001
             log.error("[notify] dedupe check failed; retry required (%s)", exc)
             return False
@@ -1567,7 +1651,11 @@ class Notifier:
     def dedupe_keys_with_prefix(self, prefix: str) -> tuple[str, ...]:
         """Journal keys beginning with ``prefix``, for condition cleanup."""
         with self._notification_lock:
-            return tuple(key for key in self._dedupe_journal if key.startswith(prefix))
+            try:
+                return tuple(key for key in self._dedupe_journal if key.startswith(prefix))
+            except UnreadableDedupeJournal:
+                self._hold_unreadable_journal(None, "", "")
+                return ()
 
     def has_transport(self, email_eligible: bool = True) -> bool:
         """True when at least one delivery route is configured.

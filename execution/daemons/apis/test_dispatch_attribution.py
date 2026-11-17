@@ -26,6 +26,7 @@ import dispatch_role  # noqa: E402
 import model_tiering  # noqa: E402
 import skill_runner  # noqa: E402
 import usage_alerts  # noqa: E402
+import harness_router  # noqa: E402
 from test_codex_tiering_ledger import codex_reports_tokens  # noqa: E402,F401
 from test_dispatch_role import captured_codex_dispatches, fake_repo  # noqa: E402,F401
 
@@ -1228,6 +1229,111 @@ def test_missing_usage_snapshot_does_not_raise_notice(monkeypatch, tmp_path, led
     spy = _SpyNotifier(silenced=True)
     assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
     assert spy.sent == []
+
+
+@pytest.mark.parametrize("writer", [
+    "usage", "exhausted", "probe_available", "probe_unknown", "cooling",
+    "model_cooling", "probe_failure", "capacity_observation",
+])
+def test_each_usage_writer_shape_keeps_other_provider_thresholds(
+    writer, monkeypatch, tmp_path, ledger
+) -> None:
+    import time
+
+    path = tmp_path / "usage.json"
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(path))
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    harness_router.record_usage("claude", [_window(55)])
+    now = time.time()
+    writers = {
+        "usage": lambda: harness_router.record_usage("codex", [_window(2)]),
+        "exhausted": lambda: harness_router.record_exhausted("codex", now + 3600),
+        "probe_available": lambda: harness_router.record_probe_available("codex", source="synthetic"),
+        "probe_unknown": lambda: harness_router.record_probe_unknown("codex", source="synthetic", detail="unknown"),
+        "cooling": lambda: harness_router.record_cooling("codex", now + 3600, reason="synthetic"),
+        "model_cooling": lambda: harness_router.record_model_cooling("codex", "sol", now + 3600, reason="synthetic"),
+        "probe_failure": lambda: harness_router.record_probe_failure("codex", "synthetic"),
+        "capacity_observation": lambda: harness_router.record_capacity_observation("codex", source="synthetic"),
+    }
+    writers[writer]()
+    assert harness_router.usage_snapshot_problem(path) is None
+    spy = _SpyNotifier()
+    assert len(usage_alerts.check_usage_thresholds("claude", notifier=spy)) == 1
+    assert len(spy.delivered) == 1
+
+
+def test_malformed_sibling_still_checks_readable_threshold(monkeypatch, tmp_path, ledger) -> None:
+    path = _usage_file(monkeypatch, tmp_path, "claude", [_window(55)])
+    data = json.loads(path.read_text())
+    data["codex"] = []
+    path.write_text(json.dumps(data))
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    spy = _SpyNotifier()
+    assert len(usage_alerts.check_usage_thresholds("claude", notifier=spy)) == 1
+    assert any("Usage snapshot unreadable" in message for message in spy.delivered)
+    assert any("crossed 50%" in message for message in spy.delivered)
+
+
+def test_probe_preserves_and_reports_unreadable_snapshot(monkeypatch, tmp_path, ledger) -> None:
+    import usage_probe
+
+    path = tmp_path / "usage.json"
+    original = b"{malformed synthetic bytes"
+    path.write_bytes(original)
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(path))
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_USAGE_PROBE", "on")
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    spy = _SpyNotifier(silenced=True)
+    monkeypatch.setattr(usage_alerts, "_default_journal_factory", lambda: spy)
+    monkeypatch.setattr(usage_alerts, "_default_notifier_factory", lambda: spy)
+    reset = int((datetime.now(timezone.utc) + timedelta(days=3)).timestamp())
+    shape = json.dumps({"type": "rate_limit_event", "rate_limit_info": {
+        "status": "allowed_warning", "resetsAt": reset, "rateLimitType": "seven_day",
+        "utilization": 0.55, "isUsingOverage": False,
+    }})
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, shape, "")
+
+    outcome = usage_probe.refresh_usage_if_stale(
+        {"claude": "/bin/claude"}, env={"PATH": "/usr/bin"},
+        run=fake_run, alert_in_background=False,
+    )
+    assert outcome == {"claude": "refreshed"}
+    assert path.with_name(path.name + ".unreadable").read_bytes() == original
+    assert harness_router.usage_snapshot_problem(path) is None
+    assert len([item for item in spy.sent if "Usage snapshot unreadable" in item[0]]) == 1
+    assert len([item for item in spy.sent if "crossed 50%" in item[0]]) == 1
+
+
+def test_refused_source_notice_outside_silence_reaches_hook(
+    monkeypatch, tmp_path, ledger
+) -> None:
+    from lib.notify import held_view
+
+    path = tmp_path / "usage.json"
+    path.write_text("broken")
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(path))
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    spy = _SpyNotifier(deliver=False, silenced=False)
+    assert usage_alerts.check_usage_thresholds("claude", notifier=spy) == []
+    assert len(held_view.read_queue(tmp_path / "digest.json")) == 1
+    assert held_view.summary()["usage_snapshot_unreadable"] == 1
+    hook = Path(__file__).resolve().parents[3] / ".claude" / "hooks" / "user_prompt_submit.py"
+    run = subprocess.run(
+        [sys.executable, str(hook)], input='{"session_id":"synthetic"}',
+        text=True, capture_output=True,
+        env={**os.environ, "HOME": str(tmp_path), "CLAUDE_PROJECT_DIR": str(tmp_path)},
+        timeout=10,
+    )
+    assert run.returncode == 0
+    assert "APIS_HARNESS_USAGE_FILE" in run.stdout
+    assert "harness_usage.py refresh" in run.stdout
 
 
 def test_a_dispatch_succeeds_when_the_alert_check_blows_up(

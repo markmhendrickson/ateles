@@ -246,7 +246,8 @@ def check_usage_thresholds(
                 notifier_factory=notifier_factory,
                 journal_factory=journal_factory,
             )
-            return []
+            if harness_router.usage_snapshot_problem(source, provider=provider) is not None:
+                return []
         try:
             reading = harness_router.usage_reading(provider, now_wall=current.timestamp())
         except (ValueError, OverflowError, OSError) as exc:

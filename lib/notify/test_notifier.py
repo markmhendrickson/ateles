@@ -800,15 +800,50 @@ def test_send_without_dedupe_key_is_unchanged_and_always_delivers(tmp_path):
     assert not n._dedupe_path.exists()
 
 
-def test_unreadable_dedupe_journal_does_not_crash_send(tmp_path):
+def test_unreadable_dedupe_journal_does_not_crash_send(tmp_path, monkeypatch):
+    from . import held_view
+
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(n._digest_path))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(n._dedupe_path))
+    n._dedupe_path.write_text("not json")
+    key = "monedula:consent_channel_failed"
+    for _ in range(2):
+        assert not n.send("consent channel failed", Priority.BLOCKER,
+                          handler="monedula", dedupe_key=key)
+    assert sent == []
+    assert n._dedupe_path.read_text() == "not json"
+    assert n._dedupe_path.with_name(n._dedupe_path.name + ".unreadable").read_text() == "not json"
+    assert {item["keys"][0] for item in held_view.read_queue(n._digest_path)} == {
+        key, "dedupe-journal-unreadable",
+    }
+    assert [row["key"] for row in held_view.read_recovery(n._digest_path)] == [
+        "dedupe-journal-unreadable",
+    ]
+    hook = _REPO_ROOT / ".claude" / "hooks" / "user_prompt_submit.py"
+    run = notifier_mod.subprocess.run(
+        [sys.executable, str(hook)], input='{"session_id":"synthetic"}',
+        text=True, capture_output=True,
+        env={**os.environ, "HOME": str(tmp_path), "CLAUDE_PROJECT_DIR": str(tmp_path)},
+        timeout=10,
+    )
+    assert run.returncode == 0
+    assert "--clear-unreadable-journal" in run.stdout
+    assert held_view.main(["--clear-unreadable-journal"]) == 0
+    assert n._dedupe_journal[key]["state"] == "held"
+    assert not n.send("consent channel failed", Priority.BLOCKER,
+                      handler="monedula", dedupe_key=key)
+    assert n.flush_digest()
+    assert sent == ["⚠ [monedula] consent channel failed"]
+
+
+def test_unreadable_journal_keeps_keyless_delivery(tmp_path):
     sent = []
     n = _notifier(tmp_path, NO_SILENCE, sent)
     n._dedupe_path.write_text("not json")
-    ok = n.send(
-        "consent channel failed", Priority.BLOCKER, handler="monedula",
-        dedupe_key="monedula:consent_channel_failed",
-    )
-    assert ok is True  # treated as empty journal, not a crash
+    assert n.send("independent", Priority.BLOCKER, handler="apis")
+    assert sent == ["[apis] independent"]
 
 
 @pytest.mark.parametrize("journal", ["absent", "delivered", "malformed", "held"])
@@ -1206,7 +1241,8 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
 
     operations = ("send", "drain", "held_receipt_fail", "direct_receipt_fail",
                   "transport_refuse", "transport_uncertain", "crash_pending", "crash_sending", "restart",
-                  "migrate", "operator_clear", "window_roll")
+                  "migrate", "operator_clear", "window_roll", "journal_corrupt",
+                  "journal_reconcile")
     for length in range(1, 4):
         for index, sequence in enumerate(product(operations, repeat=length)):
             root = tmp_path / f"walk-{length}-{index}"
@@ -1218,6 +1254,7 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
             n.should_flush_digest = lambda: False
             key = "usage:weekly:reset0:50"
             clear_allowance: dict[str, int] = {}
+            journal_bad = False
             for operation in sequence:
                 before = held_view.read_queue(n._digest_path)
                 if operation in ("send", "held_receipt_fail", "direct_receipt_fail"):
@@ -1244,7 +1281,7 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
                     n.should_flush_digest = lambda: False
                     n._recover_sending_entries()
                 elif operation in ("crash_pending", "crash_sending"):
-                    if key not in n._dedupe_journal:
+                    if not journal_bad and key not in n._dedupe_journal:
                         if operation == "crash_pending":
                             assert n._mark_dedupe_pending(key, "apis")
                         else:
@@ -1255,6 +1292,8 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
                     if n.migrate_dedupe(key, moved):
                         key = moved
                 elif operation == "operator_clear":
+                    if journal_bad:
+                        continue
                     recovery = held_view.read_recovery(n._digest_path)
                     if any(row["key"] == key for row in recovery):
                         assert held_view.main(["--clear-unconfirmed", key]) == 0
@@ -1266,6 +1305,15 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
                 elif operation == "window_roll":
                     n.clear_dedupe(key)
                     key = key.replace("reset0", "reset1")
+                elif operation == "journal_corrupt":
+                    n._dedupe_path.write_bytes(b"{synthetic malformed journal")
+                    journal_bad = True
+                    n.send(f"crossed {key}", Priority.WARN, handler="apis",
+                           dedupe_key=key, retryable=True)
+                elif operation == "journal_reconcile" and journal_bad:
+                    assert held_view.main(["--clear-unreadable-journal"]) == 0
+                    journal_bad = False
+                    clear_allowance[key] = clear_allowance.get(key, 0) + 1
                 elif operation == "transport_refuse":
                     n._in_silence_window = lambda: False
                     original = n._deliver
@@ -1290,7 +1338,7 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
                 after = held_view.read_queue(n._digest_path)
                 assert len({held_view.notice_identity(item) for item in after}) == len(after), sequence
                 recovery_keys = {row["key"] for row in held_view.read_recovery(n._digest_path)}
-                for journal_key, entry in n._dedupe_journal.items():
+                for journal_key, entry in (() if journal_bad else n._dedupe_journal.items()):
                     if entry.get("state") == "held":
                         assert any(journal_key in item["keys"] for item in after if isinstance(item, dict)) \
                             or journal_key in recovery_keys, sequence
@@ -1301,7 +1349,8 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
                 for delivered_key in set(delivered):
                     assert delivered.count(delivered_key) <= 1 + clear_allowance.get(delivered_key, 0), sequence
                 if len(after) < len(before):
-                    assert operation in ("drain", "operator_clear", "window_roll"), sequence
+                    assert operation in ("drain", "operator_clear", "window_roll",
+                                         "journal_reconcile"), sequence
     capsys.readouterr()
 
 

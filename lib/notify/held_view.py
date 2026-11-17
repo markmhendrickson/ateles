@@ -17,6 +17,9 @@ CLI:
     python3 lib/notify/held_view.py --all      print every notice
     python3 lib/notify/held_view.py --clear    back up and remove exactly what was
                                                last printed, nothing newer
+    python3 lib/notify/held_view.py --clear-unreadable-journal
+                                               after reconciling unknown sends,
+                                               rebuild receipts from held notices
 
 Queue text is written by daemons and can embed attacker-influenced strings
 (PR titles, issue text). Anything that puts a summary into model context must
@@ -291,8 +294,12 @@ def summary(main: Path | None = None) -> dict:
             key.startswith(UNREADABLE_USAGE_KEY_PREFIX) for key in item["keys"]
         ) for item in items
     )
+    unreadable_journal = any(
+        row.get("key") == "dedupe-journal-unreadable" for row in recovery
+    )
     return {"total": len(items), "by_handler": dict(counts), "fingerprint": fp,
             "usage_snapshot_unreadable": unreadable_usage,
+            "dedupe_journal_unreadable": unreadable_journal,
             "unconfirmed": len(recovery), "unconfirmed_fingerprint": recovery_fp}
 
 
@@ -307,9 +314,13 @@ def _print_notices(main: Path, show_all: bool) -> int:
         for row in recovery:
             print(f"- key={row['key']!r} window={row.get('window', '')!r} "
                   f"time={row['time']!r} cause={row['cause']!r}")
-            print("  Clear only after deciding to resend: python3 "
-                  "lib/notify/held_view.py --clear-unconfirmed "
-                  f"{shlex.quote(row['key'])}")
+            if row["key"] == "dedupe-journal-unreadable":
+                print("  Reconcile unknown deliveries, then run python3 "
+                      "lib/notify/held_view.py --clear-unreadable-journal")
+            else:
+                print("  Clear only after deciding to resend: python3 "
+                      "lib/notify/held_view.py --clear-unconfirmed "
+                      f"{shlex.quote(row['key'])}")
     unreadable = []
     for path in (main, email_queue_path(main)):
         try:
@@ -497,9 +508,53 @@ def _clear_unconfirmed(main: Path, key: str) -> int:
     return 0
 
 
+def _clear_unreadable_journal(main: Path) -> int:
+    """Rebuild receipts only after the operator reconciles unknown deliveries."""
+    journal_file = journal_path()
+    with file_lock(queue_lock_path(main), fail_open=False) as queue_locked:
+        if not queue_locked:
+            return 1
+        with file_lock(journal_file.with_name(journal_file.name + ".lock"),
+                       fail_open=False) as journal_locked:
+            if not journal_locked:
+                return 1
+            with file_lock(recovery_lock_path(main), fail_open=False) as recovery_locked:
+                if not recovery_locked:
+                    return 1
+                try:
+                    records = read_recovery(main)
+                    if not any(row["key"] == "dedupe-journal-unreadable" for row in records):
+                        print("No unreadable-journal recovery record; nothing cleared.")
+                        return 1
+                    items = read_queue(main) + read_queue(email_queue_path(main))
+                    journal = {}
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        for key in item["keys"]:
+                            if key != "dedupe-journal-unreadable":
+                                journal[key] = {"state": "held", "held_message": item["message"],
+                                                "handler": ""}
+                    for path in (main, email_queue_path(main)):
+                        queue = read_queue(path)
+                        write_queue(path, [item for item in queue if not (
+                            isinstance(item, dict) and "dedupe-journal-unreadable" in item["keys"]
+                        )])
+                    atomic_write(journal_file, json.dumps(journal))
+                    write_recovery(main, [row for row in records
+                                          if row["key"] != "dedupe-journal-unreadable"])
+                except Exception as exc:  # noqa: BLE001
+                    print(f"could not reconcile dedupe journal: {exc}", file=sys.stderr)
+                    return 1
+    print("Rebuilt dedupe journal from held notices; keyed delivery may resume.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     path = queue_path()
+    if "--clear-unreadable-journal" in args:
+        return _clear_unreadable_journal(path)
     if "--clear-unconfirmed" in args:
         index = args.index("--clear-unconfirmed")
         if index + 1 >= len(args):

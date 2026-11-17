@@ -168,8 +168,38 @@ def _read_json_object(path: Path) -> dict[str, object]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def usage_snapshot_problem(path: Path) -> str | None:
-    """Describe an existing snapshot that cannot supply usage observations."""
+_USAGE_ENTRY_FIELDS = frozenset({
+    "observed_at", "windows", "probe", "last_probe_failure", "cooling",
+    "model_cooling", "exhausted_until",
+})
+
+
+def _usage_entry_problem(entry: object) -> bool:
+    """One shape contract for entries written by every usage recorder."""
+    return (
+        not isinstance(entry, dict)
+        or not _USAGE_ENTRY_FIELDS.intersection(entry)
+        or ("windows" in entry and (
+            not isinstance(entry["windows"], list)
+            or bool(entry["windows"]) and not any(
+                isinstance(window, dict) and _percent(window.get("used_percent")) is not None
+                for window in entry["windows"]
+            )
+        ))
+        or ("model_cooling" in entry and not isinstance(entry["model_cooling"], dict))
+        or any(field in entry and not isinstance(entry[field], dict)
+               for field in ("probe", "last_probe_failure", "cooling"))
+        or ("observed_at" in entry and not isinstance(entry["observed_at"], str))
+        or ("exhausted_until" in entry and entry["exhausted_until"] is not None
+            and not isinstance(entry["exhausted_until"], str))
+    )
+
+
+def usage_snapshot_problem(path: Path, *, provider: str | None = None) -> str | None:
+    """Describe an unreadable snapshot or malformed provider entry.
+
+    A malformed sibling entry does not invalidate a readable provider.
+    """
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -180,21 +210,19 @@ def usage_snapshot_problem(path: Path) -> str | None:
         parsed = json.loads(raw)
     except (TypeError, ValueError):
         return "invalid JSON"
-    if not isinstance(parsed, dict) or not parsed or any(
-        not isinstance(entry, dict)
-        or not any(field in entry for field in (
-            "observed_at", "windows", "probe", "last_probe_failure",
-            "cooling", "exhausted_until",
-        ))
-        or ("windows" in entry and not isinstance(entry["windows"], list))
-        or (isinstance(entry.get("windows"), list) and entry["windows"] and not any(
-            isinstance(window, dict) and _percent(window.get("used_percent")) is not None
-            for window in entry["windows"]
-        ))
-        for entry in parsed.values()
-    ):
+    if not isinstance(parsed, dict) or not parsed:
+        return "not a usage object"
+    entries = (parsed.get(provider),) if provider in parsed else (() if provider else parsed.values())
+    if any(_usage_entry_problem(entry) for entry in entries):
         return "not a usage object"
     return None
+
+
+def _read_usage_object() -> dict[str, dict[str, object]]:
+    """Read only provider entries that obey the writer's shape contract."""
+    parsed = _read_json_object(_usage_path())
+    return {name: entry for name, entry in parsed.items()
+            if isinstance(name, str) and not _usage_entry_problem(entry)}
 
 
 def _override_values() -> tuple[Mapping[str, object], float | None]:
@@ -296,7 +324,7 @@ def usage_reading(provider: str, *, now_wall: float | None = None) -> UsageReadi
     """
     moment = time.time() if now_wall is None else now_wall
     max_age = usage_max_age_seconds()
-    entry = _read_json_object(_usage_path()).get(provider)
+    entry = _read_usage_object().get(provider)
     if not isinstance(entry, dict):
         return UsageReading(
             provider, READING_NONE, None, None, max_age, "never observed"
@@ -379,7 +407,7 @@ def live_headroom(provider: str, *, now_wall: float | None = None) -> float | No
     have not yet reset.
     """
     moment = time.time() if now_wall is None else now_wall
-    entry = _read_json_object(_usage_path()).get(provider)
+    entry = _read_usage_object().get(provider)
     if not isinstance(entry, dict):
         return None
     exhausted_until = _wall_from_iso(entry.get("exhausted_until"))
@@ -475,7 +503,7 @@ def _window_problem(window: object) -> str | None:
 
 
 def _live_observed_at(provider: str) -> float | None:
-    entry = _read_json_object(_usage_path()).get(provider)
+    entry = _read_usage_object().get(provider)
     if not isinstance(entry, dict):
         return None
     return _wall_from_iso(entry.get("observed_at"))
@@ -485,7 +513,7 @@ def _probe_evidence(
     provider: str, *, now_wall: float | None = None
 ) -> dict[str, object] | None:
     """Return a current provider-native probe observation, or ``None``."""
-    entry = _read_json_object(_usage_path()).get(provider)
+    entry = _read_usage_object().get(provider)
     probe = entry.get("probe") if isinstance(entry, dict) else None
     if not isinstance(probe, dict) or probe.get("status") not in {
         "available", "exhausted", "unknown",
@@ -686,6 +714,26 @@ def _write_usage_entry(
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path.with_name(f".{path.name}.lock"), "a", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        problem = usage_snapshot_problem(path)
+        if problem is not None:
+            # Record the failure while the original is still present. A failed
+            # backup leaves the original untouched rather than erasing evidence.
+            from usage_alerts import _notice_unreadable_snapshot
+
+            _notice_unreadable_snapshot(
+                path, problem, datetime.now(timezone.utc),
+                notifier=None, notifier_factory=None, journal_factory=None,
+            )
+            raw = path.read_bytes()
+            unreadable = path.with_name(path.name + ".unreadable")
+            fd, backup_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{unreadable.name}.")
+            try:
+                with os.fdopen(fd, "wb") as backup:
+                    backup.write(raw)
+                os.replace(backup_name, unreadable)
+            except BaseException:
+                os.unlink(backup_name)
+                raise
         existing = _read_json_object(path)
         current = existing.get(provider)
         current = current if isinstance(current, dict) else {}
@@ -701,6 +749,8 @@ def _write_usage_entry(
             merged[key] = {**(base if isinstance(base, dict) else {}), **dict(additions)}
         for key in clear_keys:
             merged.pop(key, None)
+        if _usage_entry_problem(merged):
+            raise ValueError("invalid usage entry")
         existing[provider] = merged
         fd, tmp_name = tempfile.mkstemp(
             dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
@@ -998,7 +1048,7 @@ def persisted_model_cooling(
     wanted = _model_family(model)
     if not wanted:
         return None
-    entry = _read_json_object(_usage_path()).get(provider)
+    entry = _read_usage_object().get(provider)
     windows = entry.get("model_cooling") if isinstance(entry, dict) else None
     if not isinstance(windows, dict):
         return None
@@ -1106,7 +1156,7 @@ def persisted_cooling(
     any edit.  Keys: ``until`` (epoch), ``until_iso``, ``reason``.
     """
     moment = time.time() if now_wall is None else now_wall
-    entry = _read_json_object(_usage_path()).get(provider)
+    entry = _read_usage_object().get(provider)
     cooling = entry.get("cooling") if isinstance(entry, dict) else None
     if not isinstance(cooling, dict):
         return None
@@ -1122,7 +1172,7 @@ def persisted_cooling(
 
 def usage_windows(provider: str) -> list[dict[str, object]]:
     """Return the recorded usage windows (session, weekly, ...) for a provider."""
-    entry = _read_json_object(_usage_path()).get(provider)
+    entry = _read_usage_object().get(provider)
     windows = entry.get("windows") if isinstance(entry, dict) else None
     return [dict(w) for w in windows if isinstance(w, dict)] if isinstance(windows, list) else []
 
@@ -1309,7 +1359,15 @@ def usage_gate(provider: str, *, now_wall: float | None = None) -> UsageGate | N
     common: dict[str, object] = {
         "max_age_seconds": max_age, "ceiling_percent": ceiling, "burst_percent": burst,
     }
-    entry = _read_json_object(_usage_path()).get(normalized)
+    raw_entry = _read_json_object(_usage_path()).get(normalized)
+    if raw_entry is not None and _usage_entry_problem(raw_entry):
+        return _refused(
+            normalized, GATE_MALFORMED,
+            f"usage reading malformed for {normalized}; refusing new frontier "
+            "dispatch until a valid one is recorded",
+            moment, entry=raw_entry, **common,
+        )
+    entry = _read_usage_object().get(normalized)
     if not isinstance(entry, dict) or (
         "observed_at" not in entry and "windows" not in entry
         and "exhausted_until" not in entry and "probe" not in entry
