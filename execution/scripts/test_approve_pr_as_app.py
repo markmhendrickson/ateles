@@ -161,7 +161,7 @@ class _FakeClient:
         workflow_runs: "list[dict] | None" = None,
         actions_status: int = 200,
         default_branch: "str | None" = BASE_REF,
-        repo_owner: "dict | None" = None,
+        repo_owner: "dict | list | None" = None,
         checks_total: "int | None" = None,
         checks_page_status: "dict[int, int] | None" = None,
         pr_mergeable: "bool | None" = True,
@@ -5243,10 +5243,11 @@ class TestRoundCapOverride:
         assert await target.run(REPO, PR, ALL_FOUR, apply=True) == 1
         assert client.posted == [] and "organization-owned" in capsys.readouterr().out
 
-    async def test_unreadable_owner_has_no_override(self, monkeypatch, capsys):
+    @pytest.mark.parametrize("owner", [{}, []])
+    async def test_unreadable_owner_has_no_override(self, monkeypatch, capsys, owner):
         comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
         client = _FakeClient(comments=comments + [_operator_override()], check_runs=_green_checks(),
-                             repo_owner={})
+                             repo_owner=owner)
         _install_client(monkeypatch, client)
         _install_app_mint(monkeypatch)
         assert await target.run(REPO, PR, ALL_FOUR, apply=True) == 1

@@ -524,6 +524,8 @@ async def _repository_operator(client: httpx.AsyncClient, repo: str) -> tuple[st
         owner = (resp.json() or {}).get("owner") or {}
     except Exception:  # noqa: BLE001 — an unknown owner cannot authorize
         return "", "repository owner could not be read"
+    if not isinstance(owner, dict):
+        return "", "repository owner could not be read"
     if owner.get("type") != "User":
         return "", "repository owner is not a User; organization-owned repositories have no override"
     login = owner.get("login")
