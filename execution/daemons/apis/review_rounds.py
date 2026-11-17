@@ -104,20 +104,15 @@ def _comment_id(value: object) -> int | None:
     return None
 
 
-def verdict_class(body: str, lens: str) -> str:
-    """Classify a posted lens record with the approval reader's own rules."""
+def verdict_class(body: str, lens: str) -> tuple[str, bool]:
+    """Classify a retry with the counter's verdict kind and blocking state."""
     import swarm_dispatch
     from review_panel import LENSES
 
     agent = next((item.agent for item in LENSES if item.lens == lens), None)
     if agent is None:
-        return "unreadable"
-    verdict = swarm_dispatch.lens_own_verdict(body, lens_agent=agent)
-    if verdict is None:
-        return "unreadable"
-    if verdict in swarm_dispatch.SIGN_OFF_CLEAR_VERDICTS:
-        return "signed_off" if swarm_dispatch.sign_off_is_warranted(body, lens_agent=agent) else "blocked"
-    return "blocked"
+        return "unreadable", True
+    return swarm_dispatch.lens_verdict_classification(body, lens_agent=agent)
 
 
 def round_status(records: dict[str, list], current_head: str, *, cap: int = ROUND_CAP) -> RoundStatus:
@@ -207,29 +202,42 @@ def round_status(records: dict[str, list], current_head: str, *, cap: int = ROUN
 
 def operator_override(comments: list[dict], owner_login: str, operator_login: str, repo: str, pr: int) -> dict | None:
     """Latest valid operator comment when the human owner is the operator."""
-    if not owner_login or not operator_login or owner_login != operator_login:
+    if (not isinstance(owner_login, str) or not isinstance(operator_login, str)
+            or not owner_login or owner_login != operator_login):
         return None
     valid = []
+    now = datetime.now(timezone.utc)
+    url_pattern = re.compile(rf"https://github\.com/{re.escape(repo)}/pull/{pr}#issuecomment-([0-9]+)\Z")
     for comment in comments:
-        body = comment.get("body") or ""
+        if not isinstance(comment, dict):
+            continue
+        body = comment.get("body")
+        if not isinstance(body, str):
+            continue
         lines = body.splitlines()
-        user = comment.get("user") or {}
-        login = user.get("login") or ""
-        association = (comment.get("author_association") or "").upper()
-        created = comment.get("created_at") or ""
-        updated = comment.get("updated_at") or ""
+        user = comment.get("user")
+        if not isinstance(user, dict):
+            continue
+        login = user.get("login")
+        association = comment.get("author_association")
+        created = comment.get("created_at")
+        updated = comment.get("updated_at")
+        url = comment.get("html_url")
+        match = url_pattern.fullmatch(url) if isinstance(url, str) else None
+        comment_id = comment.get("id")
         reason = "\n".join(lines[1:]).strip()
         if (
             lines and lines[0].strip() == OVERRIDE_COMMAND
             and login == operator_login
             and user.get("type") == "User"
-            and association not in {"BOT", "APP"}
-            and created and updated == created
+            and (association is None or isinstance(association, str))
+            and (association or "").upper() not in {"BOT", "APP"}
+            and created == updated and _verdict_time(created, now) is not None
             and len(reason) >= 20
-            and str(comment.get("html_url") or "").startswith(
-                (f"https://github.com/{repo}/pull/{pr}#issuecomment-",
-                 f"https://github.com/{repo}/issues/{pr}#issuecomment-")
-            )
+            and match is not None
+            and _comment_id(match.group(1)) is not None
+            and (comment_id is None or _comment_id(comment_id) == _comment_id(match.group(1)))
         ):
             valid.append(comment)
-    return max(valid, key=lambda comment: comment["created_at"]) if valid else None
+    return max(valid, key=lambda comment: (_verdict_time(comment["created_at"], now),
+                                           _comment_id(comment.get("id")) or 0)) if valid else None

@@ -555,13 +555,20 @@ async def _operator_profile_login(client: httpx.AsyncClient) -> tuple[str, str]:
         resp.raise_for_status()
         data = resp.json()
         rows = data.get("entities") if isinstance(data, dict) else None
-        if (not isinstance(rows, list) or data.get("has_more") is True
-                or data.get("total", len(rows)) > len(rows) or len(rows) == 100):
+        total = data.get("total") if isinstance(data, dict) else None
+        has_more = data.get("has_more") if isinstance(data, dict) else None
+        if (not isinstance(rows, list) or has_more not in (None, False)
+                or isinstance(total, bool) or (total is not None and
+                    (not isinstance(total, int) or total != len(rows))) or len(rows) == 100):
             return "", "operator_profile read is partial or malformed"
         matches = []
         for row in rows:
+            if not isinstance(row, dict):
+                return "", "operator_profile read is partial or malformed"
             outer = row.get("snapshot") if isinstance(row, dict) else None
             snap = outer.get("snapshot", outer) if isinstance(outer, dict) else None
+            if not isinstance(snap, dict) or not isinstance(snap.get("profile_key"), str):
+                return "", "operator_profile read is partial or malformed"
             if isinstance(snap, dict) and snap.get("profile_key") == "default":
                 matches.append(snap)
         if len(matches) != 1:
@@ -602,7 +609,12 @@ async def _fetch_issue_comments(client: httpx.AsyncClient, repo: str, pr: int) -
             params={"per_page": 100, "page": page},
         )
         resp.raise_for_status()
-        rows = resp.json() or []
+        rows = resp.json()
+        if (not isinstance(rows, list) or any(
+            not isinstance(row, dict) or not isinstance(row.get("body"), str)
+            or not isinstance(row.get("user"), dict) for row in rows
+        )):
+            raise ValueError("GitHub comment listing is partial or malformed")
         out.extend(rows)
         if len(rows) < 100:
             break
@@ -2609,7 +2621,11 @@ async def run(
         added = [lens for lens in lenses if lens not in floor_names]
         _print_derived_lenses(required, added, excluded=excluded)
 
-        comments = await _fetch_issue_comments(client, repo, pr)
+        try:
+            comments = await _fetch_issue_comments(client, repo, pr)
+        except ValueError as exc:
+            print(f"refusing: {exc}")
+            return 1
 
         # Whose comments are lens verdicts. The head marker is text any account
         # can post on a public repo, so a lens comment counts only when a swarm
@@ -2792,7 +2808,11 @@ async def run(
             return 1
 
         if override:
-            fresh_comments = await _fetch_issue_comments(client, repo, pr)
+            try:
+                fresh_comments = await _fetch_issue_comments(client, repo, pr)
+            except ValueError as exc:
+                print(f"refusing to approve: {exc}. Submitting nothing.")
+                return 1
             fresh_owner, fresh_operator, fresh_owner_error = await _repository_operator(client, repo)
             fresh_override = (review_rounds.operator_override(fresh_comments, fresh_owner, fresh_operator, repo, pr)
                               if fresh_owner and not fresh_owner_error else None)

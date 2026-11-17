@@ -309,7 +309,9 @@ def _comments(client: httpx.Client, repo: str, pr: int, identity: Identity) -> l
         )
         if resp.status_code >= 400:
             raise Refusal(f"could not list comments on {repo}#{pr} (HTTP {resp.status_code})")
-        rows = resp.json() or []
+        rows = resp.json()
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise Refusal("GitHub comment listing is partial or malformed; refusing to post")
         out.extend(rows)
         if len(rows) < 100:
             return out
@@ -364,8 +366,15 @@ def post_verdict(
     check_author_admitted(identity, composed)
     marker = swarm_dispatch.compose_lens_review_marker(lens, live)
     existing = _existing_for_head(_comments(client, repo, pr, identity), login=identity.login, marker=marker)
-    if existing and review_rounds.verdict_class(str(existing.get("body") or ""), lens) != review_rounds.verdict_class(composed, lens):
+    if existing and (
+        review_rounds.verdict_class(str(existing.get("body") or ""), lens)
+        != review_rounds.verdict_class(composed, lens)
+        or existing.get("body") != composed
+    ):
         existing = None
+    if existing and (not isinstance(existing.get("id"), int) or
+                     isinstance(existing.get("id"), bool) or existing["id"] <= 0):
+        raise Refusal("latest lens verdict has no usable comment id; refusing to edit")
     action = "edit" if existing else "create"
     summary = f"lens={lens} head={live} verdict={verdict} as {identity.login} ({identity.via})"
     if dry_run:

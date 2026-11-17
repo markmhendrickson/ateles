@@ -5147,6 +5147,12 @@ def _operator_override(id_=1200, *, author=None, reason="The review has exceeded
 @pytest.mark.asyncio
 class TestRoundCapOverride:
     _run = TestRoundCap._run
+    async def test_partial_comment_row_cannot_disappear_from_approval_history(self):
+        client = _FakeClient(comments=[None], check_runs=_green_checks())
+        with pytest.raises(ValueError, match="partial or malformed"):
+            await target._fetch_issue_comments(client, REPO, PR)
+        assert client.posted == []
+
     async def test_operator_comment_overrides_only_cap_and_reports_evidence(self, monkeypatch, capsys):
         override = _operator_override()
         code, client = await self._run(monkeypatch,
@@ -5186,6 +5192,36 @@ class TestRoundCapOverride:
         assert login == expected
         assert bool(error) == (not expected)
 
+    async def test_malformed_profile_row_cannot_be_ignored_beside_default(self, monkeypatch):
+        assert _ORIGINAL_OPERATOR_PROFILE_LOGIN is not None
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://records.example")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-bearer")
+
+        class ProfileClient:
+            async def post(self, url, headers=None, json=None):
+                return _FakeResponse({"entities": [
+                    {"snapshot": {"profile_key": "default", "github_login": "synthetic-owner"}},
+                    {"snapshot": None},
+                ], "total": 2})
+
+        login, error = await _ORIGINAL_OPERATOR_PROFILE_LOGIN(ProfileClient())
+        assert login == "" and "partial or malformed" in error
+
+    @pytest.mark.parametrize("metadata", [{"has_more": "true"}, {"total": 2}, {"total": True}])
+    async def test_partial_or_malformed_profile_listing_disables_override(self, monkeypatch, metadata):
+        assert _ORIGINAL_OPERATOR_PROFILE_LOGIN is not None
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://records.example")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-bearer")
+
+        class ProfileClient:
+            async def post(self, url, headers=None, json=None):
+                return _FakeResponse({"entities": [
+                    {"snapshot": {"profile_key": "default", "github_login": "synthetic-owner"}}
+                ], **metadata})
+
+        login, error = await _ORIGINAL_OPERATOR_PROFILE_LOGIN(ProfileClient())
+        assert login == "" and "partial or malformed" in error
+
     @pytest.mark.parametrize("login,error", [
         ("", "default operator_profile lacks a valid github_login field"),
         ("", "default operator_profile could not be read"),
@@ -5209,6 +5245,42 @@ class TestRoundCapOverride:
         _operator_override(other_pr=True),
     ])
     async def test_invalid_override_refused(self, monkeypatch, override):
+        code, client = await self._run(monkeypatch,
+            _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override])
+        assert code == 1 and client.posted == []
+
+    @pytest.mark.parametrize("field,value,equal_timestamps", [
+        ("created_at", "malformed", True), ("updated_at", "malformed", True),
+        ("created_at", "2026-02-30T10:00:00Z", True),
+        ("created_at", "2026-11-17T10:00:00", True),
+        ("created_at", "2099-01-01T00:00:00Z", True),
+        ("created_at", None, False), ("updated_at", None, False),
+        ("updated_at", "2026-11-17T10:00:00Z", False),
+        ("html_url", f"https://github.com/{REPO}/pull/{PR}#issuecomment-", False),
+        ("html_url", f"https://github.com/{REPO}/pull/{PR}#issuecomment-abc", False),
+        ("html_url", f"https://github.com/{REPO}/pull/99#issuecomment-1200", False),
+        ("html_url", f"https://github.com/other/repo/pull/{PR}#issuecomment-1200", False),
+        ("html_url", f"https://github.com/{REPO}/issues/{PR}#issuecomment-1200", False),
+        ("html_url", f"https://github.com/{REPO}/pull/{PR}#issuecomment-1201", False),
+    ])
+    async def test_malformed_authorization_metadata_refuses(self, monkeypatch, field, value, equal_timestamps):
+        override = _operator_override()
+        override[field] = value
+        if equal_timestamps:
+            override["created_at"] = override["updated_at"] = value
+        code, client = await self._run(monkeypatch,
+            _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override])
+        assert code == 1 and client.posted == []
+
+    @pytest.mark.parametrize("field,value", [
+        ("body", None), ("body", ["/override-round-cap"]),
+        ("user", None), ("user", "synthetic-owner"),
+        ("author_association", 1),
+        ("id", "malformed"),
+    ])
+    async def test_malformed_override_fields_refuse(self, monkeypatch, field, value):
+        override = _operator_override()
+        override[field] = value
         code, client = await self._run(monkeypatch,
             _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override])
         assert code == 1 and client.posted == []
@@ -5262,6 +5334,13 @@ class TestRoundCapOverride:
         code, client = await self._run(monkeypatch, comments + [original],
                                         comments_after_first_get=comments + [{**original}])
         assert code == 0 and len(client.posted) == 1 and client.comment_get_count >= 2
+
+    async def test_malformed_fresh_override_history_refuses_before_submit(self, monkeypatch):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        original = _operator_override()
+        code, client = await self._run(monkeypatch, comments + [original],
+                                        comments_after_first_get=comments + [original, None])
+        assert code == 1 and client.posted == [] and client.comment_get_count >= 2
 
     async def test_flag_and_environment_cannot_grant_override(self, monkeypatch):
         monkeypatch.setenv("ATELES_OVERRIDE_ROUND_CAP", "1")

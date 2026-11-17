@@ -46,6 +46,28 @@ def test_override_requires_repository_owner_to_equal_operator():
     assert rr.operator_override([row], "other-owner", "other-owner", "example/repo", 7) is row
 
 
+@pytest.mark.parametrize("verdict,kind,blocking", [
+    ("SIGNED_OFF", "signed_off", False),
+    ("APPROVE", "signed_off", False),
+    ("BLOCKED", "blocked", True),
+    ("REQUEST_CHANGES", "blocked", True),
+    ("CHANGES_REQUESTED", "unreadable", True),
+    ("COMMENT", "comment", False),
+    ("unreadable", "unreadable", True),
+])
+def test_poster_classification_agrees_with_counter_for_every_verdict_kind(verdict, kind, blocking):
+    row = _verdict("pm", H1, verdict=verdict, n=1)
+    assert rr.verdict_class(row["body"], "pm") == (kind, blocking)
+    record = swarm_dispatch.lens_records([row])["pm"][0]
+    assert record.blocking is blocking
+
+
+def test_comment_with_explicit_objection_uses_counters_blocking_state():
+    row = _verdict("pm", H1, verdict="COMMENT", n=1, extra="[BLOCKING] unresolved\n")
+    assert rr.verdict_class(row["body"], "pm") == ("comment", True)
+    assert swarm_dispatch.lens_records([row])["pm"][0].blocking
+
+
 def test_clear_repushes_and_sites_private_shape_spend_only_second_round():
     comments = [_verdict("pm", H1, verdict="REQUEST_CHANGES", n=0)]
     heads = [f"{i:040x}" for i in range(2, 22)]

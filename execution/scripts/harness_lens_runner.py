@@ -2687,7 +2687,9 @@ def _pr_comments(*, repo: str, pr: int) -> list[dict]:
     pages = json.loads(result.stdout or "[]")
     if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
         raise ValueError("GitHub comment listing had an unexpected shape")
-    return [comment for page in pages for comment in page if isinstance(comment, dict)]
+    if any(not isinstance(comment, dict) for page in pages for comment in page):
+        raise ValueError("GitHub comment listing contained a malformed comment")
+    return [comment for page in pages for comment in page]
 
 
 def _matching_verdict_comments(
@@ -2734,7 +2736,8 @@ def _one_verdict_comment(
     if old_marker.group("head") != new_marker.group("head"):
         return None
     from review_rounds import verdict_class
-    if verdict_class(str(latest.get("body") or ""), lens) != verdict_class(verdict_text, lens):
+    if (verdict_class(str(latest.get("body") or ""), lens) != verdict_class(verdict_text, lens)
+            or latest.get("body") != verdict_text):
         return None
     return latest
 

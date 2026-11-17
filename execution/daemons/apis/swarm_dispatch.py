@@ -4285,6 +4285,24 @@ def _original_lens_body(body: str) -> str:
     return (body or "")[match.end():].lstrip("\n") if match else (body or "")
 
 
+def lens_verdict_classification(body: str, *, lens_agent: str) -> tuple[str, bool]:
+    """The counter's verdict kind and blocking state, also used by posters."""
+    verdict = lens_own_verdict(body, lens_agent=lens_agent)
+    cleared = sign_off_is_warranted(body, lens_agent=lens_agent)
+    blocking = (not cleared and verdict != "comment") or bool(
+        lens_explicit_objection(body, lens_agent=lens_agent)
+    )
+    if cleared:
+        kind = "signed_off"
+    elif verdict == "comment":
+        kind = "comment"
+    elif verdict is None:
+        kind = "unreadable"
+    else:
+        kind = "blocked"
+    return kind, blocking
+
+
 def lens_records(comments: list[dict]) -> dict[str, list[review_carry.LensRecord]]:
     """Every lens verdict comment on the PR, per lens in comment order.
 
@@ -4310,6 +4328,7 @@ def lens_records(comments: list[dict]) -> dict[str, list[review_carry.LensRecord
         if known is None:
             continue
         body = _original_lens_body(raw)
+        _, blocking = lens_verdict_classification(body, lens_agent=known.agent)
         out.setdefault(lens, []).append(
             review_carry.LensRecord(
                 lens=lens,
@@ -4320,10 +4339,7 @@ def lens_records(comments: list[dict]) -> dict[str, list[review_carry.LensRecord
                 created_at=str(comment.get("created_at") or ""),
                 comment_id=comment.get("id"),
                 source_order=source_order,
-                blocking=(
-                    not sign_off_is_warranted(body, lens_agent=known.agent)
-                    and lens_own_verdict(body, lens_agent=known.agent) != "comment"
-                ) or bool(lens_explicit_objection(body, lens_agent=known.agent)),
+                blocking=blocking,
             )
         )
     return out

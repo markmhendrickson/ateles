@@ -39,7 +39,9 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR), str(_SCRIPTS_DIR)):
 
 import harness_lens_runner as hlr  # noqa: E402
 import harness_router  # noqa: E402
+import review_rounds  # noqa: E402
 import skill_runner  # noqa: E402
+import swarm_dispatch  # noqa: E402
 from skill_runner import SkillResult  # noqa: E402
 from lib.daemon_runtime.agent_loader import AgentDefinition  # noqa: E402
 
@@ -2929,6 +2931,58 @@ def test_post_verdict_edits_existing_lens_comment_in_place(monkeypatch, tmp_path
     assert url.endswith("#issuecomment-41")
     assert current_body == SIGNED_OFF_VERDICT
     assert len(patch_calls) == 1
+
+
+@pytest.mark.parametrize("replacement", ["COMMENT", "SIGNED_OFF"])
+def test_harness_poster_preserves_blocking_round_then_edits_identical_retry(monkeypatch, replacement):
+    heads = ["1" * 40, "2" * 40, SAMPLE_HEAD]
+    comments = [{"id": index, "body": SIGNED_OFF_VERDICT.replace(SAMPLE_HEAD, head)
+                 .replace("SIGNED_OFF", "BLOCKED"),
+                 "created_at": f"2026-11-17T00:00:0{index}Z",
+                 "html_url": f"https://github.com/o/r/pull/1#issuecomment-{index}",
+                 "user": {"login": "ateles-agent"}}
+                for index, head in enumerate(heads, 1)]
+    replacement_body = SIGNED_OFF_VERDICT.replace("SIGNED_OFF", replacement)
+    writes = []
+
+    def _run(command, **kwargs):
+        if command[1] == "api" and command[2].startswith("repos/o/r/issues/1/comments?"):
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps([comments]), stderr="")
+        method = command[3]
+        writes.append(method)
+        if method == "POST":
+            comments.append({"id": 4, "body": json.loads(kwargs["input"])["body"],
+                             "created_at": "2026-11-17T00:00:04Z",
+                             "html_url": "https://github.com/o/r/pull/1#issuecomment-4",
+                             "user": {"login": "ateles-agent"}})
+        else:
+            assert method == "PATCH" and command[4].endswith("/issues/comments/4")
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(hlr.subprocess, "run", _run)
+    hlr.post_verdict(repo="o/r", pr=1, verdict_text=replacement_body)
+    assert writes == ["POST"] and comments[2]["body"].find("BLOCKED") >= 0
+    assert review_rounds.round_status(swarm_dispatch.lens_records(comments), "4" * 40).round_number == 4
+    hlr.post_verdict(repo="o/r", pr=1, verdict_text=replacement_body)
+    assert writes == ["POST", "PATCH"]
+
+
+def test_harness_comment_reader_refuses_malformed_history_row(monkeypatch):
+    def _run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps([[None]]), stderr="")
+
+    monkeypatch.setattr(hlr.subprocess, "run", _run)
+    with pytest.raises(ValueError, match="malformed comment"):
+        hlr._pr_comments(repo="o/r", pr=1)
+
+
+def test_harness_same_kind_changed_findings_are_not_an_identical_retry():
+    old = SIGNED_OFF_VERDICT.replace("SIGNED_OFF", "BLOCKED")
+    row = {"id": 41, "body": old, "user": {"login": "ateles-agent"}}
+    changed = old + "Additional finding.\n"
+    assert hlr._one_verdict_comment(repo="o/r", pr=1, lens="pm",
+                                     attribution=old.splitlines()[1], verdict_text=changed,
+                                     comments=[row]) is None
 
 
 @pytest.mark.parametrize("intervening", [False, True])
