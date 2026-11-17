@@ -5228,6 +5228,8 @@ class TestRoundCapOverride:
 
     async def test_environment_cannot_redefine_repository_owner(self, monkeypatch):
         monkeypatch.setenv("APIS_OPERATOR_LOGIN", OTHER_LOGIN)
+        # Model the value captured when the approval module was imported.
+        monkeypatch.setattr(target, "_OPERATOR_LOGIN", OTHER_LOGIN, raising=False)
         comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
         code, client = await self._run(monkeypatch, comments + [_operator_override(author=OTHER_LOGIN)])
         assert code == 1 and client.posted == []
@@ -5263,10 +5265,13 @@ class TestPartialLensIdentityHistory:
     _run = TestRoundCap._run
 
     async def test_unresolved_historical_lens_refuses_clear_current_head(self, monkeypatch, capsys):
-        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        comments = (_cap_round_comments(ROUND_HEADS, author="unresolved-lens-account")
+                    + _all_clear_comments(ALL_FOUR))
+        monkeypatch.setattr(target, "lens_comment_authors", lambda: SWARM_AUTHORS, raising=False)
         monkeypatch.setattr(
             target, "lens_comment_authors_resolution",
             lambda: lens_authors.Resolution(SWARM_AUTHORS, ("the account behind PAVO_AGENT_PAT",)),
+            raising=False,
         )
         code, client = await self._run(monkeypatch, comments)
         assert code == 1 and client.posted == []
@@ -5276,6 +5281,7 @@ class TestPartialLensIdentityHistory:
         monkeypatch.setattr(
             target, "lens_comment_authors_resolution",
             lambda: lens_authors.Resolution(SWARM_AUTHORS),
+            raising=False,
         )
         code, client = await self._run(monkeypatch, _all_clear_comments(ALL_FOUR))
         assert code == 0 and len(client.posted) == 1
@@ -5284,6 +5290,7 @@ class TestPartialLensIdentityHistory:
         monkeypatch.setattr(
             target, "lens_comment_authors_resolution",
             lambda: lens_authors.Resolution(SWARM_AUTHORS, ("the account behind PAVO_AGENT_PAT",)),
+            raising=False,
         )
         code, client = await self._run(monkeypatch, _all_clear_comments(ALL_FOUR) + [_operator_override()])
         assert code == 0 and len(client.posted) == 1
