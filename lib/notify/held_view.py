@@ -79,6 +79,13 @@ def budget_path(main: Path) -> Path:
     return main.with_name(f"{main.stem}-email-budget.json")
 
 
+def journal_path() -> Path:
+    return Path(
+        os.environ.get("ATELES_DEDUPE_JOURNAL_PATH", "").strip()
+        or Path(tempfile.gettempdir()) / "ateles-notify-dedupe.json"
+    )
+
+
 def queue_lock_path(main: Path) -> Path:
     return main.with_name(f"{main.name}.lock")
 
@@ -310,6 +317,33 @@ def _clear(main: Path) -> int:
                 except Exception:  # noqa: BLE001 — a missing/corrupt backup restarts
                     old = []
                 atomic_write(backup, json.dumps((old + removed)[-BACKUP_MAX:]))
+                # Queue -> journal is the shared lock order. A cleared usage
+                # threshold remains settled for this window, while a higher
+                # threshold has its own key and can still alert.
+                journal_file = journal_path()
+                with file_lock(journal_file.with_name(journal_file.name + ".lock"),
+                               fail_open=False) as journal_locked:
+                    if not journal_locked:
+                        raise OSError("dedupe journal lock unavailable")
+                    try:
+                        journal = json.loads(read_text_nofollow(journal_file))
+                    except FileNotFoundError:
+                        journal = {}
+                    if not isinstance(journal, dict):
+                        raise ValueError("dedupe journal is not an object")
+                    changed = False
+                    for key, entry in journal.items():
+                        if (isinstance(entry, dict) and entry.get("state") == "held"
+                                and entry.get("held_message") in removed):
+                            journal[key] = {
+                                "state": "delivered", "notified_at": time.strftime(
+                                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                "handler": entry.get("handler", ""),
+                                "cleared": True,
+                            }
+                            changed = True
+                    if changed:
+                        atomic_write(journal_file, json.dumps(journal))
                 for path, keep in kept.items():
                     write_queue(path, keep)
             snap.unlink(missing_ok=True)

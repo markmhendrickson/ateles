@@ -145,6 +145,26 @@ def test_clear_does_not_remove_when_backup_fails(queue, monkeypatch):
     assert json.loads(queue.read_text()) == ["⚠️ [apis] one"]
 
 
+def test_clear_backup_failure_keeps_held_receipt(queue, monkeypatch, tmp_path):
+    from lib.notify import Notifier, Priority, neotoma_sink
+
+    journal = tmp_path / "dedupe.json"
+    monkeypatch.setattr(neotoma_sink, "record", lambda **kwargs: None)
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(journal))
+    notifier = Notifier(rubric={"silence_start": "00:00", "silence_end": "23:59"})
+    notifier._digest_path = queue
+    notifier._dedupe_path = journal
+    notifier.should_flush_digest = lambda: False
+    notifier._in_silence_window = lambda: True
+    assert not notifier.send("usage crossed", Priority.WARN, handler="apis",
+                             dedupe_key="usage:weekly:50", retryable=True)
+    assert held_view.main([]) == 0
+    monkeypatch.setattr(held_view, "backup_path", lambda main: main / "missing" / "backup.json")
+    assert held_view.main(["--clear"]) == 1
+    assert notifier._dedupe_journal["usage:weekly:50"]["state"] == "held"
+    assert held_view.read_queue(queue) == ["⚠ [apis] usage crossed"]
+
+
 def test_sibling_files_are_private_and_symlinks_are_not_followed(queue, tmp_path):
     queue.write_text(json.dumps(["⚠️ [apis] one"]))
     held_view.main([])

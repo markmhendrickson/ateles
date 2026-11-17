@@ -35,8 +35,8 @@ call is delivered independently, same as before.
 All times are in the rubric's configured timezone (default: Europe/Madrid).
 
 Retryable held-notice state table (journal x queue x queue lock):
-* Journal absent, malformed, stale, or pending: every queue state and either
-  lock outcome remains retriable; a malformed entry is replaced on the send.
+* Journal absent, malformed, stale, or pending: a readable queue is checked
+  before insertion; a matching notice repairs its held receipt without a copy.
 * Journal held/delivered with a readable queue containing its notice and an
   acquired lock: suppress (the notice is deliverable or already delivered).
 * Journal held with a readable queue missing its notice and an acquired lock:
@@ -45,9 +45,14 @@ Retryable held-notice state table (journal x queue x queue lock):
   preserve the queue bytes, and surface the recovery error in held_view.
 * Any timed-out queue lock: do not mutate or drain the queue; retry the send.
   A previously held key is checked again when the lock becomes available.
-For each of the 4 journal states x 4 queue states x 2 lock outcomes, the
-outcome is delivered, queued with a held key, or retriable with a visible
-recovery error; no unreadable queue is overwritten.
+* Failed receipt write: the queued notice survives; retry repairs the receipt.
+* Operator clear: a held receipt becomes delivered/cleared before queue removal.
+* Full queue: keep existing bytes and reject the new notice for retry.
+Across send, retry, drain, clear, and restart: at most one queued copy per
+notice; a held key has a queued notice unless queue recovery is visible; each
+threshold reaches the transport at most once per window and ultimately reaches
+it unless cleared; no queue bytes vanish except by delivery or operator clear.
+All public operations return without raising on recoverable file failures.
 """
 
 from __future__ import annotations
@@ -305,25 +310,29 @@ class Notifier:
         Returns True if sent immediately, False if held, dropped, suppressed
         as a duplicate, or undelivered.
         """
-        if retryable and dedupe_key:
-            # The sender thread owns this lock through the transport outcome.
-            # A timed-out caller cannot make a live pending send retryable.
-            with held_view.file_lock(
-                self._dedupe_owner_lock_path(dedupe_key), blocking=False,
-                fail_open=False,
-            ) as owned:
-                if not owned:
-                    return False
-                with self._notification_lock:
-                    return self._send_locked(
-                        message, priority, handler, bypass_silence, dedupe_key,
-                        email_eligible, retryable, related_dedupe_keys,
-                    )
-        with self._notification_lock:
-            return self._send_locked(
-                message, priority, handler, bypass_silence, dedupe_key, email_eligible,
-                retryable, related_dedupe_keys,
-            )
+        try:
+            if retryable and dedupe_key:
+                # The sender thread owns this lock through the transport outcome.
+                # A timed-out caller cannot make a live pending send retryable.
+                with held_view.file_lock(
+                    self._dedupe_owner_lock_path(dedupe_key), blocking=False,
+                    fail_open=False,
+                ) as owned:
+                    if not owned:
+                        return False
+                    with self._notification_lock:
+                        return self._send_locked(
+                            message, priority, handler, bypass_silence, dedupe_key,
+                            email_eligible, retryable, related_dedupe_keys,
+                        )
+            with self._notification_lock:
+                return self._send_locked(
+                    message, priority, handler, bypass_silence, dedupe_key, email_eligible,
+                    retryable, related_dedupe_keys,
+                )
+        except Exception as exc:  # noqa: BLE001 — a notifier must not break its caller
+            log.error("[notify] send failed; notice remains retryable (%s)", exc)
+            return False
 
     def _dedupe_owner_lock_path(self, key: str) -> Path:
         digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
@@ -383,7 +392,9 @@ class Notifier:
         if dedupe_key and prio != Priority.INFO:
             if retryable:
                 for key in (dedupe_key, *related_dedupe_keys):
-                    self._mark_dedupe_pending(key, handler)
+                    if not self._mark_dedupe_pending(key, handler):
+                        log.error("[notify] could not reserve dedupe key %r; delivery deferred", key)
+                        return False
             else:
                 self._mark_dedupe_notified(dedupe_key, handler)
 
@@ -512,35 +523,20 @@ class Notifier:
                     # A symlink is not a queue file; atomic_write safely
                     # replaces it without following its target.
                     items = [] if path.is_symlink() else held_view.read_queue(path)
-                    items.append(message)
-                    dropped = 0
-                    evicted: list[str] = []
-                    if len(items) > HELD_QUEUE_MAX:
-                        dropped = len(items) - HELD_QUEUE_MAX
-                        evicted, items = items[:dropped], items[dropped:]
-                        log.error(
-                            "[notify] held queue %s over %d items — dropped the %d oldest",
-                            path.name,
-                            HELD_QUEUE_MAX,
-                            dropped,
+                    other_path = self._email_path if path == self._digest_path else self._digest_path
+                    other_items = held_view.read_queue(other_path)
+                    if message in items or message in other_items:
+                        # The previous queue write may have succeeded while its
+                        # held receipt failed. Repair the receipt in place.
+                        return not dedupe_keys or self._mark_dedupe_held(
+                            dedupe_keys, handler, message
                         )
-                    if message not in items:
+                    if len(items) >= HELD_QUEUE_MAX:
+                        log.error("[notify] held queue %s full; preserving existing notices", path.name)
                         return False
+                    items.append(message)
                     if not self._persist_queue(items, path):
                         return False
-                    if dropped:
-                        other_path = (
-                            self._email_path if path == self._digest_path
-                            else self._digest_path
-                        )
-                        try:
-                            retained = items + held_view.read_queue(other_path)
-                        except Exception as exc:  # noqa: BLE001
-                            log.warning("[notify] cannot reconcile evicted notice (%s)", exc)
-                            retained = evicted  # preserve keys until a readable check
-                        self._release_held_messages(
-                            item for item in evicted if item not in retained
-                        )
                     # The queue lock excludes drainers until the held receipt
                     # is recorded. A failed journal write leaves a visible
                     # notice, never a held key without one. Evicted receipts
@@ -690,14 +686,18 @@ class Notifier:
         second process already draining makes this one skip rather than
         double-send. Never emits a ``📋 Digest`` body.
         """
-        with self._notification_lock:
-            with held_view.file_lock(
-                held_view.drain_lock_path(self._digest_path), blocking=False,
-                fail_open=False,
-            ) as free:
-                if not free:
-                    return False
-                return self._drain()
+        try:
+            with self._notification_lock:
+                with held_view.file_lock(
+                    held_view.drain_lock_path(self._digest_path), blocking=False,
+                    fail_open=False,
+                ) as free:
+                    if not free:
+                        return False
+                    return self._drain()
+        except Exception as exc:  # noqa: BLE001
+            log.error("[notify] held drain failed; queue preserved (%s)", exc)
+            return False
 
     def _drain(self) -> bool:
         main_items = self._drop_routine(self._digest_path)
@@ -950,14 +950,14 @@ class Notifier:
         ) as available:
             return not available
 
-    def _mark_dedupe_pending(self, key: str, handler: str = "") -> None:
+    def _mark_dedupe_pending(self, key: str, handler: str = "") -> bool:
         def change(journal: dict[str, Any]) -> bool:
             journal[key] = {
                 "state": "pending", "pending_at": self._now_local().isoformat(),
                 "handler": handler,
             }
             return True
-        self._update_dedupe_journal(change)
+        return self._update_dedupe_journal(change)
 
     def _mark_dedupe_delivered(self, key: str, handler: str = "") -> None:
         def change(journal: dict[str, Any]) -> bool:
@@ -1161,7 +1161,11 @@ class Notifier:
 
     def is_dedupe_open(self, key: str) -> bool:
         """True when ``key`` was already reported and not yet cleared."""
-        return self._is_duplicate(key)
+        try:
+            return self._is_duplicate(key)
+        except Exception as exc:  # noqa: BLE001
+            log.error("[notify] dedupe check failed; retry required (%s)", exc)
+            return False
 
     def dedupe_keys_with_prefix(self, prefix: str) -> tuple[str, ...]:
         """Journal keys beginning with ``prefix``, for condition cleanup."""

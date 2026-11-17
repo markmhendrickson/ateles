@@ -375,7 +375,7 @@ def test_usage_warning_is_not_email_eligible(monkeypatch, tmp_path, ledger) -> N
     assert spy.email_flags == [False]
 
 
-def test_evicted_usage_warning_is_sent_again_once(monkeypatch, tmp_path, ledger) -> None:
+def test_full_queue_preserves_usage_warning(monkeypatch, tmp_path, ledger) -> None:
     from lib.notify import Priority, neotoma_sink, notifier as notifier_mod
 
     monkeypatch.setattr(neotoma_sink, "record", lambda **kwargs: None)
@@ -391,13 +391,13 @@ def test_evicted_usage_warning_is_sent_again_once(monkeypatch, tmp_path, ledger)
     assert spy.inner._dedupe_journal[key]["state"] == "held"
     spy.send("other warning", priority=Priority.WARN, handler="other",
              dedupe_key="other:warning", retryable=True)
-    assert key not in spy.inner._dedupe_journal
+    assert spy.inner._dedupe_journal[key]["state"] == "held"
 
     assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
-    assert len(spy.sent) == 3
+    assert len(spy.sent) == 2
     assert spy.inner._dedupe_journal[key]["state"] == "held"
     assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
-    assert len(spy.sent) == 3
+    assert len(spy.sent) == 2
 
 
 def test_unreadable_held_queue_is_not_overwritten_by_new_usage_warning(
@@ -1209,3 +1209,83 @@ def test_window_span_names() -> None:
     assert usage_alerts.window_span("weekly_all") == (timedelta(days=7), True)
     assert usage_alerts.window_span("window_90m") == (timedelta(minutes=90), True)
     assert usage_alerts.window_span("mystery")[1] is False
+
+
+@pytest.mark.parametrize("name,reset", [
+    ("window_" + "9" * 5000 + "m", None),
+    ("weekly", "9999-12-31T23:59:59-23:59"),
+    ("weekly", "1900-01-01T00:00:00Z"),
+    ("weekly", "2010-01-01T00:00:00Z"),
+    ("weekly", "2030-01-01T00:00:00Z"),
+    ("weekly", "2200-01-01T00:00:00Z"),
+    (42, None),
+])
+def test_malformed_window_metadata_never_skips_an_accepted_eighty_percent_alert(
+    monkeypatch, tmp_path, ledger, name, reset,
+) -> None:
+    import harness_router
+
+    window = {"name": name, "used_percent": 80}
+    if reset is not None:
+        window["resets_at"] = reset
+    with pytest.raises(ValueError):
+        harness_router.record_usage("cursor", [window])
+    _usage_file(monkeypatch, tmp_path, "cursor", [window])
+    spy = _SpyNotifier()
+    usage_alerts.check_usage_thresholds("cursor", notifier=spy)
+    assert len(spy.delivered) == 1
+    assert "80% used" in spy.delivered[0]
+
+
+@pytest.mark.parametrize("percent", [float("nan"), float("inf"), float("-inf"), -1, 101])
+def test_record_usage_rejects_invalid_percentage(monkeypatch, tmp_path, percent) -> None:
+    import harness_router
+
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
+    with pytest.raises(ValueError):
+        harness_router.record_usage("cursor", [{"name": "weekly", "used_percent": percent}])
+    assert not (tmp_path / "usage.json").exists()
+
+
+def test_stale_usage_alert_labels_last_observation(monkeypatch, tmp_path, ledger) -> None:
+    path = _usage_file(monkeypatch, tmp_path, "cursor", [_window(80)])
+    doc = json.loads(path.read_text())
+    doc["cursor"]["observed_at"] = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    path.write_text(json.dumps(doc))
+    spy = _SpyNotifier()
+    usage_alerts.check_usage_thresholds("cursor", notifier=spy)
+    assert len(spy.delivered) == 1
+    assert "was last observed at" in spy.delivered[0]
+
+
+@pytest.mark.parametrize("all_notices", [False, True])
+def test_operator_clear_settles_usage_thresholds_without_reopening(
+    monkeypatch, tmp_path, ledger, all_notices,
+) -> None:
+    from lib.notify import held_view
+
+    window = _window(52)
+    _usage_file(monkeypatch, tmp_path, "cursor", [window])
+    spy = _SpyNotifier(silenced=True)
+    spy.inner._digest_path = tmp_path / "held.json"
+    spy.inner._dedupe_path = tmp_path / "dedupe.json"
+    spy.inner.should_flush_digest = lambda: False
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(spy.inner._digest_path))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(spy.inner._dedupe_path))
+    usage_alerts.check_usage_thresholds("cursor", notifier=spy)
+    first = usage_alerts.dedupe_key("cursor", window["name"], window["resets_at"], 50)
+    if all_notices:
+        window["used_percent"] = 76
+        _usage_file(monkeypatch, tmp_path, "cursor", [window])
+        usage_alerts.check_usage_thresholds("cursor", notifier=spy)
+    assert held_view.main(["--all"] if all_notices else []) == 0
+    assert held_view.main(["--clear"]) == 0
+    assert spy.inner._dedupe_journal[first]["cleared"] is True
+    prior = len(spy.sent)
+    usage_alerts.check_usage_thresholds("cursor", notifier=spy)
+    assert len(spy.sent) == prior
+    if not all_notices:
+        window["used_percent"] = 76
+        _usage_file(monkeypatch, tmp_path, "cursor", [window])
+        usage_alerts.check_usage_thresholds("cursor", notifier=spy)
+        assert len(spy.sent) == prior + 1

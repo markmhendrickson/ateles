@@ -8,6 +8,7 @@ those paths raised AttributeError instead of notifying.
 import sys
 import threading
 import json
+from itertools import product
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -570,9 +571,8 @@ def test_retryable_alert_recovers_pending_after_interrupted_handoff(tmp_path):
         raise RuntimeError("interrupted before transport return")
 
     first._deliver = interrupted
-    with pytest.raises(RuntimeError, match="interrupted"):
-        first.send("usage crossed", Priority.WARN, handler="apis",
-                   dedupe_key=key, retryable=True)
+    assert not first.send("usage crossed", Priority.WARN, handler="apis",
+                          dedupe_key=key, retryable=True)
     assert first._dedupe_journal[key]["state"] == "pending"
 
     second = _notifier(tmp_path, NO_SILENCE, sent)
@@ -899,7 +899,7 @@ def test_two_instances_retry_after_queue_lock_timeout(tmp_path, monkeypatch):
     assert len(held_view.read_queue(first._digest_path)) == 1
 
 
-def test_evicted_key_released_even_when_new_held_receipt_fails(tmp_path, monkeypatch):
+def test_full_queue_preserves_existing_notice_and_key(tmp_path, monkeypatch):
     from . import held_view
 
     n = _notifier(tmp_path, ALWAYS_SILENT, [])
@@ -908,11 +908,143 @@ def test_evicted_key_released_even_when_new_held_receipt_fails(tmp_path, monkeyp
     assert not n.send("first", Priority.WARN, handler="apis",
                       dedupe_key="first", retryable=True)
     assert n._dedupe_journal["first"]["state"] == "held"
-    monkeypatch.setattr(n, "_mark_dedupe_held", lambda *args: False)
     assert not n.send("second", Priority.WARN, handler="apis",
                       dedupe_key="second", retryable=True)
-    assert held_view.read_queue(n._digest_path) == ["⚠ [apis] second"]
-    assert "first" not in n._dedupe_journal
+    assert held_view.read_queue(n._digest_path) == ["⚠ [apis] first"]
+    assert n._dedupe_journal["first"]["state"] == "held"
+    assert "second" not in n._dedupe_journal
+
+
+@pytest.mark.parametrize("email", [False, True])
+def test_failed_held_receipt_does_not_duplicate_on_retry(tmp_path, monkeypatch, email):
+    from . import held_view
+
+    sent = []
+    n = _notifier(tmp_path, ALWAYS_SILENT, sent)
+    n._email_primary = email
+    n._notify_to = "synthetic@example.test" if email else ""
+    n.should_flush_digest = lambda: False
+    original = n._mark_dedupe_held
+    failures = [True]
+
+    def fail_once(keys, handler, message):
+        if failures.pop(0) if failures else False:
+            return False
+        return original(keys, handler, message)
+
+    monkeypatch.setattr(n, "_mark_dedupe_held", fail_once)
+    for _ in range(2):
+        assert not n.send("usage crossed", Priority.WARN, handler="apis",
+                          dedupe_key="usage:weekly:50", retryable=True)
+    queued = held_view.read_queue(n._email_path if email else n._digest_path)
+    assert queued == ["⚠ [apis] usage crossed"]
+    assert n._dedupe_journal["usage:weekly:50"]["state"] == "held"
+    n._in_silence_window = lambda: False
+    if email:
+        n._deliver_email = lambda message: sent.append(message) or True
+    assert n.flush_digest()
+    assert sent == ["⚠ [apis] usage crossed"]
+    assert not n.send("usage crossed", Priority.WARN, handler="apis",
+                      dedupe_key="usage:weekly:50", retryable=True)
+    assert len(sent) == 1
+
+
+def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
+    """Every short send/drain/clear/restart walk preserves the state table."""
+    from . import held_view
+
+    operations = ("send", "drain", "clear", "restart")
+    for length in range(1, 5):
+        for index, sequence in enumerate(product(operations, repeat=length)):
+            root = tmp_path / f"walk-{length}-{index}"
+            root.mkdir()
+            monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(root / "digest.json"))
+            monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(root / "dedupe.json"))
+            sent = []
+            n = _notifier(root, ALWAYS_SILENT, sent)
+            n.should_flush_digest = lambda: False
+            key = "usage:weekly:50"
+            notice = "⚠ [apis] usage crossed"
+            ever_sent = False
+            cleared = False
+            for operation in sequence:
+                before = held_view.read_queue(n._digest_path)
+                if operation == "send":
+                    ever_sent = True
+                    assert not n.send("usage crossed", Priority.WARN, handler="apis",
+                                      dedupe_key=key, retryable=True)
+                elif operation == "drain":
+                    n._in_silence_window = lambda: False
+                    n.flush_digest()
+                    n._in_silence_window = lambda: True
+                elif operation == "clear":
+                    assert held_view.main([]) == 0
+                    assert held_view.main(["--clear"]) == 0
+                    cleared |= notice in before
+                else:
+                    n = _notifier(root, ALWAYS_SILENT, sent)
+                    n.should_flush_digest = lambda: False
+                after = held_view.read_queue(n._digest_path)
+                assert after.count(notice) <= 1, sequence
+                entry = n._dedupe_journal.get(key, {})
+                assert entry.get("state") != "held" or notice in after, sequence
+                assert sent.count(notice) <= 1, sequence
+                if notice in before and notice not in after:
+                    assert operation in ("drain", "clear"), sequence
+            if ever_sent and not cleared and not sent:
+                n._in_silence_window = lambda: False
+                assert n.flush_digest(), sequence
+                assert sent == [notice], sequence
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("failure", [
+    "journal_write", "queue_write", "held_receipt", "queue_lock",
+    "malformed_journal", "unreadable_queue",
+])
+def test_retryable_failure_transition_recovers_single_copy(tmp_path, monkeypatch, failure):
+    from . import held_view
+
+    sent = []
+    n = _notifier(tmp_path, ALWAYS_SILENT, sent)
+    n.should_flush_digest = lambda: False
+    key = "usage:weekly:50"
+    original_queue_lock = n._queue_lock
+    original_mark = n._mark_dedupe_held
+    original_journal_write = n._persist_dedupe_journal
+    original_queue_write = held_view.write_queue
+    if failure == "journal_write":
+        monkeypatch.setattr(n, "_persist_dedupe_journal", lambda doc: False)
+    elif failure == "queue_write":
+        monkeypatch.setattr(held_view, "write_queue", lambda path, items: (_ for _ in ()).throw(OSError("synthetic queue failure")))
+    elif failure == "held_receipt":
+        monkeypatch.setattr(n, "_mark_dedupe_held", lambda *args: False)
+    elif failure == "queue_lock":
+        @contextmanager
+        def unavailable():
+            yield False
+        monkeypatch.setattr(n, "_queue_lock", unavailable)
+    elif failure == "malformed_journal":
+        n._dedupe_path.write_text(json.dumps({key: ["malformed"]}))
+    else:
+        n._digest_path.write_bytes(b"unreadable queue")
+
+    assert not n.send("usage crossed", Priority.WARN, handler="apis",
+                      dedupe_key=key, retryable=True)
+    if failure == "unreadable_queue":
+        assert n._digest_path.read_bytes() == b"unreadable queue"
+        n._digest_path.unlink()
+    monkeypatch.setattr(n, "_queue_lock", original_queue_lock)
+    monkeypatch.setattr(n, "_mark_dedupe_held", original_mark)
+    monkeypatch.setattr(n, "_persist_dedupe_journal", original_journal_write)
+    monkeypatch.setattr(held_view, "write_queue", original_queue_write)
+    assert not n.send("usage crossed", Priority.WARN, handler="apis",
+                      dedupe_key=key, retryable=True)
+    assert held_view.read_queue(n._digest_path) == ["⚠ [apis] usage crossed"]
+    assert n._dedupe_journal[key]["state"] == "held"
+    n._in_silence_window = lambda: False
+    assert n.flush_digest()
+    assert sent == ["⚠ [apis] usage crossed"]
 
 
 def test_clear_dedupe_on_a_key_never_seen_does_not_raise(tmp_path):
@@ -1212,15 +1344,15 @@ def test_no_route_drain_is_quiet_and_does_not_rewrite(tmp_path, monkeypatch, cap
     assert sum("no delivery route" in r.getMessage() for r in caplog.records) == 1
 
 
-def test_queue_is_capped_to_newest_items(tmp_path, monkeypatch, caplog):
+def test_full_queue_preserves_oldest_items(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(notifier_mod, "HELD_QUEUE_MAX", 10)
     n = _daemon(tmp_path, email=False, silent=True)
     with caplog.at_level(logging.ERROR, logger="lib.notify.notifier"):
         _hold(n, 13)
     items = _file(tmp_path, "digest.json")
     assert len(items) == 10
-    assert "PR #3 " in items[0] and "PR #12 " in items[-1]
-    assert sum("dropped the 1 oldest" in r.getMessage() for r in caplog.records) == 3
+    assert "PR #0 " in items[0] and "PR #9 " in items[-1]
+    assert sum("preserving existing notices" in r.getMessage() for r in caplog.records) == 3
 
 
 # ── budget state validation, atomic writes, private files ───────────────────

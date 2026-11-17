@@ -47,6 +47,7 @@ the last seven days are used and the message says so.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import tempfile
@@ -84,8 +85,11 @@ ALERT_SEND_TIMEOUT_SECONDS = 30.0
 _retry_after: dict[str, float] = {}
 
 
-def _canonical_window_name(name: str) -> str:
-    return (name or "").strip().casefold() or "unnamed"
+def _canonical_window_name(name: object) -> str:
+    if not isinstance(name, str):
+        return "unavailable"
+    cleaned = name.strip().casefold()
+    return cleaned if 0 < len(cleaned) <= 64 else "unavailable"
 
 
 def window_span(name: str) -> tuple[timedelta, bool]:
@@ -94,8 +98,10 @@ def window_span(name: str) -> tuple[timedelta, bool]:
     if key in _NAMED_SPANS:
         return _NAMED_SPANS[key], True
     match = _MINUTES_NAME.match(key)
-    if match and int(match.group(1)) > 0:
-        return timedelta(minutes=int(match.group(1))), True
+    if match and len(match.group(1)) <= 6:
+        minutes = int(match.group(1))
+        if 1 <= minutes <= 525600:
+            return timedelta(minutes=minutes), True
     return _DEFAULT_SPAN, False
 
 
@@ -104,10 +110,14 @@ def _parse_iso(raw: object) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
-    except ValueError:
+    except (ValueError, OverflowError, OSError):
         return None
     aware = parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-    return aware.astimezone(timezone.utc)
+    try:
+        normalized = aware.astimezone(timezone.utc)
+        return normalized if 2000 <= normalized.year <= 2100 else None
+    except (ValueError, OverflowError, OSError):
+        return None
 
 
 def _percent(raw: object) -> float | None:
@@ -115,9 +125,9 @@ def _percent(raw: object) -> float | None:
         return None
     try:
         value = float(raw)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    return value if value == value and value >= 0 else None  # drop NaN/negatives
+    return value if math.isfinite(value) and 0 <= value <= 100 else None
 
 
 def dedupe_key(provider: str, window: str, resets_at: str | None, threshold: int) -> str:
@@ -151,6 +161,8 @@ def build_message(
     callers: list[tuple[str | None, str | None, int]],
     span_known: bool,
     attribution_unavailable: bool = False,
+    observed_at: datetime | None = None,
+    reading_fresh: bool = True,
 ) -> str:
     reset_text = resets_at.isoformat(timespec="minutes") if resets_at else "unknown"
     span_note = "" if span_known else " (window length unknown; last 7 days)"
@@ -158,8 +170,12 @@ def build_message(
         "attribution unavailable (ledger could not be read)"
         if attribution_unavailable else _describe_callers(callers)
     )
+    usage_text = (
+        f"is {used_percent:g}% used" if reading_fresh else
+        f"was last observed at {observed_at.isoformat(timespec='minutes') if observed_at else 'unknown time'} as {used_percent:g}% used"
+    )
     return (
-        f"Provider usage: {provider} {window} window is {used_percent:g}% used "
+        f"Provider usage: {provider} {window} window {usage_text} "
         f"(crossed {_threshold_text(thresholds)}). Resets {reset_text}. "
         f"Top callers by dispatch count{span_note}: "
         f"{caller_text}."
@@ -220,14 +236,28 @@ def check_usage_thresholds(
     journal = None
     try:
         current = now or datetime.now(timezone.utc)
+        try:
+            reading = harness_router.usage_reading(provider, now_wall=current.timestamp())
+        except (ValueError, OverflowError, OSError) as exc:
+            log.warning("[apis] usage reading freshness unavailable: %s", exc)
+            reading = None
+        reading_fresh = reading is not None and reading.state == harness_router.READING_FRESH
+        observed_at = None
+        if reading is not None and reading.observed_at is not None:
+            try:
+                observed_at = datetime.fromtimestamp(reading.observed_at, timezone.utc)
+            except (ValueError, OverflowError, OSError):
+                pass
         windows = harness_router.usage_windows(provider)
         for window in windows:
-            name = _canonical_window_name(str(window.get("name") or ""))
+            name = _canonical_window_name(window.get("name"))
             used = _percent(window.get("used_percent"))
             if used is None:
                 continue
             resets_raw = window.get("resets_at")
             resets_at = _parse_iso(resets_raw)
+            if resets_at is not None and not current - timedelta(days=366) <= resets_at <= current + timedelta(days=366):
+                resets_at = None
             if resets_at is not None and resets_at <= current:
                 continue  # that window has reset; its reading no longer applies
             reset_key = resets_at.isoformat(timespec="seconds") if resets_at else None
@@ -294,7 +324,11 @@ def check_usage_thresholds(
                             return
                         sender_notifier = notifier or (notifier_factory or _default_notifier_factory)()
                         span, span_known = window_span(name)
-                        window_start = (resets_at - span) if resets_at else (current - span)
+                        try:
+                            window_start = (resets_at - span) if resets_at else (current - span)
+                        except (ValueError, OverflowError):
+                            window_start = current - _DEFAULT_SPAN
+                            span_known = False
                         try:
                             callers = model_tiering.top_callers(
                                 since=window_start, provider=provider, limit=3
@@ -309,6 +343,7 @@ def check_usage_thresholds(
                             thresholds=pending, resets_at=resets_at, callers=callers,
                             span_known=span_known,
                             attribution_unavailable=attribution_unavailable,
+                            observed_at=observed_at, reading_fresh=reading_fresh,
                         )
                         from lib.notify import Priority
 
