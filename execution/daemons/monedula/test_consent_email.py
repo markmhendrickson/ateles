@@ -779,6 +779,43 @@ def test_real_read_authenticated_operator_attended_is_approved(monkeypatch, tmp_
     assert result.states[key] == "approved"
 
 
+@pytest.mark.parametrize("format", ("plain", "html"))
+@pytest.mark.parametrize("authored", (False, True))
+def test_consent_reader_excludes_quoted_request(monkeypatch, tmp_path, format, authored):
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    items = consent_email.build_pending_items([(h, [{}])], "2026-09-22")
+    tok = items[0].token
+    request = "Reply ATTENDED (calendar) or APPROVE (one-off) or SKIP"
+    if format == "plain":
+        body = ("ATTENDED\n" if authored else "") + "> " + request
+        payload = {"body_text": body}
+    else:
+        body = ("<p>ATTENDED</p>" if authored else "") + \
+               f"<div class='gmail_quote'>{request}</div>"
+        payload = {"body_html": body}
+    _arm_email(monkeypatch)
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        tok, auth_by_id={"m1": [_GOOGLE_PASS]}, body_by_id={"m1": payload}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert (tok in result.approved) is authored
+
+
+def test_consent_unmarked_html_request_is_unreadable(monkeypatch, tmp_path):
+    h = _Handler("oneoff", label="Example", amount=60)
+    items = consent_email.build_pending_items([(h, [{}])], "2026-09-22")
+    tok = items[0].token
+    _arm_email(monkeypatch)
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        tok, auth_by_id={"m1": [_GOOGLE_PASS]}, body_by_id={"m1": {
+            "body_html": f"<p>Reply APPROVE to pay</p><p>{subject_marker(tok)}</p>"
+        }}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == set()
+    assert result.reason_code == "consent_reply_read_failed"
+
+
 def test_real_read_unauthenticated_operator_attended_is_held(monkeypatch, tmp_path):
     h = _Handler("therapy", label="Studio Example", amount=60)
     items = consent_email.build_pending_items([(h, [{}])], "2026-09-22")

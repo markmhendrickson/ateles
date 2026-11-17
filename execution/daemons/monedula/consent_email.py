@@ -3,6 +3,10 @@
 Owns pending-set fingerprinting, Design/UX reply grammar (attendance + marker
 bind), and fail-closed approve semantics. Does NOT invent a second Gmail send
 path — every outbound/inbound call goes through ``lib.approval.email_channel``.
+The shared reader removes quoted text for payment consent too. Monedula uses a
+different verdict grammar from Turdus: calendar obligations require ATTENDED,
+and multi-item replies bind each line to a payment marker; the Turdus
+`approve <version>`/PR predicate cannot represent those payment terms.
 
 State file (``.monedula_consent_email.json`` beside strandings state) stores
 only ``{fingerprint, generation, sent_at}`` — no addresses, bodies, or

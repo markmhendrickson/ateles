@@ -35,6 +35,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from email.utils import parseaddr
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable, Literal
 
@@ -73,31 +74,112 @@ class ReadRepliesOutcome:
     unreadable_replies: tuple[ApprovalReply, ...] = ()
 
 
-def _strip_html(html: str) -> str:
-    """Reduce an HTML email part to plain text good enough for verdict parsing.
+_QUOTE_HEADER = re.compile(r"(?i)^(?:from|sent|to|subject):\s*\S")
+_ATTRIBUTION = re.compile(r"(?i)^on\s+.+\bwrote:\s*$")
+_FORWARD = re.compile(
+    r"(?i)^(?:-{2,}\s*(?:original|forwarded) message\s*-{2,}|"
+    r"begin forwarded message:|_{5,})"
+)
 
-    Only used for the HTML-only fallback (a reply with no plaintext part). Drops
-    <script>/<style> blocks, turns block-level tag boundaries into newlines so a
-    verb keeps leading its line, removes the remaining tags, and unescapes the
-    handful of entities that show up in real replies. Not a general HTML
-    sanitizer — just enough that `<p>approve v0.20.0</p>` reads as
-    `approve v0.20.0`.
-    """
-    if not html:
-        return ""
-    # Remove script/style content entirely.
-    html = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", html)
-    # Block-level boundaries → newlines so lines don't run together.
-    html = re.sub(r"(?i)<\s*(br|/p|/div|/li|/tr|/h[1-6])\s*/?>", "\n", html)
-    # Drop all remaining tags.
-    html = re.sub(r"<[^>]+>", "", html)
-    # Unescape the common entities seen in plain replies.
-    for ent, ch in (("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"),
-                    ("&gt;", ">"), ("&quot;", '"'), ("&#39;", "'")):
-        html = html.replace(ent, ch)
-    # Collapse runs of blank lines / trailing spaces.
-    lines = [ln.strip() for ln in html.splitlines()]
-    return "\n".join(ln for ln in lines if ln)
+
+def _authored_plain(text: str) -> str:
+    """Keep authored lines; an attribution, forward or signature ends the reply."""
+    lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if (_ATTRIBUTION.match(stripped) or _FORWARD.match(stripped)
+                or _QUOTE_HEADER.match(stripped) or stripped in ("--", "-- ")):
+            break
+        if stripped.startswith(">"):
+            continue
+        if stripped:
+            lines.append(stripped)
+    return "\n".join(lines)
+
+
+class _AuthoredHTML(HTMLParser):
+    """Extract visible authored text while discarding quoted subtrees."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.stack: list[tuple[str, bool]] = []
+        self.quote_depth = 0
+        self.boundary_seen = False
+        self.terminal = False
+        self.hr_at: int | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attrs_by_name = dict(attrs)
+        classes = set((attrs_by_name.get("class") or "").lower().split())
+        element_id = (attrs_by_name.get("id") or "").lower()
+        quote = (tag in ("blockquote", "script", "style")
+                 or bool(classes & {"gmail_quote", "gmail_extra", "yahoo_quoted",
+                                    "protonmail_quote", "msoquote", "outlookmessageheader"})
+                 or element_id in {"divrplyfwdmsg", "appendonsend"}
+                 or (tag == "div" and (attrs_by_name.get("type") or "").lower() == "cite"))
+        if ("gmail_attr" in classes or "moz-cite-prefix" in classes
+                or element_id in {"divrplyfwdmsg", "appendonsend"}):
+            self.terminal = True
+            self.boundary_seen = True
+        if quote:
+            self.quote_depth += 1
+            self.boundary_seen = True
+        self.stack.append((tag, quote))
+        if tag == "hr" and self.quote_depth == 0:
+            self.hr_at = len(self.parts)
+            self.parts.append("\n")
+        elif tag in ("br", "p", "div", "li", "tr") and self.quote_depth == 0:
+            self.parts.append("\n")
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self.stack:
+            return
+        # Well-formed mail usually nests correctly; close through a mismatched
+        # wrapper without allowing quoted content to escape its subtree.
+        while self.stack:
+            opened, quote = self.stack.pop()
+            if quote:
+                self.quote_depth -= 1
+            if opened == tag:
+                break
+        if tag in ("p", "div", "li", "tr") and self.quote_depth == 0:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self.terminal or self.quote_depth:
+            return
+        if self.hr_at is not None and _QUOTE_HEADER.search(data.strip()):
+            self.parts = self.parts[:self.hr_at]
+            self.terminal = True
+            self.boundary_seen = True
+            return
+        self.parts.append(data)
+
+
+def _extract_authored_html(html: str) -> tuple[str, bool]:
+    """Return (authored text, quote boundary seen) from an HTML reply."""
+    parser = _AuthoredHTML()
+    parser.feed(html)
+    return _authored_plain("".join(parser.parts)), parser.boundary_seen
+
+
+def _strip_html(html: str) -> str:
+    """Plain authored text from HTML, retained for callers of this helper."""
+    return _extract_authored_html(html)[0]
+
+
+def _unmarked_notification_copy(body: str) -> bool:
+    """An HTML-only copy of an instruction with its token has no safe boundary."""
+    return bool(re.search(
+        r"(?i)\breply\s+(?:approve|attended|to approve|with one line per payment)\b",
+        body,
+    )
+                and re.search(r"(?i)(?:swarm-approve:|release-approve:|\[APPROVE-[0-9A-F]+\])", body))
 
 
 def email_enabled() -> bool:
@@ -596,15 +678,18 @@ def read_replies_with_status(
                 continue
             # A triage snippet, subject, preview, or header can contain both
             # verdict and token, but none proves that the full reply was read.
-            body = next((value for key in ("body_text", "body", "text", "plain")
+            plain = next((value for key in ("body_text", "body", "text", "plain")
                          if isinstance((value := body_data.get(key)), str)
                          and value.strip()), "")
-            if not body:
-                raw_html = body_data.get("body_html")
-                body = _strip_html(raw_html) if isinstance(raw_html, str) else ""
+            body = _authored_plain(plain)
+            raw_html = body_data.get("body_html")
+            if not body and isinstance(raw_html, str):
+                body, boundary_seen = _extract_authored_html(raw_html)
+                if body and not boundary_seen and _unmarked_notification_copy(body):
+                    body = ""
             if not body.strip():
                 saw_transport_error = True
-                transport_detail = "gws_read_failed"
+                transport_detail = "reply_quote_boundary_unknown"
                 unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
             if on_reply_message is not None:

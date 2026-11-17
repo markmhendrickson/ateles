@@ -719,3 +719,167 @@ def test_unreadable_authenticated_reply_notices_once_then_routes_once(
     assert ("v1.2.3" if kind == "release" else "o/r#7") in notices[0]
     assert "Telegram" in notices[0]
     assert len(posts) == 1
+
+
+def _poll_authored_reply(monkeypatch, tmp_path, kind, body_data, *, polls=1):
+    """Exercise the real shared reader and both Turdus POST routes with fake gws."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(turdus, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setattr(turdus, "_STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(turdus, "DRY_RUN", False)
+    monkeypatch.setattr(turdus, "_poll_gmail_messages", lambda *_: [])
+    monkeypatch.setattr(email_channel, "_gws", lambda: "/synthetic/gws")
+    monkeypatch.setattr(email_channel, "_fetch_auth_results", lambda _mid: [_AUTH_PASS])
+    subject = ("Re: Release v1.2.3 ready to approve" if kind == "release" else
+               "Re: [Ateles] PR o/r#7 is READY TO MERGE")
+
+    def fake_gws(args, timeout=45):
+        if "+triage" in args:
+            token = args[args.index("--query") + 1]
+            if ("release-approve:" in token) == (kind == "release"):
+                return {"messages": [{"id": "approval-1", "from": "Op <op@example.com>",
+                                      "subject": subject}]}
+            return {"messages": []}
+        if "+read" in args:
+            return body_data
+        raise AssertionError(args)
+
+    posts = []
+
+    async def post(*args):
+        posts.append(args)
+        return True
+
+    monkeypatch.setattr(email_channel, "gws_json", fake_gws)
+    monkeypatch.setattr(turdus, "_post_release_approval", post)
+    monkeypatch.setattr(turdus, "_post_email_approval", post)
+    notices = _StubNotifier()
+    state = {"last_message_id": None}
+    for _ in range(polls):
+        notifier = _StubNotifier()
+        state = _run(turdus.poll_once(notifier, state))
+        notices.sent.extend(notifier.sent)
+    return posts, state, notices
+
+
+_PLAIN_QUOTES = (
+    "> Reply approve v1.2.3 to publish\n> release-approve: v1.2.3",
+    "On Tue, Nov 17, 2026 Example wrote:\nReply APPROVE\nswarm-approve: o/r#7",
+    "-----Original Message-----\nReply APPROVE\nswarm-approve: o/r#7",
+    "From: Swarm <swarm@example.net>\nSent: Tuesday\nTo: Op\nSubject: READY TO MERGE\nReply APPROVE",
+    "---------- Forwarded message ---------\nReply APPROVE",
+    "Begin forwarded message:\nReply APPROVE",
+    "-- \nReply APPROVE",
+)
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("quote", _PLAIN_QUOTES)
+def test_plain_quoted_notification_never_posts(monkeypatch, tmp_path, kind, quote):
+    posts, state, _ = _poll_authored_reply(monkeypatch, tmp_path, kind,
+                                           {"body_text": quote})
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+
+
+_HTML_QUOTES = (
+    '<blockquote><p>Reply APPROVE</p></blockquote>',
+    '<div class="gmail_quote"><p>Reply APPROVE</p><blockquote>approve v1.2.3</blockquote></div>',
+    '<div class="gmail_extra">Reply APPROVE</div>',
+    '<div class="gmail_attr">On Tue wrote:</div><div>Reply APPROVE</div>',
+    '<div class="yahoo_quoted">Reply APPROVE</div>',
+    '<div id="divRplyFwdMsg">From: swarm</div><div>Reply APPROVE</div>',
+    '<div id="appendonsend">Reply APPROVE</div>',
+    '<div type="cite">Reply APPROVE</div>',
+    '<div class="moz-cite-prefix">On Tue wrote:</div><div>Reply APPROVE</div>',
+    '<hr><div>From: swarm</div><div>Reply APPROVE</div>',
+)
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("quote", _HTML_QUOTES)
+def test_html_quoted_notification_never_posts(monkeypatch, tmp_path, kind, quote):
+    posts, state, _ = _poll_authored_reply(monkeypatch, tmp_path, kind,
+                                           {"body_html": quote})
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+
+
+@pytest.mark.parametrize("kind,approval", (
+    ("pr", "APPROVE"), ("pr", "approve 7"), ("pr", "approve #7"),
+    ("pr", "approve o/r#7"), ("release", "approve v1.2.3"),
+    ("release", "APPROVE 1.2.3"),
+))
+@pytest.mark.parametrize("format", ("plain", "html"))
+def test_authored_approval_routes_once(monkeypatch, tmp_path, kind, approval, format):
+    quote = "Reply APPROVE" if kind == "pr" else "Reply approve v1.2.3 to publish"
+    body = ({"body_text": f"{approval}\n> {quote}"} if format == "plain" else
+            {"body_html": f"<p>{approval}</p><blockquote>{quote}</blockquote>"})
+    posts, state, _ = _poll_authored_reply(monkeypatch, tmp_path, kind, body)
+    assert len(posts) == 1
+    assert state.get("processed_ids", []).count("approval-1") == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("format", ("plain", "html"))
+def test_authored_approval_below_inline_quote_routes(monkeypatch, tmp_path, kind, format):
+    approval = "APPROVE" if kind == "pr" else "approve v1.2.3"
+    body = ({"body_text": f"> Different quoted line\n{approval}"} if format == "plain" else
+            {"body_html": f"<blockquote>Different quoted line</blockquote><p>{approval}</p>"})
+    posts, _, _ = _poll_authored_reply(monkeypatch, tmp_path, kind, body)
+    assert len(posts) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+def test_html_unmarked_notification_copy_is_unreadable(monkeypatch, tmp_path, kind):
+    instruction = ("Reply approve v1.2.3 to publish" if kind == "release" else
+                   "Reply APPROVE, approve on GitHub, or comment /approve to merge")
+    token = ("release-approve: v1.2.3" if kind == "release" else
+             "swarm-approve: o/r#7")
+    body = {"body_html": f"<p>{instruction}</p><p>{token}</p>"}
+    posts, state, notifier = _poll_authored_reply(monkeypatch, tmp_path, kind, body,
+                                                  polls=2)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+    assert len([m for m in notifier.sent if "could not be read yet" in m]) == 1
+
+
+@pytest.mark.parametrize("kind,reply", (
+    ("pr", "do not approve"), ("pr", "not approved yet"),
+    ("pr", "no, approve later"), ("pr", "approve? no"),
+    ("pr", "approve if CI passes"), ("pr", "approve but wait"),
+    ("pr", "please approve"), ("pr", "approve #8"),
+    ("pr", "approve o/r#8"), ("release", "I don't approve 1.2.3"),
+    ("release", "approve v1.2.3?"), ("release", "approve v1.2.3 later"),
+    ("release", "approve v1.2.3 unless ready"),
+    ("release", "please approve v1.2.3"),
+    ("release", "approve v1.2.4"),
+))
+def test_nonaffirmative_reply_never_posts(monkeypatch, tmp_path, kind, reply):
+    posts, state, _ = _poll_authored_reply(monkeypatch, tmp_path, kind,
+                                           {"body_text": reply})
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+def test_conflicting_body_correlation_never_posts(monkeypatch, tmp_path, kind):
+    body = ("approve v1.2.3\nrelease-approve: v1.2.4" if kind == "release" else
+            "APPROVE\nswarm-approve: o/r#8")
+    posts, _, _ = _poll_authored_reply(monkeypatch, tmp_path, kind,
+                                       {"body_text": body})
+    assert posts == []
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+def test_multipart_prefers_authored_plain_then_html(monkeypatch, tmp_path, kind):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    posts, _, _ = _poll_authored_reply(monkeypatch, tmp_path, kind, {
+        "body_text": "hold", "body_html": f"<p>{approval}</p>"})
+    assert posts == []
+    posts, _, _ = _poll_authored_reply(monkeypatch, tmp_path / "second", kind, {
+        "body_text": "> quoted text", "body_html": f"<p>{approval}</p>"})
+    assert len(posts) == 1

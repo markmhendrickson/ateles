@@ -711,21 +711,34 @@ def _parse_approve_token(text: str) -> tuple[str, int] | None:
     return m.group(1), int(m.group(2))
 
 
-def _reply_says_approve(body: str) -> bool:
-    """True when the operator's reply expresses approval.
+def _affirmative_approval(body: str, target: str, *, release: bool) -> bool:
+    """Accept only the notification's affirmative first-line reply form.
 
-    Conservative: the word APPROVE must appear as the operator's OWN text, i.e.
-    on a line that is not a quoted line (Gmail prefixes quotes with '>'). This
-    avoids matching the word "APPROVE" inside the quoted original notification
-    ("Reply APPROVE ... to merge"). Case-insensitive on the word itself.
+    The shared mail reader supplies authored text. Direct callers use the same
+    extraction so a quoted instruction cannot become a verdict on either path.
     """
-    for line in (body or "").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith(">"):
-            continue  # skip blank + quoted-original lines
-        if re.search(r"\bapprove\b", stripped, re.IGNORECASE):
-            return True
-    return False
+    authored = email_channel._authored_plain(body)
+    lines = [line.strip() for line in authored.splitlines() if line.strip()]
+    if not lines:
+        return False
+    suffix = (rf"(?:v?{re.escape(target.lstrip('v'))})" if release
+              else rf"(?:{re.escape(target)}|#?{re.escape(target.rsplit('#', 1)[-1])})")
+    pattern = rf"approve(?:\s+{suffix})?" if not release else rf"approve\s+{suffix}"
+    if not re.fullmatch(pattern, lines[0], re.IGNORECASE):
+        return False
+    # A following correction/hold makes the message ambiguous even if the
+    # first line looked valid. Correlation lines are metadata, not instructions.
+    for line in lines[1:]:
+        if line.lower().startswith(("swarm-approve:", "release-approve:")):
+            continue
+        if re.search(r"(?i)\b(?:not|don'?t|do not|no|never|cannot|can'?t|won'?t|hold|wait|stop|cancel|reject|decline|deny|later|unless|if|but|instead)\b|\?", line):
+            return False
+    return True
+
+
+def _reply_says_approve(body: str, target: str = "") -> bool:
+    """PR approval: `approve`, optionally followed by this PR number or ref."""
+    return _affirmative_approval(body, target, release=False)
 
 
 def _read_message_body(message_id: str) -> str:
@@ -866,14 +879,18 @@ async def _maybe_handle_swarm_approval(msg: dict, notifier: Notifier) -> bool:
             priority=Priority.BLOCKER, handler=DAEMON_NAME,
         )
         return True
-    token = _parse_approve_token(body) or _parse_approve_token(subject)
+    match = re.search(r"\bPR\s+([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)#(\d+)", subject)
+    token = (match.group(1), int(match.group(2))) if match else _parse_approve_token(subject)
+    body_token = _parse_approve_token(body)
+    if body_token and body_token != token:
+        return False
     if not token:
         log.info(
             f"[{DAEMON_NAME}] operator reply matched merge-ready subject but "
             "carried no swarm-approve token — treating as a normal reply"
         )
         return False
-    if not _reply_says_approve(body):
+    if not _reply_says_approve(body, f"{token[0]}#{token[1]}"):
         log.info(
             f"[{DAEMON_NAME}] operator reply to {token[0]}#{token[1]} did not say "
             "APPROVE — not merging (may be a question or a hold)"
@@ -912,23 +929,8 @@ def _parse_release_approve_token(text: str) -> str | None:
 
 
 def _reply_approves_version(body: str, version: str) -> bool:
-    """True when the operator's own (unquoted) text says `approve <version>`.
-
-    Exact-version match (operator ruling 2026-07-27): the reply must name THIS
-    release's version, so a bare `approve` or an `approve` for a different
-    version never triggers this publish. The `v` prefix is optional in the
-    operator's reply (`approve 0.20.0` and `approve v0.20.0` both count).
-    """
-    want = version.lstrip("v")
-    # word-boundaried version, optional leading v, must sit after an `approve`.
-    pat = re.compile(rf"\bapprove\b[^\n]*\bv?{re.escape(want)}\b", re.IGNORECASE)
-    for line in (body or "").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith(">"):
-            continue  # skip blank + quoted-original lines
-        if pat.search(stripped):
-            return True
-    return False
+    """Release approval: `approve <this version>` (the v prefix is optional)."""
+    return _affirmative_approval(body, version, release=True)
 
 
 async def _post_release_approval(version: str, sender: str) -> bool:
@@ -1006,9 +1008,11 @@ async def _maybe_handle_release_approval(msg: dict, notifier: Notifier) -> bool:
             priority=Priority.BLOCKER, handler=DAEMON_NAME,
         )
         return True
-    version = _parse_release_approve_token(body) or _parse_release_approve_token(
-        subject
-    )
+    match = re.search(r"\bRelease\s+(v[0-9][\w.+-]*)", subject, re.IGNORECASE)
+    version = match.group(1) if match else _parse_release_approve_token(subject)
+    body_version = _parse_release_approve_token(body)
+    if body_version and body_version.lower() != (version or "").lower():
+        return False
     if not version:
         log.info(
             f"[{DAEMON_NAME}] operator reply matched release subject but carried no "

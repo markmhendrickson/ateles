@@ -204,18 +204,30 @@ only after the RC email was sent from the configured swarm mailbox.
 `release_result` to `approved` and runs `python3 publish.py --version <version>`.
 See the Ateles SOUL.md "Release approval" section.
 
-**Email reply** — the operator replies `approve <version>` to the RC email. The
+**Email reply** — the operator's first non-empty, unquoted line is
+`approve <version>` (case-insensitive; the `v` prefix is optional) to the RC
+email. The version must be the one named in that notification. The
 routing mirrors the swarm PR-approve flow:
 
-If authentication metadata or the reply body cannot be read, Turdus leaves
-the reply pending, sends one Telegram notice naming the release, and retries
-on the next poll. A readable authentication failure is rejected and handled.
+For a PR merge-ready email, the first non-empty, unquoted line is `APPROVE`,
+optionally followed by that notification's PR number (`7`, `#7`, or
+`owner/repo#7`). A different PR number is not an approval.
+
+Only operator-authored text counts; quoted, forwarded, original-message and
+signature text never grants approval. A refusal, conditional instruction,
+question, longer sentence or wrong version is a non-approval and is handled
+under the normal non-approval rule. If authentication metadata or the reply
+body cannot be read, or an HTML-only copy of the notification has no
+identifiable quote boundary, Turdus leaves the reply pending, sends one
+Telegram notice naming the release, and retries on the next poll. A readable
+authentication failure is rejected and handled.
 
 ```
 reply "approve <version>" to the RC email
   → Turdus (Gmail poll) verifies: sender == operator, subject has "ready to
-    approve", body has `release-approve: <version>` token AND unquoted
-    `approve <that exact version>`
+    approve", the original mail carries the `release-approve: <version>`
+    search token, subject names the version, and the first unquoted authored
+    line is `approve <that exact version>`
   → POST /approve-release (Apis, loopback + X-Approve-Secret)
   → swarm_dispatch._handle_release_approve
   → publish.py --version <version> --from-email-approval
@@ -227,8 +239,8 @@ Safety properties (match the PR-approve flow + one extra):
 - **Loopback + shared secret** — `/approve-release` is 127.0.0.1-only and
   requires `APIS_APPROVE_EMAIL_SECRET`; unset → 503, wrong → 401. An email alone
   can't drive a publish without the secret on both daemons.
-- **Unquoted-text guard** — the word `approve` must be the operator's own text,
-  not the quoted `Reply approve …` from the original email.
+- **Unquoted-text guard** — the complete affirmative line must be the
+  operator's own text, not the quoted `Reply approve …` from the original email.
 - **Exact-version match** (operator ruling 2026-07-27) — the reply must name
   *this* release's version, so a stale `approve` from an old release thread can
   never trigger the wrong publish.
