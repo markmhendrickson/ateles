@@ -726,8 +726,8 @@ def test_cleanup_assertion_records_nested_links_without_reading_targets(world, m
 # Existing-PR corrections retain the runner's custody, import checks and result
 # channel, but can never call the create-or-edit-PR path.
 @pytest.fixture
-def existing_correction(world, monkeypatch):
-    branch = "codex/scoped-correction"
+def existing_correction(world, monkeypatch, request):
+    branch = getattr(request, "param", "codex/scoped-correction")
     src = world["tmp"] / "src"
     git(src, "checkout", "-qb", branch, home=world["home"])
     (src / "prior-wip.txt").write_text("preserved original work\n")
@@ -775,6 +775,38 @@ def test_existing_correction_preserves_wip_and_updates_only_the_admitted_pr(worl
     assert git(world["remote"], "merge-base", spec["head_sha"], record["delivery_commit"], home=world["home"]) == spec["head_sha"]
     assert calls == [("GET", f"/repos/{REPO}"), ("GET", f"/repos/{REPO}/pulls/12")] * 3
     assert git(world["remote"], "for-each-ref", "--format=%(refname)", "refs/heads/cicada", home=world["home"]) == ""
+
+
+@pytest.mark.parametrize("existing_correction", ["feat/session-change", "fix-gate-wording"], indirect=True)
+def test_existing_correction_on_a_session_branch_fast_forwards_that_branch(world, existing_correction):
+    # A PR a session opened on its own branch: the job commits on top of it,
+    # pushes the same branch as a fast-forward and reports the same PR.
+    spec, calls, _ = existing_correction
+    rc, record = _run(_job(world["tmp"], delivery=spec), _agent(world))
+    assert rc == 0 and record["delivery_status"] == "updated"
+    assert record["pr_number"] == 12 and record["delivery_branch"] == spec["branch"]
+    assert _remote_ref(world, f"refs/heads/{spec['branch']}") == record["delivery_commit"]
+    assert git(world["remote"], "merge-base", spec["head_sha"], record["delivery_commit"],
+               home=world["home"]) == spec["head_sha"]
+    assert git(world["remote"], "show", f"{spec['branch']}:prior-wip.txt", home=world["home"]) == "preserved original work"
+    assert all(method == "GET" for method, _ in calls)
+
+
+@pytest.mark.parametrize("existing_correction", ["feat/session-change"], indirect=True)
+@pytest.mark.parametrize("change", [
+    {"state": "closed"}, {"merged": True},
+    {"head": {"ref": "feat/other", "sha": "a" * 40, "repo": {"full_name": REPO}}},
+    {"head": {"ref": "feat/session-change", "sha": "a" * 40, "repo": {"full_name": "fork/repo"}}},
+])
+def test_existing_correction_on_a_session_branch_refuses_a_wrong_pr(world, existing_correction, change):
+    spec, calls, state = existing_correction
+    state.update(change)
+    def never(*a, **kw):
+        raise AssertionError("a wrong PR reached the model")
+    _, record = _run(_job(world["tmp"], delivery=spec), never)
+    assert record["delivery_status"] == "clone_failed"
+    assert _remote_ref(world, f"refs/heads/{spec['branch']}") == spec["head_sha"]
+    assert all(method == "GET" for method, _ in calls)
 
 
 @pytest.mark.parametrize("when", ["before_clone", "after_model"])
@@ -849,6 +881,7 @@ def test_existing_correction_wrong_source_refuses_before_model(world, existing_c
 @pytest.mark.parametrize("change", [
     {"pr_number": ""}, {"head_sha": ""}, {"pr_number": "0"}, {"head_sha": "abc"},
     {"branch": "codex/main"}, {"branch": "main"}, {"branch": "codex/release/v1"},
+    {"branch": "feat/main"}, {"branch": "release-2"}, {"branch": "refs/heads/feat"},
 ])
 def test_existing_correction_malformed_job_never_starts_model(world, existing_correction, change):
     spec, _, _ = existing_correction

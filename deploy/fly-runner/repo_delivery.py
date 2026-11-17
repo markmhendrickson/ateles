@@ -146,8 +146,8 @@ GITHUB_REMOTE_TRANSPORT = "https"
 GITHUB_API = "https://api.github.com"
 # A release-looking or default-looking branch is never pushed, whatever the
 # builder pattern says.
-_PROTECTED_BRANCH_RE = re.compile(r"(?i)(?:main|master|trunk|develop|release[/_-].*|releases/.*"
-                                  r"|hotfix/.*|v?[0-9]+(?:\.[0-9]+)*)")  # fmt: skip
+_PROTECTED_BRANCH_RE = re.compile(r"(?i)(?:main|master|trunk|develop|release(?:[/_-].*)?|releases(?:/.*)?"
+                                  r"|hotfix(?:/.*)?|v?[0-9]+(?:\.[0-9]+)*)")  # fmt: skip
 _REPOSITORY_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}", re.ASCII)
 # The agent's pull request text: <export>/pull_request.md, first line the title.
 PR_TEXT_NAME = "pull_request.md"
@@ -525,14 +525,27 @@ def make_checkout(work: Work, *, branch: str, base_branch: str, repository: str,
                     os.chown(os.path.join(dirpath, name), *ident, follow_symlinks=False)
 
 
+# An existing pull request's head may be any well-formed branch of the same
+# repository (a session opens PRs on branches of its own choosing), not only a
+# builder branch. Every other existing-PR check still applies: the PR must be
+# open, unmerged, same-repository, on exactly this head, and the push is a
+# lease-guarded fast-forward. The default and release-looking names are refused
+# by ``check_push_branch``. Kept equal to ``build_delivery.EXISTING_BRANCH_RE``.
+EXISTING_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", re.ASCII)
+
+
+def existing_branch_name_ok(branch: object) -> bool:
+    return bool(isinstance(branch, str) and EXISTING_BRANCH_RE.fullmatch(branch)
+                and not branch.startswith(("refs/", "HEAD"))
+                and not any(x in branch for x in ("..", "//"))
+                and not branch.endswith(("/", ".", ".lock"))
+                and not any(p.startswith(".") or p.endswith(".lock") for p in branch.split("/")))
+
+
 def check_branch(branch: str, *, existing: bool = False) -> str:
     matched = isinstance(branch, str) and BRANCH_RE.fullmatch(branch)
     if existing:
-        matched = (isinstance(branch, str)
-                   and re.fullmatch(r"(?:cicada|codex)/[A-Za-z0-9][A-Za-z0-9._/-]*", branch)
-                   and not any(x in branch for x in ("..", "//"))
-                   and not branch.endswith(("/", ".", ".lock"))
-                   and not any(p.startswith(".") or p.endswith(".lock") for p in branch.split("/")))
+        matched = existing_branch_name_ok(branch)
     if not matched:
         raise RepoWorkError(BRANCH_REFUSED, "the branch name does not match the builder pattern")
     return branch
@@ -854,7 +867,7 @@ def check_push_branch(branch: str, default_branch: str, *, existing: bool = Fals
     """The branch a delivery may push: the builder pattern, never the
     repository's default branch, never a release-looking name."""
     check_branch(branch, existing=existing)
-    leaf = branch.split("/", 1)[1]
+    leaf = branch.split("/", 1)[-1]
     if branch == default_branch or _PROTECTED_BRANCH_RE.fullmatch(branch) \
             or _PROTECTED_BRANCH_RE.fullmatch(leaf):  # fmt: skip
         raise RepoWorkError(PUSH_REFUSED, "the branch is a default or release branch")

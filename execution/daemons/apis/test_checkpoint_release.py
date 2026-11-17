@@ -1725,6 +1725,36 @@ def test_denial_marker_rejects_non_regular_existing_entry(
     assert apis._checkpoint_denial_persisted("ent_cp") is False
 
 
+def test_apis_denial_marker_matches_shared_store(monkeypatch, tmp_path):
+    """The daemon and the resolver CLI share one marker rule; pin agreement."""
+    import checkpoint_denial_store
+
+    root = tmp_path / "denials"
+    monkeypatch.setenv("APIS_CHECKPOINT_DENIAL_DIR", str(root))
+    marker = apis._checkpoint_denial_marker("ent_cp")
+    assert marker == checkpoint_denial_store.checkpoint_denial_marker("ent_cp")
+    marker.parent.mkdir(parents=True)
+    marker.write_text("denied\n")
+    assert apis._checkpoint_denial_persisted("ent_cp") is True
+    assert checkpoint_denial_store.checkpoint_denial_persisted("ent_cp") is True
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected_reason"),
+    [("", "is not configured"), ("relative/denials", "must be an absolute")],
+)
+def test_apis_denial_marker_logs_critical_when_unbound(
+    configured, expected_reason, monkeypatch, caplog
+):
+    monkeypatch.setenv("APIS_CHECKPOINT_DENIAL_DIR", configured)
+    with caplog.at_level("CRITICAL"):
+        assert apis._checkpoint_denial_marker("ent_cp") is None
+    assert any(
+        record.levelname == "CRITICAL" and expected_reason in record.getMessage()
+        for record in caplog.records
+    )
+
+
 @pytest.mark.asyncio
 async def test_already_approved_unstamped_checkpoint_releases_task(
     monkeypatch, release_store
@@ -1852,14 +1882,21 @@ def test_runtime_configs_bind_absolute_persistent_denial_store():
     )
     assert "apis-checkpoint-denials" in compose["volumes"]
 
-    mcp_wrapper = (
-        _HERE.parent.parent / "mcp" / "ateles" / "run_ateles_mcp.sh"
-    ).read_text()
+    # One shared default, exported by the bootstrap both checkpoint-resolving
+    # launchers source; the launched value itself is exercised end to end in
+    # execution/mcp/ateles/test_resolve_checkpoint.py.
+    mcp_dir = _HERE.parent.parent / "mcp" / "ateles"
+    bootstrap = (mcp_dir / "ateles_mcp_bootstrap.sh").read_text()
     assert (
-        'APIS_CHECKPOINT_DENIAL_DIR="${APIS_CHECKPOINT_DENIAL_DIR:-'
-        '/var/tmp/ateles/checkpoint-denials}"'
-    ) in mcp_wrapper
-    assert "export APIS_CHECKPOINT_DENIAL_DIR" in mcp_wrapper
+        'ATELES_DEFAULT_CHECKPOINT_DENIAL_DIR="/var/tmp/ateles/checkpoint-denials"'
+        in bootstrap
+    )
+    assert "export APIS_CHECKPOINT_DENIAL_DIR" in bootstrap
+    for launcher in (
+        mcp_dir / "run_ateles_mcp.sh",
+        _HERE.parent.parent / "scripts" / "resolve_checkpoint.sh",
+    ):
+        assert "ateles_export_checkpoint_denial_dir" in launcher.read_text()
 
 
 def test_mcp_startup_proves_checkpoint_denial_store(monkeypatch, tmp_path):

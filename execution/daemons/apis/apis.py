@@ -233,7 +233,9 @@ if str(_DAEMON_DIR) not in sys.path:
     sys.path.insert(0, str(_DAEMON_DIR))
 
 from checkpoint_denial_store import (  # noqa: E402
+    checkpoint_denial_marker_with_reason as _checkpoint_denial_marker_with_reason,
     require_checkpoint_denial_store as _require_checkpoint_denial_store,
+    valid_checkpoint_denial_marker as _shared_valid_checkpoint_denial_marker,
 )
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
@@ -4402,31 +4404,14 @@ def _release_lifecycle_proven(task_id: str, expected_status: TaskStatus) -> bool
 
 
 def _checkpoint_denial_marker(checkpoint_id: str) -> Path | None:
-    configured = os.environ.get("APIS_CHECKPOINT_DENIAL_DIR", "").strip()
-    if not configured:
-        log.critical(
-            "[%s] APIS_CHECKPOINT_DENIAL_DIR is not configured; durable "
-            "cross-process denial fallback is unavailable",
-            DAEMON_NAME,
-        )
-        return None
-    root = Path(configured)
-    if not root.is_absolute():
-        log.critical(
-            "[%s] APIS_CHECKPOINT_DENIAL_DIR must be an absolute shared-state path",
-            DAEMON_NAME,
-        )
-        return None
-    digest = hashlib.sha256(checkpoint_id.encode()).hexdigest()
-    return root / f"{digest}.denied"
+    marker, reason = _checkpoint_denial_marker_with_reason(checkpoint_id)
+    if marker is None:
+        log.critical("[%s] %s", DAEMON_NAME, reason)
+    return marker
 
 
 def _valid_checkpoint_denial_marker(marker: Path) -> bool:
-    try:
-        mode = os.lstat(marker).st_mode
-    except OSError:
-        return False
-    return stat.S_ISREG(mode) and not stat.S_ISLNK(mode)
+    return _shared_valid_checkpoint_denial_marker(marker)
 
 
 def _checkpoint_denial_persisted(checkpoint_id: str) -> bool:

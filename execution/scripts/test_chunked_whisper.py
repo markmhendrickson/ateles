@@ -3,6 +3,7 @@
 Whisper is faked; the audio is a synthetic tone cut by the real ffmpeg, so the
 tests are skipped where ffmpeg is absent.
 """
+import json
 import math
 import shutil
 import struct
@@ -33,6 +34,45 @@ def test_repeat_loop_detection_counts_adjacent_repeats_only():
     assert cw.has_repeat_loop("so " + "thank you " * 5 + "bye")
     assert cw.has_repeat_loop("no no no no no")
     assert not cw.has_repeat_loop("i think so, i think it works, i think we can, i think not")
+
+
+def test_whisper_cli_asr_passes_runtime_initial_prompt(tmp_path, monkeypatch):
+    wav = tmp_path / "chunk.wav"
+    wav.write_bytes(b"synthetic")
+    model = tmp_path / "model.bin"
+    model.write_bytes(b"synthetic")
+    commands = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        stem = Path(cmd[cmd.index("--output-file") + 1])
+        Path(f"{stem}.json").write_text(
+            json.dumps(
+                {
+                    "transcription": [
+                        {
+                            "offsets": {"from": 0, "to": 1000},
+                            "text": "Synthetic Product",
+                        }
+                    ],
+                    "result": {"language": "en"},
+                }
+            )
+        )
+        return type("P", (), {"returncode": 0, "stderr": ""})()
+
+    monkeypatch.setattr(cw, "run_guarded", fake_run)
+    asr = cw.whisper_cli_asr(
+        "whisper-cli",
+        model,
+        initial_prompt="Synthetic Product",
+    )
+
+    segments, language = asr(wav, "en", [])
+
+    assert commands[0][commands[0].index("--prompt") + 1] == "Synthetic Product"
+    assert segments[0]["text"] == "Synthetic Product"
+    assert language == "en"
 
 
 @needs_ffmpeg
