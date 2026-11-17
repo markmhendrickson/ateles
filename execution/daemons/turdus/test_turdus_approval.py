@@ -11,6 +11,7 @@ Apis POST + gws +read stubbed out. The security-critical properties under test:
 
 import asyncio
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,8 +19,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "phoenicurus-release"))
 
 import turdus  # noqa: E402
+import prepare  # noqa: E402
 from lib.approval import email_channel  # noqa: E402
 
 
@@ -177,6 +180,144 @@ def test_release_approval_authenticated_sender_routes(monkeypatch):
     msg = _op_msg(subject="Re: Release v1.2.3 ready to approve")
     assert _run(turdus._maybe_handle_release_approval(msg, _StubNotifier())) is True
     assert posted == [("v1.2.3", "op@example.com")]
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("auth", ("pass", "fail", "missing", "unreadable"))
+def test_two_mailbox_approval_effect(monkeypatch, tmp_path, kind, auth):
+    operator_dir = tmp_path / "operator"
+    swarm_dir = tmp_path / "swarm"
+    operator_dir.mkdir()
+    swarm_dir.mkdir()
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(swarm_dir))
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", str(operator_dir))
+    monkeypatch.setattr(turdus, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setattr(prepare, "SWARM_EMAIL", "swarm@example.net")
+    monkeypatch.setattr(turdus, "DRY_RUN", False)
+    monkeypatch.setattr(turdus, "_save_state", lambda _state: None)
+    monkeypatch.setattr(turdus, "_poll_gmail_messages", turdus._poll_gmail_messages)
+    monkeypatch.setattr(email_channel.shutil, "which", lambda _name: "/fake/gws")
+    subject = ("Re: Release v1.2.3 ready to approve" if kind == "release" else
+               "Re: [Ateles] PR o/r#7 is READY TO MERGE")
+    body = ("approve v1.2.3\n> release-approve: v1.2.3" if kind == "release" else
+            "APPROVE\n> swarm-approve: o/r#7")
+    calls = []
+    tasks = []
+
+    def fake_run(cmd, **kwargs):
+        config_dir = kwargs.get("env", {}).get("GOOGLE_WORKSPACE_CLI_CONFIG_DIR",
+                                                  str(operator_dir))
+        calls.append((config_dir, cmd))
+        assert cmd[0] == "/fake/gws" or cmd[0] == "gws"
+        if "+send" in cmd:
+            assert config_dir == str(swarm_dir)
+            return subprocess.CompletedProcess(cmd, 0, "{}", "")
+        if "+triage" in cmd:
+            if config_dir == str(swarm_dir):
+                token = cmd[cmd.index("--query") + 1]
+                matching = ("release-approve:" in token) == (kind == "release")
+                messages = [{"id": "approval-1", "from": "Op <op@example.com>",
+                             "subject": subject}] if matching else []
+            else:
+                messages = []
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"messages": messages}), "")
+        if "get" in cmd:
+            assert config_dir == str(swarm_dir)
+            if auth == "unreadable":
+                return subprocess.CompletedProcess(cmd, 1, "", "synthetic error")
+            values = ([{"name": "Authentication-Results", "value": _AUTH_PASS}]
+                      if auth == "pass" else
+                      [{"name": "Authentication-Results", "value":
+                        "mx.google.com; dmarc=fail header.from=example.com"}]
+                      if auth == "fail" else [])
+            return subprocess.CompletedProcess(cmd, 0,
+                json.dumps({"payload": {"headers": values}}), "")
+        if "+read" in cmd:
+            assert config_dir == str(swarm_dir)
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"body_text": body}), "")
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    async def post(*args):
+        calls.append(("posted", args))
+        return True
+
+    async def task(*args):
+        tasks.append(args)
+
+    monkeypatch.setattr(turdus, "_post_release_approval", post)
+    monkeypatch.setattr(turdus, "_post_email_approval", post)
+    monkeypatch.setattr(turdus, "_create_task_for_email", task)
+    if kind == "release":
+        assert prepare.email_send("Release v1.2.3 ready to approve", "notes")
+    notifier = _StubNotifier()
+    state = _run(turdus.poll_once(notifier, {}))
+    posts = [c for c in calls if c[0] == "posted"]
+    assert len(posts) == (1 if auth == "pass" else 0)
+    assert tasks == []
+    if auth != "pass":
+        assert len(notifier.sent) == 1
+        assert ("v1.2.3" if kind == "release" else "o/r#7") in notifier.sent[0]
+        assert "Telegram" in notifier.sent[0]
+    assert "approval-1" in state["processed_ids"]
+    _run(turdus.poll_once(notifier, state))
+    assert len([c for c in calls if c[0] == "posted"]) == len(posts)
+    assert len(notifier.sent) == 1
+    assert all(config == str(swarm_dir) for config, cmd in calls
+               if isinstance(cmd, list) and ("get" in cmd or "+read" in cmd))
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+def test_operator_inbox_lookalike_does_not_approve(monkeypatch, tmp_path, kind):
+    operator_dir = tmp_path / "operator"
+    swarm_dir = tmp_path / "swarm"
+    operator_dir.mkdir()
+    swarm_dir.mkdir()
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(swarm_dir))
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", str(operator_dir))
+    monkeypatch.setattr(turdus, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setattr(email_channel.shutil, "which", lambda _name: "/fake/gws")
+    posts = []
+
+    def fake_run(cmd, **kwargs):
+        config = kwargs.get("env", {}).get("GOOGLE_WORKSPACE_CLI_CONFIG_DIR",
+                                            str(operator_dir))
+        if "+triage" in cmd:
+            messages = [] if config == str(swarm_dir) else [{
+                "id": "lookalike", "from": "op@example.com",
+                "subject": ("Re: Release v1.2.3 ready to approve" if kind == "release"
+                            else "Re: [Ateles] PR o/r#7 is READY TO MERGE") }]
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"messages": messages}), "")
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(turdus, "_save_state", lambda _state: None)
+    async def post(*args):
+        posts.append(args)
+        return True
+    monkeypatch.setattr(turdus, "_post_email_approval", post)
+    monkeypatch.setattr(turdus, "_post_release_approval", post)
+    async def store(_msg):
+        return "synthetic"
+    monkeypatch.setattr(turdus, "_store_email_entity", store)
+    _run(turdus.poll_once(_StubNotifier(), {}))
+    assert posts == []
+
+
+def test_unconfigured_swarm_mailbox_makes_no_approval_gws_call(monkeypatch):
+    monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(turdus, "_poll_gmail_messages", lambda *_: [])
+    monkeypatch.setattr(turdus, "_save_state", lambda _state: None)
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append(a))
+    _run(turdus.poll_once(_StubNotifier(), {}))
+    assert calls == []
 
 
 def test_non_operator_sender_ignored(monkeypatch):
@@ -493,7 +634,13 @@ def test_dedup_set_guards_when_watermark_does_not_short_circuit(monkeypatch):
 def test_approval_message_recorded_for_dedup(monkeypatch):
     # An operator approval reply must be recorded in processed_ids so it can
     # never be re-routed to the Apis publish gate on a later cycle.
-    _wire_poll(monkeypatch, messages=[_invoice_msg("appr1")])
+    monkeypatch.setattr(turdus, "_poll_gmail_messages", lambda *_: [])
+    monkeypatch.setattr(turdus, "_save_state", lambda _state: None)
+    reply = email_channel.ApprovalReply(
+        "appr1", "Re: Release v1.2.3 ready to approve",
+        "approve v1.2.3\nrelease-approve: v1.2.3")
+    monkeypatch.setattr(email_channel, "read_replies_with_status", lambda *_a, **_k:
+        email_channel.ReadRepliesOutcome("ok", [], replies=(reply,)))
 
     async def _yes_release(_msg, _notifier):
         return True
@@ -502,5 +649,4 @@ def test_approval_message_recorded_for_dedup(monkeypatch):
     notifier = _StubNotifier()
     state = _run(turdus.poll_once(notifier, {"last_message_id": None}))
     assert "appr1" in state.get("processed_ids", [])
-    # No invoice task/notification for an approval reply.
     assert [m for m in notifier.sent if "invoice(s)" in m] == []

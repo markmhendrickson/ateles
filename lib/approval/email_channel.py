@@ -42,6 +42,14 @@ log = logging.getLogger("ateles.approval.email")
 
 
 @dataclass(frozen=True)
+class ApprovalReply:
+    message_id: str
+    subject: str
+    body: str = ""
+    authenticated: bool = True
+
+
+@dataclass(frozen=True)
 class ReadRepliesOutcome:
     """Statusful result of an inbox reply sweep.
 
@@ -60,6 +68,8 @@ class ReadRepliesOutcome:
     kind: Literal["ok", "transport_error", "disabled"]
     texts: list[str]
     detail: str = ""
+    replies: tuple[ApprovalReply, ...] = ()
+    rejected_replies: tuple[ApprovalReply, ...] = ()
 
 
 def _strip_html(html: str) -> str:
@@ -472,6 +482,7 @@ def read_replies_with_status(
     on_reply_message: Callable[[str, str], None] | None = None,
     on_sender_rejected: Callable[[], None] | None = None,
     on_unauthenticated_operator_reply: Callable[[], None] | None = None,
+    require_enabled: bool = True,
 ) -> ReadRepliesOutcome:
     """Statusful inbox sweep — distinguish empty-ok from transport failure.
 
@@ -489,7 +500,7 @@ def read_replies_with_status(
     operator-facing message. The reply is still ignored. When this callback
     is not given, ``on_sender_rejected`` fires instead (prior behaviour).
     """
-    if not email_enabled():
+    if require_enabled and not email_enabled():
         return ReadRepliesOutcome(kind="disabled", texts=[], detail="ATELES_NOTIFY_EMAIL")
     if not tokens:
         return ReadRepliesOutcome(kind="ok", texts=[], detail="")
@@ -505,6 +516,8 @@ def read_replies_with_status(
         )
 
     texts: list[str] = []
+    replies: list[ApprovalReply] = []
+    rejected_replies: list[ApprovalReply] = []
     seen_ids: set[str] = set()
     saw_transport_error = False
     transport_detail = ""
@@ -547,6 +560,7 @@ def read_replies_with_status(
                     except Exception as exc:  # noqa: BLE001
                         log.warning(f"on_sender_rejected callback failed: {exc}")
                 continue
+            seen_ids.add(mid)
             # The From address is text the sender chose. Require Gmail's own
             # record that the operator's domain authorized this message before
             # its body is read or its verdict counted. Unreadable metadata is a
@@ -556,12 +570,14 @@ def read_replies_with_status(
             if auth_results is None:
                 saw_transport_error = True
                 transport_detail = "gws_auth_metadata_failed"
+                rejected_replies.append(ApprovalReply(mid, subject, authenticated=False))
                 continue
             if not sender_domain_authenticated(auth_results):
                 log.warning(
                     "approval: ignoring reply — sender domain authentication "
                     "absent or not a pass (address matched, identity unknown)"
                 )
+                rejected_replies.append(ApprovalReply(mid, subject, authenticated=False))
                 cb = on_unauthenticated_operator_reply or on_sender_rejected
                 if cb is not None:
                     try:
@@ -569,7 +585,6 @@ def read_replies_with_status(
                     except Exception as exc:  # noqa: BLE001
                         log.warning(f"reply-rejected callback failed: {exc}")
                 continue
-            seen_ids.add(mid)
             body_data = gws_json(["gmail", "+read", "--id", mid, "--headers",
                                   "--format", "json"], timeout=30)
             if body_data is None:
@@ -605,15 +620,19 @@ def read_replies_with_status(
                 except Exception as exc:  # noqa: BLE001
                     log.warning(f"on_reply_message callback failed: {exc}")
             texts.append(f"{subject}\n{body}")
+            replies.append(ApprovalReply(mid, subject, body))
 
     # Any fetch failure within the sweep fails the WHOLE read: a verdict set
     # built from only the messages that loaded is incomplete, and acting on it
     # could honour one reply while missing a later one that changes it.
     if saw_transport_error:
         return ReadRepliesOutcome(
-            kind="transport_error", texts=[], detail=transport_detail or "gws_failed"
+            kind="transport_error", texts=[], detail=transport_detail or "gws_failed",
+            rejected_replies=tuple(rejected_replies),
         )
-    return ReadRepliesOutcome(kind="ok", texts=texts, detail="")
+    return ReadRepliesOutcome(kind="ok", texts=texts, detail="",
+                              replies=tuple(replies),
+                              rejected_replies=tuple(rejected_replies))
 
 
 def read_replies(

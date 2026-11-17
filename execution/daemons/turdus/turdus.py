@@ -1046,10 +1046,47 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
     """
     log.info(f"[{DAEMON_NAME}] Polling Gmail (max={MAX_MESSAGES} messages)...")
 
+    processed_ids: list[str] = list(state.get("processed_ids", []))
+    processed_id_set = set(processed_ids)
+
+    def _mark_handled(mid: str) -> None:
+        if mid and mid not in processed_id_set:
+            processed_id_set.add(mid)
+            processed_ids.append(mid)
+
+    # Approval replies live in the swarm mailbox. The shared reader performs
+    # discovery, authentication and body reads with that mailbox's config.
+    outcome = email_channel.read_replies_with_status(
+        [_RELEASE_APPROVE_TOKEN_PREFIX, _APPROVE_TOKEN_PREFIX],
+        max_msgs=MAX_MESSAGES, require_enabled=False,
+    )
+    approval_count = 0
+    if outcome.kind in ("ok", "transport_error"):
+        # A partial read cannot approve anything; rejected metadata can still
+        # be reported once, using only the subject for the target name.
+        candidates = list(outcome.rejected_replies)
+        if outcome.kind == "ok":
+            candidates += list(outcome.replies)
+        for reply in candidates:
+            if reply.message_id in processed_id_set:
+                continue
+            msg = {"id": reply.message_id, "sender": OPERATOR_EMAIL,
+                   "subject": reply.subject, "body": reply.body,
+                   "authenticated": reply.authenticated}
+            try:
+                if await _maybe_handle_release_approval(msg, notifier) or await _maybe_handle_swarm_approval(msg, notifier):
+                    approval_count += 1
+                    _mark_handled(reply.message_id)
+            except Exception as exc:
+                log.error(f"[{DAEMON_NAME}] approval check failed: {exc}")
+
     messages = _poll_gmail_messages(MAX_MESSAGES)
 
     if not messages:
         log.info(f"[{DAEMON_NAME}] No new messages found")
+        if processed_ids != state.get("processed_ids", []):
+            state["processed_ids"] = processed_ids[-_MAX_PROCESSED_IDS:]
+            _save_state(state)
         return state
 
     last_seen_id = state.get("last_message_id")
@@ -1063,6 +1100,9 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
 
     if not new_messages:
         log.info(f"[{DAEMON_NAME}] No messages newer than last_seen_id={last_seen_id}")
+        if processed_ids != state.get("processed_ids", []):
+            state["processed_ids"] = processed_ids[-_MAX_PROCESSED_IDS:]
+            _save_state(state)
         return state
 
     log.info(f"[{DAEMON_NAME}] Processing {len(new_messages)} new message(s)")
@@ -1072,27 +1112,8 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
     # reappear; the notification must never fire twice for the same Gmail ID.
     # `processed_ids` is an ordered list (used as a bounded set) persisted in
     # state. Only genuinely-new IDs count toward the notification totals.
-    processed_ids: list[str] = list(state.get("processed_ids", []))
-    processed_id_set = set(processed_ids)
-
-    def _mark_handled(mid: str) -> None:
-        """Record a message ID as terminally handled for cross-cycle dedup.
-
-        Covers EVERY disposition that `continue`s out of the loop — approval
-        routing and noise included, not just the task path — so that if the
-        positional `last_message_id` gate ever resets or messages reorder, a
-        message can never be re-routed. This matters most for the approval
-        branches: re-routing an operator `approve <version>` reply to the Apis
-        publish gate a second time is more consequential than a duplicate
-        invoice notification.
-        """
-        if mid and mid not in processed_id_set:
-            processed_id_set.add(mid)
-            processed_ids.append(mid)
-
     actionable_count = 0
     invoice_count = 0
-    approval_count = 0
     for msg in new_messages:
         msg_id = msg.get("id", "")
 
@@ -1101,29 +1122,6 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         # short-circuits even the approval paths below.
         if msg_id and msg_id in processed_id_set:
             continue
-
-        # Release-approval reply takes precedence: an operator `approve <version>`
-        # reply to a release RC email is routed to the Apis publish gate and the
-        # message is then done (no task created). Checked before swarm-approval
-        # because the two use distinct subject markers, so at most one matches.
-        try:
-            if await _maybe_handle_release_approval(msg, notifier):
-                approval_count += 1
-                _mark_handled(msg_id)
-                continue
-        except Exception as exc:  # never let approval detection break the poll
-            log.error(f"[{DAEMON_NAME}] release-approval check failed: {exc}")
-
-        # Swarm PR-approval reply takes precedence over normal classification:
-        # an operator "APPROVE" reply to a merge-ready email is routed to Apis
-        # and this message is then done (no task created for it).
-        try:
-            if await _maybe_handle_swarm_approval(msg, notifier):
-                approval_count += 1
-                _mark_handled(msg_id)
-                continue
-        except Exception as exc:  # never let approval detection break the poll
-            log.error(f"[{DAEMON_NAME}] swarm-approval check failed: {exc}")
 
         sender = msg.get("sender", msg.get("from", ""))
         subject = msg.get("subject", "(no subject)")
