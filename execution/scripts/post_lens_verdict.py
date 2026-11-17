@@ -57,9 +57,10 @@ who commented (`approve_pr_as_app._check_approver_identities`), and a comment is
 not a push, so "approval of the most recent reviewable push" is unaffected.
 Only a PR the App itself opened is refused, as it should be.
 
-An unchanged-head retry edits the existing comment only while it remains the
-latest lens verdict on the PR. Once another verdict is posted, a return to the
-same head creates a new comment, preserving each review episode in history.
+An unchanged-head retry edits the existing comment only when its verdict
+class is identical and it remains the latest lens verdict on the PR. A
+changed class or intervening verdict creates a new comment, preserving each
+review episode in history.
 The marker format is unchanged. The comment is read back and must match.
 
 This tool never prints, logs, or writes a token or key. Exit 0: posted (or
@@ -87,6 +88,7 @@ import httpx  # noqa: E402
 from lib import github_app_token as _github_app_token  # noqa: E402
 
 import lens_authors  # noqa: E402
+import review_rounds  # noqa: E402
 import swarm_dispatch  # noqa: E402
 
 GITHUB_API = "https://api.github.com"
@@ -362,6 +364,8 @@ def post_verdict(
     check_author_admitted(identity, composed)
     marker = swarm_dispatch.compose_lens_review_marker(lens, live)
     existing = _existing_for_head(_comments(client, repo, pr, identity), login=identity.login, marker=marker)
+    if existing and review_rounds.verdict_class(str(existing.get("body") or ""), lens) != review_rounds.verdict_class(composed, lens):
+        existing = None
     action = "edit" if existing else "create"
     summary = f"lens={lens} head={live} verdict={verdict} as {identity.login} ({identity.via})"
     if dry_run:

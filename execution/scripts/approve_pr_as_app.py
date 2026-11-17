@@ -146,7 +146,8 @@ all-clear episode continues the round. Verdicts are ordered by UTC creation
 time, integer comment id, then source order. Missing or malformed timestamps,
 or timestamp ties without usable comment ids, refuse approval because the
 round order is unknown. The cap uses the whole PR history. A
-fourth round is refused unless the repository's human owner posted an unedited,
+fourth round is refused unless the repository's human owner matches the default
+Neotoma operator_profile.github_login and posted an unedited,
 PR-specific `/override-round-cap` comment with a reason of at least 20
 characters. `APIS_OPERATOR_LOGIN` is not authority for this override. A
 partial lens identity resolution makes round order indeterminate; a valid
@@ -512,8 +513,8 @@ async def _fetch_pr(client: httpx.AsyncClient, repo: str, pr: int) -> dict:
     return resp.json() or {}
 
 
-async def _repository_operator(client: httpx.AsyncClient, repo: str) -> tuple[str, str]:
-    """Read the PR repository's human owner from GitHub, never caller config.
+async def _repository_operator(client: httpx.AsyncClient, repo: str) -> tuple[str, str, str]:
+    """Read the human repository owner only if the operator profile agrees.
 
     `APIS_OPERATOR_LOGIN` is useful elsewhere but cannot confer override
     authority. An unreadable owner or organization disables the override.
@@ -523,15 +524,54 @@ async def _repository_operator(client: httpx.AsyncClient, repo: str) -> tuple[st
         resp.raise_for_status()
         owner = (resp.json() or {}).get("owner") or {}
     except Exception:  # noqa: BLE001 — an unknown owner cannot authorize
-        return "", "repository owner could not be read"
+        return "", "", "repository owner could not be read"
     if not isinstance(owner, dict):
-        return "", "repository owner could not be read"
+        return "", "", "repository owner could not be read"
     if owner.get("type") != "User":
-        return "", "repository owner is not a User; organization-owned repositories have no override"
+        return "", "", "repository owner is not a User; organization-owned repositories have no override"
     login = owner.get("login")
     if not isinstance(login, str) or not login:
-        return "", "repository owner login could not be read"
-    return login, ""
+        return "", "", "repository owner login could not be read"
+    operator_login, profile_error = await _operator_profile_login(client)
+    if profile_error:
+        return "", "", profile_error
+    if login != operator_login:
+        return "", "", "repository owner differs from the operator_profile GitHub login"
+    return login, operator_login, ""
+
+
+async def _operator_profile_login(client: httpx.AsyncClient) -> tuple[str, str]:
+    """Resolve the default operator's GitHub login from Neotoma, never caller login config."""
+    token = (os.environ.get("NEOTOMA_BEARER_TOKEN") or "").strip()
+    if not token:
+        return "", "Neotoma bearer token unavailable for operator_profile read"
+    base = (os.environ.get("NEOTOMA_BASE_URL") or "https://neotoma.markmhendrickson.com").rstrip("/")
+    try:
+        resp = await client.post(
+            f"{base}/entities/query",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"entity_type": "operator_profile", "include_snapshots": True, "limit": 100},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        rows = data.get("entities") if isinstance(data, dict) else None
+        if (not isinstance(rows, list) or data.get("has_more") is True
+                or data.get("total", len(rows)) > len(rows) or len(rows) == 100):
+            return "", "operator_profile read is partial or malformed"
+        matches = []
+        for row in rows:
+            outer = row.get("snapshot") if isinstance(row, dict) else None
+            snap = outer.get("snapshot", outer) if isinstance(outer, dict) else None
+            if isinstance(snap, dict) and snap.get("profile_key") == "default":
+                matches.append(snap)
+        if len(matches) != 1:
+            return "", "default operator_profile is missing or ambiguous"
+        login = matches[0].get("github_login")
+        if not isinstance(login, str) or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", login):
+            return "", "default operator_profile lacks a valid github_login field"
+        return login, ""
+    except Exception:  # noqa: BLE001 — unreadable authority fails closed
+        return "", "default operator_profile could not be read"
 
 
 def _unresolved_lens_reason(resolution: lens_authors.Resolution) -> str:
@@ -2593,9 +2633,9 @@ async def run(
             head_sha,
         )
         identity_gap = not resolution.complete or bool(getattr(resolution, "partial", False))
-        owner_login, owner_error = (await _repository_operator(client, repo)
-                                    if rounds.capped or identity_gap else ("", ""))
-        override = (review_rounds.operator_override(comments, owner_login, repo, pr)
+        owner_login, operator_login, owner_error = (await _repository_operator(client, repo)
+                                    if rounds.capped or identity_gap else ("", "", ""))
+        override = (review_rounds.operator_override(comments, owner_login, operator_login, repo, pr)
                     if owner_login and (rounds.capped or identity_gap) else None)
         print(rounds.describe())
         if identity_gap:
@@ -2753,10 +2793,10 @@ async def run(
 
         if override:
             fresh_comments = await _fetch_issue_comments(client, repo, pr)
-            fresh_owner, fresh_owner_error = await _repository_operator(client, repo)
-            fresh_override = (review_rounds.operator_override(fresh_comments, fresh_owner, repo, pr)
+            fresh_owner, fresh_operator, fresh_owner_error = await _repository_operator(client, repo)
+            fresh_override = (review_rounds.operator_override(fresh_comments, fresh_owner, fresh_operator, repo, pr)
                               if fresh_owner and not fresh_owner_error else None)
-            if fresh_owner != owner_login or fresh_override != override:
+            if fresh_owner != owner_login or fresh_operator != operator_login or fresh_override != override:
                 print("refusing to approve: operator round-cap override changed or vanished. Submitting nothing.")
                 return 1
 

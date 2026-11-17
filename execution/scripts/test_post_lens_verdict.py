@@ -273,12 +273,26 @@ def test_a_shared_identity_is_refused_for_a_lens_that_has_its_own_app(monkeypatc
 
 def test_a_second_post_for_the_same_head_edits_in_place(monkeypatch, tmp_path, capsys):
     marker = swarm_dispatch.compose_lens_review_marker("arch", HEAD)
-    existing = {"id": 41, "body": marker + "\nold\n", "user": {"login": APP_LOGIN}}
+    existing = {"id": 41, "body": marker + "\n" + GOOD_BODY, "user": {"login": APP_LOGIN}}
     client = _Client(comments=[existing])
     assert _run(monkeypatch, tmp_path, client) == 0
     method, url, _ = client.writes[0]
     assert method == "PATCH" and url.endswith("/issues/comments/41")
     assert "edited:" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("old_verdict,new_verdict", [
+    ("BLOCKED", "SIGNED_OFF"), ("SIGNED_OFF", "BLOCKED"),
+    ("COMMENT", "SIGNED_OFF"), ("SIGNED_OFF", "COMMENT"),
+])
+def test_changed_verdict_class_posts_new_history_record(monkeypatch, tmp_path, old_verdict, new_verdict):
+    marker = swarm_dispatch.compose_lens_review_marker("arch", HEAD)
+    old = GOOD_BODY.replace("SIGNED_OFF", old_verdict)
+    new = GOOD_BODY.replace("SIGNED_OFF", new_verdict)
+    client = _Client(comments=[{"id": 41, "body": marker + "\n" + old, "user": {"login": APP_LOGIN}}])
+    assert _run(monkeypatch, tmp_path, client, body=new) == 0
+    assert client.writes[0][0] == "POST"
+    assert len(client.comments) == 2
 
 
 def test_two_existing_matches_form_history_and_a_new_episode(monkeypatch, tmp_path):

@@ -2894,9 +2894,7 @@ def test_post_verdict_persistent_failure_stays_loud_after_three_attempts(
 
 
 def test_post_verdict_edits_existing_lens_comment_in_place(monkeypatch, tmp_path):
-    old_body = SIGNED_OFF_VERDICT.replace(SAMPLE_HEAD, "b" * 40).replace(
-        "SIGNED_OFF", "REQUEST_CHANGES"
-    )
+    old_body = SIGNED_OFF_VERDICT
     current_body = old_body
     patch_calls = []
 
@@ -2933,30 +2931,58 @@ def test_post_verdict_edits_existing_lens_comment_in_place(monkeypatch, tmp_path
     assert len(patch_calls) == 1
 
 
-def test_post_verdict_refuses_ambiguous_prior_lens_comments(monkeypatch, tmp_path):
+@pytest.mark.parametrize("intervening", [False, True])
+def test_post_verdict_preserves_changed_or_intervened_history(monkeypatch, intervening):
+    old = SIGNED_OFF_VERDICT.replace("SIGNED_OFF", "REQUEST_CHANGES")
+    comments = [{"id": 41, "body": old, "html_url": "https://github.com/o/r/pull/1#issuecomment-41",
+                 "user": {"login": "ateles-agent"}}]
+    if intervening:
+        comments.append({"id": 42, "body": SIGNED_OFF_VERDICT.replace("review:pm", "review:qa"),
+                         "user": {"login": "ateles-agent"}})
     writes = []
+
+    def _run(command, **kwargs):
+        if command[1] == "api" and command[2].startswith("repos/o/r/issues/1/comments?"):
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps([comments]), stderr="")
+        writes.append(command)
+        assert command[:4] == ["gh", "api", "-X", "POST"]
+        comments.append({"id": 43, "body": json.loads(kwargs["input"])["body"],
+                         "html_url": "https://github.com/o/r/pull/1#issuecomment-43",
+                         "user": {"login": "ateles-agent"}})
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(hlr.subprocess, "run", _run)
+    assert hlr.post_verdict(repo="o/r", pr=1, verdict_text=SIGNED_OFF_VERDICT).endswith("#issuecomment-43")
+    assert comments[0]["body"] == old and len(writes) == 1
+
+
+def test_post_verdict_preserves_prior_lens_comments(monkeypatch, tmp_path):
+    writes = []
+    comments = [{
+        "id": i, "body": SIGNED_OFF_VERDICT.replace(SAMPLE_HEAD, "b" * 40),
+        "html_url": f"https://github.com/o/r/pull/1#issuecomment-{i}",
+        "user": {"login": "ateles-agent"},
+    } for i in (1, 2)]
 
     def _run(command, **kwargs):
         if command[1] == "api" and command[2].startswith(
             "repos/o/r/issues/1/comments?"
         ):
-            comment = {
-                "body": SIGNED_OFF_VERDICT,
-                "html_url": "url",
-                "user": {"login": "ateles-agent"},
-            }
-            pages = [[{**comment, "id": 1}, {**comment, "id": 2}]]
+            pages = [comments]
             return subprocess.CompletedProcess(
                 command, 0, stdout=json.dumps(pages), stderr=""
             )
         writes.append(command)
-        raise AssertionError("ambiguous comments must prevent every write")
+        assert command[:4] == ["gh", "api", "-X", "POST"]
+        comments.append({"id": 3, "body": json.loads(kwargs["input"])["body"],
+                         "html_url": "https://github.com/o/r/pull/1#issuecomment-3",
+                         "user": {"login": "ateles-agent"}})
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
     monkeypatch.setattr(hlr.subprocess, "run", _run)
 
-    with pytest.raises(RuntimeError, match="ambiguous prior review:pm"):
-        hlr.post_verdict(repo="o/r", pr=1, verdict_text=SIGNED_OFF_VERDICT)
-    assert writes == []
+    assert hlr.post_verdict(repo="o/r", pr=1, verdict_text=SIGNED_OFF_VERDICT).endswith("#issuecomment-3")
+    assert len(writes) == 1 and len(comments) == 3
 
 
 def test_run_one_does_not_post_when_verdict_unreadable(

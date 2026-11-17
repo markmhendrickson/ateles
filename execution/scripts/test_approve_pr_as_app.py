@@ -37,6 +37,7 @@ for _p in (str(_REPO_ROOT), str(_SCRIPTS), str(_DAEMON_DIR)):
         sys.path.insert(0, _p)
 
 import approve_pr_as_app as target  # noqa: E402
+_ORIGINAL_OPERATOR_PROFILE_LOGIN = getattr(target, "_operator_profile_login", None)
 import lens_authors  # noqa: E402
 import post_lens_verdict  # noqa: E402
 import swarm_dispatch  # noqa: E402
@@ -94,6 +95,9 @@ def _lens_comment_identities(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(lens_authors, "_app_bot_logins", lambda: (set(), False))
     lens_authors.clear_cache()
+    async def _profile(_client):
+        return swarm_dispatch._OPERATOR_LOGIN, ""
+    monkeypatch.setattr(target, "_operator_profile_login", _profile, raising=False)
 
 
 def _comment(id_: int, body: str, *, author: str | None = SWARM_LOGIN) -> dict:
@@ -5066,7 +5070,7 @@ class TestRoundCap:
         assert code == 1 and client.posted == []
         assert "round order indeterminate" in capsys.readouterr().out
 
-    async def test_poster_preserves_return_episode_and_approval_refuses_fifth_round(
+    async def test_poster_preserves_changed_verdict_and_approval_refuses_fourth_round(
         self, monkeypatch, capsys
     ):
         class GitHubComments:
@@ -5100,8 +5104,8 @@ class TestRoundCap:
         identity = post_lens_verdict.Identity("synthetic-token", SWARM_LOGIN, "test")
         sequence = [
             (ROUND_HEADS[0], "BLOCKED"),
-            (ROUND_HEADS[1], "SIGNED_OFF"),
-            (ROUND_HEADS[0], "BLOCKED"),
+            (ROUND_HEADS[0], "SIGNED_OFF"),
+            (ROUND_HEADS[1], "BLOCKED"),
             (ROUND_HEADS[2], "BLOCKED"),
             (HEAD, "SIGNED_OFF"),
         ]
@@ -5124,7 +5128,7 @@ class TestRoundCap:
         comments = github.comments + _all_clear_comments(ALL_FOUR)
         code, client = await self._run(monkeypatch, comments)
         assert code == 1 and client.posted == []
-        assert "round 5 of 3" in capsys.readouterr().out
+        assert "round 4 of 3" in capsys.readouterr().out
 
 
 def _operator_override(id_=1200, *, author=None, reason="The review has exceeded the cap for a documented reason.",
@@ -5153,6 +5157,47 @@ class TestRoundCapOverride:
         assert f"OVERRIDDEN by the operator ({override['html_url']})" in out
         assert override["body"] in out and override["created_at"] in out
         assert swarm_dispatch._OPERATOR_LOGIN in out
+
+    async def test_another_human_repository_owner_cannot_override(self, monkeypatch, capsys):
+        owner = "different-human-owner"
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        client = _FakeClient(comments=comments + [_operator_override(author=owner)],
+                             check_runs=_green_checks(), repo_owner={"login": owner, "type": "User"})
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        assert await target.run(REPO, PR, ALL_FOUR, apply=True) == 1
+        assert client.posted == []
+        assert "differs from the operator_profile" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("snapshot,expected", [
+        ({"profile_key": "default", "github_login": "synthetic-owner"}, "synthetic-owner"),
+        ({"profile_key": "default"}, ""),
+    ])
+    async def test_profile_reader_requires_declared_login(self, monkeypatch, snapshot, expected):
+        assert _ORIGINAL_OPERATOR_PROFILE_LOGIN is not None
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://records.example")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-bearer")
+        class ProfileClient:
+            async def post(self, url, headers=None, json=None):
+                assert url == "https://records.example/entities/query"
+                assert json == {"entity_type": "operator_profile", "include_snapshots": True, "limit": 100}
+                return _FakeResponse({"entities": [{"snapshot": snapshot}], "total": 1})
+        login, error = await _ORIGINAL_OPERATOR_PROFILE_LOGIN(ProfileClient())
+        assert login == expected
+        assert bool(error) == (not expected)
+
+    @pytest.mark.parametrize("login,error", [
+        ("", "default operator_profile lacks a valid github_login field"),
+        ("", "default operator_profile could not be read"),
+    ])
+    async def test_missing_or_unreadable_operator_login_refuses(self, monkeypatch, capsys, login, error):
+        async def _profile(_client):
+            return login, error
+        monkeypatch.setattr(target, "_operator_profile_login", _profile)
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        code, client = await self._run(monkeypatch, comments + [_operator_override()])
+        assert code == 1 and client.posted == []
+        assert error in capsys.readouterr().out
 
     @pytest.mark.parametrize("override", [
         _operator_override(author=OTHER_LOGIN),

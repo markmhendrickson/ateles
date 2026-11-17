@@ -104,6 +104,22 @@ def _comment_id(value: object) -> int | None:
     return None
 
 
+def verdict_class(body: str, lens: str) -> str:
+    """Classify a posted lens record with the approval reader's own rules."""
+    import swarm_dispatch
+    from review_panel import LENSES
+
+    agent = next((item.agent for item in LENSES if item.lens == lens), None)
+    if agent is None:
+        return "unreadable"
+    verdict = swarm_dispatch.lens_own_verdict(body, lens_agent=agent)
+    if verdict is None:
+        return "unreadable"
+    if verdict in swarm_dispatch.SIGN_OFF_CLEAR_VERDICTS:
+        return "signed_off" if swarm_dispatch.sign_off_is_warranted(body, lens_agent=agent) else "blocked"
+    return "blocked"
+
+
 def round_status(records: dict[str, list], current_head: str, *, cap: int = ROUND_CAP) -> RoundStatus:
     """Count contiguous review episodes in verdict order; unknown order denies."""
     current = (current_head or "").lower()
@@ -189,8 +205,10 @@ def round_status(records: dict[str, list], current_head: str, *, cap: int = ROUN
     return RoundStatus(current, tuple(rounds), len(rounds), cap, current in reviewed)
 
 
-def operator_override(comments: list[dict], operator_login: str, repo: str, pr: int) -> dict | None:
-    """Latest valid operator comment; caller supplies only this PR's comments."""
+def operator_override(comments: list[dict], owner_login: str, operator_login: str, repo: str, pr: int) -> dict | None:
+    """Latest valid operator comment when the human owner is the operator."""
+    if not owner_login or not operator_login or owner_login != operator_login:
+        return None
     valid = []
     for comment in comments:
         body = comment.get("body") or ""

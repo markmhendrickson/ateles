@@ -34,6 +34,18 @@ def test_cap_stays_three():
     assert rr.CAP_REACHED == "round cap reached: split or cut scope"
 
 
+def test_override_requires_repository_owner_to_equal_operator():
+    row = {
+        "body": "/override-round-cap\nA sufficiently detailed synthetic reason.",
+        "user": {"login": "other-owner", "type": "User"},
+        "created_at": "2026-10-27T10:00:00Z",
+        "updated_at": "2026-10-27T10:00:00Z",
+        "html_url": "https://github.com/example/repo/pull/7#issuecomment-1",
+    }
+    assert rr.operator_override([row], "other-owner", "operator", "example/repo", 7) is None
+    assert rr.operator_override([row], "other-owner", "other-owner", "example/repo", 7) is row
+
+
 def test_clear_repushes_and_sites_private_shape_spend_only_second_round():
     comments = [_verdict("pm", H1, verdict="REQUEST_CHANGES", n=0)]
     heads = [f"{i:040x}" for i in range(2, 22)]
