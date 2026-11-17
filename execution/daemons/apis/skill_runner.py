@@ -1384,6 +1384,7 @@ def _write_harness_event(
     tool_name: str,
     success: str,
     agent_session_id: str = "",
+    dispatch_id: str = "",
     input_summary: str = "",
     output_summary: str = "",
     duration_ms: int | None = None,
@@ -1393,6 +1394,12 @@ def _write_harness_event(
 ) -> None:
     """
     Best-effort write of a harness_event entity to Neotoma.
+
+    The schema's identity is ``session_id`` + ``event_type`` + ``event_at``,
+    so every row carries all three. ``session_id`` is the agent session when
+    there is one, else ``dispatch:<dispatch_id>`` — the dispatch's own id
+    (``model_tiering.new_dispatch_id``), minted here when a caller passed none.
+    Without it, session-less dispatch events resolved to one shared entity.
 
     ``event_at`` is when the event happened. A caller that writes later than
     that (the paced audit queue) passes the time it captured; without one the
@@ -1433,8 +1440,8 @@ def _write_harness_event(
 
     event_at = event_at or datetime.now(timezone.utc).isoformat()
     # canonical_name_fields per schema: session_id, event_type, event_at.
-    session_key = agent_session_id or f"{role}:{task_entity_id}"
-    idempotency_key = f"harness-event-{session_key}-{event_type}-{event_at}"
+    session_id = agent_session_id or f"dispatch:{dispatch_id or model_tiering.new_dispatch_id()}"
+    idempotency_key = f"harness-event-{session_id}-{event_type}-{event_at}"
 
     entity: dict = {
         "entity_type": "harness_event",
@@ -1444,9 +1451,8 @@ def _write_harness_event(
         "agent_sub": agent_sub,
         "success": success,
         "task_entity_id": task_entity_id,
+        "session_id": session_id,
     }
-    if agent_session_id:
-        entity["session_id"] = agent_session_id
     if input_summary:
         entity["input_summary"] = input_summary[:500]
     if resolved_tier is not None:
@@ -1534,12 +1540,13 @@ def _write_harness_event(
                 snapshot = snapshot["snapshot"]
             expected = {
                 "task_entity_id": task_entity_id,
-                **({"session_id": agent_session_id} if agent_session_id else {}),
+                "session_id": session_id,
             }
             if any(snapshot.get(field) != value for field, value in expected.items()):
                 log.warning(
                     "[apis] harness_event readback mismatch "
-                    f"(entity_id={event_id}, task_entity_id={task_entity_id})"
+                    f"(entity_id={event_id}, task_entity_id={task_entity_id}, "
+                    f"session_id={session_id})"
                 )
             relationships_req = urllib.request.Request(
                 f"{base_url}/entities/{event_id}/relationships", method="GET",
@@ -1574,12 +1581,16 @@ async def _emit_harness_event(**fields) -> None:
     ``asyncio.to_thread`` call it replaces did. ``fields`` are captured now,
     and ``event_at`` is stamped now unless the caller already set it, so a
     queued row records the moment of the event, not the moment of its write
-    (``event_at`` is also part of the row's idempotency key).
+    (``event_at`` is also part of the row's idempotency key). A row with no
+    agent session gets its ``dispatch_id`` here too when the caller has none,
+    so the queued write and any retry of it keep one identity.
     """
     fields = {
         **fields,
         "event_at": fields.get("event_at") or datetime.now(timezone.utc).isoformat(),
     }
+    if not fields.get("agent_session_id") and not fields.get("dispatch_id"):
+        fields["dispatch_id"] = model_tiering.new_dispatch_id()
     await audit_queue.emit(
         lambda: asyncio.to_thread(_write_harness_event, **fields),
         label=(
@@ -3264,6 +3275,10 @@ async def _run_skill_once(
     """
     model = model_tiering.validate_model_selector(model)
     _role = (role or skill).lower()
+    # One id per dispatch attempt: it ties the tier ledger's start row to its
+    # spend row, and it is the harness_event session_id when the dispatch has
+    # no agent session, so each attempt's audit rows form their own record.
+    _ledger_dispatch_id = model_tiering.new_dispatch_id()
     # Whether the caller supplied a timeout is kept: a Fly job resolves its
     # own timeout once it is bound for Fly (APIS_FLY_DISPATCH_TIMEOUT), and a
     # local run, including a fallback from Fly, uses the shared one.
@@ -3396,6 +3411,7 @@ async def _run_skill_once(
                 await _emit_harness_event(
                     task_entity_id=task_entity_id,
                     agent_session_id=agent_session_id,
+                    dispatch_id=_ledger_dispatch_id,
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
@@ -3601,6 +3617,7 @@ async def _run_skill_once(
             await _emit_harness_event(
                 task_entity_id=task_entity_id,
                 agent_session_id=agent_session_id,
+                dispatch_id=_ledger_dispatch_id,
                 role=_role,
                 agent_sub=agent_def.aauth_sub,
                 event_type="subprocess",
@@ -3943,8 +3960,8 @@ async def _run_skill_once(
     # forgot to name an action class shows up here instead of hiding.
     # The id ties this start row to the spend row appended when the dispatch
     # ends (`record_dispatch_usage`), so attribution survives a provider failover
-    # that records one start row per provider tried.
-    _ledger_dispatch_id = model_tiering.new_dispatch_id()
+    # that records one start row per provider tried. The id is minted at the
+    # top of this function.
     log.info(
         f"[apis] {skill} via {provider}: "
         + model_tiering.record_dispatch(
@@ -3958,6 +3975,7 @@ async def _run_skill_once(
         await _emit_harness_event(
             task_entity_id=task_entity_id,
             agent_session_id=agent_session_id,
+            dispatch_id=_ledger_dispatch_id,
             role=_role,
             agent_sub=agent_def.aauth_sub,
             event_type="subprocess",
@@ -4392,6 +4410,7 @@ async def _run_skill_once(
                         await _emit_harness_event(
                             task_entity_id=task_entity_id,
                             agent_session_id=agent_session_id,
+                            dispatch_id=_ledger_dispatch_id,
                             role=_role,
                             agent_sub=agent_def.aauth_sub,
                             event_type="subprocess",
@@ -4472,6 +4491,7 @@ async def _run_skill_once(
                 await _emit_harness_event(
                     task_entity_id=task_entity_id,
                     agent_session_id=agent_session_id,
+                    dispatch_id=_ledger_dispatch_id,
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
@@ -4690,6 +4710,7 @@ async def _run_skill_once(
                 await _emit_harness_event(
                     task_entity_id=task_entity_id,
                     agent_session_id=agent_session_id,
+                    dispatch_id=_ledger_dispatch_id,
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
@@ -4733,6 +4754,7 @@ async def _run_skill_once(
                 await _emit_harness_event(
                     task_entity_id=task_entity_id,
                     agent_session_id=agent_session_id,
+                    dispatch_id=_ledger_dispatch_id,
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
