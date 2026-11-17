@@ -786,24 +786,26 @@ def test_plain_quoted_notification_never_posts(monkeypatch, tmp_path, kind, quot
 
 
 _HTML_QUOTES = (
-    '<blockquote><p>Reply APPROVE</p></blockquote>',
-    '<div class="gmail_quote"><p>Reply APPROVE</p><blockquote>approve v1.2.3</blockquote></div>',
-    '<div class="gmail_extra">Reply APPROVE</div>',
-    '<div class="gmail_attr">On Tue wrote:</div><div>Reply APPROVE</div>',
-    '<div class="yahoo_quoted">Reply APPROVE</div>',
-    '<div id="divRplyFwdMsg">From: swarm</div><div>Reply APPROVE</div>',
-    '<div id="appendonsend">Reply APPROVE</div>',
-    '<div type="cite">Reply APPROVE</div>',
-    '<div class="moz-cite-prefix">On Tue wrote:</div><div>Reply APPROVE</div>',
-    '<hr><div>From: swarm</div><div>Reply APPROVE</div>',
+    '<blockquote>{quoted}</blockquote>',
+    '<div class="gmail_quote">{quoted}</div>',
+    '<div class="gmail_extra">{quoted}</div>',
+    '<div class="gmail_attr">On Tue wrote:</div><div>{quoted}</div>',
+    '<div class="yahoo_quoted">{quoted}</div>',
+    '<div id="divRplyFwdMsg">From: swarm</div><div>{quoted}</div>',
+    '<div id="appendonsend">{quoted}</div>',
+    '<div type="cite">{quoted}</div>',
+    '<div class="moz-cite-prefix">On Tue wrote:</div><div>{quoted}</div>',
+    '<hr><div>From: swarm</div><div>{quoted}</div>',
 )
 
 
 @pytest.mark.parametrize("kind", ("release", "pr"))
 @pytest.mark.parametrize("quote", _HTML_QUOTES)
 def test_html_quoted_notification_never_posts(monkeypatch, tmp_path, kind, quote):
+    quoted = ("<p>Reply APPROVE, approve v1.2.3 to publish</p>"
+              "<p>release-approve: v1.2.3</p><p>swarm-approve: o/r#7</p>")
     posts, state, _ = _poll_authored_reply(monkeypatch, tmp_path, kind,
-                                           {"body_html": quote})
+                                           {"body_html": quote.format(quoted=quoted)})
     assert posts == []
     assert "approval-1" not in state.get("processed_ids", [])
 
