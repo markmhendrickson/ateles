@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
 import turdus  # noqa: E402
+from lib.approval import email_channel  # noqa: E402
 
 
 _AUTH_PASS = "mx.google.com; dmarc=pass header.from=example.com"
@@ -95,7 +96,7 @@ def _wire(monkeypatch, *, body, secret="s3cret", posted=None):
     monkeypatch.setattr(turdus, "OPERATOR_EMAIL", "op@example.com")
     monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
     monkeypatch.delenv("ATELES_MAIL_AUTHSERV_ID", raising=False)
-    monkeypatch.setattr(turdus.email_channel, "_fetch_auth_results",
+    monkeypatch.setattr(email_channel, "_fetch_auth_results",
                         lambda mid: [_AUTH_PASS])
     monkeypatch.setattr(turdus, "APIS_APPROVE_EMAIL_SECRET", secret)
     monkeypatch.setattr(turdus, "DRY_RUN", False)
@@ -140,9 +141,9 @@ def test_approval_authentication_failure_never_posts(monkeypatch, kind, evidence
     if evidence == "fetch_error":
         def fail_fetch(_mid):
             raise OSError("synthetic metadata read failure")
-        monkeypatch.setattr(turdus.email_channel, "_fetch_auth_results", fail_fetch)
+        monkeypatch.setattr(email_channel, "_fetch_auth_results", fail_fetch)
     else:
-        monkeypatch.setattr(turdus.email_channel, "_fetch_auth_results",
+        monkeypatch.setattr(email_channel, "_fetch_auth_results",
                             lambda _mid: evidence)
 
     async def fake_release_post(version, sender):
