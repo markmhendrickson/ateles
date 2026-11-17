@@ -272,7 +272,7 @@ def _google_pass_for_operator_domain() -> dict:
     domain = _os.environ.get("OPERATOR_EMAIL", "").rpartition("@")[2].strip().lower()
     value = (f"mx.google.com; dkim=pass header.i=@{domain} header.s=s; "
              f"dmarc=pass (p=NONE) header.from={domain}")
-    return {"id": "m", "payload": {"headers": [
+    return {"id": "m1", "payload": {"headers": [
         {"name": "Authentication-Results", "value": value}]}}
 
 
@@ -822,7 +822,7 @@ _GOOGLE_DMARC_PASS = (
 def _metadata(auth_values: list[str]) -> dict:
     headers = [{"name": "From", "value": "op@example.com"}]
     headers += [{"name": "Authentication-Results", "value": v} for v in auth_values]
-    return {"id": "m", "payload": {"headers": headers}}
+    return {"id": "m1", "payload": {"headers": headers}}
 
 
 def _is_metadata_get(args) -> bool:
@@ -993,6 +993,18 @@ class TestSenderDomainAuthentication:
             assert [reply.message_id for reply in outcome.unreadable_replies] == ["m1"]
             assert outcome.rejected_replies == ()
 
+    @pytest.mark.parametrize("auth", (
+        {"id": "other", "payload": {"headers": [
+            {"name": "Authentication-Results", "value": _GOOGLE_DMARC_PASS}]}},
+        {"id": "m1", "payload": {"headers": [
+            {"name": "Other", "value": []},
+            {"name": "Authentication-Results", "value": _GOOGLE_DMARC_PASS}]}},
+    ))
+    def test_mismatched_or_invalid_auth_metadata_is_not_ok(self, monkeypatch, auth):
+        outcome = self._run(monkeypatch, auth)
+        assert outcome.kind == "transport_error"
+        assert outcome.texts == []
+
     def test_fail_open_wrapper_also_drops_unauthenticated(self, monkeypatch):
         monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
         monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
@@ -1151,6 +1163,26 @@ class TestPartialReadFailsClosed:
         assert out.kind == "transport_error"
         assert out.texts == []
         assert out.detail == "gws_read_oversized"
+
+    @pytest.mark.parametrize("body", (
+        {"body_text": "APPROVE", "body": "HOLD"},
+        {"body_text": "APPROVE", "plain": []},
+        {"body_text": "APPROVE", "extra": ["x" * 262144]},
+    ))
+    def test_invalid_or_oversized_body_fields_cannot_approve(self, monkeypatch, body):
+        self._env(monkeypatch)
+
+        def fake(args, timeout=45):
+            if "+triage" in args:
+                return {"complete": True, "messages": [
+                    {"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                     "from": "op@example.com"}]}
+            return body
+
+        with _mock_inbox(side_effect=fake):
+            out = ec.read_replies_with_status(["TOK"])
+        assert out.kind == "transport_error"
+        assert out.texts == []
 
     def test_callback_failure_cannot_return_approval(self, monkeypatch):
         self._env(monkeypatch)

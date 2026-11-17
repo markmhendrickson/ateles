@@ -596,6 +596,9 @@ def gws_json(args: list[str], timeout: int = 45) -> Any:
             log.warning(f"gws {args[:2]} failed: {(r.stderr or '').strip()[:160]}")
             return None
         out = r.stdout or ""
+        if len(out.encode("utf-8")) > 1048576:
+            log.warning(f"gws {args[:2]} response exceeds approval read limit")
+            return None
         start = min([i for i in (out.find("{"), out.find("[")) if i >= 0] or [-1])
         if start < 0:
             return None
@@ -795,6 +798,8 @@ def _fetch_auth_results(message_id: str) -> list[str] | None:
                     timeout=30)
     if not isinstance(data, dict):
         return None
+    if "id" in data and data["id"] != message_id:
+        return None
     payload = data.get("payload")
     if not isinstance(payload, dict):
         return None
@@ -805,10 +810,11 @@ def _fetch_auth_results(message_id: str) -> list[str] | None:
         return None
     values: list[str] = []
     for h in headers:
-        if not isinstance(h, dict):
+        if (not isinstance(h, dict) or not isinstance(h.get("name"), str) or
+                not isinstance(h.get("value"), str)):
             return None
-        if str(h.get("name") or "").strip().lower() == "authentication-results":
-            values.append(str(h.get("value") or ""))
+        if h["name"].strip().lower() == "authentication-results":
+            values.append(h["value"])
     return values
 
 
@@ -835,6 +841,8 @@ def _complete_triage_rows(data: Any, max_msgs: int) -> tuple[list[dict] | None, 
     """Accept only a complete, structurally valid mailbox collection."""
     if not isinstance(data, dict):
         return None, "gws_triage_invalid_response"
+    if len(json.dumps(data).encode("utf-8")) > 1048576:
+        return None, "gws_triage_oversized"
     if "messages" in data and "results" in data:
         return None, "gws_triage_invalid_response"
     rows = data.get("messages", data.get("results"))
@@ -1002,21 +1010,22 @@ def read_replies_with_status(
                 transport_detail = "gws_read_failed"
                 unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
-            if any(isinstance(value, str) and len(value) > 262144
-                   for value in body_data.values()):
+            if len(json.dumps(body_data).encode("utf-8")) > 262144:
                 saw_transport_error = True
                 transport_detail = "gws_read_oversized"
                 unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
             # A triage snippet, subject, preview, or header can contain both
             # verdict and token, but none proves that the full reply was read.
-            plain_key = next((key for key in ("body_text", "body", "text", "plain")
-                              if key in body_data), None)
-            if plain_key is not None and not isinstance(body_data[plain_key], str):
+            plain_keys = [key for key in ("body_text", "body", "text", "plain")
+                          if key in body_data]
+            if (any(not isinstance(body_data[key], str) for key in plain_keys) or
+                    len({body_data[key] for key in plain_keys}) > 1):
                 saw_transport_error = True
                 transport_detail = "gws_read_invalid_response"
                 unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
+            plain_key = plain_keys[0] if plain_keys else None
             plain_present = plain_key is not None
             plain = body_data[plain_key] if plain_present else ""
             body, plain_safe = _authored_plain_checked(plain)
