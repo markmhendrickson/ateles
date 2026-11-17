@@ -565,7 +565,7 @@ def test_each_journal_mutation_preserves_a_concurrent_instances_key(
     assert "other" in second._dedupe_journal
 
 
-def test_retryable_alert_recovers_pending_after_interrupted_handoff(tmp_path):
+def test_retryable_alert_recovers_ambiguous_sending_after_interrupted_handoff(tmp_path):
     import pytest
 
     sent = []
@@ -578,9 +578,13 @@ def test_retryable_alert_recovers_pending_after_interrupted_handoff(tmp_path):
     first._deliver = interrupted
     assert not first.send("usage crossed", Priority.WARN, handler="apis",
                           dedupe_key=key, retryable=True)
-    assert first._dedupe_journal[key]["state"] == "pending"
+    assert first._dedupe_journal[key]["state"] == "sending"
 
     second = _notifier(tmp_path, NO_SILENCE, sent)
+    assert not second.send("usage crossed", Priority.WARN, handler="apis",
+                           dedupe_key=key, retryable=True)
+    original_now = second._now_local
+    second._now_local = lambda: original_now() + timedelta(seconds=6)
     assert second.send("usage crossed", Priority.WARN, handler="apis",
                        dedupe_key=key, retryable=True)
     assert second._dedupe_journal[key]["state"] == "delivered"

@@ -110,6 +110,17 @@ def test_clear_removes_only_what_was_shown(queue, capsys):
     assert not held_view.snapshot_path(queue).exists()
 
 
+def test_clear_uses_identity_when_a_keyed_notice_text_changes(queue, capsys):
+    first = {"keys": ["usage:weekly:50"], "message": "⚠ [apis] 50%"}
+    latest = {"keys": ["usage:weekly:50"], "message": "⚠ [apis] 55%"}
+    queue.write_text(json.dumps([first]))
+    assert held_view.main([]) == 0
+    queue.write_text(json.dumps([latest]))
+    assert held_view.main(["--clear"]) == 0
+    assert held_view.read_queue(queue) == []
+    assert held_view.read_queue(held_view.backup_path(queue)) == [latest]
+
+
 def test_clear_without_a_listing_clears_nothing(queue, capsys):
     queue.write_text(json.dumps(["⚠️ [apis] one"]))
     assert held_view.main(["--clear"]) == 0

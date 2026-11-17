@@ -430,7 +430,7 @@ def test_unreadable_held_queue_is_not_overwritten_by_new_usage_warning(
     spy.inner._digest_path.write_text(retained)
     usage_alerts._retry_after.clear()
     assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
-    assert spy.inner._digest_queue[0] == "⚠ [apis] " + spy.sent[0][0]
+    assert held_view.notice_text(spy.inner._digest_queue[0]) == "⚠ [apis] " + spy.sent[0][0]
 
 
 def test_missing_held_notice_allows_one_new_usage_warning(
@@ -620,7 +620,7 @@ def test_a_send_that_raises_is_retried_on_the_next_check(
     usage_alerts._retry_after.clear()  # past the backoff
     key = spy.sent[0][2]
     entry = spy.inner._dedupe_journal[key]
-    entry["pending_at"] = (spy.inner._now_local() - timedelta(minutes=1)).isoformat()
+    entry["attempt_at"] = (spy.inner._now_local() - timedelta(minutes=1)).isoformat()
     _replace_journal_entry(spy.inner, key, entry)
     assert len(usage_alerts.check_usage_thresholds("cursor", notifier=spy)) == 1
 
@@ -830,7 +830,7 @@ def test_documented_usage_script_invokes_alert_without_pythonpath(tmp_path):
     script = _DAEMON_DIR.parent.parent / "scripts" / "harness_usage.py"
     reset = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
     child = f'''import runpy, sys
-sys.path.insert(0, {str(script.parent)!r})
+sys.path.insert(0, {str(_DAEMON_DIR)!r})
 import usage_alerts
 class Fake:
     def is_dedupe_open(self, key): return False
@@ -863,9 +863,11 @@ def test_active_ungated_providers_are_observed_and_alerted(monkeypatch, tmp_path
 
     monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
     monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_USAGE_PROBE", "on")
     monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
     called = []
-    alerted = []
+    spy = _SpyNotifier()
     def refresh(provider, *args, **kwargs):
         called.append(provider)
         harness_router.record_usage(provider, [
@@ -874,14 +876,31 @@ def test_active_ungated_providers_are_observed_and_alerted(monkeypatch, tmp_path
         ])
         return "refreshed"
     monkeypatch.setattr(usage_probe, "_refresh_provider", refresh)
-    monkeypatch.setattr(usage_probe, "_alert_on_new_reading", lambda provider, **kw: alerted.append(provider))
+    monkeypatch.setattr(usage_probe, "_alert_on_new_reading",
+                        lambda provider, **kw: usage_alerts.check_usage_thresholds(provider, notifier=spy))
     outcome = usage_probe.refresh_usage_if_stale(
         {"codex": "/bin/codex", "cursor": "/bin/cursor", "claude": "/bin/claude"},
         env={}, force=True,
     )
     assert outcome == {"codex": "refreshed", "cursor": "refreshed"}
-    assert called == alerted == ["codex", "cursor"]
+    assert called == ["codex", "cursor"]
     assert all(len(harness_router.usage_windows(p)) == 1 for p in called)
+    assert len(spy.delivered) == 2
+    assert all("(crossed 50% and 75%)" in message for message in spy.delivered)
+
+
+def test_only_active_gated_provider_is_probed(monkeypatch, tmp_path):
+    import usage_probe
+
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_USAGE_PROBE", "on")
+    monkeypatch.setattr(usage_probe, "_refresh_provider", lambda provider, *args, **kwargs: "refreshed")
+    monkeypatch.setattr(usage_probe, "_alert_on_new_reading", lambda *args, **kwargs: None)
+    outcome = usage_probe.refresh_usage_if_stale(
+        {"claude": "/bin/claude", "codex": "/bin/codex"}, env={}, force=True,
+    )
+    assert outcome == {"claude": "refreshed"}
 
 
 def test_cli_exit_leaves_failed_alert_pending_for_next_process(
