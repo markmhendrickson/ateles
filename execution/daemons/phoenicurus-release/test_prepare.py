@@ -22,6 +22,12 @@ import pytest
 import prepare
 
 
+@pytest.fixture(autouse=True)
+def approval_addresses(monkeypatch):
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.com")
+
+
 @pytest.fixture
 def isolated_state(tmp_path, monkeypatch):
     """Point both lock files at a temp dir so tests never touch real state."""
@@ -81,6 +87,7 @@ from unittest.mock import patch, MagicMock  # noqa: E402
 
 def test_email_send_skips_when_operator_email_unset(monkeypatch):
     monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "")
+    monkeypatch.delenv("OPERATOR_EMAIL")
     # Must not even look for gws when there's no recipient.
     with patch("shutil.which") as which:
         assert prepare.email_send("subj", "body") is False
@@ -325,6 +332,36 @@ def test_rc_email_absent_swarm_directory_uses_telegram_only(monkeypatch, tmp_pat
     assert "Email approval unavailable; approve through Telegram instead." in prompt
     chosen = prepare._agent_env()["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"]
     assert chosen != str(tmp_path) and os.listdir(chosen) == []
+
+
+@pytest.mark.parametrize("swarm,cfg", [
+    (None, True),
+    ("malformed", True),
+    ("op@example.com", True),
+    ("swarm@example.com", False),
+])
+def test_unreadable_mailbox_never_offers_or_sends_approval(
+    monkeypatch, tmp_path, swarm, cfg
+):
+    monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setattr(prepare, "SWARM_EMAIL", swarm or "")
+    if swarm is None:
+        monkeypatch.delenv("ATELES_SWARM_EMAIL")
+    else:
+        monkeypatch.setenv("ATELES_SWARM_EMAIL", swarm)
+    config_dir = tmp_path if cfg else tmp_path / "missing"
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(config_dir))
+
+    prompt = prepare._build_agent_prompt("v1.2.3", 1)
+    assert "gws gmail +send" not in prompt
+    assert "Email approval unavailable; approve through Telegram instead." in prompt
+    assert "Do not run gws" in prompt
+    with patch("shutil.which", return_value="/synthetic/gws"), \
+         patch.object(prepare.subprocess, "run") as run:
+        assert prepare.email_send("Release v1.2.3 ready to approve", "notes") is False
+    run.assert_not_called()
+    chosen = prepare._agent_env()["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"]
+    assert chosen != str(config_dir) and os.listdir(chosen) == []
 
 
 def test_rc_email_send_failure_is_in_telegram_instructions(monkeypatch, tmp_path):

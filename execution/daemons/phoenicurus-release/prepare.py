@@ -224,6 +224,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from lib.daemon_runtime.logging_setup import configure_daemon_logging
 from lib import github_app_token  # noqa: E402
+from lib.approval import email_channel  # noqa: E402
 from lib.approval.email_channel import gws_config_dir_env  # noqa: E402
 from lib.environment_allowlist import (  # noqa: E402
     ALLOWED_ENVIRONMENT_NAMES,
@@ -527,10 +528,11 @@ def email_send(subject: str, body: str) -> bool:
     """
     import shutil
 
-    if not OPERATOR_EMAIL:
-        log.info("OPERATOR_EMAIL unset — skipping release email (Telegram only)")
+    if not email_channel.swarm_mailbox_configured():
+        log.info("swarm mailbox unavailable — skipping release email (Telegram only)")
         return False
-    swarm_gws = gws_config_dir_env(require_existing=True)
+    swarm_gws = (gws_config_dir_env(require_existing=True)
+                 if email_channel.swarm_mailbox_configured() else {})
     if not swarm_gws:
         log.warning("swarm mailbox unavailable — skipping release email")
         return False
@@ -933,9 +935,7 @@ def _build_agent_prompt(last_tag: str, commit_count: int) -> str:
         else "Send the Telegram notification to the default chat."
     )
     from_flag = f' --from "{SWARM_EMAIL}"' if SWARM_EMAIL else ""
-    email_available = bool(
-        OPERATOR_EMAIL and gws_config_dir_env(require_existing=True)
-    )
+    email_available = email_channel.swarm_mailbox_configured()
     email_note = (
         f"""11. Email the operator the SAME notification before Telegram. Email
     approval is available only when this send succeeds.
@@ -967,7 +967,7 @@ def _build_agent_prompt(last_tag: str, commit_count: int) -> str:
     notification: "Email approval unavailable because the RC email failed to
     send; approve through Telegram instead." Do NOT abort the run."""
         if email_available
-        else "11. Email notification skipped: email approval unavailable because the swarm mailbox directory is not configured and present, or OPERATOR_EMAIL is unset. Do not run gws. Add this sentence to Telegram: \"Email approval unavailable; approve through Telegram instead.\""
+        else "11. Email notification skipped: email approval unavailable because the separate swarm mailbox is not configured. Do not run gws. Add this sentence to Telegram: \"Email approval unavailable; approve through Telegram instead.\""
     )
     return f"""You are Phoenicurus, the Neotoma release-preparation agent.
 
@@ -1155,7 +1155,8 @@ def _agent_env() -> dict:
     # The RC email goes out through gws as the swarm mailbox when one is
     # configured and present: never inherit the ambient operator account.
     env.pop("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", None)
-    swarm_gws = gws_config_dir_env(require_existing=True)
+    swarm_gws = (gws_config_dir_env(require_existing=True)
+                 if email_channel.swarm_mailbox_configured() else {})
     if swarm_gws:
         env.update(swarm_gws)
     else:
