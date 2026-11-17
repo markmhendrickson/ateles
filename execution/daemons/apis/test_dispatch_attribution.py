@@ -894,6 +894,7 @@ def test_only_active_gated_provider_is_probed(monkeypatch, tmp_path):
 
     monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude")
     monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_USAGE_GATE", "on")
     monkeypatch.setenv("APIS_USAGE_PROBE", "on")
     monkeypatch.setattr(usage_probe, "_refresh_provider", lambda provider, *args, **kwargs: "refreshed")
     monkeypatch.setattr(usage_probe, "_alert_on_new_reading", lambda *args, **kwargs: None)
