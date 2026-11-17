@@ -218,7 +218,7 @@ only after the RC email was sent from the configured swarm mailbox.
 The existing Telegram `skip <version>` command marks the candidate skipped.
 See the Ateles SOUL.md "Release approval" section.
 
-**Email reply** — after provably quoted text and a short benign signature are removed, the entire
+**Email reply** — after only provably quoted text is removed, the entire
 operator-authored reply must contain exactly one instruction line:
 `approve <version>` (case-insensitive; the `v` prefix is optional). A final
 period or exclamation mark is allowed. The version must match the release in
@@ -238,9 +238,10 @@ authored text; unknown elements make the body unreadable. Head, title,
 script, style, template, form values and other non-rendered elements do not
 count. A substantive plain-text part takes precedence over HTML. For HTML-only
 replies, every element in the text's ancestor chain must have only allowed inline
-style properties: font family, safe font size and line height, font weight/style,
+style properties: an allowlisted font family, safe font size and line height, font weight/style,
 text alignment/decoration, bounded margins and padding, white space, wrapping,
-direction, and inert borders. Relative font sizes are multiplied down the
+`text-transform:none`, `direction:ltr`, `unicode-bidi:normal`, and inert borders.
+Relative font sizes are multiplied down the
 ancestor chain from a 16px base; a computed size below 8px or a relative
 scale below 0.7 is unreadable. Absolute sizes below 8px are unreadable.
 Every margin and padding side must be nonnegative and at most 100px, 75pt,
@@ -252,13 +253,25 @@ content (`details` outside its summary, closed `dialog`, `menu`, `slot`,
 unreadable. Text colour must be an explicit opaque dark 3- or 6-digit hex,
 RGB(A) or supported dark name; backgrounds must be explicit opaque light colours
 or absent. Unparsed colours, transparency, images, gradients, hiding/layout CSS,
-variables and stylesheet declarations make the body unreadable. Quoted, forwarded,
-original-message and signature text never grants approval. A signature is
-discarded only after an exact `-- ` or `--` line, with at most four nonblank
-lines of at most 80 characters and no approval/refusal vocabulary, PR number,
-or version string; any other tail makes the reply unreadable. A quote header is a
-boundary only when all following nonblank text is quoted or a header; unquoted
-text after it makes the reply unreadable. Bottom-posted HTML or plain-text replies
+variables and stylesheet declarations make the body unreadable. Font families
+are limited to Arial, Helvetica, Helvetica Neue, Verdana, Tahoma, Trebuchet MS,
+Calibri, Cambria, Candara, Segoe UI, Aptos, Georgia, Times, Times New Roman,
+Garamond, Palatino, Courier, Courier New, Menlo, Monaco, Consolas, Roboto,
+Open Sans, Lato, system-ui, -apple-system, BlinkMacSystemFont, sans-serif,
+serif, monospace, ui-sans-serif, ui-serif and ui-monospace. Every family in a
+comma-separated list must be allowed. Unknown or symbol fonts, `@font-face`,
+font shorthand, font variant/features/synthesis, unicode range, text transform
+other than `none`, direction other than `ltr`, unicode bidi other than `normal`,
+writing mode and text orientation make the body unreadable. Quoted text is
+removed only when each line starts with `>`, or a terminal `On <date> <name>
+wrote:` / `Le <date> ... a écrit :` / `El <date> ... escribió:` attribution is
+followed only by `>` lines and blanks, or a full `From:`, `Sent:`, `To:`,
+`Subject:` block is followed only by `>` lines and blanks. A full header block
+immediately after `-----Original Message-----` or `Begin forwarded message:`
+also marks quoted original content. Isolated header-shaped and separator lines
+remain authored. No signature is stripped: `--` or `-- ` and every following
+line remain authored, so a signed or otherwise extended approval reply is a
+non-approval and receives the exact-form correction. Bottom-posted HTML or plain-text replies
 are unreadable. Any second instruction, text before or
 after the affirmative, refusal, condition, question, longer sentence, or wrong
 target is a non-approval. For every readable, authenticated non-approval in an
@@ -268,7 +281,9 @@ recorded, and giving the exact accepted reply. It never routes that reply.
 This includes ordinary replies, questions, skips and blank authored replies
 above a recognizable quote. The subject target must match the correlation token
 in the reply, including when the token appears only in quoted text; a missing
-or mismatched token refuses approval and sends one notice naming both targets.
+or mismatched token refuses approval and sends one Telegram notice naming the
+subject target and the reply's correlation target (or its absence), plus the
+exact accepted form: `approve` for that PR or `approve <version>` for that release.
 If authentication
 metadata or the reply body cannot be read, if HTML markup is malformed around
 a quote, or if an HTML-only copy of the notification has no identifiable quote

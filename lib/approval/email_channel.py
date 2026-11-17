@@ -76,12 +76,13 @@ class ReadRepliesOutcome:
     unreadable_replies: tuple[ApprovalReply, ...] = ()
 
 
-_QUOTE_HEADER = re.compile(r"(?i)^(?:from|sent|to|subject):\s*\S")
-_ATTRIBUTION = re.compile(r"(?i)^on\s+.+\bwrote:\s*$")
-_FORWARD = re.compile(
-    r"(?i)^(?:-{2,}\s*(?:original|forwarded) message\s*-{2,}|"
-    r"begin forwarded message:|_{5,})"
+_ATTRIBUTION = re.compile(
+    r"(?i)^(?:on\s+\S.+\s+\S.+\s+wrote:|"
+    r"le\s+\S.+\s+\S.+\s+a écrit\s*:|"
+    r"el\s+\S.+\s+\S.+\s+escribió:)$"
 )
+_FORWARD = re.compile(r"(?i)^(?:-----Original Message-----|Begin forwarded message:)$")
+_OUTLOOK_HEADERS = ("from:", "sent:", "to:", "subject:")
 
 _NON_RENDERED = frozenset({
     "head", "title", "script", "style", "template", "noscript", "object",
@@ -106,12 +107,14 @@ _SAFE_STYLE = frozenset({"font-family", "font-size", "font-weight", "font-style"
                          "text-align", "text-decoration", "line-height", "white-space",
                          "word-wrap", "overflow-wrap", "direction", "color",
                          "background", "background-color"})
-_SIGNATURE_WORD = re.compile(
-    r"(?i)\b(?:approve|approved|yes|skip|attended|reject|cancel|hold|wait|"
-    r"stop|no|not|don't|do\s+not|later|unless|if|but|instead|change|"
-    r"revoke|withdraw|undo)\b"
-)
-_SIGNATURE_TARGET = re.compile(r"(?i)(?<!\w)(?:(?:[\w.-]+/[\w.-]+)?#\d+|v?\d+\.\d+\.\d+)\b")
+_SAFE_FONTS = frozenset({
+    "arial", "helvetica", "helvetica neue", "verdana", "tahoma", "trebuchet ms",
+    "calibri", "cambria", "candara", "segoe ui", "aptos", "georgia", "times",
+    "times new roman", "garamond", "palatino", "courier", "courier new",
+    "menlo", "monaco", "consolas", "roboto", "open sans", "lato",
+    "system-ui", "-apple-system", "blinkmacsystemfont", "sans-serif", "serif",
+    "monospace", "ui-sans-serif", "ui-serif", "ui-monospace",
+})
 _LAYOUT_VALUE = re.compile(r"(0|\d+(?:\.\d+)?)(px|pt|em|rem|%)?")
 _LAYOUT_LIMITS = {"px": 100, "pt": 75, "em": 8, "rem": 8, "%": 10}
 
@@ -147,6 +150,15 @@ def _safe_colour(value: str, *, background: bool) -> bool:
                  all(c <= 100 for c in rgba[:3])))
 
 
+def _safe_font_family(value: str) -> bool:
+    families = value.split(",")
+    return bool(families) and all(
+        (family.strip().strip('"\'').casefold() in _SAFE_FONTS and
+         (family.strip()[0] not in '"\'' or family.strip()[-1] == family.strip()[0]))
+        for family in families if family.strip()
+    ) and all(family.strip() for family in families)
+
+
 def _safe_style(style: str, parent_px: float = 16, relative_scale: float = 1) -> tuple[bool, float, float]:
     font_px = parent_px
     scale = relative_scale
@@ -162,6 +174,13 @@ def _safe_style(style: str, parent_px: float = 16, relative_scale: float = 1) ->
             return False, font_px, scale
         if name in {"color", "background", "background-color"}:
             if not _safe_colour(value, background=name != "color"):
+                return False, font_px, scale
+        elif name == "font-family":
+            if not _safe_font_family(value):
+                return False, font_px, scale
+        elif name in {"text-transform", "direction", "unicode-bidi"}:
+            if value != {"text-transform": "none", "direction": "ltr",
+                         "unicode-bidi": "normal"}[name]:
                 return False, font_px, scale
         elif name == "font-size":
             keyword = {"small": 13, "medium": 16, "large": 18,
@@ -217,29 +236,32 @@ def _hiding_style(style: str) -> bool:
 
 
 def _authored_plain_checked(text: str) -> tuple[str, bool]:
-    """Return authored lines and whether every quote boundary is terminal."""
+    """Keep every authored line; remove only structurally proven quotations."""
     lines: list[str] = []
     source = text.splitlines()
     saw_quote = False
     for index, line in enumerate(source):
         stripped = line.strip()
-        if line in ("--", "-- "):
-            tail = [part.strip() for part in source[index + 1:]
-                    if part.strip() and not part.lstrip().startswith(">")]
-            safe_tail = (len(tail) <= 4 and all(
-                len(part) <= 80 and not _SIGNATURE_WORD.search(part) and
-                not _SIGNATURE_TARGET.search(part) for part in tail))
-            return "\n".join(lines), safe_tail
-        if _ATTRIBUTION.match(stripped) or _FORWARD.match(stripped) or _QUOTE_HEADER.match(stripped):
-            safe_tail = all(not tail.strip() or tail.lstrip().startswith(">") or
-                            _QUOTE_HEADER.match(tail.strip()) for tail in source[index + 1:])
-            return "\n".join(lines), safe_tail
+        if _ATTRIBUTION.fullmatch(stripped) and all(
+                not tail.strip() or tail.lstrip().startswith(">")
+                for tail in source[index + 1:]):
+            return "\n".join(lines), True
+        header_start = index + 1 if _FORWARD.fullmatch(stripped) else index
+        headers = source[header_start:header_start + len(_OUTLOOK_HEADERS)]
+        if (len(headers) == len(_OUTLOOK_HEADERS) and
+                all(header.strip().casefold().startswith(name) and
+                    header.strip()[len(name):].strip()
+                    for header, name in zip(headers, _OUTLOOK_HEADERS)) and
+                (header_start != index or all(
+                    not tail.strip() or tail.lstrip().startswith(">")
+                    for tail in source[header_start + len(_OUTLOOK_HEADERS):]))):
+            return "\n".join(lines), True
         if stripped.startswith(">"):
             saw_quote = True
             continue
         if stripped:
             if saw_quote:
-                return "\n".join(lines), False
+                return "\n".join([*lines, stripped]), False
             lines.append(stripped)
     return "\n".join(lines), True
 
@@ -262,7 +284,6 @@ class _AuthoredHTML(HTMLParser):
         self.body_depth = 0
         self.boundary_seen = False
         self.terminal = False
-        self.hr_at: int | None = None
         self.unsafe = False
         self.font_stack: list[tuple[float, float]] = []
         self.closed_dialog_stack: list[bool] = []
@@ -292,6 +313,8 @@ class _AuthoredHTML(HTMLParser):
         if ("hidden" in attrs_by_name or
                 (attrs_by_name.get("aria-hidden") or "").strip().lower() == "true" or
                 not style_safe or
+                ("face" in attrs_by_name and tag == "font" and
+                 not _safe_font_family(attrs_by_name.get("face") or "")) or
                 (tag == "link" and "stylesheet" in (attrs_by_name.get("rel") or "").lower().split())):
             self.unsafe = True
         for name in ("color", "text", "bgcolor"):
@@ -319,7 +342,6 @@ class _AuthoredHTML(HTMLParser):
             if tag == "area":
                 self.unsafe = True
             if tag == "hr" and self.quote_depth == 0 and not self.non_rendered_depth:
-                self.hr_at = len(self.parts)
                 self.parts.append("\n")
             elif tag == "br" and self.quote_depth == 0 and not self.non_rendered_depth:
                 self.parts.append("\n")
@@ -378,7 +400,7 @@ class _AuthoredHTML(HTMLParser):
         if self.stack and self.stack[-1][0] == "style":
             # Empty rules cannot affect rendering. A rule with declarations
             # can affect any descendant through selectors and cascade.
-            if data.strip() and not re.fullmatch(
+            if "@font-face" in data.casefold() or data.strip() and not re.fullmatch(
                 r"(?:\s*[.#]?[a-zA-Z][\w-]*\s*\{\s*\}\s*)+", data):
                 self.unsafe = True
         if self.quote_depth or self.non_rendered_depth or (self.structured and not self.body_depth):
@@ -386,11 +408,6 @@ class _AuthoredHTML(HTMLParser):
         if self.boundary_seen and data.strip():
             self.unsafe = True
         if self.terminal:
-            return
-        if self.hr_at is not None and _QUOTE_HEADER.search(data.strip()):
-            self.parts = self.parts[:self.hr_at]
-            self.terminal = True
-            self.boundary_seen = True
             return
         self.parts.append(data)
 

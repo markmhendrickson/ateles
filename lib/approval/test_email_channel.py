@@ -127,12 +127,16 @@ def test_normal_mail_font_sizes_remain_readable(size):
     "On Tuesday Example wrote:\n> old text\nI withdraw approval",
 ))
 def test_plain_header_with_later_authored_text_is_unreadable(tail):
-    assert ec._authored_plain_checked("APPROVE\n" + tail) == ("APPROVE", False)
+    body, safe = ec._authored_plain_checked("APPROVE\n" + tail)
+    assert "I withdraw approval" in body or not safe
+    assert body != "APPROVE" or not safe
 
 
-def test_plain_terminal_header_and_signature_keep_safe_reply():
-    assert ec._authored_plain_checked("APPROVE\nFrom: Swarm <swarm@example.net>\n> old") == ("APPROVE", True)
-    assert ec._authored_plain_checked("APPROVE\n-- \nSignature") == ("APPROVE", True)
+def test_unproven_header_and_signature_are_authored():
+    assert ec._authored_plain_checked("APPROVE\nFrom: Swarm <swarm@example.net>\n> old") == (
+        "APPROVE\nFrom: Swarm <swarm@example.net>", True)
+    assert ec._authored_plain_checked("APPROVE\n-- \nSignature") == (
+        "APPROVE\n--\nSignature", True)
 
 
 @pytest.mark.parametrize("tail", (
@@ -141,11 +145,74 @@ def test_plain_terminal_header_and_signature_keep_safe_reply():
     "Manager, approve later", "Example v1.2.3", "Review PR #7",
 ))
 def test_signature_tail_must_be_short_and_benign(tail):
-    assert ec._authored_plain_checked("APPROVE\n-- \n" + tail) == ("APPROVE", False)
+    assert ec._authored_plain_checked("APPROVE\n-- \n" + tail)[0].endswith(tail)
 
 
-def test_benign_signature_after_affirmative_stays_readable():
-    assert ec._authored_plain_checked("APPROVE\n-- \nExample Name\nEngineer") == ("APPROVE", True)
+def test_benign_signature_after_affirmative_stays_authored():
+    assert ec._authored_plain_checked("APPROVE\n-- \nExample Name\nEngineer") == (
+        "APPROVE\n--\nExample Name\nEngineer", True)
+
+
+@pytest.mark.parametrize("tail", (
+    "Subject: I rescind my consent", "From: I rescind my consent",
+    "Date: I rescind my consent", "To: I rescind my consent",
+    "Cc: I rescind my consent", "Sent: I rescind my consent",
+    "-- \nI rescind my consent", "--\nI rescind my consent",
+    "-----Original Message-----\nI rescind my consent",
+    "From: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\nI rescind my consent",
+))
+def test_unproven_quote_shapes_preserve_authored_withdrawal(tail):
+    body, safe = ec._authored_plain_checked("approve\n" + tail)
+    assert safe
+    assert "I rescind my consent" in body
+
+
+@pytest.mark.parametrize("quote", (
+    "On Tuesday Example wrote:\n> old request",
+    "Le mardi Exemple a écrit :\n> ancienne demande",
+    "El martes Ejemplo escribió:\n> solicitud anterior",
+    "-----Original Message-----\nFrom: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\nold request",
+    "From: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\n> old request",
+))
+def test_proven_bottom_quote_is_removed(quote):
+    assert ec._authored_plain_checked("approve\n" + quote) == ("approve", True)
+
+
+@pytest.mark.parametrize("font", (
+    "Wingdings", "Arial, Webdings", "Symbol", "Emoji", "Unknown Font",
+))
+def test_unsafe_font_family_and_font_face_are_unreadable(font):
+    assert ec._extract_authored_html(
+        f"<body><p style='font-family:{font}'>APPROVE</p></body>")[0] == ""
+    assert ec._extract_authored_html(
+        f"<body><font face='{font}'>APPROVE</font></body>")[0] == ""
+
+
+@pytest.mark.parametrize("markup", (
+    "<style>@font-face { font-family: Custom; src:url(x) }</style>",
+    "<p style='font:14px Wingdings'>APPROVE</p>",
+    "<p style='font-variant:small-caps'>APPROVE</p>",
+    "<p style='font-feature-settings:normal'>APPROVE</p>",
+    "<p style='font-synthesis:none'>APPROVE</p>",
+    "<p style='unicode-range:U+0-FFFF'>APPROVE</p>",
+    "<p style='text-transform:uppercase'>APPROVE</p>",
+    "<p style='direction:rtl'>APPROVE</p>",
+    "<p style='unicode-bidi:bidi-override'>APPROVE</p>",
+    "<p style='writing-mode:vertical-rl'>APPROVE</p>",
+    "<p style='text-orientation:sideways'>APPROVE</p>",
+))
+def test_unsafe_font_and_text_rendering_are_unreadable(markup):
+    assert ec._extract_authored_html(f"<body>{markup}</body>")[0] == ""
+
+
+@pytest.mark.parametrize("font", (
+    "Arial", "'Helvetica Neue', sans-serif", '"Times New Roman", serif',
+    "Calibri, Arial", "system-ui, -apple-system", "Menlo, monospace",
+))
+def test_common_mail_fonts_remain_readable(font):
+    escaped_font = font.replace('"', "&quot;")
+    assert ec._extract_authored_html(
+        f"<body><p style=\"font-family:{escaped_font}\">APPROVE</p></body>")[0] == "APPROVE"
 
 
 def test_html_bottom_post_after_quote_is_unreadable():

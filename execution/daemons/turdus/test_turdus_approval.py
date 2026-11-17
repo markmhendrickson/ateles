@@ -902,7 +902,11 @@ def test_conflicting_body_correlation_never_posts(monkeypatch, tmp_path, kind):
                                                  {"body_text": body}, polls=2)
     assert posts == []
     assert state.get("approval_correction_ids") == ["approval-1"]
-    assert len([n for n in notices.sent if "correlation target" in n]) == 1
+    matching = [n for n in notices.sent if "correlation target" in n]
+    assert len(matching) == 1
+    assert ("o/r#7" if kind == "pr" else "v1.2.3") in matching[0]
+    assert ("o/r#8" if kind == "pr" else "v1.2.4") in matching[0]
+    assert ("`approve`" if kind == "pr" else "`approve v1.2.3`") in matching[0]
 
 
 @pytest.mark.parametrize("kind", ("release", "pr"))
@@ -913,7 +917,10 @@ def test_missing_correlation_refuses_even_exact_approval(monkeypatch, tmp_path, 
         include_token=False)
     assert posts == []
     assert state.get("approval_correction_ids") == ["approval-1"]
-    assert len([n for n in notices.sent if "missing correlation token" in n]) == 1
+    matching = [n for n in notices.sent if "missing correlation token" in n]
+    assert len(matching) == 1
+    assert ("o/r#7" if kind == "pr" else "v1.2.3") in matching[0]
+    assert ("`approve`" if kind == "pr" else "`approve v1.2.3`") in matching[0]
 
 
 @pytest.mark.parametrize("kind", ("release", "pr"))
@@ -1003,6 +1010,7 @@ def _real_notifier(monkeypatch, tmp_path, *, silence=False):
     notifier._digest_path = tmp_path / "held.json"
     notifier._dedupe_path = tmp_path / "dedupe.json"
     monkeypatch.setattr(notifier, "_in_silence_window", lambda: silence)
+    monkeypatch.setattr(notifier, "should_flush_digest", lambda: False)
     transport = _Transport()
     notifier._apprise = transport
     return notifier, transport
@@ -1257,23 +1265,24 @@ def test_open_details_summary_and_normal_styling_route(monkeypatch, tmp_path, ki
     "I withdraw approval", "Name\nTitle\nLocation\nPhone\nExtra",
     "Please approve later", "Release v1.2.3", "PR #7",
 ))
-def test_ambiguous_signature_tail_stays_pending(monkeypatch, tmp_path, kind, tail):
+def test_signature_tail_gets_correction(monkeypatch, tmp_path, kind, tail):
     approval = "approve v1.2.3" if kind == "release" else "APPROVE"
     posts, state, notices = _poll_authored_reply(
         monkeypatch, tmp_path, kind,
         {"body_text": f"{approval}\n-- \n{tail}"}, polls=2)
     assert posts == []
     assert "approval-1" not in state.get("processed_ids", [])
-    assert len([note for note in notices.sent if "could not be read yet" in note]) == 1
+    assert len([note for note in notices.sent if "no approval was recorded" in note]) == 1
 
 
 @pytest.mark.parametrize("kind", ("release", "pr"))
-def test_benign_signature_still_routes(monkeypatch, tmp_path, kind):
+def test_benign_signature_gets_exact_form_correction(monkeypatch, tmp_path, kind):
     approval = "approve v1.2.3" if kind == "release" else "APPROVE"
-    posts, _, _ = _poll_authored_reply(
+    posts, _, notices = _poll_authored_reply(
         monkeypatch, tmp_path, kind,
         {"body_text": f"{approval}\n-- \nExample Name\nEngineer"})
-    assert len(posts) == 1
+    assert posts == []
+    assert any("no approval was recorded" in note for note in notices.sent)
 
 
 def test_release_email_skip_correction_points_to_telegram(monkeypatch, tmp_path):
@@ -1329,17 +1338,71 @@ def test_header_followed_by_authored_withdrawal_never_routes(monkeypatch, tmp_pa
         monkeypatch, tmp_path, kind, {"body_text": f"{approval}\n{tail}"}, polls=2)
     assert posts == []
     assert "approval-1" not in state.get("processed_ids", [])
-    assert len([note for note in notices.sent if "could not be read yet" in note]) == 1
+    assert len([note for note in notices.sent if
+                "could not be read yet" in note or "no approval was recorded" in note]) == 1
 
 
 @pytest.mark.parametrize("kind", ("release", "pr"))
-def test_terminal_header_and_signature_still_route(monkeypatch, tmp_path, kind):
+def test_unproven_header_and_signature_never_route(monkeypatch, tmp_path, kind):
     approval = "approve v1.2.3" if kind == "release" else "APPROVE"
     for suffix in ("From: Swarm <swarm@example.net>\n> old message", "-- \nOperator"):
         posts, _, _ = _poll_authored_reply(
             monkeypatch, tmp_path / str(len(suffix)), kind,
             {"body_text": f"{approval}\n{suffix}"})
-        assert len(posts) == 1
+        assert posts == []
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("tail", (
+    "Subject: I rescind my consent", "From: I rescind my consent",
+    "Date: I rescind my consent", "-- \nI rescind my consent",
+    "--\nI rescind my consent",
+    "-----Original Message-----\nI rescind my consent",
+    "From: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\nI rescind my consent",
+))
+def test_authored_withdrawal_never_routes(monkeypatch, tmp_path, kind, tail):
+    approval = "approve v1.2.3" if kind == "release" else "approve"
+    posts, state, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind, {"body_text": f"{approval}\n{tail}"}, polls=2)
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
+    assert len([note for note in notices.sent if "no approval was recorded" in note]) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("quote", (
+    "On Tuesday Example wrote:\n> original",
+    "-----Original Message-----\nFrom: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\noriginal",
+))
+def test_proven_bottom_quote_still_routes(monkeypatch, tmp_path, kind, quote):
+    approval = "approve v1.2.3" if kind == "release" else "approve"
+    posts, _, _ = _poll_authored_reply(
+        monkeypatch, tmp_path, kind, {"body_text": f"{approval}\n{quote}"})
+    assert len(posts) == 1
+
+
+@pytest.mark.parametrize("kind", ("release", "pr"))
+@pytest.mark.parametrize("markup", (
+    "<p style='font-family:Wingdings'>{approval}</p>",
+    "<font face='Webdings'>{approval}</font>",
+    "<p style='font:14px Symbol'>{approval}</p>",
+    "<p style='font-variant:small-caps'>{approval}</p>",
+    "<p style='font-feature-settings:normal'>{approval}</p>",
+    "<p style='font-synthesis:none'>{approval}</p>",
+    "<p style='unicode-range:U+0-FFFF'>{approval}</p>",
+    "<p style='text-transform:uppercase'>{approval}</p>",
+    "<p style='direction:rtl'>{approval}</p>",
+    "<p style='unicode-bidi:bidi-override'>{approval}</p>",
+    "<p style='writing-mode:vertical-rl'>{approval}</p>",
+    "<p style='text-orientation:sideways'>{approval}</p>",
+))
+def test_unsafe_font_never_routes(monkeypatch, tmp_path, kind, markup):
+    approval = "approve v1.2.3" if kind == "release" else "approve"
+    posts, state, _ = _poll_authored_reply(
+        monkeypatch, tmp_path, kind,
+        {"body_html": f"<body>{markup.format(approval=approval)}</body>"})
+    assert posts == []
+    assert "approval-1" not in state.get("processed_ids", [])
 
 
 @pytest.mark.parametrize("kind", ("release", "pr"))

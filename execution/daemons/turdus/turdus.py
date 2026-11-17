@@ -767,7 +767,9 @@ def _approval_target_matches(msg: dict, notifier: Notifier, subject_target: str,
         delivered = notifier.send(
             f"{DAEMON_NAME}: no approval was recorded for {subject_target}. "
             f"The reply's correlation target is {token_label}; "
-            "reply to the matching approval request instead.",
+            f"reply to the matching approval request with exactly "
+            f"`{'approve ' + subject_target if release else 'approve'}` "
+            "on one line to approve it.",
             priority=Priority.BLOCKER, handler=DAEMON_NAME, email_eligible=False,
         )
         if delivered:
