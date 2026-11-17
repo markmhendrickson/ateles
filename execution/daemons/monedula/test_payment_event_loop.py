@@ -266,3 +266,52 @@ def test_each_halt_announces_its_own_recovery(monkeypatch, tmp_path):
         assert monedula._retry_pending_payment_events() is True
     assert sum("could not be recorded" in m for m in sent) == 2
     assert sum("halt cleared" in m for m in sent) == 2
+
+
+def test_crash_before_journal_outcome_leaves_record_queued(monkeypatch, tmp_path):
+    """The record is queued before the journal marks the obligation done, so a
+    crash between the two leaves it for the next tick, which records it and
+    never pays again."""
+    import payment_journal
+
+    w, neo = _world(monkeypatch, tmp_path)
+    events = _capture_events(neo, monkeypatch, state={})
+    _capture_alerts(monkeypatch)
+    real_outcome = payment_journal.record_outcome
+    crash = {"on": True}
+
+    def outcome(*a, **k):
+        if crash["on"]:
+            raise SystemExit("synthetic crash after the queue write")
+        return real_outcome(*a, **k)
+
+    monkeypatch.setattr(payment_journal, "record_outcome", outcome)
+    w.tick()
+    key = neo.only["payment_key"]
+    neo.resolve(key, "approved", "attended yoga")
+    try:
+        w.tick(minutes=15)
+    except SystemExit:
+        pass
+    assert len(w.handler.execute_calls) == 1
+    assert events == []
+    assert len(json.loads((tmp_path / "pending.json").read_text())["entries"]) == 1
+    crash["on"] = False
+    w.tick(minutes=15)
+    assert len(w.handler.execute_calls) == 1
+    assert len(events) == 1
+    assert json.loads((tmp_path / "pending.json").read_text())["entries"] == []
+
+
+def test_record_failure_still_settles_the_paid_item(monkeypatch, tmp_path):
+    w, neo = _world(monkeypatch, tmp_path)
+    _capture_events(neo, monkeypatch, state={"fail": True})
+    _capture_alerts(monkeypatch)
+    settled: list[str] = []
+    monkeypatch.setattr(
+        monedula, "_resolve_item_session", lambda item, state: settled.append(state)
+    )
+    _two_approved(w, neo)
+    assert w.tick(minutes=15) is False
+    assert len(w.handler.execute_calls) == 1
+    assert settled.count("settled") == 1
