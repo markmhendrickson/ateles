@@ -139,10 +139,18 @@ def resolve_changed_files(repo: str, pr: int) -> list[str]:
     A list that cannot be read, or that comes back empty (a PR always touches at
     least one file), raises, so the caller falls back to every lens.
     """
-    proc = subprocess.run(
+    def read_query(args: list[str], *, timeout: int, label: str) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            raise RuntimeError(
+                f"could not read the changed files of {repo}#{pr} ({label}): {exc}"
+            ) from exc
+
+    proc = read_query(
         ["gh", "api", "--paginate", f"repos/{repo}/pulls/{pr}/files",
          "--jq", ".[] | {filename, previous_filename}"],
-        capture_output=True, text=True, timeout=120,
+        timeout=120, label="file list",
     )
     if proc.returncode != 0:
         raise RuntimeError(
@@ -174,9 +182,9 @@ def resolve_changed_files(repo: str, pr: int) -> list[str]:
     # The same completeness rule the approval tool applies
     # (review_scope.file_list_problem): a list at the files API's cap, or one
     # whose row count differs from the PR's own changed_files, is not trusted.
-    count = subprocess.run(
+    count = read_query(
         ["gh", "api", f"repos/{repo}/pulls/{pr}", "--jq", ".changed_files"],
-        capture_output=True, text=True, timeout=60,
+        timeout=60, label="changed-files count",
     )
     expected: object = None
     if count.returncode == 0:
@@ -208,6 +216,9 @@ def lenses_for_all(changed_files: list[str] | None) -> list[str]:
     if str(APIS_DIR) not in sys.path:
         sys.path.insert(0, str(APIS_DIR))
     import review_panel  # noqa: PLC0415 - daemon module, stdlib only
+    from approve_pr_as_app import _validate_panel_max  # noqa: PLC0415 - share approval bound
+
+    max_panel = _validate_panel_max(os.environ.get("APIS_PANEL_MAX", "6"))
 
     extras = [name for name in LENS_ROLES
               if name not in LENS_ORDER
@@ -219,9 +230,6 @@ def lenses_for_all(changed_files: list[str] | None) -> list[str]:
             print(f"warning: the approval tool could require {', '.join(missing)}, "
                   "which this runner cannot dispatch", file=sys.stderr)
         return [*LENS_ORDER, *(name for name in extras if name in requirable)]
-    max_panel = int(os.environ.get("APIS_PANEL_MAX", "6"))
-    if max_panel < 1:  # select_panel would silently drop lenses
-        raise ValueError(f"APIS_PANEL_MAX={max_panel}")
     floor = {lens.lens for lens in
              review_panel.approval_floor(set(), changed_files, max_panel)}
     return [*LENS_ORDER, *(name for name in extras if name in floor)]
@@ -487,8 +495,8 @@ def main(argv: list[str] | None = None, *,
             changed = None
         try:
             lenses = lenses_for_all(changed)
-        except ValueError:
-            log("APIS_PANEL_MAX must be an integer")
+        except RuntimeError as exc:
+            log(str(exc))
             return 2
     else:
         lenses = [args.lens]

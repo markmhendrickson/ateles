@@ -1,5 +1,6 @@
 """Tests for fly_lens_review.py with the Fly dispatch mocked."""
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -298,6 +299,64 @@ def test_all_unreadable_file_list_runs_legal_too(tmp_path):
                 poster=lambda **kw: (True, ""), files_resolver=broken)
     assert rc == 0
     assert [c["lens"] for c in d.calls] == [*f.LENS_ORDER, "legal"]
+
+
+@pytest.mark.parametrize(
+    ("query", "failure"),
+    [("files", "timeout"), ("count", "timeout"),
+     ("files", "oserror"), ("count", "oserror")],
+)
+def test_file_list_timeout_runs_every_requirable_lens(
+    monkeypatch, tmp_path, capsys, query, failure,
+):
+    row = json.dumps({"filename": "README.md"}) + "\n"
+
+    def fake_run(argv, **kw):
+        current = "count" if argv[-1] == ".changed_files" else "files"
+        if current == query:
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(argv, kw["timeout"])
+            raise OSError("synthetic launch failure")
+        return _Proc(stdout="1\n" if current == "count" else row)
+
+    monkeypatch.setattr(f.subprocess, "run", fake_run)
+    d = Script(*[lens_env("Pavo", "pm")] * 6)
+    rc = f.main(["--repo", "o/r", "--pr", "7", "--lens", "all",
+                 "--task-entity-id", "ent_x", "--out-dir", str(tmp_path)],
+                dispatch=d, head_resolver=lambda r, p: HEAD)
+    assert rc == 0
+    assert [c["lens"] for c in d.calls] == [*f.LENS_ORDER, "legal"]
+    error = capsys.readouterr().err
+    assert "could not read the changed files" in error
+    assert "running every lens the approval tool could require" in error
+
+
+@pytest.mark.parametrize("panel_max", ["0", "-1", "abc", "below_floor"])
+def test_all_rejects_panel_max_below_approval_bound(
+    monkeypatch, tmp_path, capsys, panel_max,
+):
+    sys.path.insert(0, str(f.APIS_DIR))
+    import review_panel
+
+    floor_count = sum(lens.always for lens in review_panel.LENSES)
+    monkeypatch.setenv("APIS_PANEL_MAX", str(floor_count - 1) if panel_max == "below_floor"
+                       else panel_max)
+    d = Script()
+    rc, _ = run(tmp_path, d, lens="all")
+    assert rc == 2
+    assert d.calls == []
+    assert "APIS_PANEL_MAX" in capsys.readouterr().err
+
+
+def test_all_accepts_panel_max_at_approval_bound(monkeypatch, tmp_path):
+    sys.path.insert(0, str(f.APIS_DIR))
+    import review_panel
+
+    monkeypatch.setenv("APIS_PANEL_MAX", str(sum(lens.always for lens in review_panel.LENSES)))
+    d = Script(*[lens_env("Pavo", "pm")] * 5)
+    rc, _ = run(tmp_path, d, lens="all")
+    assert rc == 0
+    assert [c["lens"] for c in d.calls] == list(f.LENS_ORDER)
 
 
 # --- resolve_changed_files: renames and empty lists (security review, PR #1787) ---
