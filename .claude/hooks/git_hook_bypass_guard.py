@@ -785,6 +785,8 @@ def _reads_program_from_stdin(rest: list[Word]) -> bool:
         t = rest[j].text
         if t in _INTERPRETER_PROGRAM_OPTIONS:
             return False
+        if t in {"-f", "--file", "-i", "--include", "-l", "--load", "--source"}:
+            return False
         if t in ("-", "-s", "--"):
             return True
         if t in _INTERPRETER_VALUE_OPTIONS:
@@ -904,6 +906,8 @@ def _scratch_destination(path: str) -> bool:
 
 def _archive_violation(base: str, args: list[str], destinations: list[str]) -> str | None:
     if base not in _ARCHIVE_TOOLS or not destinations:
+        return None
+    if base == "ditto" and not any(arg in {"-x", "--extract"} for arg in args):
         return None
     if base in {"cpio", "pax"}:
         return f"{base} extraction may write absolute member paths"
@@ -1336,7 +1340,9 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int =
         tail = rest[start:]
         stdin_program = (runner in {"source", "."} and len(tail) > 1 and
                          tail[1].text in {"/dev/stdin", "/dev/fd/0", "-"}) or (
-            runner not in _EVALUATORS and _reads_program_from_stdin(tail))
+            runner not in _EVALUATORS and (
+                _reads_program_from_stdin(tail) or
+                (len(tail) > 1 and tail[1].text in {"/dev/stdin", "/dev/fd/0"})))
         if stdin_program and (cmd.stdin or cmd.pipe_in or cmd.redirects):
             if cmd.stdin_dynamic or any(op.startswith("<") for op, _ in cmd.redirects):
                 return "program text cannot be inspected"

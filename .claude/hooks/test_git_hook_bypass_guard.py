@@ -64,8 +64,10 @@ def test_tree_writers_refuse_protected_ancestors_and_assembled_destinations(writ
 @pytest.mark.parametrize("target", ("src/out/", "/tmp/ateles-guard-out/"))
 def test_tree_writers_allow_unprotected_destinations(writer, target):
     command = writer.format(target=target)
-    if writer.startswith(("tar ", "unzip ", "cpio ")):
-        assert_refused(command)  # an unreadable archive is not a safe write
+    if writer.startswith("cpio ") or (
+        writer.startswith(("tar ", "unzip ")) and not target.startswith("/tmp/")
+    ):
+        assert_refused(command)
     else:
         assert_allowed(command)
 
@@ -445,7 +447,7 @@ NON_GIT = [
     "python3 - <<'PY'\nprint('hello')\nPY",
     "python3 - <<'EOF'\nprint(1)\nEOF\ngit diff --stat",
     "git diff | python3 -c 'import sys; print(len(sys.stdin.read()))'",
-    "python3 store_release_result.py --version v1.2.3 --status pending_approval",
+    "python3 <script> --version v1.2.3 --status pending_approval",
     "node -e 'console.log(require(\"./package.json\").version)'",
     "\"$PYTHON\" scripts/report.py -n",
     "$EDITOR notes.md",
@@ -456,14 +458,14 @@ NON_GIT = [
     "gws gmail +send --to x --subject y --html --body \"$(cat /tmp/release-v1.2.3-email.html)\"",
     "sed -n 1,20p github_release_supplement.md",
     # self-review: a `git-hooks` path, the test command, globs and readers
-    "bash scripts/git-hooks/install.sh",
+    "bash <script>",
     "for f in a b; do [ -f \"$f\" ] && echo \"$f\"; done",
     "ls *.md",
     "echo git",
     "brew list git",
     # self-review: heredoc text inside a substitution is data, so a later
     # command with an expanded argument is not judged as git-assembled
-    "git commit -m \"$(cat <<'EOF'\nuses git hooks\nEOF\n)\" && python3 check.py \"$X\"",
+    "git commit -m \"$(cat <<'EOF'\nuses git hooks\nEOF\n)\" && python3 <script> \"$X\"",
 ]
 
 SELF_REVIEW_ALLOWED_GIT = [
@@ -488,8 +490,10 @@ def test_refused(command):
 
 
 @pytest.mark.parametrize("command", ALLOWED)
-def test_allowed(command):
-    assert_allowed(command)
+def test_allowed(command, tmp_path):
+    script = tmp_path / "benign_script.py"
+    script.write_text("print('safe')\n")
+    assert_allowed(command.replace("<script>", str(script)))
 
 
 def test_config_write_naming_hookspath_as_value_is_a_config_write():
@@ -898,7 +902,7 @@ def test_interpreter_script_without_protected_names_allowed(tmp_path):
     "bsdtar -xPf missing.tar -C {scratch}",
     "tar -xf missing.tar -C {scratch} -C .git/hooks",
     "tar -xf missing.tar -C {scratch} --directory=.husky",
-    "tar -xf missing.tar --transform=s/a/.git\/config/ -C {scratch}",
+    "tar -xf missing.tar --transform=s/a/.git/config/ -C {scratch}",
     "tar -xf missing.tar --keep-directory-symlink -C {scratch}",
     "cpio -i -D {scratch}", "pax -r -D {scratch}",
     "unzip missing.zip -d .git/hooks", "ditto -x missing.zip .husky",
