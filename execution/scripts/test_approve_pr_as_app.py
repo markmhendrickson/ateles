@@ -317,7 +317,7 @@ class _FakeClient:
             rows = (
                 self.file_rows
                 if self.file_rows is not None
-                else [{"filename": f} for f in self.changed_files]
+                else [{"filename": f, "status": "modified"} for f in self.changed_files]
             )
             return _FakeResponse(rows[(page - 1) * 100 : page * 100])
         if url.endswith(f"/issues/{PR}/comments"):
@@ -2595,7 +2595,7 @@ class _CompareClient(_FakeClient):
 
 
 def _pr_file(name: str, patch: str = "+x\n") -> dict:
-    return {"filename": name, "patch": patch, "changes": 1, "additions": 1, "deletions": 0}
+    return {"filename": name, "status": "modified", "patch": patch, "changes": 1, "additions": 1, "deletions": 0}
 
 
 def _round_comments(head: str, *, blocked: tuple[str, ...] = (), skip=()) -> list[dict]:
@@ -4391,6 +4391,18 @@ def _rename(new: str, old: str) -> dict:
 
 @pytest.mark.asyncio
 class TestPathPanelFailsClosedOnTheFileList:
+    @pytest.mark.parametrize("row", [
+        {"filename": "docs/guide/ci.md", "status": "renamed", "previous_filename": None},
+        {"filename": "", "status": "modified"},
+        {"filename": " package.json", "status": "modified"},
+        {"filename": "package.json", "status": "weird"},
+    ])
+    async def test_malformed_file_row_makes_approval_tool_refuse(self, monkeypatch, capsys, row):
+        client = _path_client([], _all_clear_comments(["ux"]), scope=_scope(), file_rows=[row])
+        assert await _run_path(monkeypatch, client, apply=False) == 1
+        assert client.posted == []
+        assert "changed-file list cannot be trusted" in capsys.readouterr().out
+
     async def test_a_rename_out_of_a_full_panel_path_selects_the_full_panel(self, monkeypatch):
         """Item 1. The new path is a UI path; the OLD path was a workflow."""
         rows = [_rename("docs/guide/ci.md", ".github/workflows/ci.yml")]

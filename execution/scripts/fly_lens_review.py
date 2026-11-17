@@ -149,7 +149,7 @@ def resolve_changed_files(repo: str, pr: int) -> list[str]:
 
     proc = read_query(
         ["gh", "api", "--paginate", f"repos/{repo}/pulls/{pr}/files",
-         "--jq", ".[] | {filename, previous_filename}"],
+         "--jq", ".[] | {filename, previous_filename, status}"],
         timeout=120, label="file list",
     )
     if proc.returncode != 0:
@@ -157,6 +157,10 @@ def resolve_changed_files(repo: str, pr: int) -> list[str]:
             f"could not list the changed files of {repo}#{pr} "
             f"(rc={proc.returncode}): {(proc.stderr or '').strip()[:200]}"
         )
+    if str(APIS_DIR) not in sys.path:
+        sys.path.insert(0, str(APIS_DIR))
+    import review_scope  # noqa: PLC0415 - daemon module, stdlib only
+
     paths: list[str] = []
     rows_seen = 0
     for line in (proc.stdout or "").splitlines():
@@ -169,14 +173,15 @@ def resolve_changed_files(repo: str, pr: int) -> list[str]:
             raise RuntimeError(
                 f"could not read the changed files of {repo}#{pr}: a row was not JSON"
             ) from None
-        if not isinstance(row, dict) or not isinstance(row.get("filename"), str):
+        try:
+            row_paths = review_scope.file_row_paths(row)
+        except ValueError as exc:
             raise RuntimeError(
-                f"could not read the changed files of {repo}#{pr}: a row had no filename"
-            )
-        for key in ("filename", "previous_filename"):
-            value = row.get(key)
-            if isinstance(value, str) and value.strip() and value.strip() not in paths:
-                paths.append(value.strip())
+                f"could not read the changed files of {repo}#{pr}: {exc}"
+            ) from exc
+        for path in row_paths:
+            if path not in paths:
+                paths.append(path)
     if not paths:
         raise RuntimeError(f"the changed-file list of {repo}#{pr} came back empty")
     # The same completeness rule the approval tool applies
@@ -192,10 +197,6 @@ def resolve_changed_files(repo: str, pr: int) -> list[str]:
             expected = json.loads((count.stdout or "").strip())
         except ValueError:
             expected = None
-    if str(APIS_DIR) not in sys.path:
-        sys.path.insert(0, str(APIS_DIR))
-    import review_scope  # noqa: PLC0415 - daemon module, stdlib only
-
     problem = review_scope.file_list_problem(rows_seen, expected)
     if problem:
         raise RuntimeError(f"the changed-file list of {repo}#{pr} is not complete: {problem}")

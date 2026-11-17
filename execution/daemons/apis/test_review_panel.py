@@ -641,7 +641,7 @@ def _github(monkeypatch, files, *, scope=REAL_SCOPE, scope_status=200, scope_rai
                 content = base64.b64encode((scope or "").encode()).decode()
                 return _Resp(scope_status, {"type": "file", "encoding": "base64", "content": content})
             if url.endswith(f"/pulls/{PR_NUMBER}/files"):
-                return _Resp(200, [{"filename": f} for f in files])
+                return _Resp(200, [{"filename": f, "status": "modified"} for f in files])
             if url.endswith(f"/repos/{REPO}"):
                 return _Resp(200, {"default_branch": "main"})
             return _Resp(404, {})
@@ -911,7 +911,7 @@ def _scripted_client(files, *, scope=REAL_SCOPE, issue_comments=(), open_prs=())
                 content = base64.b64encode(scope.encode()).decode()
                 return _Resp(200, {"type": "file", "encoding": "base64", "content": content})
             if url.endswith(f"/pulls/{PR_NUMBER}/files"):
-                return _Resp(200, [{"filename": f} for f in files])
+                return _Resp(200, [{"filename": f, "status": "modified"} for f in files])
             if url.endswith(f"/issues/{PARENT}/comments"):
                 return _Resp(200, [{"body": b} for b in issue_comments])
             if url.endswith(f"/repos/{REPO}/pulls"):
