@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 import monedula  # noqa: E402
 import payment_approval  # noqa: E402
 import payment_event  # noqa: E402
+import payment_journal  # noqa: E402
 import consent_email  # noqa: E402
 from test_payment_approval import (  # noqa: E402
     APPROVER_JKT,
@@ -285,12 +286,10 @@ def test_first_queue_write_failure_halts_next_tick_until_outcome_is_stored(
     approval_writes = neo.writes
     pending_file = tmp_path / "pending.json"
     original_save = monedula._save_pending_payment_events
-    missed: list[dict] = []
     fail = {"on": True}
 
     def unavailable(data):
         if fail["on"]:
-            missed.extend(data["entries"])
             raise OSError("synthetic pending-file creation failure")
         original_save(data)
 
@@ -298,25 +297,58 @@ def test_first_queue_write_failure_halts_next_tick_until_outcome_is_stored(
     assert w.tick(minutes=15) is False
     assert len(w.handler.execute_calls) == 1
     assert not pending_file.exists()
-    assert next(iter(w.journal["obligations"].values()))["payment_event_state"] == "unrecorded"
+    outcome = next(iter(w.journal["obligations"].values()))
+    assert outcome["payment_event_state"] == "unrecorded"
+    assert set(outcome["payment_event_entry"]) == {"fields", "identity", "obligation"}
+    assert outcome["payment_event_entry"]["fields"]["status"] == "sent"
 
-    assert w.tick(minutes=15) is False
-    assert len(w.handler.execute_calls) == 1
-    assert neo.writes == approval_writes
-    assert w.sends == []
-    assert not pending_file.exists()
+    for _ in range(3):
+        assert w.tick(minutes=15) is False
+        assert len(w.handler.execute_calls) == 1
+        assert neo.writes == approval_writes
+        assert w.sends == []
+        assert not pending_file.exists()
+        assert events == []
+        assert next(iter(w.journal["obligations"].values()))["payment_event_state"] == "unrecorded"
     assert any("payment outcome could not be recorded" in repr(a) for a in alerts)
 
     fail["on"] = False
-    assert monedula._queue_payment_event(missed[0]) is True
     assert w.tick(minutes=15) is True
     assert len(w.handler.execute_calls) == 2
     assert len(events) == 2
+    assert json.loads(pending_file.read_text())["entries"] == []
+    assert sum("halt cleared" in repr(a) for a in alerts) == 1
     assert all(
         row["payment_event_state"] == "stored"
         for row in w.journal["obligations"].values()
         if row.get("state") == "done"
     )
+
+
+def test_legacy_unrecorded_outcome_without_entry_keeps_halt(monkeypatch, tmp_path):
+    w, neo = _world(monkeypatch, tmp_path)
+    alerts = _capture_alerts(monkeypatch)
+    jpath = consent_email.journal_path()
+    payment_journal.record_intent(jpath, "old-obligation", "old-token", generation=1)
+    payment_journal.record_outcome(
+        jpath, "old-obligation", "sent", event_queued=False,
+        event_entry={
+            "fields": {"label": "Synthetic", "status": "sent"},
+            "identity": {"payment_date": "2030-01-02", "obligation_key": "old-obligation"},
+            "obligation": "old-obligation",
+        },
+    )
+    legacy = json.loads(jpath.read_text())
+    del legacy["obligations"]["old-obligation"]["payment_event_entry"]
+    jpath.write_text(json.dumps(legacy))
+
+    for _ in range(3):
+        assert w.tick(minutes=15) is False
+        assert w.handler.execute_calls == []
+        assert neo.writes == 0
+        assert w.sends == []
+    assert any("payment outcome could not be recorded" in repr(a) for a in alerts)
+    assert not (tmp_path / "pending.json").exists()
 
 
 def test_no_outstanding_journal_outcome_leaves_normal_tick_unaffected(monkeypatch, tmp_path):

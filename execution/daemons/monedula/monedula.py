@@ -1661,6 +1661,40 @@ def _retry_pending_payment_events() -> bool:
     try:
         data = _load_pending_payment_events()
         recovered_unrecorded = False
+        journal = payment_journal.load(journal_path())
+        for obligation, outcome in journal["obligations"].items():
+            if (
+                not isinstance(outcome, dict)
+                or outcome.get("state") != payment_journal.STATE_DONE
+                or outcome.get("payment_event_state") != "unrecorded"
+            ):
+                continue
+            entry = outcome.get("payment_event_entry")
+            if (
+                not isinstance(entry, dict)
+                or entry.get("obligation") != obligation
+                or not isinstance(entry.get("fields"), dict)
+                or not isinstance(entry.get("identity"), dict)
+            ):
+                log.error("payment_event_journal_unrecorded: missing or malformed entry")
+                _notify_unrecorded_payment_event()
+                return False
+            queued = [
+                pending for pending in data["entries"]
+                if pending.get("obligation") == obligation
+            ]
+            if queued:
+                if len(queued) != 1 or queued[0] != entry:
+                    log.error("payment_event_journal_unrecorded: pending entry mismatch")
+                    _notify_unrecorded_payment_event()
+                    return False
+            elif not _queue_payment_event(entry):
+                _notify_unrecorded_payment_event()
+                return False
+            else:
+                data = _load_pending_payment_events()
+            payment_journal.mark_payment_event_queued(journal_path(), obligation)
+            recovered_unrecorded = True
         while data["entries"]:
             entry = data["entries"][0]
             try:
@@ -2295,7 +2329,8 @@ def main() -> bool:
             _event_queued = _queue_payment_event(_event_entry)
             try:
                 payment_journal.record_outcome(
-                    jpath, item.obligation, status, event_queued=_event_queued
+                    jpath, item.obligation, status, event_queued=_event_queued,
+                    event_entry=_event_entry if not _event_queued else None,
                 )
             except payment_journal.JournalError as exc:
                 unknown.append(label)
