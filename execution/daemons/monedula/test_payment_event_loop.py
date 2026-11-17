@@ -445,3 +445,32 @@ def test_record_failure_still_settles_the_paid_item(monkeypatch, tmp_path):
     assert w.tick(minutes=15) is False
     assert len(w.handler.execute_calls) == 1
     assert settled.count("settled") == 1
+
+
+def test_outcome_from_a_route_without_payment_events_never_holds_payments(monkeypatch, tmp_path):
+    """A route that writes no payment_event (the Telegram consent route) records
+    its outcome without the keyword: the outcome carries no payment_event_state,
+    so it neither halts later ticks nor raises at the call."""
+    w, neo = _world(monkeypatch, tmp_path)
+    _capture_events(neo, monkeypatch)
+    alerts = _capture_alerts(monkeypatch)
+    jpath = consent_email.journal_path()
+    payment_journal.record_intent(jpath, "telegram-obligation", "tg-token", generation=1)
+    payment_journal.record_outcome(jpath, "telegram-obligation", "sent")
+
+    row = json.loads(jpath.read_text())["obligations"]["telegram-obligation"]
+    assert row["state"] == payment_journal.STATE_DONE
+    assert "payment_event_state" not in row and "payment_event_entry" not in row
+    assert w.tick() is True
+    assert not any("payment outcome could not be recorded" in repr(a) for a in alerts)
+
+
+@pytest.mark.parametrize("bad", ["yes", 1, 0])
+def test_record_outcome_refuses_a_non_boolean_event_flag(tmp_path, bad):
+    jpath = tmp_path / "journal.json"
+    payment_journal.record_intent(jpath, "obligation", "token", generation=1)
+    with pytest.raises(payment_journal.JournalError):
+        payment_journal.record_outcome(jpath, "obligation", "sent", event_queued=bad)
+    assert payment_journal.obligation_state(payment_journal.load(jpath), "obligation") != (
+        payment_journal.STATE_DONE
+    )

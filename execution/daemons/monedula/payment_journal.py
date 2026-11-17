@@ -166,11 +166,21 @@ def record_intent(path: Path, obligation: str, token: str, *, generation: int) -
 
 
 def record_outcome(
-    path: Path, obligation: str, status: str, *, event_queued: bool,
+    path: Path, obligation: str, status: str, *, event_queued: bool | None = None,
     event_entry: dict[str, Any] | None = None,
 ) -> None:
-    """Record the transfer's outcome after it returns, and read it back."""
-    if not event_queued and not isinstance(event_entry, dict):
+    """Record the transfer's outcome after it returns, and read it back.
+
+    ``event_queued`` says whether this route records a payment_event for the
+    outcome: True when its entry is queued, False when queueing failed (then
+    ``event_entry`` is kept with the outcome so recording can be retried), and
+    None for a route that writes no payment_event (the Telegram consent route
+    today), whose outcome carries no ``payment_event_state`` and so never holds
+    payments for a record that route was never going to write.
+    """
+    if event_queued is not None and not isinstance(event_queued, bool):
+        raise JournalError("event_queued must be True, False or None")
+    if event_queued is False and not isinstance(event_entry, dict):
         raise JournalError("unrecorded payment_event requires its entry")
     data = load(path)
     entry = data["obligations"].get(obligation)
@@ -179,17 +189,18 @@ def record_outcome(
     entry["state"] = STATE_DONE
     entry["outcome_status"] = str(status)[:64]
     entry["outcome_at"] = time.time()
-    entry["payment_event_state"] = "queued" if event_queued else "unrecorded"
-    if not event_queued:
+    if event_queued is not None:
+        entry["payment_event_state"] = "queued" if event_queued else "unrecorded"
+    if event_queued is False:
         entry["payment_event_entry"] = event_entry
     _write(path, data)
     back = load(path)
     if (
         obligation_state(back, obligation) != STATE_DONE
         or back["obligations"][obligation].get("payment_event_state")
-        != entry["payment_event_state"]
+        != entry.get("payment_event_state")
         or (
-            not event_queued
+            event_queued is False
             and back["obligations"][obligation].get("payment_event_entry") != event_entry
         )
     ):
