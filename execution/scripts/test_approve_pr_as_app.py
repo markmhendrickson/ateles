@@ -5048,7 +5048,7 @@ class TestRoundCap:
         ] + _all_clear_comments(ALL_FOUR)
         code, client = await self._run(monkeypatch, comments)
         assert code == 1 and client.posted == []
-        assert "round 4 of 3" in capsys.readouterr().out
+        assert "round 5 of 3" in capsys.readouterr().out
 
     async def test_equal_timestamp_missing_comment_id_refuses_even_with_clear_current_head(
         self, monkeypatch, capsys

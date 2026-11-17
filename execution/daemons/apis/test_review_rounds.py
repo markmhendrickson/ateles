@@ -152,10 +152,11 @@ def test_revisited_heads_form_distinct_episodes_and_refuse_at_cap():
         ))
     ]
     status = _status(comments, H4)
-    # The clear H2 episode and following H1 episode share round two.
-    assert status.round_number == 4 and status.refused
+    # Returning to H1 after a blocking episode is a new round even though the
+    # episode before it (H2) was clear: five rounds in all.
+    assert status.round_number == 5 and status.refused
     assert [round_.heads for round_ in status.rounds] == [
-        (H1,), (H2, H1), (H3,), (H4,),
+        (H1,), (H2,), (H1,), (H3,), (H4,),
     ]
 
 
@@ -226,3 +227,23 @@ def test_many_clear_heads_with_revisits_remain_one_round():
                 for i, head in enumerate((H1, H2, H1, H3, H2, H4))]
     status = _status(comments, H4)
     assert status.round_number == 1 and status.rounds[0].heads == (H1, H2, H1, H3, H2, H4)
+
+
+def test_return_to_an_earlier_head_after_a_blocking_episode_spends_a_new_round_even_after_a_clear_one():
+    # pm's sequence: a blocking verdict on F, a clear verdict on Z at the SAME timestamp, then a clear re-review
+    # back on F. Ordered by comment id this is three rounds (F blocks, Z clears, F again), not one or two.
+    f, z = "f" * 40, "0" * 40
+    same = "2026-10-27T10:00:00Z"
+    comments = [
+        {**_verdict("pm", f, verdict="REQUEST_CHANGES", n=10), "created_at": same},
+        {**_verdict("pm", z, n=11), "created_at": same},
+        {**_verdict("pm", f, n=12), "created_at": "2026-10-27T10:05:00Z"},
+    ]
+    status = _status(comments, f)
+    assert status.round_number == 3 and not status.refused
+
+
+def test_return_to_an_earlier_head_after_all_clear_history_is_the_same_round():
+    comments = [_verdict("pm", H1, n=0), _verdict("pm", H2, n=1), _verdict("pm", H1, n=2)]
+    status = _status(comments, H1)
+    assert status.round_number == 1 and not status.refused

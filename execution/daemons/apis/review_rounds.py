@@ -149,13 +149,22 @@ def round_status(records: dict[str, list], current_head: str, *, cap: int = ROUN
 
     rounds: list[ReviewRound] = []
     previous: ReviewEpisode | None = None
+    seen_heads: set[str] = set()
+    any_blocking = False
     for episode in episodes:
-        if previous is None or previous.blocking:
+        # A return to a head that was already reviewed, after any blocking
+        # episode in the history, is a new round even when the episode just
+        # before it was clear: the cap must not be reset by re-reviewing an
+        # old head.
+        returned = episode.head in seen_heads and any_blocking
+        if previous is None or previous.blocking or returned:
             rounds.append(ReviewRound((episode.head,), episode.blocking))
         else:
             last = rounds[-1]
             rounds[-1] = ReviewRound(last.heads + (episode.head,), episode.blocking)
         previous = episode
+        seen_heads.add(episode.head)
+        any_blocking = any_blocking or episode.blocking
 
     if unplaced:
         unknown = tuple(sorted(unplaced))
@@ -170,7 +179,7 @@ def round_status(records: dict[str, list], current_head: str, *, cap: int = ROUN
     if previous is None or previous.head != current:
         # The current head has no latest episode yet. Even a previously reviewed
         # SHA is a new episode after verdicts on another head.
-        if previous is None or previous.blocking:
+        if previous is None or previous.blocking or (current in seen_heads and any_blocking):
             rounds.append(ReviewRound((current,), False))
         else:
             last = rounds[-1]
