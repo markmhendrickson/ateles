@@ -83,7 +83,7 @@ _MINUTES_NAME = re.compile(r"^window_(\d+)m$")
 # is persisted, a restarted or separate process retries at once, and the
 # dedupe journal stays the only record of what was delivered.
 RETRY_BACKOFF_SECONDS = 5.0
-ALERT_SEND_TIMEOUT_SECONDS = 30.0
+ALERT_SEND_TIMEOUT_SECONDS = held_view.ALERT_SEND_TIMEOUT_SECONDS
 _retry_after: dict[str, float] = {}
 
 

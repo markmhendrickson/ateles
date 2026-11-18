@@ -251,7 +251,7 @@ def test_disallowed_or_unreadable_request_never_reaches_signer_or_upstream(
 
 
 @pytest.mark.parametrize("method", [
-    "initialize", "ping", "tools/list", "notifications/initialized", "notifications/cancelled",
+    "initialize", "ping", "tools/list", "notifications/initialized",
 ])
 def test_non_call_methods_are_forwarded_with_allowlist(method):
     request = {"jsonrpc": "2.0", "method": method}
@@ -265,12 +265,10 @@ def test_non_call_methods_are_forwarded_with_allowlist(method):
     assert upstream_requests[0][3]["signature"] == SIGNATURE["signature"]
 
 
-def test_method_match_uses_decoded_json_value():
+def test_escaped_method_is_refused():
     body = b'{"jsonrpc":"2.0","id":1,"method":"\\u0069nitialize"}'
     status, _, sign_calls, upstream_requests = _in_memory_mcp_request(body, ("store",))
-    assert status == 200
-    assert sign_calls == [("POST", UPSTREAM_BASE + "/mcp", body, "application/json")]
-    assert upstream_requests[0][2] == body
+    assert status == 403 and sign_calls == [] and upstream_requests == []
 
 
 @pytest.mark.parametrize("method", [
@@ -294,7 +292,7 @@ def test_ungranted_rpc_methods_never_reach_signer_or_upstream(method):
     ("GET", None, False),
     ("GET", "existing-session", False),
     ("DELETE", None, False),
-    ("DELETE", "existing-session", True),
+    ("DELETE", "existing-session", False),
 ])
 def test_allowlist_http_verbs_are_scoped(http_method, session_id, allowed):
     status, payload, sign_calls, upstream_requests = _in_memory_mcp_request(
@@ -334,13 +332,11 @@ def test_granted_job_is_refused_the_uploaded_file_route():
     assert sign_calls == [] and upstream_requests == []
 
 
-def test_no_allowlist_still_forwards_the_uploaded_file_route():
+def test_wildcard_refuses_the_uploaded_file_route():
     status, _, sign_calls, upstream_requests = _in_memory_mcp_request(
         b"", None, http_method="GET", path=SOURCE_PATH,
     )
-    assert status == 200
-    assert sign_calls == [("GET", UPSTREAM_BASE + SOURCE_PATH, None, "application/json")]
-    assert upstream_requests[0][0:3] == ("GET", SOURCE_PATH, None)
+    assert status == 403 and sign_calls == [] and upstream_requests == []
 
 
 def test_no_allowlist_keeps_ungranted_tool_forwarding():
@@ -350,12 +346,36 @@ def test_no_allowlist_keeps_ungranted_tool_forwarding():
     assert len(sign_calls) == 1 and upstream_requests[0][2] == body
 
 
-def test_no_allowlist_keeps_resource_method_forwarding():
+@pytest.mark.parametrize("method", [
+    "initialize", "notifications/initialized", "ping", "tools/list", "tools/call",
+])
+def test_wildcard_forwards_only_tool_use_and_handshake(method):
+    request = {"jsonrpc": "2.0", "method": method}
+    if not method.startswith("notifications/"):
+        request["id"] = 1
+    if method == "tools/call":
+        request["params"] = {"name": "synthetic_tool", "arguments": {}}
+    body = json.dumps(request).encode()
+    status, _, sign_calls, upstream_requests = _in_memory_mcp_request(body, None)
+    assert status == 200 and len(sign_calls) == 1 and upstream_requests[0][2] == body
+
+
+@pytest.mark.parametrize("body", [
+    b'[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]',
+    b'{"jsonrpc":"2.0","id":1,"method":"resources/read"}',
+    b'{"jsonrpc":"2.0","id":1,"method":"tools/List"}',
+    b'{"jsonrpc":"2.0","id":1,"method":"\\u0074ools/list"}',
+    b'{"jsonrpc":"2.0","id":1,"method":"notifications/cancelled"}',
+])
+def test_wildcard_refuses_non_tool_and_noncanonical_requests(body):
+    status, _, sign_calls, upstream_requests = _in_memory_mcp_request(body, None)
+    assert status == 403 and sign_calls == [] and upstream_requests == []
+
+
+def test_wildcard_refuses_resource_method():
     body = b'{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"private"}}'
     status, _, sign_calls, upstream_requests = _in_memory_mcp_request(body, None)
-    assert status == 200
-    assert sign_calls == [("POST", UPSTREAM_BASE + "/mcp", body, "application/json")]
-    assert upstream_requests[0][2] == body
+    assert status == 403 and sign_calls == [] and upstream_requests == []
 
 
 def test_requires_a_peer_uid_unless_testing():
@@ -503,22 +523,15 @@ def test_complete_content_length_response_is_cleanly_terminated():
 
 
 @pytest.mark.parametrize("method", ["GET", "DELETE"])
-def test_get_and_delete_are_signed_without_body_and_round_trip_session(method, upstream, sign_calls, proxy_port):
+def test_wildcard_refuses_non_rpc_http_methods(method, upstream, sign_calls, proxy_port):
     conn = _client(proxy_port)
     conn.request(method, "/mcp", headers={"Mcp-Session-Id": "session-from-client", "Authorization": "Bearer x"})
     resp = conn.getresponse()
     resp.read()
-    assert resp.status == 200
-    assert resp.getheader("Mcp-Session-Id") == "session-from-upstream"
+    assert resp.status == 403
     conn.close()
 
-    assert sign_calls == [(method, UPSTREAM_BASE + "/mcp", None, "application/json")]
-    seen = upstream.requests[0]
-    assert seen["method"] == method
-    headers = _lower(seen["headers"])
-    assert headers["mcp-session-id"] == "session-from-client"
-    assert headers["signature"] == SIGNATURE["signature"]
-    assert "authorization" not in headers
+    assert sign_calls == [] and upstream.requests == []
 
 
 @pytest.mark.parametrize(
@@ -539,28 +552,18 @@ def test_rejections_never_reach_upstream(method, path, status, upstream, sign_ca
 # --- GET /sources/<id>/content --------------------------------------------
 
 
-def test_source_content_get_is_signed_and_returns_the_file_bytes(upstream, sign_calls, proxy_port):
+def test_source_content_get_is_refused(upstream, sign_calls, proxy_port):
     conn = _client(proxy_port)
     conn.request("GET", SOURCE_PATH, headers={"Authorization": "Bearer x", "Cookie": "c=1", "Accept": "*/*"})
     resp = conn.getresponse()
     payload = resp.read()
     conn.close()
 
-    assert resp.status == 200
-    assert payload == SOURCE_BYTES
-    assert resp.getheader("Content-Type") == "application/pdf"
-    assert resp.getheader("Set-Cookie") is None and resp.getheader("X-Internal") is None
-    assert sign_calls == [("GET", UPSTREAM_BASE + SOURCE_PATH, None, "application/json")]
-    assert len(upstream.requests) == 1
-    seen = upstream.requests[0]
-    assert (seen["method"], seen["path"], seen["body"]) == ("GET", SOURCE_PATH, b"")
-    headers = _lower(seen["headers"])
-    assert headers["signature"] == SIGNATURE["signature"]
-    assert headers["accept"] == "*/*"
-    assert "authorization" not in headers and "cookie" not in headers
+    assert resp.status == 403
+    assert sign_calls == [] and upstream.requests == []
 
 
-def test_source_content_logs_method_path_status_and_bytes_never_the_body(caplog, upstream, proxy_port):
+def test_source_content_refusal_logs_no_body(caplog, upstream, proxy_port):
     caplog.set_level("INFO", logger="neotoma_proxy")
     conn = _client(proxy_port)
     conn.request("GET", SOURCE_PATH)
@@ -571,7 +574,7 @@ def test_source_content_logs_method_path_status_and_bytes_never_the_body(caplog,
     while time.time() < deadline and not any(SOURCE_PATH in r.getMessage() for r in caplog.records):
         time.sleep(0.01)
     lines = [r.getMessage() for r in caplog.records]
-    assert f"neotoma proxy GET {SOURCE_PATH} 200 in=0 out={len(SOURCE_BYTES)}" in lines
+    assert any(f"neotoma proxy GET {SOURCE_PATH} 403" in line for line in lines)
     assert not any("synthetic upload" in line for line in lines)
 
 
@@ -631,8 +634,8 @@ def test_source_content_refuses_other_paths_ids_traversal_and_queries_with_404(
     assert upstream.requests == [] and sign_calls == []
 
 
-@pytest.mark.parametrize(("peer_uid", "status"), [(1000, 403), (None, 403), (4242, 200)])
-def test_source_content_is_only_forwarded_for_the_allowed_peer_uid(
+@pytest.mark.parametrize(("peer_uid", "status"), [(1000, 403), (None, 403), (4242, 403)])
+def test_source_content_is_refused_even_for_the_allowed_peer_uid(
     peer_uid, status, monkeypatch, upstream, sign_calls, uid_checked_proxy_port
 ):
     monkeypatch.setattr(neotoma_proxy, "proc_net_peer_uid", lambda *a, **k: peer_uid)
@@ -642,11 +645,7 @@ def test_source_content_is_only_forwarded_for_the_allowed_peer_uid(
     payload = resp.read()
     conn.close()
     assert resp.status == status
-    if status == 403:
-        assert upstream.requests == [] and sign_calls == []
-    else:
-        assert payload == SOURCE_BYTES
-        assert len(upstream.requests) == 1 and len(sign_calls) == 1
+    assert upstream.requests == [] and sign_calls == []
 
 
 def test_chunked_request_body_gets_411(upstream, sign_calls, proxy_port):

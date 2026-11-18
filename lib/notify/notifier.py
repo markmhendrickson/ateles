@@ -681,18 +681,19 @@ class Notifier:
         """Current (window_start, count), rolled over if the window has passed."""
         now = self._wall_clock()
         try:
+            if held_view.budget_unreadable(self._digest_path):
+                raise ValueError("held-email budget invalid")
             raw = json.loads(held_view.read_text_nofollow(self._budget_path()))
             start, count = float(raw["window_start"]), int(raw["count"])
         except FileNotFoundError:
             return now, 0
-        except Exception as exc:  # noqa: BLE001 — corrupt state => fresh window
-            log.warning("[notify] held-email budget unreadable (%s) — resetting", exc)
-            return now, 0
-        # NaN never compares as elapsed and a negative count would raise the
-        # cap: neither is a state this code writes, so start over.
+        except Exception as exc:  # noqa: BLE001 — unknown budget holds email delivery
+            log.warning("[notify] held-email budget unreadable (%s) — holding", type(exc).__name__)
+            return now, HELD_EMAIL_BUDGET_PER_HOUR
+        # An invalid count or time cannot prove remaining delivery budget.
         if not math.isfinite(start) or count < 0:
-            log.warning("[notify] held-email budget invalid — resetting")
-            return now, 0
+            log.warning("[notify] held-email budget invalid — holding")
+            return now, HELD_EMAIL_BUDGET_PER_HOUR
         if now - start >= _HELD_EMAIL_WINDOW_SECONDS or start > now:
             return now, 0
         return start, count

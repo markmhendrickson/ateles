@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,100 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from lib.notify import held_view  # noqa: E402
+
+
+def test_interrupted_send_is_visible_without_notifier_restart(tmp_path, monkeypatch, capsys):
+    queue = tmp_path / "digest.json"
+    journal = tmp_path / "dedupe.json"
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(queue))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(journal))
+    key = "synthetic:usage:50"
+    cutoff = held_view.ALERT_SEND_TIMEOUT_SECONDS + held_view.SENDING_VISIBILITY_MARGIN_SECONDS
+    stamp = (datetime.now(timezone.utc) - timedelta(seconds=cutoff + 1)).isoformat()
+    journal.write_text(json.dumps({key: {"state": "sending", "attempt_at": stamp,
+                                         "handler": "apis"}}))
+    assert held_view.summary()["unconfirmed"] == 1
+    assert held_view.main([]) == 0
+    shown = capsys.readouterr().out
+    assert "interrupted send" in shown and key in shown
+    assert "--clear-unconfirmed" in shown
+    hook = _REPO_ROOT / ".claude" / "hooks" / "user_prompt_submit.py"
+    env = {**os.environ, "HOME": str(tmp_path), "CLAUDE_PROJECT_DIR": str(tmp_path)}
+    run = subprocess.run([sys.executable, str(hook)], input='{"session_id":"synthetic"}',
+                         text=True, capture_output=True, env=env, timeout=10)
+    assert run.returncode == 0
+    assert "[unconfirmed alerts] 1" in run.stdout
+    assert f"--clear-unconfirmed {key}" in run.stdout
+    assert held_view.main(["--clear-unconfirmed", key]) == 0
+    assert key not in json.loads(journal.read_text())
+    assert held_view.summary()["unconfirmed"] == 0
+
+
+def test_recent_sending_receipt_stays_in_flight(tmp_path, monkeypatch, capsys):
+    queue = tmp_path / "digest.json"
+    journal = tmp_path / "dedupe.json"
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(queue))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(journal))
+    key = "synthetic:usage:50"
+    journal.write_text(json.dumps({key: {"state": "sending",
+                                         "attempt_at": datetime.now(timezone.utc).isoformat(),
+                                         "handler": "apis"}}))
+    assert held_view.summary()["unconfirmed"] == 0
+    assert held_view.summary()["sending_in_flight"] == 1
+    assert held_view.main([]) == 0
+    assert "IN FLIGHT" in capsys.readouterr().out
+    hook = _REPO_ROOT / ".claude" / "hooks" / "user_prompt_submit.py"
+    env = {**os.environ, "HOME": str(tmp_path), "CLAUDE_PROJECT_DIR": str(tmp_path)}
+    run = subprocess.run([sys.executable, str(hook)], input='{"session_id":"synthetic"}',
+                         text=True, capture_output=True, env=env, timeout=10)
+    assert "[alerts in flight] 1" in run.stdout
+    assert "[unconfirmed alerts]" not in run.stdout
+    assert held_view.main(["--clear-unconfirmed", key]) == 1
+    assert key in json.loads(journal.read_text())
+
+
+@pytest.mark.parametrize("name,contents", [
+    ("digest.json", b""), ("digest.json", b"\xff"),
+    ("digest-email.json", b"["), ("digest-recovery.json", b"\xff"),
+    ("dedupe.json", b"\xff"), ("digest-email-budget.json", b"\xff"),
+])
+def test_unreadable_notification_file_is_visible_to_session(
+    tmp_path, monkeypatch, name, contents
+):
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    (tmp_path / name).write_bytes(contents)
+    hook = _REPO_ROOT / ".claude" / "hooks" / "user_prompt_submit.py"
+    env = {**os.environ, "HOME": str(tmp_path), "CLAUDE_PROJECT_DIR": str(tmp_path)}
+    run = subprocess.run([sys.executable, str(hook)], input='{"session_id":"synthetic"}',
+                         text=True, capture_output=True, env=env, timeout=10)
+    assert run.returncode == 0
+    assert run.stdout.strip()
+    if name == "dedupe.json":
+        assert "[dedupe-journal]" in run.stdout
+    elif name.endswith("budget.json"):
+        assert "[held-email-budget]" in run.stdout
+
+
+def test_non_utf8_sink_state_is_visible(tmp_path, monkeypatch):
+    sink_dir = tmp_path / "sink"
+    sink_dir.mkdir()
+    (sink_dir / "state-synthetic.json").write_bytes(b"\xff")
+    monkeypatch.setenv("ATELES_NOTIFY_SINK_DIR", str(sink_dir))
+    assert held_view.summary(tmp_path / "digest.json")["sink_state_unreadable"] == 1
+
+
+def test_missing_queue_for_held_receipt_is_visible(tmp_path, monkeypatch, capsys):
+    queue = tmp_path / "digest.json"
+    journal = tmp_path / "dedupe.json"
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(queue))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(journal))
+    journal.write_text(json.dumps({"synthetic:held": {
+        "state": "held", "held_message": "synthetic notice", "handler": "apis",
+    }}))
+    assert held_view.summary()["orphaned_held_receipts"] == 1
+    assert held_view.main([]) == 0
+    assert "no queue notice" in capsys.readouterr().out
 
 
 def test_unconfirmed_alert_appears_in_session_hook(tmp_path, queue):

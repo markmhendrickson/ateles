@@ -592,6 +592,10 @@ def test_timed_out_combined_handoff_keeps_all_thresholds_owned(
     try:
         assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
         assert entered.wait(timeout=2)
+        from lib.notify import held_view
+        info = held_view.summary(spy.inner._digest_path)
+        assert info["sending_in_flight"] == 1
+        assert info["unconfirmed"] == 0
         assert usage_alerts.check_usage_thresholds("cursor", notifier=_SpyNotifier()) == []
         assert len(spy.sent) == 2
     finally:

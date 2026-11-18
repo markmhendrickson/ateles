@@ -12,7 +12,7 @@ from itertools import product
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -968,6 +968,33 @@ def test_journal_recovery_salvages_parseable_siblings_from_torn_copy(tmp_path, m
     assert n._dedupe_journal["last"] == good
 
 
+@pytest.mark.parametrize("copy_bytes,expected_key", [
+    (b'\xff{"known": {"state": "delivered", "notified_at": "2026-11-17T00:00:00+00:00", "handler": "apis"}}', "known"),
+    (b'\xff{"known": {"state": "delivered", "notified_at": "2026-11-17T00:00:00+00:00", "handler": "apis"}, "torn": \xff}', "known"),
+    (b'\xff\xfe\xfd', None),
+])
+def test_undecodable_journal_copy_reconciles_without_resending(
+    tmp_path, monkeypatch, copy_bytes, expected_key
+):
+    from . import held_view
+
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    n._dedupe_path.write_bytes(copy_bytes)
+    assert not n.send("synthetic", Priority.WARN, handler="apis", dedupe_key="unknown",
+                      retryable=True)
+    assert held_view.main(["--clear-unreadable-journal"]) == 0
+    journal = n._dedupe_journal
+    assert held_view.RECOVERED_AT in journal
+    if expected_key:
+        assert journal[expected_key]["state"] == "delivered"
+    assert not n.send("synthetic", Priority.WARN, handler="apis", dedupe_key="unknown",
+                      retryable=True)
+    assert sent == []
+
+
 @pytest.mark.parametrize("journal", ["absent", "delivered", "malformed", "held"])
 @pytest.mark.parametrize("queue", ["with_notice", "without_notice", "unreadable", "missing"])
 @pytest.mark.parametrize("locked", [True, False])
@@ -1513,7 +1540,7 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
                   "transport_refuse", "transport_uncertain", "crash_pending", "crash_sending", "restart",
                   "migrate", "migration_queue_fail", "migration_journal_fail",
                   "migration_sink_fail", "operator_clear", "window_roll",
-                  "journal_corrupt", "journal_reconcile", "malformed_receipt",
+                  "journal_corrupt", "journal_corrupt_bytes", "journal_reconcile", "malformed_receipt",
                   "unreadable_snapshot_twice")
     for length in range(1, 4):
         for index, sequence in enumerate(product(operations, repeat=length)):
@@ -1559,7 +1586,10 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
                             assert n._mark_dedupe_pending(key, "apis")
                         else:
                             assert n._mark_dedupe_sending((key,), "apis")
-                            n._recover_sending_entries()
+                            journal = n._dedupe_journal
+                            journal[key]["attempt_at"] = (datetime.now(timezone.utc)
+                                - timedelta(minutes=1)).isoformat()
+                            assert n._persist_dedupe_journal(journal)
                 elif operation == "migrate":
                     moved = key.replace(":50", ":corrected:50")
                     if n.migrate_dedupe(key, moved):
@@ -1601,7 +1631,9 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
                     recovery = held_view.read_recovery(n._digest_path)
                     if any(row["key"] == key and row.get("migration_to") for row in recovery):
                         n.clear_dedupe(key)
-                    elif any(row["key"] == key for row in recovery):
+                    elif (any(row["key"] == key for row in recovery)
+                          or any(row["key"] == key for row in
+                                 held_view.journal_receipt_status()[0])):
                         assert held_view.main(["--clear-unconfirmed", key]) == 0, sequence
                         clear_allowance[key] = clear_allowance.get(key, 0) + 1
                     elif before:
@@ -1611,8 +1643,10 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
                 elif operation == "window_roll":
                     n.clear_dedupe(key)
                     key = key.replace("reset0", "reset1")
-                elif operation == "journal_corrupt":
-                    n._dedupe_path.write_bytes(b"{synthetic malformed journal")
+                elif operation in ("journal_corrupt", "journal_corrupt_bytes"):
+                    n._dedupe_path.write_bytes(
+                        b"\xff\xfe{" if operation == "journal_corrupt_bytes"
+                        else b"{synthetic malformed journal")
                     journal_bad = True
                     n.send(f"crossed {key}", Priority.WARN, handler="apis",
                            dedupe_key=key, retryable=True)
@@ -1668,7 +1702,9 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
                         assert any(journal_key in item["keys"] for item in after if isinstance(item, dict)) \
                             or journal_key in recovery_keys, sequence
                     if entry.get("state") in ("sending", "delivered_unconfirmed"):
-                        assert journal_key in recovery_keys, sequence
+                        assert (journal_key in recovery_keys or journal_key in {
+                            row["key"] for row in held_view.journal_receipt_status()[0]
+                        }), sequence
                 delivered = [message.rsplit(" ", 1)[-1] for message in sent
                              if message.startswith("⚠ [apis] crossed ")]
                 for delivered_key in set(delivered):
@@ -2053,24 +2089,24 @@ def _budget_file(tmp_path, payload):
     (tmp_path / "digest-email-budget.json").write_text(payload)
 
 
-def test_nan_window_start_starts_a_fresh_window(tmp_path, monkeypatch):
+def test_nan_window_start_holds_email_queue(tmp_path, monkeypatch):
     runs = _GwsRuns()
     monkeypatch.setattr("lib.notify.notifier.subprocess.run", runs)
     _budget_file(tmp_path, '{"window_start": NaN, "count": 5}')
     _hold(_daemon(tmp_path, email=True, silent=True), 8)
     _daemon(tmp_path, email=True, silent=False).flush_digest()
-    assert len(runs.cmds) == 5  # a NaN start would otherwise never roll over: 0 sent
-    saved = json.loads((tmp_path / "digest-email-budget.json").read_text())
-    assert saved["window_start"] == saved["window_start"] and saved["count"] == 5
+    assert runs.cmds == []
+    assert len(_file(tmp_path, "digest-email.json")) == 8
 
 
-def test_negative_count_does_not_raise_the_cap(tmp_path, monkeypatch):
+def test_negative_count_holds_email_queue(tmp_path, monkeypatch):
     runs = _GwsRuns()
     monkeypatch.setattr("lib.notify.notifier.subprocess.run", runs)
     _budget_file(tmp_path, '{"window_start": 1000000.0, "count": -100}')
     _hold(_daemon(tmp_path, email=True, silent=True), 20)
     _daemon(tmp_path, email=True, silent=False).flush_digest()
-    assert len(runs.cmds) == 5
+    assert runs.cmds == []
+    assert len(_file(tmp_path, "digest-email.json")) == 20
 
 
 def test_infinite_window_start_is_rejected(tmp_path, monkeypatch):

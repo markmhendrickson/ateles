@@ -32,6 +32,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -62,6 +63,10 @@ BACKUP_MAX = 1000
 # Do not follow a symlink planted at a sibling file's path (0 where unsupported).
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 RECOVERED_AT = "__recovered_at__"
+# Shared with the usage-alert sender. A short margin allows its bounded join
+# and the receipt write to finish before a send is called interrupted.
+ALERT_SEND_TIMEOUT_SECONDS = 30.0
+SENDING_VISIBILITY_MARGIN_SECONDS = 5.0
 
 
 def receipt_problem(entry: object) -> str | None:
@@ -196,9 +201,22 @@ def unreadable_sink_states() -> list[Path]:
             state = json.loads(read_text_nofollow(path))
             if sink_state_problem(state):
                 bad.append(path)
-        except (OSError, ValueError):
+        except (OSError, ValueError, UnicodeError):
             bad.append(path)
     return bad
+
+
+def budget_unreadable(main: Path) -> bool:
+    try:
+        value = json.loads(read_text_nofollow(budget_path(main)))
+        return (not isinstance(value, dict) or type(value.get("count")) is not int
+                or value["count"] < 0 or not isinstance(value.get("window_start"), (int, float))
+                or isinstance(value["window_start"], bool)
+                or not math.isfinite(value["window_start"]))
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError, UnicodeError):
+        return True
 
 
 def notice_text(item: str | dict) -> str:
@@ -353,6 +371,60 @@ def read_text_nofollow(path: Path) -> str:
         return fh.read()
 
 
+def read_bytes_nofollow(path: Path) -> bytes:
+    fd = os.open(str(path), os.O_RDONLY | _NOFOLLOW)
+    with os.fdopen(fd, "rb") as fh:
+        return fh.read()
+
+
+def journal_receipt_status(now: datetime | None = None) -> tuple[list[dict], list[dict], bool]:
+    """Return aged uncertain receipts, live sends, and journal read failure."""
+    try:
+        entries = json.loads(read_text_nofollow(journal_path()))
+        if not isinstance(entries, dict):
+            raise ValueError("dedupe journal is not an object")
+    except FileNotFoundError:
+        return [], [], False
+    except (OSError, ValueError, UnicodeError):
+        return [], [], True
+    current = now or datetime.now(timezone.utc)
+    uncertain, in_flight = [], []
+    for key, entry in entries.items():
+        if key == RECOVERED_AT:
+            continue
+        if not isinstance(key, str) or receipt_problem(entry):
+            uncertain.append({"key": str(key), "cause": "malformed receipt"})
+            continue
+        state = entry["state"]
+        if state == "delivered_unconfirmed":
+            uncertain.append({"key": key, "cause": "uncertain send"})
+        elif state == "sending":
+            attempted = datetime.fromisoformat(entry["attempt_at"].replace("Z", "+00:00"))
+            age = (current - attempted).total_seconds()
+            row = {"key": key, "cause": "interrupted send"}
+            (uncertain if (age < -SENDING_VISIBILITY_MARGIN_SECONDS
+                           or age >= ALERT_SEND_TIMEOUT_SECONDS + SENDING_VISIBILITY_MARGIN_SECONDS)
+             else in_flight).append(row)
+    return uncertain, in_flight, False
+
+
+def orphaned_held_receipts(main: Path) -> list[str]:
+    """A held receipt without its queued notice cannot disappear silently."""
+    try:
+        journal = json.loads(read_text_nofollow(journal_path()))
+        items = read_queue(main) + read_queue(email_queue_path(main))
+    except (FileNotFoundError, OSError, ValueError, UnicodeError):
+        return []
+    if not isinstance(journal, dict):
+        return []
+    return [key for key, entry in journal.items()
+            if (key != RECOVERED_AT and isinstance(key, str)
+                and isinstance(entry, dict) and not receipt_problem(entry)
+                and entry["state"] == "held"
+                and not any((key in item["keys"] if isinstance(item, dict)
+                             else item == entry["held_message"]) for item in items))]
+
+
 def atomic_write(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` atomically with mode 0600. Raises.
 
@@ -439,7 +511,11 @@ def summary(main: Path | None = None) -> dict:
         recovery = read_recovery(main or queue_path())
     except Exception:
         recovery = [{"key": "unreadable", "time": "", "cause": "unreadable"}]
-    recovery_fp = hashlib.sha256(json.dumps(recovery).encode()).hexdigest() if recovery else ""
+    journal_uncertain, in_flight, journal_unreadable = journal_receipt_status()
+    orphaned = orphaned_held_receipts(queue_main)
+    recovery_keys = {row["key"] for row in recovery}
+    journal_only = [row for row in journal_uncertain if row["key"] not in recovery_keys]
+    recovery_fp = hashlib.sha256(json.dumps((recovery, journal_only, in_flight, orphaned)).encode()).hexdigest()
     projections = sum(bool(row.get("migration_to")) or row.get("cause") == "sink resolution pending"
                       for row in recovery)
     unreadable_usage = sum(
@@ -447,16 +523,22 @@ def summary(main: Path | None = None) -> dict:
             key.startswith(UNREADABLE_USAGE_KEY_PREFIX) for key in item["keys"]
         ) for item in items
     )
-    unreadable_journal = any(
+    unreadable_journal = journal_unreadable or any(
         row.get("key") == "dedupe-journal-unreadable" for row in recovery
     )
     bad_sink_states = unreadable_sink_states()
+    bad_budget = budget_unreadable(queue_main)
     return {"total": len(items), "by_handler": dict(counts), "fingerprint": fp,
             "usage_snapshot_unreadable": unreadable_usage,
             "dedupe_journal_unreadable": unreadable_journal,
             "queue_unreadable": queue_unreadable,
             "sink_state_unreadable": len(bad_sink_states),
-            "unconfirmed": len(recovery) - projections, "projection_pending": projections,
+            "budget_unreadable": bad_budget,
+            "unconfirmed": len(recovery) - projections + len(journal_only),
+            "interrupted_keys": [row["key"] for row in journal_uncertain
+                                 if row["cause"] == "interrupted send"],
+            "sending_in_flight": len(in_flight), "projection_pending": projections,
+            "orphaned_held_receipts": len(orphaned),
             "unconfirmed_fingerprint": recovery_fp}
 
 
@@ -482,6 +564,21 @@ def _print_notices(main: Path, show_all: bool) -> int:
                 print("  Clear only after deciding to resend: python3 "
                       "lib/notify/held_view.py --clear-unconfirmed "
                       f"{shlex.quote(row['key'])}")
+    journal_uncertain, in_flight, journal_unreadable = journal_receipt_status()
+    if journal_unreadable:
+        print("RECOVERY REQUIRED: dedupe journal unreadable; preserve it and reconcile unknown deliveries.")
+    recovery_keys = {row["key"] for row in recovery}
+    for row in journal_uncertain:
+        if row["key"] not in recovery_keys:
+            print(f"RECOVERY REQUIRED: {row['cause']} key={row['key']!r}. "
+                  "After deciding to resend, run python3 lib/notify/held_view.py "
+                  f"--clear-unconfirmed {shlex.quote(row['key'])}")
+    for row in in_flight:
+        print(f"IN FLIGHT: send key={row['key']!r}; no resend is available yet.")
+    orphaned = orphaned_held_receipts(main)
+    for key in orphaned:
+        print(f"RECOVERY REQUIRED: held receipt key={key!r} has no queue notice; "
+              "preserve and repair the queue before resolving the key.")
     unreadable = []
     for path in (main, email_queue_path(main)):
         try:
@@ -492,9 +589,12 @@ def _print_notices(main: Path, show_all: bool) -> int:
         print(f"RECOVERY REQUIRED: held notice queue unreadable at {path}; preserve the file and repair it before clearing notices.")
     for path in unreadable_sink_states():
         print(f"RECOVERY REQUIRED: notification sink state unreadable at {path}; preserve and repair it before key migration or resolution.")
+    if budget_unreadable(main):
+        print("RECOVERY REQUIRED: held-email budget unreadable; preserve and repair it before draining email notices.")
     items = actionable_items(main)
     if not items:
-        if not unreadable:
+        if not (unreadable or recovery or journal_uncertain or in_flight or journal_unreadable
+                or orphaned or budget_unreadable(main) or unreadable_sink_states()):
             print("No held operator notices.")
         return 1 if unreadable else 0
     info = summary(main)
@@ -633,9 +733,12 @@ def _clear_unconfirmed(main: Path, key: str) -> int:
                 queues: dict[Path, list[str | dict]] = {}
                 try:
                     records = read_recovery(main)
+                    aged, _, unreadable = journal_receipt_status()
+                    if unreadable:
+                        raise ValueError("dedupe journal unreadable")
                     if not any(row["key"] == key and not row.get("migration_to")
                                and row.get("cause") != "sink resolution pending"
-                               for row in records):
+                               for row in records) and not any(row["key"] == key for row in aged):
                         print(f"No unconfirmed alert for {key!r}.")
                         return 1
                     journal = json.loads(read_text_nofollow(journal_file))
@@ -712,7 +815,8 @@ def _clear_unreadable_journal(main: Path) -> int:
                               journal_file)
                     for copy in copies:
                         try:
-                            source = salvage_journal_entries(read_text_nofollow(copy))
+                            source = salvage_journal_entries(
+                                read_bytes_nofollow(copy).decode("utf-8", errors="ignore"))
                         except (FileNotFoundError, OSError):
                             continue
                         if not isinstance(source, dict):
