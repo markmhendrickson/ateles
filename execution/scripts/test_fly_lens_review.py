@@ -92,6 +92,20 @@ def test_verdict_file_shape_and_summary(tmp_path):
     "| PRIVATE-NOTE: the details |",
     "  `PRIVATE-NOTE`: the details",
     "private-note: the details",
+    "## Private note\nthe details on the next line",
+    "**PRIVATE-NOTE**\nthe details on the next line",
+    "Private note: the details",
+    "PRIVATE_NOTE: the details",
+    "PRIVATE\u2011NOTE: the details",
+    "PRIVATE\u2013NOTE: the details",
+    "PRIVATE-NOTE\uff1a the details",
+    "\u200bPRIVATE-NOTE: the details",
+    "\ufeffPRIVATE-NOTE: the details",
+    "PRIVATE-NOTES: the details",
+    "~~PRIVATE-NOTE:~~ the details",
+    "Private to requesting session: the details",
+    "Private (requesting session only): the details",
+    "<b>x</b>\n- [ ] PRIVATE-NOTE: the details",
 ])
 def test_a_private_section_is_never_in_the_posted_verdict(tmp_path, private):
     reply = GOOD + "\nOne out-of-scope hardening observation was recorded privately.\n\n" + private + "\n"
@@ -118,12 +132,33 @@ def test_a_private_marker_above_the_verdict_fails_closed_and_posts_nothing(tmp_p
     "Private data is never logged.",
     "A PRIVATE-NOTE marker is described in the brief.",
     "See the private-note section of the docs.",
+    "Private note handling is covered by the new tests.",
+    "Private notes are written to a 0600 file.",
 ])
 def test_ordinary_review_text_that_mentions_privacy_is_not_a_private_section(tmp_path, line):
     reply = GOOD + "\n" + line + "\n"
     run(tmp_path, Script(ok_env(reply)))
     assert line in (tmp_path / "pm.verdict.md").read_text()
     assert not (tmp_path / "pm.private.txt").exists()
+
+
+def test_a_reply_that_says_it_recorded_something_privately_but_has_no_private_section_is_never_posted(tmp_path):
+    # The details may sit in a form the matching missed: never post such a reply.
+    reply = GOOD + "\nOne out-of-scope hardening observation was recorded privately.\n\nsome unmarked details\n"
+    rc, posts = run(tmp_path, Script(ok_env(reply), ok_env(reply)), "--post")
+    assert posts == [] and not (tmp_path / "pm.verdict.md").exists()
+    assert rc != 0
+
+
+def test_the_private_file_is_created_private_from_the_start(tmp_path):
+    import os
+    reply = GOOD + "\nPRIVATE-NOTE: the details\n"
+    old = os.umask(0o022)
+    try:
+        run(tmp_path, Script(ok_env(reply)))
+    finally:
+        os.umask(old)
+    assert ((tmp_path / "pm.private.txt").stat().st_mode & 0o777) == 0o600
 
 
 def test_a_reply_without_a_private_section_is_posted_whole(tmp_path):

@@ -47,6 +47,7 @@ import re
 import subprocess
 import sys
 import time
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -351,23 +352,34 @@ def extract_verdict(stdout: str) -> str | None:
     return None
 
 
-# A line that opens a private section of a lens reply. The brief asks for `PRIVATE-NOTE:`; the
-# second shape is what a lens wrote unprompted ("*Private to the requesting session ...*") and
-# was posted publicly once, so both are recognised. Everything from the first such line on (and a
-# directly preceding horizontal rule) is private: never posted, kept in a 0600 file.
+# A line that opens a private section of a lens reply. The brief asks for `PRIVATE-NOTE:`; a lens
+# also wrote "Private to the requesting session ..." unprompted once and it was posted publicly, so
+# both are recognised, by their WORDS and not by exact punctuation: each line is normalised first
+# (NFKC so full-width and compatibility forms fold, zero-width characters and the BOM removed,
+# case folded, markdown prefix and emphasis dropped) and the marker is then matched with any
+# hyphen, underscore or space between its words. A marker line is the marker followed by a colon
+# (ASCII or full-width, with at most a short qualifier before it) or standing alone on its line (a
+# heading). Everything from the first such line on (and a horizontal rule directly above it) is
+# private: never posted, kept in a 0600 file.
+_ZERO_WIDTH_RE = re.compile("[\u200b-\u200f\u2060-\u2064\ufeff\u00ad]")
+_MARKUP_PREFIX_RE = re.compile(r"^[\s>#*_`~\-+\d.()\[\]|]+")
 PRIVATE_LINE_RE = re.compile(
-    r"^(?:private-note\W*:|private to the requesting session)", re.IGNORECASE)
-# Markdown that can sit before the marker on its line: quote and list markers, headings,
-# numbering, table pipes, code ticks and emphasis. All of it is dropped before matching, and
-# emphasis or ticks BETWEEN the words and the colon are dropped too, so `> - **PRIVATE-NOTE**:`
-# and `## Private to the requesting session` open a private section just like a bare marker.
-_MARKUP_PREFIX_RE = re.compile(r"^[\s>#*_`\-+\d.()\[\]|]+")
+    r"^(?:private[\W_]*notes?(?:[^\n:\uff1a]{0,40}[:\uff1a].*|\W*)"
+    r"|private[\W_]*(?:to[\W_]*)?(?:the[\W_]*)?requesting[\W_]*session.*)$")
+
+
+def _normalise_line(line: str) -> str:
+    text = unicodedata.normalize("NFKC", line)
+    text = _ZERO_WIDTH_RE.sub("", text).casefold()
+    text = _MARKUP_PREFIX_RE.sub("", text)
+    return text.replace("*", "").replace("_", "_").replace("`", "").replace("~", "").strip()
 
 
 def _private_line(line: str) -> bool:
-    text = _MARKUP_PREFIX_RE.sub("", line)
-    text = text.replace("*", "").replace("_", "").replace("`", "")
-    return bool(PRIVATE_LINE_RE.match(text.strip()))
+    return bool(PRIVATE_LINE_RE.match(_normalise_line(line)))
+
+
+RECORDED_PRIVATELY_RE = re.compile(r"recorded\s+privately", re.IGNORECASE)
 
 
 def split_private(body: str) -> tuple[str, str]:
@@ -459,9 +471,19 @@ def run_lens(*, lens: str, repo: str, pr: int, head: str, task_entity_id: str,
                     continue
                 if private:
                     note = out_dir / f"{lens}.private.txt"
-                    note.write_text(private)
-                    os.chmod(note, 0o600)
-                    log(f"{lens}: a private section was removed from the verdict (kept in {note.name})")
+                    fd = os.open(note, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    with os.fdopen(fd, "w") as fh:
+                        fh.write(private)
+                    os.chmod(note, 0o600)  # also when the file already existed with another mode
+                    log(f"{lens}: a private section ({len(private.splitlines())} lines) was removed "
+                        f"from the verdict (kept in {note.name})")
+                elif RECORDED_PRIVATELY_RE.search(body):
+                    # The reply says an observation was recorded privately but no private section
+                    # was found: the details may sit in a form the matching missed. Never post.
+                    last_reason = "the reply says an observation was recorded privately but has no private section"
+                    att["problem"] = last_reason
+                    log(f"{lens}: attempt {attempt}: {last_reason}")
+                    continue
                 path = out_dir / f"{lens}.verdict.md"
                 path.write_text(body)
                 token = VERDICT_RE.search(body.splitlines()[1]).group(1)  # type: ignore[union-attr]
