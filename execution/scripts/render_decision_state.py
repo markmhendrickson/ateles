@@ -201,12 +201,15 @@ def validate_register(text: str) -> None:
         cells = row_like_cells(line)
         if cells is None:
             continue
-        if len(cells) >= 5 and STATUS_LEAD_RE.match(cells[-1]):
-            raise ValueError(
-                f"register-shaped row {cells[0][:20]!r} lies outside the register section "
-                f"({REGISTER_HEADING!r} up to the next level-two heading); a heading "
-                "inside the register would drop later rows from the projection"
-            )
+        # ANY numbered table row outside the register section is an error, whatever its status
+        # cell or column count: the real document has none (checked), so a numbered row there is
+        # either a register row cut off by an inserted heading or a table that must not use
+        # the register's row shape. The register's boundaries are explicit and exclusive.
+        raise ValueError(
+            f"numbered table row {cells[0][:20]!r} lies outside the register section "
+            f"({REGISTER_HEADING!r} up to the next level-two heading); a heading "
+            "inside the register would drop later rows from the projection"
+        )
     seen: set[str] = set()
     for line in section.splitlines():
         # A line that looks like a numbered table row - with or without its leading pipe,

@@ -845,9 +845,26 @@ class TestRenderCleanly(unittest.TestCase):
                     self.assertEqual(code, 1, output[:200])
                     self.assertIn("outside the register section", output)
 
-    def test_other_sections_with_non_register_tables_are_not_flagged(self):
+    def test_plain_and_unbolded_numbered_rows_after_a_heading_are_caught_too(self):
+        """Not only rows that look like register rows: any numbered table row outside the section."""
         head = "## The register of open design decisions\n\n"
-        text = head + register(**{"1": "**open**"}) + "\n## Another section\n| a | b |\n|---|---|\n| 5 | plain |\n"
+        rows = register(**{"1": "**open**"})
+        for after in (
+            "| 999 | question | `x#q` | \u2014 | plain open |",
+            "999 | question | `x#q` | \u2014 | plain open |",
+            "   | 999 | question | `x#q` | \u2014 | plain open |",
+            "| 5 | plain |",
+        ):
+            text = head + rows + "\n## An inserted heading\n\n" + after + "\n"
+            for flags in (("--check",), ("--json",), ("--stdout",)):
+                with self.subTest(row=after, mode=flags[0]):
+                    code, output = self._run_mode(text, *flags)
+                    self.assertEqual(code, 1, output[:200])
+                    self.assertIn("outside the register section", output)
+
+    def test_prose_and_unnumbered_tables_in_other_sections_are_not_flagged(self):
+        head = "## The register of open design decisions\n\n"
+        text = head + register(**{"1": "**open**"}) + "\n## Another section\n| a | b |\n|---|---|\n| x | plain |\n\nSome prose.\n"
         code, output = self._run_mode(text, "--check")
         self.assertEqual(code, 0, output[:200])
 
