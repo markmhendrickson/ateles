@@ -7,6 +7,7 @@ kwargs, fingerprint file, log event names. Synthetic fixtures only.
 
 from __future__ import annotations
 
+import html
 import logging
 import sys
 import types
@@ -2230,3 +2231,99 @@ def test_multi_item_request_gives_each_item_its_accepted_form():
     assert f"APPROVE {cal_marker}" not in body
     assert f"ATTENDED {one_marker}" not in body
     assert "calendar need ATTENDED" in body and "one-off payments need APPROVE" in body
+
+
+@pytest.mark.parametrize("recovered", (False, True))
+@pytest.mark.parametrize("format", ("plain", "html"))
+def test_full_sent_payment_request_quote_approves(monkeypatch, tmp_path, recovered, format):
+    handler = _Handler("session", label="Example", amount=60)
+    triggered = [(handler, [{}])]
+    _arm_email(monkeypatch)
+    sent = []
+    monkeypatch.setattr(consent_email, "send_request",
+                        lambda subject, body: sent.append((subject, body)) or True)
+    item = consent_email.build_pending_items(triggered, "2026-09-22")[0]
+    calls = {"n": 0}
+
+    def fake(args, timeout=45):
+        if "+triage" in args:
+            query = args[args.index("--query") + 1]
+            active = item.token in query or (recovered and calls["n"] > 0 and
+                                             "[Ateles] Monedula consent" in query)
+            return {"complete": True, "messages": [{
+                "id": "reply", "subject": f"RE: {sent[-1][0]}",
+                "from": "Op <op@example.com>"}] if active else []}
+        if "+read" in args:
+            if recovered and calls["n"] == 0:
+                calls["n"] += 1
+                return {"body_text": "ATTENDED", "body_html": "<p>SKIP</p>"}
+            original = sent[-1][1]
+            marker = subject_marker(item.token)
+            authored = f"ATTENDED {marker}" if recovered else "ATTENDED"
+            if format == "plain":
+                return {"body_text": authored + "\n" + "\n".join(
+                    f"> {line}" for line in original.splitlines())}
+            return {"body_html": (f"<p>{authored}</p><blockquote>" +
+                                  "<br>".join(html.escape(line) for line in original.splitlines()) +
+                                  "</blockquote>")}
+        raise AssertionError(args)
+
+    monkeypatch.setattr(_ec, "gws_json", fake)
+    monkeypatch.setattr(_ec, "_fetch_auth_results", lambda _mid: [_GOOGLE_PASS])
+    path = tmp_path / "m.json"
+    if recovered:
+        first = consent_email.request_and_collect(triggered, "2026-09-22", state_path=path)
+        assert first.approved == set()
+        assert len(sent) == 2
+        assert "previous consent request" in sent[-1][1]
+        item = consent_email.build_pending_items(triggered, "2026-09-22", 2)[0]
+    result = consent_email.request_and_collect(triggered, "2026-09-22", state_path=path)
+    assert result.approved == {item.token}
+
+
+@pytest.mark.parametrize("batch", (False, True))
+@pytest.mark.parametrize("correction,authenticated", (
+    ("do not pay", True), ("ATTENDED", True), ("do not pay", False)))
+def test_tokenless_payment_reply_holds_entire_request(
+        monkeypatch, tmp_path, batch, correction, authenticated):
+    handlers = [_Handler("session", label="Example", amount=60)]
+    if batch:
+        handlers.append(_Handler("invoice", label="Invoice", amount=25, calendar=False))
+    triggered = [(handler, [{}]) for handler in handlers]
+    items = consent_email.build_pending_items(triggered, "2026-09-22")
+    _arm_email(monkeypatch)
+    sent = []
+    monkeypatch.setattr(consent_email, "send_request",
+                        lambda subject, body: sent.append((subject, body)) or True)
+
+    def fake(args, timeout=45):
+        if "+triage" in args:
+            query = args[args.index("--query") + 1]
+            mids = (["m1"] if "subject:" not in query and items[0].token in query else
+                    ["m1", "m2"] if "subject:" in query else [])
+            return {"complete": True, "messages": [{
+                "id": mid, "subject": f"RE: [Ateles] Monedula consent 2026-09-22"
+                                      + (f" {subject_marker(items[0].token)}" if mid == "m1" else ""),
+                "from": "op@example.com"} for mid in mids]}
+        if "+read" in args:
+            mid = args[args.index("--id") + 1]
+            if mid == "m2":
+                return {"body_text": correction}
+            body = ("\n".join(f"ATTENDED {subject_marker(i.token)}" if i.is_calendar
+                              else f"APPROVE {subject_marker(i.token)}" for i in items)
+                    if batch else "ATTENDED")
+            return {"body_text": body}
+        raise AssertionError(args)
+
+    monkeypatch.setattr(_ec, "gws_json", fake)
+    monkeypatch.setattr(_ec, "_fetch_auth_results", lambda mid:
+                        [_GOOGLE_PASS] if mid == "m1" or authenticated else [])
+    notices = []
+    result = consent_email.request_and_collect(
+        triggered, "2026-09-22", state_path=tmp_path / "m.json",
+        on_missing_token_reply=lambda msg, key: notices.append(msg))
+    assert len(result.approved) == (0 if authenticated else len(items))
+    assert not any("no payment was approved" in note for note in notices)
+    if authenticated:
+        assert len(result.blocked) == len(items)
+        assert any("is held" in note for note in notices)

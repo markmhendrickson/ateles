@@ -914,6 +914,42 @@ def _complete_triage_rows(data: Any, max_msgs: int) -> tuple[list[dict] | None, 
     return rows, ""
 
 
+def sent_request_body(token: str, reply_subject: str, *, max_msgs: int = 40) -> str | None:
+    """Read the matching sent notice; missing or ambiguous evidence proves no quote."""
+    # The target is in the reply subject, while the token is in the sent body.
+    subject = re.sub(r"^\s*re:\s*", "", reply_subject, flags=re.IGNORECASE).strip()
+    if not subject or token not in {"release-approve:", "swarm-approve:"}:
+        return None
+    target = (re.search(r"\bRelease\s+(v[0-9][\w.+-]*)", subject, re.IGNORECASE)
+              if token == "release-approve:" else
+              re.search(r"\bPR\s+([A-Za-z0-9._-]+/[A-Za-z0-9._-]+#\d+)", subject))
+    if target is None:
+        return None
+    query = f'in:sent "{token} {target.group(1)}"'
+    data = gws_json(["gmail", "+triage", "--format", "json", "--max",
+                     str(max_msgs), "--query", query])
+    rows, _ = _complete_triage_rows(data, max_msgs)
+    if rows is None:
+        return None
+    swarm = os.environ.get("ATELES_SWARM_EMAIL", "").strip().casefold()
+    candidates = [row for row in rows
+                  if row["subject"].strip().casefold() == subject.casefold()
+                  and _parse_address(str(row.get("from") or "")).casefold() == swarm]
+    if len(candidates) != 1:
+        return None
+    sent = gws_json(["gmail", "+read", "--id", candidates[0]["id"],
+                     "--headers", "--format", "json"], timeout=30)
+    if not isinstance(sent, dict):
+        return None
+    body = sent.get("body_text")
+    if not isinstance(body, str):
+        html = sent.get("body_html")
+        body = _extract_authored_html(html)[0] if isinstance(html, str) else None
+    if not body or f"{token} {target.group(1)}".casefold() not in body.casefold():
+        return None
+    return body
+
+
 def read_replies_with_status(
     tokens: list[str],
     max_msgs: int = 40,
@@ -922,7 +958,7 @@ def read_replies_with_status(
     on_unauthenticated_operator_reply: Callable[[], None] | None = None,
     require_enabled: bool = True,
     correction_queries: list[str] | None = None,
-    request_bodies: dict[str, str] | None = None,
+    request_bodies: dict[str, str] | Callable[[str, str], str | None] | None = None,
 ) -> ReadRepliesOutcome:
     """Statusful inbox sweep — distinguish empty-ok from transport failure.
 
@@ -975,23 +1011,20 @@ def read_replies_with_status(
         if data is None:
             # gws_json fail-opens to None on any transport/parse failure.
             # For statusful callers that is distinct from "zero matching msgs".
-            if not correction_query:
-                saw_transport_error = True
-                transport_detail = "gws_triage_failed"
+            saw_transport_error = True
+            transport_detail = "gws_triage_failed"
             continue
         msgs, error = _complete_triage_rows(data, max_msgs)
         if msgs is None:
-            if not correction_query:
-                saw_transport_error = True
-                transport_detail = error
+            saw_transport_error = True
+            transport_detail = error
             continue
         for m in msgs:
             mid = m["id"]
             subject = m["subject"]
             if len(mid) > 256 or len(subject) > 8192:
-                if not correction_query:
-                    saw_transport_error = True
-                    transport_detail = "gws_triage_oversized"
+                saw_transport_error = True
+                transport_detail = "gws_triage_oversized"
                 continue
             if not mid or mid in seen_ids or not subject.upper().startswith("RE:"):
                 continue
@@ -1024,10 +1057,9 @@ def read_replies_with_status(
             # failing authentication is not the operator.
             auth_results = _fetch_auth_results(mid)
             if auth_results is None:
-                if not correction_query:
-                    saw_transport_error = True
-                    transport_detail = "gws_auth_metadata_failed"
-                    unreadable_replies.append(ApprovalReply(mid, subject))
+                saw_transport_error = True
+                transport_detail = "gws_auth_metadata_failed"
+                unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
             if not sender_domain_authenticated(auth_results):
                 log.warning(
@@ -1045,16 +1077,14 @@ def read_replies_with_status(
             body_data = gws_json(["gmail", "+read", "--id", mid, "--headers",
                                   "--format", "json"], timeout=30)
             if not isinstance(body_data, dict):
-                if not correction_query:
-                    saw_transport_error = True
-                    transport_detail = "gws_read_failed"
-                    unreadable_replies.append(ApprovalReply(mid, subject))
+                saw_transport_error = True
+                transport_detail = "gws_read_failed"
+                unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
             if len(json.dumps(body_data).encode("utf-8")) > 262144:
-                if not correction_query:
-                    saw_transport_error = True
-                    transport_detail = "gws_read_oversized"
-                    unreadable_replies.append(ApprovalReply(mid, subject))
+                saw_transport_error = True
+                transport_detail = "gws_read_oversized"
+                unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
             # A triage snippet, subject, preview, or header can contain both
             # verdict and token, but none proves that the full reply was read.
@@ -1062,10 +1092,9 @@ def read_replies_with_status(
                           if key in body_data]
             if (any(not isinstance(body_data[key], str) for key in plain_keys) or
                     len({body_data[key] for key in plain_keys}) > 1):
-                if not correction_query:
-                    saw_transport_error = True
-                    transport_detail = "gws_read_invalid_response"
-                    unreadable_replies.append(ApprovalReply(mid, subject))
+                saw_transport_error = True
+                transport_detail = "gws_read_invalid_response"
+                unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
             plain_key = plain_keys[0] if plain_keys else None
             plain_present = plain_key is not None
@@ -1090,8 +1119,15 @@ def read_replies_with_status(
                 )
                 known += tuple(f"[APPROVE-{candidate}]" for candidate in tokens
                                if re.fullmatch(r"[0-9A-F]{8}", candidate, re.IGNORECASE))
+                if callable(request_bodies):
+                    try:
+                        original_request = request_bodies(token, subject)
+                    except Exception:  # noqa: BLE001 — missing proof cannot approve
+                        original_request = None
+                else:
+                    original_request = (request_bodies or {}).get(token)
                 html_body, boundary_seen = _extract_authored_html(
-                    raw_html, original_request=(request_bodies or {}).get(token),
+                    raw_html, original_request=original_request,
                     known_quote_lines=known, verify_quote=True)
                 if html_body and not boundary_seen and _unmarked_notification_copy(html_body):
                     html_body = ""
@@ -1099,10 +1135,9 @@ def read_replies_with_status(
                                   (not html_body.strip() or
                                    [line.casefold() for line in body.splitlines()] !=
                                    [line.casefold() for line in html_body.splitlines()])):
-                if not correction_query:
-                    saw_transport_error = True
-                    transport_detail = "reply_quote_boundary_unknown"
-                    unreadable_replies.append(ApprovalReply(mid, subject))
+                saw_transport_error = True
+                transport_detail = "reply_quote_boundary_unknown"
+                unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
             if not plain_present:
                 body = html_body
@@ -1113,10 +1148,9 @@ def read_replies_with_status(
                                        or any(_ATTRIBUTION.match(line.strip()) or _FORWARD.match(line.strip())
                                               for line in plain.splitlines())))
             if not body.strip() and not blank_quoted_reply:
-                if not correction_query:
-                    saw_transport_error = True
-                    transport_detail = "reply_quote_boundary_unknown"
-                    unreadable_replies.append(ApprovalReply(mid, subject))
+                saw_transport_error = True
+                transport_detail = "reply_quote_boundary_unknown"
+                unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
             reply = ApprovalReply(mid, subject, body,
                                   correlation_target=correlation_target)

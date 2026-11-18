@@ -143,12 +143,15 @@ def _load_mark(path: Path) -> dict:
         return {}
 
 
-def _save_mark(path: Path, fingerprint: str, sent_at: float, *, generation: int) -> None:
+def _save_mark(path: Path, fingerprint: str, sent_at: float, *, generation: int,
+               request_body: str | None = None) -> None:
     payload: dict[str, Any] = {
         "fingerprint": fingerprint,
         "generation": int(generation),
         "sent_at": sent_at,
     }
+    if request_body is not None:
+        payload["request_body"] = request_body
     path.write_text(json.dumps(payload, indent=2, sort_keys=True))
 
 
@@ -724,7 +727,7 @@ def request_and_collect(
             log.error("consent_request_send_failed — payments remain blocked; retry next tick")
             return _block_all(items, "consent_request_send_failed")
         # Ordering invariant: persist mark ONLY after send_request returns True.
-        _save_mark(path, fp, time.time(), generation=generation)
+        _save_mark(path, fp, time.time(), generation=generation, request_body=body)
 
     tokens = [i.token for i in items]
     sender_rejected = {"n": 0}
@@ -738,18 +741,19 @@ def request_and_collect(
         unauthenticated["n"] += 1
         log.warning(REASON_REPLY_UNAUTHENTICATED)
 
-    request_variants = [build_request_body(items, superseded=value,
-                                          settled=settled, unknown=unknown)[1]
-                        for value in (False, True)]
-    original_lines = "\n".join(request_variants)
+    # The persisted mark records the actual successful send, including a
+    # recovery preface. Older marks have no body and cannot prove extra quotes.
+    original_lines = (mark.get("request_body") if already_sent else body)
     outcome: ReadRepliesOutcome = read_replies_with_status(
         tokens,
         on_sender_rejected=_on_rejected,
         on_unauthenticated_operator_reply=_on_unauthenticated,
         correction_queries=[f"[Ateles] Monedula consent {items[0].payment_date}"],
-        request_bodies={token: original_lines for token in tokens},
+        request_bodies={token: original_lines for token in tokens}
+        if isinstance(original_lines, str) else {},
     )
 
+    correction_holds = bool(outcome.correction_only_replies)
     if on_missing_token_reply is not None:
         forms = "; ".join(
             f"`{'attended' if item.is_calendar else 'yes'} {item.handler_name}`"
@@ -757,7 +761,7 @@ def request_and_collect(
         for reply in outcome.correction_only_replies:
             try:
                 on_missing_token_reply(
-                    f"monedula: no payment was approved for {items[0].payment_date}. "
+                    f"monedula: payment consent for {items[0].payment_date} is held. "
                     "Your email reply did not include a payment code. Reply to "
                     "the current request and quote it so its code is present. "
                     f"For Telegram consent, send exactly {forms} for the "
@@ -798,7 +802,8 @@ def request_and_collect(
                 "using its new codes can count.\n\n" + body
             )
             if send_request(subject, body):
-                _save_mark(path, fp, time.time(), generation=new_generation)
+                _save_mark(path, fp, time.time(), generation=new_generation,
+                           request_body=body)
                 result.send_count += 1
             else:
                 log.error("consent_reissue_send_failed — payments held")
@@ -814,6 +819,14 @@ def request_and_collect(
             path.parent,
             on_unauthenticated_reply,
         )
+
+    if correction_holds:
+        for item in items:
+            key = match_key(item)
+            result.states[key] = "blocked"
+            result.blocked.add(key)
+        result.reason_code = "consent_reply_missing_token"
+        return result
 
     if not outcome.texts:
         for item in items:

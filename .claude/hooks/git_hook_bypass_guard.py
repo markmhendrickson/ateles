@@ -169,7 +169,7 @@ _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 _SENSITIVE_NAME = re.compile(r"^(?:GIT_[A-Za-z0-9_]*|HUSKY[A-Za-z0-9_]*)$")
 _GIT_LOCATION_NAME = frozenset({"HOME", "XDG_CONFIG_HOME"})
 _LOADER_NAME = frozenset({
-    "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "GIT_EXEC_PATH", "GIT_SSH",
+    "PATH", "CDPATH", "PWD", "OLDPWD", "LD_PRELOAD", "LD_LIBRARY_PATH", "GIT_EXEC_PATH", "GIT_SSH",
     "GIT_SSH_COMMAND", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_EXTERNAL_DIFF",
     "GIT_PAGER", "PAGER", "EDITOR", "VISUAL", "GIT_EDITOR", "SHELL",
     "BASH_ENV", "ENV", "IFS", "PYTHONPATH", "PYTHONSTARTUP",
@@ -246,7 +246,7 @@ _WRAPPERS = frozenset(_WRAPPER_GRAMMAR)
 # an attempted invocation is recognized and refused before generic handling.
 _DENIED_WRAPPERS = frozenset({"script", "parallel", "watch", "chroot", "doas", "sudo"})
 _DENIED_DIRECTORY_PROGRAMS = frozenset({
-    "pushd", "popd", "tmux", "screen", "nsenter",
+    "pushd", "popd", "mount", "umount", "tmux", "screen", "nsenter",
     "runuser", "su",
 })
 # Every wrapper has an explicit write-operand decision. Values name options
@@ -996,6 +996,9 @@ def _matches_protected_path(normalized: str) -> bool:
 
 def _protected_path(path: str) -> bool:
     """Paths that can redirect or disable the prepare checkout's hooks."""
+    if re.search(r"^/(?:dev/(?:fd|stdin|stdout|stderr)(?:/|$)|"
+                 r"proc/(?:self|\d+)(?:/|$))", path):
+        return True
     forms, unresolved = _path_forms(path)
     return any(_matches_protected_path(form) for form in forms) or (
         unresolved and _enters_protected_dir(path)
@@ -1280,17 +1283,32 @@ def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None
         targets = args[-1:] + [args[i + 1] for i, arg in enumerate(args[:-1])
                                if arg in ("-t", "--target-directory")]
         sources = [arg for arg in args[:-1] if not arg.startswith("-")]
-        if base == "ln" and any(
-            arg in {"-s", "--symbolic"} or (
+        if base in {"ln", "cp"} and any(
+            arg in {"-s", "--symbolic", "--symbolic-link"} or (
                 arg.startswith("-") and not arg.startswith("--") and "s" in arg[1:]
             ) for arg in args
         ):
-            for source in sources:
-                if _protected_path(source) or any(
-                    _protected_path(os.path.join(os.path.dirname(target), source))
-                    for target in targets
-                ):
-                    return "ln creating a symlink to protected hook or git config path"
+            # A later command can traverse a newly created link before it
+            # exists on disk for path resolution. Refuse link creation here.
+            return f"{base} creating a link whose later destination is unknown"
+        if base == "ln" and any(_protected_path(source) for source in sources):
+            return "ln linking a protected hook or git config path"
+        if base == "cp" and any(arg in {"-l", "--link"} or
+                                 (arg.startswith("-") and not arg.startswith("--")
+                                  and "l" in arg[1:]) for arg in args):
+            return "cp creating a link whose later destination is unknown"
+        if base == "cp" and any(
+            arg in {"-R", "-r", "-a", "--recursive", "--archive"} or
+            (arg.startswith("-") and not arg.startswith("--") and
+             any(flag in arg[1:] for flag in "Rra")) for arg in args
+        ):
+            return "cp tree may contain a link whose later destination is unknown"
+        if base == "rsync" and any(
+            arg in {"-a", "-l", "--archive", "--links", "--copy-links"}
+            or (arg.startswith("-") and not arg.startswith("--") and
+                any(flag in arg[1:] for flag in "alL")) for arg in args
+        ):
+            return "rsync may create a link whose later destination is unknown"
         # A directory target writes each source under its own name, so
         # `cp config .git/` lands on .git/config.
         targets += [os.path.join(target, os.path.basename(os.path.normpath(source)))
@@ -1676,7 +1694,9 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int =
     ):
         return f"{base} directory option is not allowed during release preparation"
     if base == "cd" and (len(rest) > 2 or
-                          (len(rest) > 1 and rest[1].text == "-")):
+                          (len(rest) > 1 and
+                           (rest[1].text == "-" or
+                            not rest[1].text.startswith(("/", "."))))):
         return "cd working directory cannot be resolved literally"
     own_mentions = _words_mention_git(rest[1:], cmd.stdin)
     any_expanded = any(w.expanded for w in rest[1:])

@@ -731,7 +731,7 @@ def test_unreadable_authenticated_reply_notices_once_then_routes_once(
 
 def _poll_authored_reply(monkeypatch, tmp_path, kind, body_data, *, polls=1,
                          include_token=True, triage_response=None,
-                         authenticated=True):
+                         authenticated=True, sent_body=None):
     """Exercise the real shared reader and both Turdus POST routes with fake gws."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
@@ -759,6 +759,10 @@ def _poll_authored_reply(monkeypatch, tmp_path, kind, body_data, *, polls=1,
     def fake_gws(args, timeout=45):
         if "+triage" in args:
             token = args[args.index("--query") + 1]
+            if token.startswith("in:sent"):
+                return {"complete": True, "messages": [{
+                    "id": "sent-1", "from": "Swarm <swarm@example.net>",
+                    "subject": subject.removeprefix("Re: ")}] if sent_body else []}
             if ("release-approve:" in token) == (kind == "release"):
                 base = {"complete": True, "messages": [{"id": "approval-1", "from": "Op <op@example.com>",
                                                        "subject": subject}]}
@@ -766,7 +770,7 @@ def _poll_authored_reply(monkeypatch, tmp_path, kind, body_data, *, polls=1,
                 base = {"complete": True, "messages": []}
             return triage_response(token, base) if triage_response else base
         if "+read" in args:
-            return body_data
+            return {"body_text": sent_body} if "sent-1" in args else body_data
         raise AssertionError(args)
 
     posts = []
@@ -1762,3 +1766,83 @@ def test_partial_sweep_retries_failed_held_notice(monkeypatch, tmp_path, kind):
     assert all("is held" in message for message, _ in attempts)
     assert all(kwargs["email_eligible"] is False for _, kwargs in attempts)
     assert state["held_approval_notice_ids"] == ["m1"]
+
+
+@pytest.mark.parametrize("kind", ("pr", "release"))
+@pytest.mark.parametrize("format", ("plain", "html"))
+def test_complete_sent_notice_quote_routes_approval(monkeypatch, tmp_path, kind, format):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    sent = f"Ready for review.\n{token}"
+    if format == "plain":
+        body = {"body_text": f"{approval}\n> Ready for review.\n> {token}"}
+    else:
+        body = {"body_html": (f"<p>{approval}</p><blockquote>"
+                              f"Ready for review.<br>{token}</blockquote>")}
+    posts, _, _ = _poll_authored_reply(
+        monkeypatch, tmp_path, kind, body, sent_body=sent)
+    assert len(posts) == 1
+
+
+@pytest.mark.parametrize("kind", ("pr", "release"))
+def test_quote_not_in_sent_notice_is_unreadable(monkeypatch, tmp_path, kind):
+    approval = "approve v1.2.3" if kind == "release" else "APPROVE"
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    posts, _, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind,
+        {"body_html": f"<p>{approval}</p><blockquote>Other notice<br>{token}</blockquote>"},
+        sent_body=f"Ready for review.\n{token}")
+    assert posts == []
+    assert any("could not be read yet" in note for note in notices.sent)
+
+
+@pytest.mark.parametrize("kind", ("pr", "release"))
+@pytest.mark.parametrize("reverse", (False, True))
+@pytest.mark.parametrize("correction,authenticated", (
+    ("do not merge", True), ("approve", True), ("do not merge", False)))
+def test_tokenless_reply_holds_matching_approval_sweep(
+        monkeypatch, tmp_path, kind, reverse, correction, authenticated):
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(turdus, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setattr(turdus, "_STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(turdus, "_poll_gmail_messages", lambda *_: [])
+    monkeypatch.setattr(turdus, "DRY_RUN", False)
+    monkeypatch.setattr(email_channel, "_gws", lambda: "/synthetic/gws")
+    subject = ("Re: Release v1.2.3 ready to approve" if kind == "release" else
+               "Re: [Ateles] PR o/r#7 is READY TO MERGE")
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    approval = "approve v1.2.3" if kind == "release" else "approve"
+    order = ["m2", "m1"] if reverse else ["m1", "m2"]
+
+    def fake_gws(args, timeout=45):
+        if "+triage" in args:
+            query = args[args.index("--query") + 1]
+            active = ("release-approve:" in query) == (kind == "release")
+            mids = (["m1"] if "subject:" not in query else order) if active else []
+            return {"complete": True, "messages": [
+                {"id": mid, "subject": subject, "from": "op@example.com"}
+                for mid in mids]}
+        if "+read" in args:
+            mid = args[args.index("--id") + 1]
+            return {"body_text": f"{approval}\n> {token}" if mid == "m1" else correction}
+        raise AssertionError(args)
+
+    monkeypatch.setattr(email_channel, "gws_json", fake_gws)
+    monkeypatch.setattr(email_channel, "_fetch_auth_results", lambda mid:
+                        [_AUTH_PASS] if mid == "m1" or authenticated else [])
+    posts = []
+
+    async def post(*args):
+        posts.append(args)
+        return True
+
+    monkeypatch.setattr(turdus, "_post_email_approval", post)
+    monkeypatch.setattr(turdus, "_post_release_approval", post)
+    notices = _StubNotifier()
+    _run(turdus.poll_once(notices, {"last_message_id": None}))
+    assert len(posts) == (0 if authenticated else 1)
+    assert not any("no approval was recorded" in note for note in notices.sent)
+    if authenticated:
+        assert any("is held" in note for note in notices.sent)

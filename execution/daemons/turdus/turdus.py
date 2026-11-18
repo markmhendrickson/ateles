@@ -1145,6 +1145,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         max_msgs=MAX_MESSAGES, require_enabled=False,
         correction_queries=[_MERGE_READY_SUBJECT_MARKER,
                             _RELEASE_READY_SUBJECT_MARKER],
+        request_bodies=email_channel.sent_request_body,
     )
     for reply in outcome.unreadable_replies:
         mid = reply.message_id
@@ -1177,11 +1178,10 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         state["unreadable_notice_ids"] = unreadable_notice_ids[-_MAX_PROCESSED_IDS:]
         _save_state(state)
     approval_count = 0
+    correction_targets: set[str] = set()
     if outcome.kind in ("ok", "transport_error"):
         for reply in outcome.correction_only_replies:
             mid = reply.message_id
-            if mid in correction_id_set or mid in processed_id_set:
-                continue
             subject = reply.subject
             release = _RELEASE_READY_SUBJECT_MARKER.lower() in subject.lower()
             if release:
@@ -1194,9 +1194,12 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
                 target = None
             if not target:
                 continue
+            correction_targets.add(target.casefold())
+            if mid in correction_id_set or mid in processed_id_set:
+                continue
             exact_form = f"approve {target}" if release else "approve"
             delivered = notifier.send(
-                f"{DAEMON_NAME}: no approval was recorded for {target}. "
+                f"{DAEMON_NAME}: email approval for {target} is held. "
                 "This email reply did not contain the request's correlation token. "
                 "An email reply must quote the request so its token is present. "
                 f"To approve in Telegram, send exactly `{exact_form}`.",
@@ -1216,7 +1219,10 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
                    "subject": reply.subject, "body": reply.body,
                    "authenticated": reply.authenticated,
                    "correlation_target": reply.correlation_target,
-                   "approval_allowed": outcome.kind == "ok",
+                   "approval_allowed": (outcome.kind == "ok" and
+                                        reply.correlation_target is not None and
+                                        reply.correlation_target.casefold()
+                                        not in correction_targets),
                    "correction_notified": reply.message_id in correction_id_set}
             try:
                 if await _maybe_handle_release_approval(msg, notifier) or await _maybe_handle_swarm_approval(msg, notifier):
@@ -1229,7 +1235,8 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
                                   reply.subject.lower() else "approve")
                     delivered = notifier.send(
                         f"{DAEMON_NAME}: exact email approval for {held_target} is held "
-                        "because another reply in this sweep could not be read. "
+                        "because another reply in this sweep was unreadable or "
+                        "did not carry the request token. "
                         f"To approve in Telegram, send exactly `{exact_form}`.",
                         priority=Priority.BLOCKER, handler=DAEMON_NAME,
                         email_eligible=False,

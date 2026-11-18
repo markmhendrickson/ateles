@@ -595,7 +595,7 @@ def test_prefixed_writers_refuse_protected_targets(prefix, target, writer):
 ))
 @pytest.mark.parametrize("writer", (
     "tee src/output", "cp source src/output", "mv source src/output",
-    "sed -i s/a/b/ src/output", "install source src/output", "cd src",
+    "sed -i s/a/b/ src/output", "install source src/output", "cd ./src",
 ))
 def test_prefixed_writers_allow_ordinary_literal_targets(prefix, writer):
     if writer.startswith("cd ") and prefix in {"env", "command", "builtin", "exec", "nice", "nohup", "time"}:
@@ -626,7 +626,7 @@ def test_writers_behind_wrapper_options_refuse_protected_targets(prefix, target,
 @pytest.mark.parametrize("prefix", WRAPPED_PREFIXES)
 @pytest.mark.parametrize("writer", (
     "tee src/output", "cp source src/output", "mv source src/output",
-    "sed -i s/a/b/ src/output", "install source src/output", "cd src",
+    "sed -i s/a/b/ src/output", "install source src/output", "cd ./src",
 ))
 def test_writers_behind_wrapper_options_allow_ordinary_targets(prefix, writer):
     if (prefix == "command -p" or prefix.split()[0] in _guard._DENIED_WRAPPERS
@@ -1011,7 +1011,7 @@ def test_entering_protected_directory_refused(command):
 
 @pytest.mark.parametrize("command", (
     "cp notes.md docs/releases/",
-    "cd docs/releases && printf x > notes.md",
+    "cd ./docs/releases && printf x > notes.md",
     "mv draft.md docs/",
 ))
 def test_ordinary_copy_and_cd_allowed(command):
@@ -1039,12 +1039,34 @@ def test_literal_directory_change_checks_effective_relative_path(command):
 
 
 @pytest.mark.parametrize("command", (
-    "cd docs && tee notes.txt",
-    "cd docs && cd .. && tee notes.txt",
-    "cd docs && printf x > notes.txt",
+    "cd ./docs && tee notes.txt",
+    "cd ./docs && cd .. && tee notes.txt",
+    "cd ./docs && printf x > notes.txt",
 ))
 def test_literal_directory_change_keeps_ordinary_relative_write(command):
     assert_allowed(command)
+
+
+@pytest.mark.parametrize("command", (
+    "CDPATH=. cd docs && printf x > notes.txt",
+    "export CDPATH=. && cd docs && printf x > notes.txt",
+    "env CDPATH=. sh -c 'cd docs && printf x > notes.txt'",
+    "cd docs && printf x > notes.txt",
+    "cd - && printf x > notes.txt",
+    "PWD=/tmp cd ./docs",
+    "OLDPWD=/tmp cd ./docs",
+    "pushd ./docs",
+    "popd",
+    "mount --bind source ./docs",
+    "printf x > /dev/fd/3",
+    "cp source /proc/self/cwd/.git/config",
+    "ln -s . ./ordinary-link && printf x > ordinary-link/.git/config",
+    "cp -s . ./ordinary-link && cp source ordinary-link/.git/config",
+    "ln -s . ./ordinary-link && cd ./ordinary-link && printf x > .git/config",
+    "rsync -a source/ ./ordinary-dir/ && printf x > ordinary-dir/.git/config",
+))
+def test_unresolved_path_mechanisms_refused_at_hook_entry(command):
+    assert_refused(command)
 
 
 @pytest.mark.parametrize("prefix", (
