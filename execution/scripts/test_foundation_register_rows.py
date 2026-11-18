@@ -348,3 +348,11 @@ class TestGfmTableBlock(unittest.TestCase):
             self.assertEqual(reserve.numbers("decision", text), [5, 6, 7])
         with self.assertRaisesRegex(ValueError, "duplicate register row"):
             decision_rows(register(**{"5-7": "**open**", "5–7": "**open**"}))
+
+    def test_blocks_cell_preserves_inline_code_pipe(self):
+        text = (
+            "| # | The question | Argued in | Blocks | Status |\n"
+            "|---|---|---|---|---|\n"
+            "| 1 | q | a | `left|right` and more | **open** |\n"
+        )
+        self.assertEqual(ds.parse_rows(text)["1"]["blocks"], "`left|right` and more")

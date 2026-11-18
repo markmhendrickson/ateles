@@ -167,7 +167,7 @@ def decision_rows(text: str) -> dict[str, dict[str, str]]:
         rows[number] = {
             "question": cells[1],
             "argued_in": cells[2],
-            "blocks": cells[3].split("|", 1)[0].strip(),
+            "blocks": cells[3],
             "status": status,
             "status_cell": cells[4],
         }
