@@ -627,6 +627,7 @@ async def _fetch_issue_comments(client: httpx.AsyncClient, repo: str, pr: int) -
         rows = resp.json()
         if (not isinstance(rows, list) or any(
             not isinstance(row, dict) or not isinstance(row.get("body"), str)
+            for row in rows
         )):
             raise ValueError("GitHub comment listing is partial or malformed")
         for row in rows:
