@@ -53,6 +53,17 @@ def numbers(kind: str, content: str) -> list[int]:
     return found
 
 
+def historical_base_text(kind: str, content: str) -> str:
+    """Read the two legacy revision table breaks on origin until their cleanup merges.
+
+    The current worktree is always parsed unchanged. This removes only a blank
+    line between two pipe-led rows in the older base copy, not malformed rows.
+    """
+    if kind != "revision":
+        return content
+    return re.sub(r"(?m)(^\|[^\n]*\|\n)\n(?=\|)", r"\1", content)
+
+
 def table_counts(content: str) -> Counter[tuple[str, int]]:
     """Revision rows per (document table, number). A document's table sits under its own
     `## ` heading; one revision legitimately appears once in EACH document its pass amends."""
@@ -104,7 +115,7 @@ def origin_text(kind: str, remote: str) -> tuple[str, str]:
 
 def next_number(kind: str, remote: str) -> tuple[int, str]:
     sha, content = origin_text(kind, remote)
-    occupied = numbers(kind, content) + list(reservations(kind, remote))
+    occupied = numbers(kind, historical_base_text(kind, content)) + list(reservations(kind, remote))
     return max(occupied) + 1, sha
 
 
@@ -156,14 +167,14 @@ def reserve(kind: str, remote: str, attempts: int = MAX_ATTEMPTS) -> int:
 def check(kind: str, remote: str, base: str) -> list[str]:
     """Check numbers introduced by the worktree against create-only refs."""
     source = KINDS[kind]
-    before = numbers(kind, git("show", f"{base}:{source}"))
+    old_text = historical_base_text(kind, git("show", f"{base}:{source}"))
+    before = numbers(kind, old_text)
     from pathlib import Path
     after = numbers(kind, Path(source).read_text(encoding="utf-8"))
     errors: list[str] = []
     if kind == "revision":
         # One row per revision per document table: a number may not repeat INSIDE one table
         # (across different tables it may). Rows already doubled on the base are history.
-        old_text = git("show", f"{base}:{source}")
         new_text = Path(source).read_text(encoding="utf-8")
         tables_before, tables_after = table_counts(old_text), table_counts(new_text)
         for (title, number), count in sorted(tables_after.items()):

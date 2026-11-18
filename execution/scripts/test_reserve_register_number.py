@@ -209,6 +209,25 @@ def test_one_new_revision_may_appear_in_several_document_tables(clones: tuple[Pa
     assert run(first, "check", "revision").returncode == 0
 
 
+def test_historical_split_table_is_read_only_on_origin_side(monkeypatch, tmp_path: Path) -> None:
+    """The historical base has blank lines in two revision tables; new text must be strict."""
+    module = _load_module()
+    header = "## Example\n| Revision | Pass | What changed |\n|---|---|---|\n"
+    old = header + "| 17 | pass | first |\n\n| 18 | pass | second |\n"
+    current = header + "| 17 | pass | first |\n| 18 | pass | second |\n"
+    source = tmp_path / "revisions.md"
+    source.write_text(current)
+    monkeypatch.setitem(module.KINDS, "revision", str(source))
+    monkeypatch.setattr(module, "git", lambda *args: old)
+    monkeypatch.setattr(module, "reservations", lambda kind, remote: set())
+    monkeypatch.setattr(module, "origin_text", lambda kind, remote: ("base-sha", old))
+    assert module.next_number("revision", "origin") == (19, "base-sha")
+    assert module.check("revision", "origin", "origin/main") == []
+    source.write_text(old)
+    with pytest.raises(ValueError, match="line 6"):
+        module.check("revision", "origin", "origin/main")
+
+
 def test_an_unreasonable_range_is_rejected(clones: tuple[Path, Path, Path]) -> None:
     _, first, _ = clones
     register = first / "docs" / "foundation" / "conformance.md"
