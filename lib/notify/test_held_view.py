@@ -66,6 +66,29 @@ def test_recent_sending_receipt_stays_in_flight(tmp_path, monkeypatch, capsys):
     assert key in json.loads(journal.read_text())
 
 
+def test_session_hook_reannounces_sending_receipt_when_it_ages(tmp_path, monkeypatch):
+    queue = tmp_path / "digest.json"
+    journal = tmp_path / "dedupe.json"
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(queue))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(journal))
+    key = "synthetic:usage:50"
+    hook = _REPO_ROOT / ".claude" / "hooks" / "user_prompt_submit.py"
+    env = {**os.environ, "HOME": str(tmp_path), "CLAUDE_PROJECT_DIR": str(tmp_path)}
+
+    def invoke(stamp):
+        journal.write_text(json.dumps({key: {"state": "sending", "attempt_at": stamp,
+                                             "handler": "apis"}}))
+        return subprocess.run([sys.executable, str(hook)],
+                              input='{"session_id":"synthetic-aging"}', text=True,
+                              capture_output=True, env=env, timeout=10).stdout
+
+    assert "[alerts in flight] 1" in invoke(datetime.now(timezone.utc).isoformat())
+    age = held_view.ALERT_SEND_TIMEOUT_SECONDS + held_view.SENDING_VISIBILITY_MARGIN_SECONDS + 1
+    out = invoke((datetime.now(timezone.utc) - timedelta(seconds=age)).isoformat())
+    assert "[interrupted send]" in out
+    assert f"--clear-unconfirmed {key}" in out
+
+
 @pytest.mark.parametrize("name,contents", [
     ("digest.json", b""), ("digest.json", b"\xff"),
     ("digest-email.json", b"["), ("digest-recovery.json", b"\xff"),
