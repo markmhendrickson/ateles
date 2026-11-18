@@ -125,7 +125,11 @@ def decision_rows(text: str) -> dict[str, dict[str, str]]:
         cells = candidate_cells(line)
         if not inside:
             if cells and _outside_number_cell(cells):
-                raise ValueError(f"line {location}: numbered table row outside the register section")
+                raise ValueError(
+                    f"line {location}: numbered table row outside the register section "
+                    "(labels exempt from this rule are listed in OUTSIDE_LABEL_WIDTHS in "
+                    "execution/scripts/foundation_register_rows.py)"
+                )
             continue
         if not line.strip():
             in_table = False

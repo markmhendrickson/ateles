@@ -100,6 +100,14 @@ class TestRegisterCandidateAccounting(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "outside the register section"):
             decision_rows(disguised)
 
+    def test_the_outside_section_error_points_to_the_exemption_table(self):
+        text = (
+            "| abc999 | q | `doc.md#q` | — | **open** |\n"
+            "## The register of open design decisions\n" + register(**{"1": "**open**"})
+        )
+        with self.assertRaisesRegex(ValueError, "OUTSIDE_LABEL_WIDTHS in execution/scripts/foundation_register_rows.py"):
+            decision_rows(text)
+
     def test_matrix_has_no_silent_omission(self):
         import tempfile
 
