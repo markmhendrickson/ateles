@@ -223,6 +223,8 @@ if str(_REPO_ROOT) not in sys.path:
 
 from lib.daemon_runtime.logging_setup import configure_daemon_logging
 from lib import github_app_token  # noqa: E402
+from lib.approval import email_channel  # noqa: E402
+from lib.approval.email_channel import gws_config_dir_env  # noqa: E402
 
 # Rotating + repeat-suppressing (lib/daemon_runtime/logging_setup.py):
 # unbounded retry logging filled a 926 GB disk on 2026-08-18.
@@ -520,8 +522,13 @@ def email_send(subject: str, body: str) -> bool:
     """
     import shutil
 
-    if not OPERATOR_EMAIL:
-        log.info("OPERATOR_EMAIL unset — skipping release email (Telegram only)")
+    if not email_channel.swarm_mailbox_configured():
+        log.info("swarm mailbox unavailable — skipping release email (Telegram only)")
+        return False
+    swarm_gws = (gws_config_dir_env(require_existing=True)
+                 if email_channel.swarm_mailbox_configured() else {})
+    if not swarm_gws:
+        log.warning("swarm mailbox unavailable — skipping release email")
         return False
     gws = shutil.which("gws")
     if not gws:
@@ -533,7 +540,7 @@ def email_send(subject: str, body: str) -> bool:
         cmd += ["--from", SWARM_EMAIL]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
-                           env=os.environ)
+                           env={**os.environ, **swarm_gws})
         if r.returncode != 0:
             log.warning(f"gws +send failed (rc={r.returncode}): "
                         f"{(r.stderr or '').strip()[:200]}")
