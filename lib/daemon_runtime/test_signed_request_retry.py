@@ -184,10 +184,12 @@ def test_auth_required_once_then_ok_succeeds(tmp_path, http):
     assert len(rec.requests) == 2
 
 
-def test_shadow_auth_required_retry_then_bearer_fallback_preserves_keyed_body(tmp_path, http):
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_shadow_auth_required_retry_then_bearer_fallback_preserves_keyed_body(tmp_path, http, async_mode):
     rec = http(_auth_required(), _auth_required())
     w, slept = _writer(tmp_path, mode=ns.SigningMode.SHADOW)
-    result = w.post("store", _store_body())
+    result = (asyncio.run(w.apost("store", _store_body())) if async_mode
+              else w.post("store", _store_body()))
     assert result.signed is False
     assert len(rec.requests) == 3
     assert [("signature" in r.headers, "authorization" in r.headers) for r in rec.requests] == [
@@ -288,6 +290,41 @@ def test_wrapper_retries_admission_unavailable_with_same_key_and_one_pin(monkeyp
     assert clock.slept == [1.0]  # the body's stated retry time
 
 
+@pytest.mark.parametrize("bad", [-1, float("nan"), float("inf"), 3601, True, [], "later"])
+def test_wrapper_ignores_invalid_stated_delay(monkeypatch, bad):
+    body = {"error": {"error_code": "ADMISSION_UNAVAILABLE",
+                      "details": {"retry_after_seconds": bad}}}
+    _FakeSigned(monkeypatch, [(503, body), (200, {})])
+    clock = _Clock()
+    assert _call(clock, rng=lambda: 1.0) == (200, {})
+    assert clock.slept == [0.5]
+
+
+def test_wrapper_ignores_legacy_delay_outside_envelope(monkeypatch):
+    body = {"error": {"error_code": "ADMISSION_UNAVAILABLE"}, "retry_after": 1}
+    _FakeSigned(monkeypatch, [(503, body), (200, {})])
+    clock = _Clock()
+    assert _call(clock, rng=lambda: 1.0) == (200, {})
+    assert clock.slept == [0.5]
+
+
+def test_wrapper_caller_mutation_cannot_change_retry_body(monkeypatch):
+    fake = _FakeSigned(monkeypatch, [(503, _ADMISSION_BODY), (200, {})])
+    body = dict(_BODY)
+    clock = _Clock()
+
+    def mutate_after_first_attempt(delay):
+        body["idempotency_key"] = "changed"
+        clock.sleep(delay)
+
+    assert ns.signed_request_with_retry(
+        "POST", f"{BASE}/correct", body, agent_name="pavo", clock=clock,
+        sleep=mutate_after_first_attempt,
+    ) == (200, {})
+    assert fake.calls[0]["body"] == fake.calls[1]["body"]
+    assert json.loads(fake.calls[1]["body"])["idempotency_key"] == "idem-2"
+
+
 def test_wrapper_retries_a_proxy_html_503(monkeypatch):
     html = ns.SignedRequestError("signing request failed", "response_not_json",
                                  response_received=True, http_status=503)
@@ -342,6 +379,26 @@ def test_wrapper_starts_no_retry_after_the_deadline(monkeypatch):
     assert len(fake.calls) == 1 and clock.slept == []
 
 
+def test_wrapper_expired_initial_deadline_sends_nothing(monkeypatch):
+    fake = _FakeSigned(monkeypatch, [(200, {})])
+    clock = _Clock()
+    with pytest.raises(ns.SignedRequestError) as caught:
+        _call(clock, deadline=clock.now)
+    assert caught.value.code == "expired"
+    assert fake.calls == []
+
+
+def test_wrapper_sleep_overshoot_keeps_the_original_503(monkeypatch):
+    fake = _FakeSigned(monkeypatch, [(503, _ADMISSION_BODY), (200, {})])
+    clock = _Clock()
+    status, body = ns.signed_request_with_retry(
+        "POST", f"{BASE}/correct", _BODY, agent_name="pavo", clock=clock,
+        sleep=lambda delay: setattr(clock, "now", clock.now + 30),
+    )
+    assert (status, body) == (503, _ADMISSION_BODY)
+    assert len(fake.calls) == 1
+
+
 def test_wrapper_principal_change_between_attempts_fails_identity_changed(monkeypatch):
     fake = _FakeSigned(monkeypatch, [(503, _ADMISSION_BODY), (200, {})],
                        principals=[("pavo@ateles-swarm", "tp-a"), ("pavo@ateles-swarm", "tp-b")])
@@ -369,3 +426,57 @@ def test_response_error_code_reads_only_documented_envelopes():
     assert ns.response_error_code('{"error": {"error_code": "F"}}') == "F"
     assert ns.response_error_code("<html>") is None
     assert ns.response_error_code({}) is None
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_writer_total_bound_refuses_stated_delay_without_sleep(tmp_path, http, monkeypatch, async_mode):
+    refusal = _admission("5")
+    rec = http(refusal)
+    policy = ns.SignedRetryPolicy(total_bound_s=1.0)
+    w, slept = _writer(tmp_path, policy)
+    clock = _Clock()
+    monkeypatch.setattr(w, "_begin_retry", lambda path, body: policy.begin("POST", body, clock=clock))
+    with pytest.raises(ns.NeotomaWriteError) as caught:
+        if async_mode:
+            asyncio.run(w.apost("store", _store_body()))
+        else:
+            w.post("store", _store_body())
+    assert caught.value.status == 503
+    assert "busy" in str(caught.value)
+    assert len(rec.requests) == 1 and slept == []
+
+
+def test_writer_sleep_overshoot_does_not_start_another_post(tmp_path, http, monkeypatch):
+    rec = http(_admission("1"))
+    policy = ns.SignedRetryPolicy(total_bound_s=2.0)
+    w, _ = _writer(tmp_path, policy)
+    clock = _Clock()
+    monkeypatch.setattr(w, "_begin_retry", lambda path, body: policy.begin("POST", body, clock=clock))
+    w._sleep = lambda delay: setattr(clock, "now", clock.now + 3)
+    with pytest.raises(ns.NeotomaWriteError) as caught:
+        w.post("store", _store_body())
+    assert caught.value.status == 503
+    assert len(rec.requests) == 1
+
+
+def test_writer_auth_refusal_overshoot_does_not_fall_back(tmp_path, http, monkeypatch):
+    rec = http(_auth_required())
+    policy = ns.SignedRetryPolicy(total_bound_s=1.0)
+    w, _ = _writer(tmp_path, policy, mode=ns.SigningMode.SHADOW)
+    clock = _Clock()
+    monkeypatch.setattr(w, "_begin_retry", lambda path, body: policy.begin("POST", body, clock=clock))
+    w._sleep = lambda delay: setattr(clock, "now", clock.now + 2)
+    with pytest.raises(ns.SignedWriteError) as caught:
+        w.post("store", _store_body())
+    assert caught.value.status == 401
+    assert len(rec.requests) == 1 and "authorization" not in rec.requests[0].headers
+
+
+def test_writer_caller_mutation_cannot_change_retry_body(tmp_path, http):
+    rec = http(_admission())
+    w, _ = _writer(tmp_path)
+    body = _store_body()
+    w._sleep = lambda delay: body.update(idempotency_key="changed")
+    assert w.post("store", body).status == 200
+    assert rec.requests[0].content == rec.requests[1].content
+    assert json.loads(rec.requests[1].content)["idempotency_key"] == "idem-1"

@@ -1,5 +1,7 @@
 """Per-agent AAuth-signed Neotoma requests for Ateles daemons.
 
+The bounded admission retry originates in task ent_519a03a17843a6b25153b7e0.
+
 Two transports live here, sharing one key resolution (:func:`agent_identity`):
 
 * :class:`NeotomaWriter` — **the signed write client for daemons** (ateles#1270
@@ -73,6 +75,7 @@ from __future__ import annotations
 import asyncio
 import json
 import concurrent.futures
+import copy
 import logging
 import math
 import multiprocessing
@@ -784,17 +787,31 @@ def signed_request_with_retry(
     principal fails with ``identity_changed``. No attempt starts at or after
     ``deadline``. Returns the last ``(status, body)``; an error that is not a
     retryable server answer propagates unchanged.
+
+    For a keyed POST, call
+    ``signed_request_with_retry("POST", url,
+    {"idempotency_key": key, "entities": entities}, agent_name="pavo")``.
     """
     policy = policy or DEFAULT_SIGNED_RETRY_POLICY
     clock = clock or time.monotonic
     sleep = sleep or time.sleep
     pin = principal_pin if principal_pin is not None else PrincipalPin()
-    retry = policy.begin(method, body, deadline=deadline, clock=clock, rng=rng,
+    fixed_body = copy.deepcopy(body)
+    retry = policy.begin(method, fixed_body, deadline=deadline, clock=clock, rng=rng,
                          label=f"{str(method).upper()} {_url_path(url)}")
+    last_answer: tuple[int, dict] | None = None
+    last_error: SignedRequestError | None = None
     while True:
+        if retry.attempt == 1 and deadline is not None and clock() >= deadline:
+            raise SignedRequestError("attempt deadline passed", "expired")
+        if retry.attempt > 1 and not retry.can_start():
+            if last_error is not None:
+                raise last_error
+            assert last_answer is not None
+            return last_answer
         try:
             status, data = signed_request(
-                method, url, body, agent_name=agent_name, timeout=timeout, sub=sub,
+                method, url, copy.deepcopy(fixed_body), agent_name=agent_name, timeout=timeout, sub=sub,
                 deadline=deadline, cancelled=cancelled, clock=clock, principal_pin=pin,
             )
         except SignedRequestError as exc:
@@ -805,10 +822,14 @@ def signed_request_with_retry(
             delay = retry.next_delay(exc.http_status, None)
             if delay is None:
                 raise
+            last_error = exc
+            last_answer = None
         else:
             delay = retry.next_delay(status, response_error_code(data), _body_retry_after(data))
             if delay is None:
                 return status, data
+            last_answer = status, data
+            last_error = None
         sleep(delay)
 
 
@@ -1476,6 +1497,16 @@ class NeotomaWriter:
             _retry_after_seconds(resp.headers.get("retry-after")),
         )
 
+    @staticmethod
+    def _expired_retry(attempt: _Attempt, resp: Any) -> None:
+        """Preserve the server refusal without starting a late retry or fallback."""
+        error_type = (SignedWriteError if _refuses_signed_identity(resp.status_code, resp.text)
+                      else NeotomaWriteError)
+        raise error_type(
+            f"/{attempt.path} -> HTTP {resp.status_code}: {resp.text[:300]}",
+            status=resp.status_code,
+        )
+
     def _resigned(self, attempt: _Attempt) -> _Attempt:
         """The same write, same body and idempotency key, under a fresh signature.
 
@@ -1522,6 +1553,7 @@ class NeotomaWriter:
         a failed lookup counts as governance.
         """
         _require_supported(path)
+        body = copy.deepcopy(body)  # pin the keyed payload across retries and fallback
         entity_types = None if entity_types is None else list(entity_types)
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             ids = self._ids_to_resolve(path, body, entity_types)
@@ -1537,6 +1569,8 @@ class NeotomaWriter:
                 delay = self._retry_delay(retry, attempt, resp)
                 if delay is not None:
                     await self._asleep(delay)
+                    if not retry.can_start():
+                        self._expired_retry(attempt, resp)
                     attempt = self._resigned(attempt)
                     continue
                 nxt = self._after_response(attempt, resp.status_code, resp.text)
@@ -1599,6 +1633,7 @@ class NeotomaWriter:
     ) -> WriteResult:
         """POST a write; same classification as :meth:`apost`."""
         _require_supported(path)
+        body = copy.deepcopy(body)  # pin the keyed payload across retries and fallback
         entity_types = None if entity_types is None else list(entity_types)
         with httpx.Client(timeout=self.timeout) as client:
             ids = self._ids_to_resolve(path, body, entity_types)
@@ -1614,6 +1649,8 @@ class NeotomaWriter:
                 delay = self._retry_delay(retry, attempt, resp)
                 if delay is not None:
                     self._sleep(delay)
+                    if not retry.can_start():
+                        self._expired_retry(attempt, resp)
                     attempt = self._resigned(attempt)
                     continue
                 nxt = self._after_response(attempt, resp.status_code, resp.text)
