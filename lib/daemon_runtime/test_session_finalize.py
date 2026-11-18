@@ -453,3 +453,33 @@ def test_the_refusal_stays_when_the_provenance_write_never_succeeds(monkeypatch)
     run = sf.create_run_session(task_id="ent_task", plan_id="ent_plan", agent="cicada", run_key="created-0")
     assert run is None
     assert calls == [60.0, 60.0, 60.0]
+
+
+
+def test_a_peer_that_keeps_making_progress_cannot_hold_the_provenance_write_open(monkeypatch):
+    """httpx's timeout is per network operation, so a peer that keeps sending bytes never trips it.
+    The provenance write has a wall-clock deadline of its own: it must give up in bounded time,
+    start no attempt after the total is spent, and leave no run session (Apis then refuses)."""
+    import threading
+    import time as _time
+
+    release = threading.Event()
+    started = []
+
+    def never_finishing(*_a, **kwargs):
+        started.append(kwargs.get("timeout"))
+        release.wait(30)  # "progress" without ever completing; ended by the test below
+        raise sf.httpx.ReadTimeout("released")
+
+    _run_session_fakes(monkeypatch, never_finishing)
+    monkeypatch.setattr(sf, "PROVENANCE_STORE_ATTEMPT_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(sf, "PROVENANCE_STORE_TOTAL_SECONDS", 0.8)
+    t0 = _time.monotonic()
+    try:
+        run = sf.create_run_session(task_id="ent_task", plan_id="ent_plan", agent="cicada", run_key="created-0")
+        elapsed = _time.monotonic() - t0
+    finally:
+        release.set()
+    assert run is None
+    assert elapsed < 3.0, f"the wait was not bounded: {elapsed:.1f}s"
+    assert 1 <= len(started) <= 3

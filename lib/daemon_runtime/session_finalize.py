@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -403,11 +404,42 @@ def build_turn_payload(
 # fast. The refusal stays: provenance is still required. This only stops a slow, healthy
 # write from reading as a failed one, the same limit other Apis stores already use
 # (NEOTOMA_STORE_ATTEMPT_TIMEOUT_SECONDS in swarm_dispatch). Worst case with the bounded
-# retries is three attempts of up to 60s plus the 2s and 5s pauses, about 187s before Apis
-# refuses to spawn (the HTTP client's per-phase timeouts can stretch one attempt a little).
-# That is the dispatch-latency bound when the store is failing; a healthy store answers at once.
+# retries is three attempts of up to 60s plus the 2s and 5s pauses, and never more than
+# PROVENANCE_STORE_TOTAL_SECONDS (+7s of pauses) of wall-clock time before Apis refuses to spawn:
+# the bound is enforced, not nominal. A healthy store answers at once.
 PROVENANCE_STORE_ATTEMPT_TIMEOUT_SECONDS = 60.0
+# Hard wall-clock bound for the WHOLE provenance write, retries included. httpx's timeout
+# limits each network operation, not the request: a peer that keeps sending bytes could hold
+# the call open indefinitely. Every attempt is therefore also cut off by a wall-clock deadline,
+# and no attempt starts once the total is spent. With the 2s and 5s retry pauses the hard
+# worst case is this value plus 7s.
+PROVENANCE_STORE_TOTAL_SECONDS = 175.0
 DEFAULT_STORE_ATTEMPT_TIMEOUT_SECONDS = 20.0
+
+
+def _call_with_hard_deadline(fn, seconds: float):
+    """Run ``fn`` and stop WAITING for it after ``seconds`` of wall-clock time.
+
+    The call runs in a daemon worker thread; on expiry a timeout (retryable, like the network
+    one) is raised and the worker is abandoned: it ends when its own network timeout fires or
+    the peer closes. At most the bounded retries leave a worker behind, none holds a lock.
+    """
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 -- re-raised in the caller below
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, name="provenance-store", daemon=True)
+    worker.start()
+    worker.join(max(seconds, 0.0))
+    if worker.is_alive():
+        raise httpx.ReadTimeout(f"provenance store exceeded its {seconds:.0f}s wall-clock deadline")
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
 
 
 def _post_store(
@@ -431,7 +463,9 @@ def _post_store(
     attempt_timeout = (PROVENANCE_STORE_ATTEMPT_TIMEOUT_SECONDS if retry_transient
                        else DEFAULT_STORE_ATTEMPT_TIMEOUT_SECONDS)
 
-    def _send() -> dict:
+    deadline = time.monotonic() + PROVENANCE_STORE_TOTAL_SECONDS
+
+    def _post() -> dict:
         resp = httpx.post(
             f"{NEOTOMA_BASE_URL}/store",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
@@ -440,6 +474,14 @@ def _post_store(
         )
         resp.raise_for_status()
         return resp.json()
+
+    def _send() -> dict:
+        if not retry_transient:
+            return _post()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise httpx.ReadTimeout("provenance store total deadline spent")
+        return _call_with_hard_deadline(_post, min(attempt_timeout, remaining))
 
     try:
         if retry_transient:
