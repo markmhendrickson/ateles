@@ -1,4 +1,4 @@
-"""Genuine review rounds, ordered by individual lens-verdict creation time."""
+"""Genuine review rounds, ordered by the fetched comment history."""
 
 from __future__ import annotations
 
@@ -167,10 +167,10 @@ def test_current_heads_own_repeat_run_is_not_another_round():
     assert _status(comments + [_verdict("arch", H2, n=2)], H2).round_number == 2
 
 
-def test_first_verdict_timestamp_orders_heads_even_when_lens_buckets_reverse_them():
+def test_comment_list_order_governs_even_when_timestamps_disagree():
     comments = [_verdict("arch", H2, n=2), _verdict("pm", H1, verdict="BLOCKED", n=0)]
     status = _status(comments, H2)
-    assert status.round_number == 2 and status.rounds[0].heads == (H1,)
+    assert status.round_number == 2 and status.rounds[0].heads == (H2, H1)
 
 
 def test_unknown_lens_and_unmarked_comment_do_not_spend_round():
@@ -215,7 +215,7 @@ def test_valid_offsets_are_normalized_to_utc_before_ordering():
     second["created_at"] = "2026-10-27T10:01:00Z"
     status = _status([second, first], H2)
     assert status.round_number == 2 and not status.refused
-    assert status.rounds[0].heads == (H1,)
+    assert status.rounds[0].heads == (H2, H1)
 
 
 def test_reset_to_earlier_clear_head_spends_after_blocking_history():
@@ -282,7 +282,7 @@ def test_security_revisit_spends_four_rounds():
     assert _status(comments, H3).round_number == 4
 
 
-def test_equal_timestamps_use_integer_comment_ids_not_sha_or_lens_bucket_order():
+def test_equal_timestamps_use_comment_list_order_not_ids_or_lens_buckets():
     high = "f" * 40
     low = "0" * 40
     comments = [_verdict("arch", low, verdict="BLOCKED", n=20),
@@ -290,8 +290,8 @@ def test_equal_timestamps_use_integer_comment_ids_not_sha_or_lens_bucket_order()
                 _verdict("pm", high, n=30)]
     comments[0]["created_at"] = comments[1]["created_at"]
     status = _status(comments, high)
-    assert status.round_number == 3 and status.refused is False
-    assert [round_.heads for round_ in status.rounds] == [(high,), (low,), (high,)]
+    assert status.round_number == 2 and status.refused is False
+    assert [round_.heads for round_ in status.rounds] == [(low,), (high,)]
 
 
 def test_equal_timestamp_same_comment_id_uses_source_order():
@@ -300,6 +300,17 @@ def test_equal_timestamp_same_comment_id_uses_source_order():
     comments[1]["created_at"] = comments[0]["created_at"]
     comments[1]["id"] = comments[0]["id"]
     assert _status(comments, H2).rounds[0].heads == (H1,)
+
+
+@pytest.mark.parametrize("timestamp", [None, "2026-10-27T10:00:00Z"])
+def test_source_order_keeps_later_objection_after_clearance(timestamp):
+    comments = [_verdict("arch", H1, n=20),
+                _verdict("arch", H2, verdict="BLOCKED", n=10)]
+    comments[0]["created_at"] = timestamp
+    comments[1]["created_at"] = timestamp
+    records = swarm_dispatch.lens_records(comments)["arch"]
+    ordered, known = rr.order_lens_records(reversed(records))
+    assert known and [r.head for r in ordered] == [H1, H2]
 
 
 def test_missing_comment_id_with_unique_timestamp_still_has_known_order():

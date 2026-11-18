@@ -323,7 +323,7 @@ def _comments(client: httpx.Client, repo: str, pr: int, identity: Identity) -> l
 def _existing_for_head(comments: list[dict], *, login: str, marker: str) -> dict | None:
     # GitHub's issue comments API returns creation order, including across
     # pages. Only the final verdict can be retried without rewriting history.
-    for comment in reversed(comments):
+    for comment in reversed(review_rounds.ordered_comments(comments)):
         first = (str(comment.get("body") or "").splitlines() or [""])[0]
         if lens_authors.verdict_marker(comment.get("body")) is None:
             continue

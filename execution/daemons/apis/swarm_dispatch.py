@@ -108,6 +108,7 @@ import lens_receipts
 import model_tiering
 import panel_check_gate
 import review_carry
+import review_rounds
 import review_delta
 import review_scope
 import skill_runner
@@ -3335,15 +3336,13 @@ def latest_aggregation_comment(
     superseded by a later ``REQUEST_CHANGES`` would read as clear and the PR
     would merge on a withdrawn approval.
 
-    Selection is therefore client-side and never positional: collect every
-    marker-bearing comment, then take max ``created_at``, tie-breaking on max
-    ``id`` (monotonic per repo). Callers must page the full comment list before
-    calling — with >100 comments the newest aggregation can sit on a later page,
-    and sorting only what you fetched cannot find what was never returned.
+    Selection uses the fetched list's creation order. Callers must page the
+    full comment list before calling — with >100 comments the newest
+    aggregation can sit on a later page.
     """
     expected = _normalise_full_sha(head_sha)
     candidates = []
-    for comment in comments:
+    for comment in review_rounds.ordered_comments(comments):
         body = comment.get("body") or ""
         parsed = parse_aggregation_marker(body)
         if not _AGGREGATION_MARKER_RE.search(body) or parsed["superseded_by"]:
@@ -3354,10 +3353,7 @@ def latest_aggregation_comment(
         candidates.append(comment)
     if not candidates:
         return None
-    return max(
-        candidates,
-        key=lambda c: (str(c.get("created_at") or ""), int(c.get("id") or 0)),
-    )
+    return candidates[-1]
 
 
 _WRAPPER_MARKER_RE = re.compile(
@@ -3452,16 +3448,18 @@ def panel_finished_at_head(
         return True
     if not required_lenses:
         return False
-    reported: set[str] = set()
-    for comment in comments:
+    latest_by_lens: dict[str, dict] = {}
+    for comment in review_rounds.ordered_comments(comments):
         body = comment.get("body") or ""
         match = lens_authors.verdict_marker(body)
         if not match or match.head != head or not comment_verdict_matches_current_head(body, head):
             continue
-        known = lens_by_name(match.lens)
-        if known is None or posted_comment_own_verdict(body, lens_agent=known.agent) is None:
-            continue
-        reported.add(match.lens)
+        latest_by_lens[match.lens] = comment
+    reported = {
+        lens for lens, comment in latest_by_lens.items()
+        if (known := lens_by_name(lens)) is not None
+        and posted_comment_own_verdict(comment.get("body") or "", lens_agent=known.agent) is not None
+    }
     return {lens.lower() for lens in required_lenses} <= reported
 
 
@@ -4237,7 +4235,7 @@ def _reviewed_head_blockers(
     exclude = _normalise_full_sha(exclude_head)
     order: list[str] = []
     by_head: dict[str, set[tuple[str, str, str]]] = {}
-    for comment in sorted(comments, key=lambda c: str(c.get("created_at") or "")):
+    for comment in review_rounds.ordered_comments(comments):
         body = comment.get("body") or ""
         marker = lens_authors.verdict_marker(body)
         if not marker:
@@ -4302,9 +4300,7 @@ def lens_records(comments: list[dict]) -> dict[str, list[review_carry.LensRecord
     no record: there is nothing to carry from it.
     """
     out: dict[str, list[review_carry.LensRecord]] = {}
-    for source_order, comment in sorted(
-        enumerate(comments), key=lambda pair: str(pair[1].get("created_at") or "")
-    ):
+    for source_order, comment in enumerate(review_rounds.ordered_comments(comments)):
         raw = comment.get("body") or ""
         # A marker quoted in prose or indented as code is not a verdict.
         # The poster's explicit retirement banner is the only prefix admitted

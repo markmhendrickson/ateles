@@ -6,8 +6,9 @@ new comment. Repeated lens/head comments at different history positions remain
 distinct records. An episode after a blocking or unreadable episode starts a
 round. Returning to a previously reviewed head after any earlier blocking
 episode starts a new round, even when the immediately previous episode cleared;
-otherwise an episode after an all-clear one stays in the same round. Timestamp
-ties use integer GitHub comment ids, then source order.
+otherwise an episode after an all-clear one stays in the same round. The fetched
+comment list's source order governs; standalone records use parsed timestamps
+and integer GitHub comment ids.
 Missing or malformed timestamps and ties without usable integer comment ids
 make order indeterminate and refuse approval unless a valid operator override
 is present. The same override can lift the three-round cap, but never unresolved
@@ -116,6 +117,35 @@ def _comment_id(value: object) -> int | None:
     return None
 
 
+def ordered_comments(comments: list[dict]) -> list[dict]:
+    """GitHub's paginated issue-comment list is already in creation order."""
+    return comments
+
+
+def order_lens_records(records) -> tuple[list, bool]:
+    """Order verdicts once for round counting and carry.
+
+    Unique source positions take precedence over timestamps. Without positions,
+    every timestamp must parse and ties need distinct comment ids.
+    """
+    items = list(records)
+    positions = [getattr(r, "source_order", None) for r in items]
+    if all(type(p) is int and p >= 0 for p in positions) and len(set(positions)) == len(items):
+        return sorted(items, key=lambda r: r.source_order), True
+    now = datetime.now(timezone.utc)
+    times = [_verdict_time(getattr(r, "created_at", None), now) for r in items]
+    if any(t is None for t in times):
+        return items, False
+    ids = [_comment_id(getattr(r, "comment_id", None)) for r in items]
+    for stamp in set(times):
+        tied = [i for i, value in enumerate(times) if value == stamp]
+        if len(tied) > 1 and (any(ids[i] is None for i in tied) or
+                              len({ids[i] for i in tied}) != len(tied)):
+            return items, False
+    indexed = sorted(range(len(items)), key=lambda i: (times[i], ids[i] or 0))
+    return [items[i] for i in indexed], True
+
+
 def verdict_class(body: str, lens: str) -> tuple[str, bool]:
     """Classify a retry with the counter's verdict kind and blocking state."""
     import swarm_dispatch
@@ -131,28 +161,30 @@ def round_status(records: dict[str, list], current_head: str, *, cap: int = ROUN
     """Count contiguous review episodes in verdict order; unknown order denies."""
     current = (current_head or "").lower()
     now = datetime.now(timezone.utc)
-    verdicts: list[tuple[datetime, int | None, int, str, bool]] = []
+    verdicts: list[tuple[datetime, int | None, int | None, str, bool]] = []
     unplaced: set[str] = set()
     invalid_timestamps: set[str] = set()
     reviewed: set[str] = set()
-    for recs in records.values():
-        for rec in recs:
-            head = (getattr(rec, "head", "") or "").lower()
-            if not head:
-                continue
-            reviewed.add(head)
-            timestamp = _verdict_time(getattr(rec, "created_at", None), now)
-            if timestamp is None:
-                unplaced.add(head)
-                invalid_timestamps.add(head)
-                continue
-            verdicts.append((
-                timestamp, _comment_id(getattr(rec, "comment_id", None)),
-                getattr(rec, "source_order", 0), head,
-                bool(getattr(rec, "blocking", not getattr(rec, "cleared", False))),
-            ))
+    ordered_records, order_known = order_lens_records(
+        rec for recs in records.values() for rec in recs
+    )
+    for rec in ordered_records:
+        head = (getattr(rec, "head", "") or "").lower()
+        if not head:
+            continue
+        reviewed.add(head)
+        timestamp = _verdict_time(getattr(rec, "created_at", None), now)
+        if timestamp is None:
+            unplaced.add(head)
+            invalid_timestamps.add(head)
+            continue
+        verdicts.append((
+            timestamp, _comment_id(getattr(rec, "comment_id", None)),
+            getattr(rec, "source_order", None), head,
+            bool(getattr(rec, "blocking", not getattr(rec, "cleared", False))),
+        ))
 
-    by_time: dict[datetime, list[tuple[datetime, int | None, int, str, bool]]] = {}
+    by_time: dict[datetime, list[tuple[datetime, int | None, int | None, str, bool]]] = {}
     for verdict in verdicts:
         by_time.setdefault(verdict[0], []).append(verdict)
     ambiguous_times = {
@@ -161,10 +193,9 @@ def round_status(records: dict[str, list], current_head: str, *, cap: int = ROUN
     }
     for timestamp in ambiguous_times:
         unplaced.update(verdict[3] for verdict in by_time[timestamp])
-    ordered = sorted(
-        (verdict for verdict in verdicts if verdict[0] not in ambiguous_times),
-        key=lambda verdict: (verdict[0], verdict[1] if verdict[1] is not None else -1, verdict[2]),
-    )
+    if not order_known:
+        unplaced.update(reviewed)
+    ordered = [verdict for verdict in verdicts if verdict[0] not in ambiguous_times]
     episodes: list[ReviewEpisode] = []
     for _, _, _, head, blocking in ordered:
         if episodes and episodes[-1].head == head:

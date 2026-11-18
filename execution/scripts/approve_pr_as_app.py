@@ -654,7 +654,7 @@ def _latest_matching_comment(
     default, so a caller cannot read lens comments without deciding whose
     they are; an empty set matches nothing.
     """
-    for c in reversed(comments):
+    for c in reversed(review_rounds.ordered_comments(comments)):
         body = c.get("body") or ""
         if body.splitlines()[:1] == [marker] and lens_authors.is_swarm_comment(c, authors):
             return c
@@ -670,7 +670,7 @@ def _matching_comments(
     """
     return [
         c
-        for c in comments
+        for c in review_rounds.ordered_comments(comments)
         if (c.get("body") or "").splitlines()[:1] == [marker]
         and lens_authors.is_swarm_comment(c, authors)
     ]

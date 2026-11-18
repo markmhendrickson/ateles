@@ -41,6 +41,8 @@ import approve_pr_as_app as target  # noqa: E402
 _ORIGINAL_OPERATOR_PROFILE_LOGIN = getattr(target, "_operator_profile_login", None)
 import lens_authors  # noqa: E402
 import post_lens_verdict  # noqa: E402
+import review_carry  # noqa: E402
+import review_delta  # noqa: E402
 import swarm_dispatch  # noqa: E402
 from review_panel import LENSES, select_panel  # noqa: E402
 
@@ -5223,6 +5225,31 @@ def _operator_override(id_=1200, *, author=None, reason="The review has exceeded
 @pytest.mark.asyncio
 class TestRoundCapOverride:
     _run = TestRoundCap._run
+
+    @pytest.mark.parametrize("bad_time", [None, "not-a-timestamp"])
+    @pytest.mark.parametrize("with_override", [False, True])
+    async def test_later_arch_objection_never_carries_earlier_clear(
+        self, monkeypatch, capsys, bad_time, with_override
+    ):
+        h1, h2 = ROUND_HEADS[:2]
+        earlier = _comment(100, _lens_comment_body("arch", target.LENS_AGENTS["arch"], head=h1))
+        objection = _comment(101, _lens_comment_body(
+            "arch", target.LENS_AGENTS["arch"], head=h2,
+            verdict="REQUEST_CHANGES", extra="[BLOCKING] ordering is unresolved",
+        ))
+        objection["created_at"] = bad_time
+        comments = [earlier, objection] + _all_clear_comments(["pm", "qa", "security"])
+        if with_override:
+            comments.append(_operator_override())
+
+        async def untouched_arch_area(*args, **kwargs):
+            return review_delta.Delta(lines=1, files=("docs/guide/example.md",))
+
+        monkeypatch.setattr(review_carry, "fetch_interdiff", untouched_arch_area)
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 1 and client.posted == []
+        if with_override:
+            assert "arch" in capsys.readouterr().out
 
     @pytest.mark.parametrize("prefix", [
         " ", "\t", "    ", "> ", "```\n", "- ", "\n", "\u200b", "\ufeff", "/OVERRIDE-ROUND-CAP\n",
