@@ -2802,7 +2802,7 @@ def test_post_verdict_retries_transient_gh_failure(monkeypatch, tmp_path):
                         {
                             "id": 1,
                             "body": SIGNED_OFF_VERDICT,
-                            "html_url": "comment-url",
+                            "html_url": "https://github.com/o/r/pull/1#issuecomment-1",
                             "user": {"login": "ateles-agent"},
                         }
                     ]
@@ -2829,7 +2829,7 @@ def test_post_verdict_retries_transient_gh_failure(monkeypatch, tmp_path):
 
     assert (
         hlr.post_verdict(repo="o/r", pr=1, verdict_text=SIGNED_OFF_VERDICT)
-        == "comment-url"
+        == "https://github.com/o/r/pull/1#issuecomment-1"
     )
     assert len(post_calls) == 3
 
@@ -2931,6 +2931,44 @@ def test_post_verdict_edits_existing_lens_comment_in_place(monkeypatch, tmp_path
     assert url.endswith("#issuecomment-41")
     assert current_body == SIGNED_OFF_VERDICT
     assert len(patch_calls) == 1
+
+
+@pytest.mark.parametrize("bad_id", [None, True, "41", 0, -1])
+def test_harness_poster_refuses_unusable_retry_id_before_write(monkeypatch, bad_id):
+    writes = []
+
+    def _run(command, **kwargs):
+        if command[1] == "api" and command[2].startswith("repos/o/r/issues/1/comments?"):
+            row = {"id": bad_id, "body": SIGNED_OFF_VERDICT,
+                   "html_url": "https://github.com/o/r/pull/1#issuecomment-41",
+                   "user": {"login": "ateles-agent"}}
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps([[row]]), stderr="")
+        writes.append(command)
+        raise AssertionError("unusable id must not reach a write")
+
+    monkeypatch.setattr(hlr.subprocess, "run", _run)
+    with pytest.raises(RuntimeError, match="positive integer id"):
+        hlr.post_verdict(repo="o/r", pr=1, verdict_text=SIGNED_OFF_VERDICT)
+    assert writes == []
+
+
+def test_harness_poster_refuses_nonlocal_readback_url(monkeypatch):
+    comments = []
+    writes = []
+
+    def _run(command, **kwargs):
+        if command[1] == "api" and command[2].startswith("repos/o/r/issues/1/comments?"):
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps([comments]), stderr="")
+        writes.append(command)
+        comments.append({"id": 41, "body": SIGNED_OFF_VERDICT,
+                         "html_url": "https://github.com/o/r/pull/99#issuecomment-41",
+                         "user": {"login": "ateles-agent"}})
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(hlr.subprocess, "run", _run)
+    with pytest.raises(RuntimeError, match="matching id and PR-local URL"):
+        hlr.post_verdict(repo="o/r", pr=1, verdict_text=SIGNED_OFF_VERDICT)
+    assert len(writes) == 1
 
 
 @pytest.mark.parametrize("replacement", ["COMMENT", "SIGNED_OFF"])

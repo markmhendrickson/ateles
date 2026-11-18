@@ -171,6 +171,7 @@ class _FakeClient:
         pr_mergeable: "bool | None" = True,
         pr_mergeable_state: "str | None" = "clean",
         mergeability_after_first_get: "tuple[bool | None, str | None] | None" = None,
+        profile_response: dict | None = None,
     ):
         # GitHub's mergeability as served on the PR, and (optionally) what it
         # turns into from the second `pulls/{n}` GET on (the pre-submit re-fetch).
@@ -184,6 +185,7 @@ class _FakeClient:
         self.actions_status = actions_status
         self.default_branch = default_branch
         self.repo_owner = repo_owner if repo_owner is not None else {"login": swarm_dispatch._OPERATOR_LOGIN, "type": "User"}
+        self.profile_response = profile_response
         self.checks_total = checks_total
         self.checks_page_status = checks_page_status or {}
         self.check_pages: list[int] = []
@@ -370,6 +372,10 @@ class _FakeClient:
         raise AssertionError(f"unexpected GET {url}")
 
     async def post(self, url, json=None, headers=None):
+        if url.endswith("/entities/query"):
+            assert json == {"entity_type": "operator_profile", "include_snapshots": True, "limit": 100}
+            assert self.profile_response is not None
+            return _FakeResponse(self.profile_response)
         assert url.endswith(f"/pulls/{PR}/reviews")
         self.posted.append({"json": json, "headers": headers})
         return _FakeResponse({"id": 999, "state": "APPROVED"})
@@ -4922,11 +4928,17 @@ def _cap_round_comments(heads: list[str], *, author: str = SWARM_LOGIN, start: i
 
 @pytest.mark.asyncio
 class TestRoundCap:
-    async def _run(self, monkeypatch, comments, *, apply=True, comments_after_first_get=None, **kw):
+    async def _run(self, monkeypatch, comments, *, apply=True, comments_after_first_get=None,
+                   profile_response=None, **kw):
         client = _FakeClient(comments=comments, check_runs=_green_checks(),
-                             comments_after_first_get=comments_after_first_get)
+                             comments_after_first_get=comments_after_first_get,
+                             profile_response=profile_response)
         _install_client(monkeypatch, client)
         _install_app_mint(monkeypatch)
+        if profile_response is not None:
+            monkeypatch.setenv("NEOTOMA_BASE_URL", "https://records.example")
+            monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-bearer")
+            monkeypatch.setattr(target, "_operator_profile_login", _ORIGINAL_OPERATOR_PROFILE_LOGIN)
         code = await target.run(REPO, PR, ALL_FOUR, apply=apply, **kw)
         return code, client
 
@@ -5147,11 +5159,110 @@ def _operator_override(id_=1200, *, author=None, reason="The review has exceeded
 @pytest.mark.asyncio
 class TestRoundCapOverride:
     _run = TestRoundCap._run
+
+    @pytest.mark.parametrize("field,value", [
+        ("id", "absent"), ("id", None), ("id", "1200"), ("id", True),
+        ("id", 0), ("id", -1), ("id", 1201),
+        ("html_url", f"https://github.com/{REPO}/pull/{PR}#issuecomment-abc"),
+    ])
+    async def test_override_requires_matching_positive_integer_id(self, monkeypatch, field, value):
+        override = _operator_override()
+        if value == "absent":
+            override.pop(field)
+        else:
+            override[field] = value
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override]
+        code, client = await self._run(monkeypatch, comments, apply=True)
+        assert code == 1 and client.posted == []
+
+    @pytest.mark.parametrize("field", [
+        "user", "login", "type", "body", "author_association",
+        "created_at", "updated_at", "html_url",
+    ])
+    async def test_override_requires_every_read_field_present(self, monkeypatch, field):
+        override = _operator_override()
+        (override["user"] if field in {"login", "type"} else override).pop(field)
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override]
+        code, client = await self._run(monkeypatch, comments, apply=True)
+        assert code == 1 and client.posted == []
+
+    @pytest.mark.parametrize("field,value", [
+        ("author_association", None), ("author_association", ""),
+        ("author_association", 1), ("html_url", 123),
+        ("body", []), ("user", []),
+    ])
+    async def test_override_requires_read_fields_typed(self, monkeypatch, field, value):
+        override = _operator_override()
+        override[field] = value
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override]
+        code, client = await self._run(monkeypatch, comments, apply=True)
+        assert code == 1 and client.posted == []
+
+    @pytest.mark.parametrize("metadata,profiles,works", [
+        ({}, 1, False), ({"total": 2}, 1, False),
+        ({"has_more": True}, 1, False), ({"has_more": 0}, 1, False),
+        ({"total": 1, "next_cursor": "another-page"}, 1, False),
+        ({"total": 1, "offset": 1}, 1, False),
+        ({"total": 2}, 2, False),
+        ({"total": 0}, 0, False), ({"total": 1}, 1, True),
+        ({"has_more": False}, 1, True),
+    ])
+    async def test_profile_completeness_and_cardinality_gate_override(
+        self, monkeypatch, metadata, profiles, works
+    ):
+        profile = {"snapshot": {"profile_key": "default",
+                                "github_login": swarm_dispatch._OPERATOR_LOGIN}}
+        response = {"entities": [dict(profile) for _ in range(profiles)], **metadata}
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        code, client = await self._run(monkeypatch, comments + [_operator_override()],
+                                       apply=True, profile_response=response)
+        assert code == (0 if works else 1)
+        assert len(client.posted) == (1 if works else 0)
+
+    async def test_fresh_override_with_missing_id_refuses_before_submit(self, monkeypatch):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        original = _operator_override()
+        fresh = {key: value for key, value in original.items() if key != "id"}
+        code, client = await self._run(monkeypatch, comments + [original],
+                                       comments_after_first_get=comments + [fresh], apply=True)
+        assert code == 1 and client.posted == [] and client.comment_get_count >= 2
+
+    async def test_new_verdict_before_submit_invalidates_earlier_gate_read(self, monkeypatch):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        original = _operator_override()
+        new_block = _comment(1300, _lens_comment_body(
+            "pm", target.LENS_AGENTS["pm"], verdict="BLOCKED"))
+        code, client = await self._run(monkeypatch, comments + [original],
+                                       comments_after_first_get=comments + [original, new_block],
+                                       apply=True)
+        assert code == 1 and client.posted == [] and client.comment_get_count >= 2
     async def test_partial_comment_row_cannot_disappear_from_approval_history(self):
         client = _FakeClient(comments=[None], check_runs=_green_checks())
         with pytest.raises(ValueError, match="partial or malformed"):
             await target._fetch_issue_comments(client, REPO, PR)
         assert client.posted == []
+
+    async def test_comment_listing_reads_every_page_and_refuses_malformed_later_page(self):
+        first = [_comment(i + 1, "ordinary comment") for i in range(100)]
+        final = _comment(101, "ordinary comment")
+
+        class PagedComments:
+            def __init__(self, last):
+                self.last = last
+                self.pages = []
+
+            async def get(self, url, headers=None, params=None):
+                page = params["page"]
+                self.pages.append(page)
+                return _FakeResponse(first if page == 1 else [self.last])
+
+        complete = PagedComments(final)
+        assert len(await target._fetch_issue_comments(complete, REPO, PR)) == 101
+        assert complete.pages == [1, 2]
+        malformed = PagedComments(None)
+        with pytest.raises(ValueError, match="partial or malformed"):
+            await target._fetch_issue_comments(malformed, REPO, PR)
+        assert malformed.pages == [1, 2]
 
     async def test_operator_comment_overrides_only_cap_and_reports_evidence(self, monkeypatch, capsys):
         override = _operator_override()

@@ -141,15 +141,20 @@ Three-round cap (operator ruling 2026-10-27, `review_rounds`): a repair unit
 not merged after three build, review and correct rounds is split or cut in scope
 before another round runs. Contiguous verdicts on one head form a review
 episode; returning to an earlier head after another head forms another episode.
-An episode after a blocking or unreadable episode starts a round; one after an
-all-clear episode continues the round. Verdicts are ordered by UTC creation
+An episode after a blocking or unreadable episode starts a round. Returning to
+a previously reviewed head after any earlier blocking episode starts a new
+round, even when the immediately previous episode cleared; otherwise an
+episode after an all-clear one stays in the same round. Verdicts are ordered by UTC creation
 time, integer comment id, then source order. Missing or malformed timestamps,
 or timestamp ties without usable comment ids, refuse approval because the
 round order is unknown. The cap uses the whole PR history. A
 fourth round is refused unless the repository's human owner matches the default
 Neotoma operator_profile.github_login and posted an unedited,
 PR-specific `/override-round-cap` comment with a reason of at least 20
-characters. `APIS_OPERATOR_LOGIN` is not authority for this override. A
+characters, present correctly typed author and timestamp fields, and a positive
+integer id matching its PR-local URL. The profile listing must explicitly prove
+completeness through a matching total or `has_more: false`, and contain exactly
+one default profile. `APIS_OPERATOR_LOGIN` is not authority for this override. A
 partial lens identity resolution makes round order indeterminate; a valid
 override lifts only this uncertainty or the cap. Every other gate still binds.
 
@@ -557,9 +562,15 @@ async def _operator_profile_login(client: httpx.AsyncClient) -> tuple[str, str]:
         rows = data.get("entities") if isinstance(data, dict) else None
         total = data.get("total") if isinstance(data, dict) else None
         has_more = data.get("has_more") if isinstance(data, dict) else None
-        if (not isinstance(rows, list) or has_more not in (None, False)
+        next_cursor = data.get("next_cursor") if isinstance(data, dict) else None
+        offset = data.get("offset") if isinstance(data, dict) else None
+        if (not isinstance(rows, list) or (has_more is not None and type(has_more) is not bool)
+                or has_more is True
                 or isinstance(total, bool) or (total is not None and
-                    (not isinstance(total, int) or total != len(rows))) or len(rows) == 100):
+                    (not isinstance(total, int) or total != len(rows)))
+                or (total is None and has_more is not False)
+                or next_cursor not in (None, "")
+                or (offset is not None and (type(offset) is not int or offset != 0))):
             return "", "operator_profile read is partial or malformed"
         matches = []
         for row in rows:
@@ -2818,6 +2829,9 @@ async def run(
                               if fresh_owner and not fresh_owner_error else None)
             if fresh_owner != owner_login or fresh_operator != operator_login or fresh_override != override:
                 print("refusing to approve: operator round-cap override changed or vanished. Submitting nothing.")
+                return 1
+            if fresh_comments != comments:
+                print("refusing to approve: PR comment history changed since gate evaluation. Submitting nothing.")
                 return 1
 
         try:

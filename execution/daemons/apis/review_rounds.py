@@ -3,9 +3,11 @@
 Contiguous verdicts for one head form an episode; returning to that head after
 another head forms another episode because the poster keeps the return as a
 new comment. Repeated lens/head comments at different history positions remain
-distinct records. An episode after a blocking or unreadable
-episode starts a round, while an episode after an all-clear one stays in the
-same round. Timestamp ties use integer GitHub comment ids, then source order.
+distinct records. An episode after a blocking or unreadable episode starts a
+round. Returning to a previously reviewed head after any earlier blocking
+episode starts a new round, even when the immediately previous episode cleared;
+otherwise an episode after an all-clear one stays in the same round. Timestamp
+ties use integer GitHub comment ids, then source order.
 Missing timestamps or ids needed to resolve a tie make order indeterminate and
 refuse approval unless a valid operator override is present.
 The three-round cap can be overridden only by the operator's unedited,
@@ -41,6 +43,7 @@ def _verdict_time(value: object, now: datetime) -> datetime | None:
 class ReviewRound:
     heads: tuple[str, ...]
     blocking: bool
+    started_reason: str
 
     def describe(self) -> str:
         heads = ", ".join(head[:7] for head in self.heads)
@@ -75,7 +78,8 @@ class RoundStatus:
     def describe(self) -> str:
         count = f"at least {self.round_number}" if self.indeterminate_head else f"round {self.round_number}"
         lines = [f"review rounds: {count} of {self.cap} across the whole verdict history"]
-        lines.extend(f"  round {i}: {round_.describe()}" for i, round_ in enumerate(self.rounds, 1))
+        lines.extend(f"  round {i} started: {round_.started_reason}; {round_.describe()}"
+                     for i, round_ in enumerate(self.rounds, 1))
         if self.indeterminate_head:
             lines.append(f"  unplaced reviewed heads: {', '.join(self.unplaced_heads)}")
             lines.append(
@@ -171,10 +175,14 @@ def round_status(records: dict[str, list], current_head: str, *, cap: int = ROUN
         # old head.
         returned = episode.head in seen_heads and any_blocking
         if previous is None or previous.blocking or returned:
-            rounds.append(ReviewRound((episode.head,), episode.blocking))
+            reason = ("first review episode" if previous is None else
+                      "the previous episode was blocking" if previous.blocking else
+                      f"returned to {episode.head[:7]} after an earlier blocking episode")
+            rounds.append(ReviewRound((episode.head,), episode.blocking, reason))
         else:
             last = rounds[-1]
-            rounds[-1] = ReviewRound(last.heads + (episode.head,), episode.blocking)
+            rounds[-1] = ReviewRound(last.heads + (episode.head,), episode.blocking,
+                                     last.started_reason)
         previous = episode
         seen_heads.add(episode.head)
         any_blocking = any_blocking or episode.blocking
@@ -193,10 +201,13 @@ def round_status(records: dict[str, list], current_head: str, *, cap: int = ROUN
         # The current head has no latest episode yet. Even a previously reviewed
         # SHA is a new episode after verdicts on another head.
         if previous is None or previous.blocking or (current in seen_heads and any_blocking):
-            rounds.append(ReviewRound((current,), False))
+            reason = ("first review episode" if previous is None else
+                      "the previous episode was blocking" if previous.blocking else
+                      f"returned to {current[:7]} after an earlier blocking episode")
+            rounds.append(ReviewRound((current,), False, reason))
         else:
             last = rounds[-1]
-            rounds[-1] = ReviewRound(last.heads + (current,), False)
+            rounds[-1] = ReviewRound(last.heads + (current,), False, last.started_reason)
     return RoundStatus(current, tuple(rounds), len(rounds), cap, current in reviewed)
 
 
@@ -230,13 +241,14 @@ def operator_override(comments: list[dict], owner_login: str, operator_login: st
             lines and lines[0].strip() == OVERRIDE_COMMAND
             and login == operator_login
             and user.get("type") == "User"
-            and (association is None or isinstance(association, str))
-            and (association or "").upper() not in {"BOT", "APP"}
+            and isinstance(association, str) and bool(association)
+            and association.upper() not in {"BOT", "APP"}
             and created == updated and _verdict_time(created, now) is not None
             and len(reason) >= 20
             and match is not None
             and _comment_id(match.group(1)) is not None
-            and (comment_id is None or _comment_id(comment_id) == _comment_id(match.group(1)))
+            and type(comment_id) is int and comment_id > 0
+            and comment_id == _comment_id(match.group(1))
         ):
             valid.append(comment)
     return max(valid, key=lambda comment: (_verdict_time(comment["created_at"], now),

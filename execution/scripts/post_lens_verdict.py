@@ -396,6 +396,8 @@ def post_verdict(
         raise Refusal(f"posting failed (HTTP {resp.status_code}); nothing is known to have landed")
     landed = resp.json() or {}
     comment_id = landed.get("id")
+    if type(comment_id) is not int or comment_id <= 0 or (existing and comment_id != existing["id"]):
+        raise Refusal("posted, but the response has no matching positive integer comment id; verify by hand")
     # Read back; the write's own response is not proof it landed as sent.
     check = client.get(
         f"{GITHUB_API}/repos/{repo}/issues/comments/{comment_id}", headers=_headers(identity)
@@ -404,8 +406,14 @@ def post_verdict(
         raise Refusal(f"posted, but the read-back failed (HTTP {check.status_code}); verify by hand")
     row = check.json() or {}
     if (
-        str(row.get("body") or "") != composed
+        type(row.get("id")) is not int or row["id"] != comment_id
+        or str(row.get("body") or "") != composed
         or str((row.get("user") or {}).get("login") or "").casefold() != identity.login.casefold()
+        or not isinstance(row.get("html_url"), str)
+        or re.fullmatch(
+            rf"https://github\.com/{re.escape(repo)}/pull/{pr}#issuecomment-{comment_id}",
+            row["html_url"],
+        ) is None
     ):
         raise Refusal("posted, but the read-back does not match what was sent; verify by hand")
     # A push between the first read and the post would leave the verdict on a head

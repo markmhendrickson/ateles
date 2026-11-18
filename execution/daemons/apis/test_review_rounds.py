@@ -36,8 +36,10 @@ def test_cap_stays_three():
 
 def test_override_requires_repository_owner_to_equal_operator():
     row = {
+        "id": 1,
         "body": "/override-round-cap\nA sufficiently detailed synthetic reason.",
         "user": {"login": "other-owner", "type": "User"},
+        "author_association": "OWNER",
         "created_at": "2026-10-27T10:00:00Z",
         "updated_at": "2026-10-27T10:00:00Z",
         "html_url": "https://github.com/example/repo/pull/7#issuecomment-1",
@@ -81,7 +83,10 @@ def test_clear_repushes_and_sites_private_shape_spend_only_second_round():
 
 def test_blocking_verdict_followed_by_new_head_starts_round():
     comments = [_verdict("pm", H1, n=0), _verdict("arch", H1, verdict="BLOCKED", n=1)]
-    assert _status(comments, H2).round_number == 2
+    status = _status(comments, H2)
+    assert status.round_number == 2
+    assert "round 1 started: first review episode" in status.describe()
+    assert "round 2 started: the previous episode was blocking" in status.describe()
 
 
 def test_three_blocking_rounds_then_fourth_head_refused():
@@ -275,6 +280,7 @@ def test_return_to_an_earlier_head_after_a_blocking_episode_spends_a_new_round_e
     ]
     status = _status(comments, f)
     assert status.round_number == 3 and not status.refused
+    assert f"round 3 started: returned to {f[:7]} after an earlier blocking episode" in status.describe()
 
 
 def test_return_to_an_earlier_head_after_all_clear_history_is_the_same_round():

@@ -2775,9 +2775,9 @@ def post_verdict(*, repo: str, pr: int, verdict_text: str) -> str:
             run_kwargs: dict = {"input": json.dumps({"body": verdict_text})}
         else:
             comment_id = existing.get("id")
-            if not isinstance(comment_id, int):
+            if type(comment_id) is not int or comment_id <= 0:
                 raise RuntimeError(
-                    f"prior review:{lens} comment has no integer id; refusing to edit"
+                    f"prior review:{lens} comment has no positive integer id; refusing to edit"
                 )
             command = [
                 "gh",
@@ -2805,9 +2805,14 @@ def post_verdict(*, repo: str, pr: int, verdict_text: str) -> str:
             row.get("id") == existing.get("id") if existing else row.get("id") not in known_ids
         )), None)
         if landed is not None:
+            landed_id = landed.get("id")
             url = str(landed.get("html_url") or "")
-            if not url:
-                raise RuntimeError(f"review:{lens} write read back without an html_url")
+            if (type(landed_id) is not int or landed_id <= 0
+                    or re.fullmatch(
+                        rf"https://github\.com/{re.escape(repo)}/pull/{pr}#issuecomment-{landed_id}",
+                        url,
+                    ) is None):
+                raise RuntimeError(f"review:{lens} write read back without a matching id and PR-local URL")
             return url
         if last_error is None:
             last_error = RuntimeError(

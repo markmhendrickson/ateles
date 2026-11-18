@@ -51,12 +51,16 @@ class _Resp:
 class _Client:
     def __init__(self, *, head=HEAD, state="open", merged_at=None, comments=None,
                  pr_status=200, post_status=201, readback_body=None, pat_login="agent-pat-user",
-                 author_login=APP_LOGIN):
+                 author_login=APP_LOGIN, readback_id="unchanged", readback_url="unchanged",
+                 response_id="unchanged"):
         self.author_login = author_login
         self.head, self.state, self.merged_at = head, state, merged_at
         self.comments = list(comments or [])
         self.pr_status, self.post_status = pr_status, post_status
         self.readback_body = readback_body
+        self.readback_id = readback_id
+        self.readback_url = readback_url
+        self.response_id = response_id
         self.pat_login = pat_login
         self.writes: list[tuple[str, str, dict]] = []
         self.auth_seen: list[str] = []
@@ -85,6 +89,10 @@ class _Client:
             row = dict(self._last)
             if self.readback_body is not None:
                 row["body"] = self.readback_body
+            if self.readback_id != "unchanged":
+                row["id"] = self.readback_id
+            if self.readback_url != "unchanged":
+                row["html_url"] = self.readback_url
             return _Resp(row)
         raise AssertionError(f"unexpected GET {url}")
 
@@ -106,7 +114,10 @@ class _Client:
                     self._last["created_at"] = row.get("created_at", self._last["created_at"])
                     self.comments[index] = self._last
                     break
-        return _Resp(self._last, self.post_status)
+        response = dict(self._last)
+        if self.response_id != "unchanged":
+            response["id"] = self.response_id
+        return _Resp(response, self.post_status)
 
     def post(self, url, headers=None, json=None):
         return self._write("POST", url, headers, json)
@@ -303,6 +314,26 @@ def test_identical_retry_with_unusable_comment_id_refuses_without_write(monkeypa
                                 "user": {"login": APP_LOGIN}}])
     assert _run(monkeypatch, tmp_path, client) == 1
     assert client.writes == []
+
+
+@pytest.mark.parametrize("readback_id,readback_url", [
+    (None, "unchanged"), (True, "unchanged"), (999, "unchanged"),
+    ("unchanged", None),
+    ("unchanged", f"https://github.com/{REPO}/pull/99#issuecomment-556"),
+])
+def test_posted_comment_needs_matching_readback_identity(
+    monkeypatch, tmp_path, readback_id, readback_url
+):
+    client = _Client(readback_id=readback_id, readback_url=readback_url)
+    assert _run(monkeypatch, tmp_path, client) == 1
+    assert len(client.writes) == 1
+
+
+@pytest.mark.parametrize("response_id", [None, True, 999])
+def test_posted_comment_needs_matching_response_id(monkeypatch, tmp_path, response_id):
+    client = _Client(response_id=response_id)
+    assert _run(monkeypatch, tmp_path, client) == 1
+    assert len(client.writes) == 1
 
 
 @pytest.mark.parametrize("old_verdict,new_verdict", [
