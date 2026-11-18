@@ -157,24 +157,9 @@ python3 execution/scripts/check_foundation_front_matter.py || ERRORS=$((ERRORS +
 echo "  - Checking reading projection is in sync with the conformance matrix..."
 python3 execution/scripts/render_reading_projection.py --check || ERRORS=$((ERRORS + 1))
 
-# Decision state: docs/foundation/decision_state.md projects the register onto
-# ruled / merged / implemented, which the register's single status field cannot
-# express. Regenerate with the same script and no flag.
-#
-# --source worktree (the default; named explicitly here) reads
-# docs/foundation/conformance.md as checked out, not a re-fetched origin/main
-# blob -- ateles#1138 round two: a branch that adds or rules a register row
-# could never regenerate correctly against origin/main alone, since that row
-# does not exist on origin/main until the branch merges. The origin/main guard
-# below stays as a sanity check that this is a real clone with a remote, not
-# because the render itself still sweeps branches (#1292 already made it
-# read exactly one source).
-if git rev-parse --verify --quiet origin/main >/dev/null; then
-  echo "  - Checking decision state is in sync with the register..."
-  python3 execution/scripts/render_decision_state.py --check --source worktree || ERRORS=$((ERRORS + 1))
-else
-  echo "  - Skipping decision state (no origin/main to read the register from)"
-fi
+# Decision state is rendered from the checked-out register, with no committed copy.
+echo "  - Checking decision state renders cleanly..."
+python3 execution/scripts/render_decision_state.py --check --source worktree || ERRORS=$((ERRORS + 1))
 
 # Skill inventory: docs/foundation/skill_inventory.md is stage 0 of the skill
 # migration (migration.md stage 11 migrates skills BY CLASS, so an

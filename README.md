@@ -11,13 +11,15 @@ life end to end, with the governance substrate (identity, capability, gating, au
 against the vision.
 
 Ateles is a design and a working example of it. The design is
-[`docs/foundation/`](docs/foundation/): twenty-eight documents — twenty-four stating how work is created,
+[`docs/foundation/`](docs/foundation/): twenty-seven documents — twenty-four stating how work is created,
 taken, executed, and approved, and what the swarm does when it cannot reach its own record, plus
-[Revisions](docs/foundation/revisions.md), [Decision state](docs/foundation/decision_state.md),
+[Revisions](docs/foundation/revisions.md),
 [Skill inventory](docs/foundation/skill_inventory.md), and the
 [Rule inventory](docs/foundation/rule_inventory.md), which state no rule and hold, respectively, the
-amendment history, the register projected onto ruled/merged/implemented, every skill measured by
-name and content hash, and every place a rule is stated across the harnesses and stores.
+amendment history, every skill measured by name and content hash, and every place a rule is stated
+across the harnesses and stores.
+The decision-state projection is generated separately; read the latest `foundation-checks` CI
+artifact or run `python3 execution/scripts/render_decision_state.py --stdout`.
 The example is what
 runs against that design — background daemons and skills that already automate code review, releases,
 issue triage, email, calendar, recurring payments (fiat + Bitcoin), meeting capture and recap, health
@@ -714,7 +716,7 @@ Full documentation lives in `docs/` — index at [docs/README.md](docs/README.md
 [Harness carriers](docs/foundation/harness_carriers.md) ·
 [Application](docs/foundation/application.md) ·
 [Revisions](docs/foundation/revisions.md) ·
-[Decision state](docs/foundation/decision_state.md) ·
+Decision state: `python3 execution/scripts/render_decision_state.py --stdout` ·
 [Status](docs/foundation/status.md) ·
 [Skill inventory](docs/foundation/skill_inventory.md) ·
 [Rule inventory](docs/foundation/rule_inventory.md)

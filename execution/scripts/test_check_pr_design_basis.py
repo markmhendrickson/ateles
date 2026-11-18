@@ -131,7 +131,6 @@ class Exemption(unittest.TestCase):
             "docs/taxonomy.md",
             "docs/phases.md",
             "docs/architecture.md",
-            "docs/foundation/decision_state.md",
             "docs/foundation/projection/adapters.md",
             "docs/agents/pavo.md",
             ".claude/skills/pavo/SKILL.md",
