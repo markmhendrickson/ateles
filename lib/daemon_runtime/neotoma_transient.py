@@ -75,7 +75,10 @@ def is_transient_status(exc: BaseException) -> bool:
     return code == 429 or 500 <= code <= 599
 
 
-def call_with_transient_retry(fn: Callable[[], T], *, label: str) -> T:
+def call_with_transient_retry(
+    fn: Callable[[], T], *, label: str, sleep: Callable[[float], None] | None = None,
+) -> T:
+    pause_for = sleep or _sleep
     attempts = len(RETRY_PAUSES_SECONDS) + 1
     for attempt in range(attempts):
         try:
@@ -92,7 +95,7 @@ def call_with_transient_retry(fn: Callable[[], T], *, label: str) -> T:
                 attempts - 1,
                 pause,
             )
-            _sleep(pause)
+            pause_for(pause)
     raise AssertionError("unreachable")  # pragma: no cover
 
 

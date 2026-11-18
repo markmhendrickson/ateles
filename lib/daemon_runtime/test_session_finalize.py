@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import pytest
+import threading
+import time
+import json
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 from lib.daemon_runtime import session_finalize as sf
 
 
@@ -11,6 +18,21 @@ class _Resp:
 
     def json(self):
         return {}
+
+
+@pytest.fixture(autouse=True)
+def _client_delegates_to_existing_fakes(monkeypatch):
+    class FakeClient:
+        def post(self, *args, **kwargs):
+            return sf.httpx.post(*args, **kwargs)
+
+        def get(self, *args, **kwargs):
+            return sf.httpx.get(*args, **kwargs)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sf, "_request_client_factory", FakeClient, raising=False)
 
 
 # ── pure payload builder ─────────────────────────────────────────────────────
@@ -363,3 +385,336 @@ def test_append_turn_posts_and_fails_open(monkeypatch):
     assert sf.append_turn(conversation_id="ent_conv", role="assistant", content="progress") is True
     monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "")
     assert sf.append_turn(conversation_id="ent_conv", role="assistant", content="x") is False
+
+
+
+def _capture_post_timeout(monkeypatch, **kwargs):
+    seen = {}
+
+    def fake_post(url, **kw):
+        seen["timeout"] = kw.get("timeout")
+        resp = type("R", (), {"raise_for_status": lambda self: None, "json": lambda self: {"ok": True}})()
+        return resp
+
+    monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    monkeypatch.setattr(sf.httpx, "post", fake_post)
+    sf._post_store({"idempotency_key": "k"}, **kwargs)
+    return seen["timeout"]
+
+
+def test_provenance_store_attempt_allows_a_slow_hosted_write(monkeypatch):
+    """The store Apis requires before spawning gets 60s per attempt; a fixed 20s refused every build
+    while the hosted instance was slow."""
+    assert _capture_post_timeout(monkeypatch, retry_transient=True) == 60.0
+
+
+def test_other_stores_keep_the_short_limit(monkeypatch):
+    assert _capture_post_timeout(monkeypatch) == 20.0
+
+
+
+def _run_session_fakes(monkeypatch, post):
+    """The same readback fakes as the success test above, with a caller-supplied POST."""
+    class _Response:
+        def __init__(self, data): self.data = data
+        def raise_for_status(self): pass
+        def json(self): return self.data
+
+    def fake_get(url, **_kwargs):
+        if url.endswith("/entities/ent_conv99"):
+            return _Response({"entity_id": "ent_conv99", "entity_type": "conversation",
+                              "snapshot": {"conversation_id": "ent_task:created-0",
+                                           "session_id": "ent_task:created-0"}})
+        if url.endswith("/entities/ent_session99"):
+            return _Response({"entity_id": "ent_session99", "entity_type": "agent_session",
+                              "snapshot": {"harness": "ateles-swarm",
+                                           "native_session_id": "ent_task:created-0"}})
+        source = url.split("/entities/", 1)[1].split("/", 1)[0]
+        targets = {"ent_conv99": ["ent_task", "ent_session99"], "ent_session99": ["ent_task"]}
+        return _Response({"relationships": [
+            {"source_entity_id": source, "target_entity_id": target, "relationship_type": "REFERS_TO"}
+            for target in targets[source]]})
+
+    monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "tok")
+    monkeypatch.setattr(sf.httpx, "post", post)
+    monkeypatch.setattr(sf.httpx, "get", fake_get)
+    if hasattr(sf, "_RequestScope"):
+        monkeypatch.setattr(sf._RequestScope, "wait", lambda _self, _seconds, _deadline=None: None)
+    monkeypatch.setattr("lib.daemon_runtime.neotoma_transient._sleep", lambda _s: None)
+    return _Response
+
+
+def test_a_healthy_but_slow_provenance_write_still_opens_the_run_session(monkeypatch):
+    """End to end through create_run_session (what Apis calls before it spawns): a write that
+    needs 20 to 60s is rejected by a 20s limit and accepted at 60s, and then passes the
+    record and relationship readbacks, so the run session opens and the spawn path is reached."""
+    calls = []
+
+    def slow_post(*_a, **kwargs):
+        calls.append(kwargs.get("timeout"))
+        if kwargs.get("timeout", 0) < 30:  # the server needs about 30s to accept this write
+            raise sf.httpx.ReadTimeout("write not accepted within the limit")
+        return response({"entities": [
+            {"entity_type": "conversation", "entity_id": "ent_conv99"},
+            {"entity_type": "agent_session", "entity_id": "ent_session99"}]})
+
+    response = _run_session_fakes(monkeypatch, slow_post)
+    run = sf.create_run_session(task_id="ent_task", plan_id="ent_plan", agent="cicada", run_key="created-0")
+    assert run == sf.RunSession("ent_conv99", "ent_session99", "ent_task:created-0")
+    assert calls[0] == 60.0 and len(calls) == 1  # one attempt, at the provenance limit
+
+
+def test_delayed_provenance_write_opens_after_real_readbacks(monkeypatch):
+    def delayed_post(*_args, **_kwargs):
+        time.sleep(0.5)  # longer than the previous reduced 0.2s limit
+        return response({"entities": [
+            {"entity_type": "conversation", "entity_id": "ent_conv99"},
+            {"entity_type": "agent_session", "entity_id": "ent_session99"},
+        ]})
+
+    response = _run_session_fakes(monkeypatch, delayed_post)
+    monkeypatch.setattr(sf, "PROVENANCE_STORE_ATTEMPT_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(sf, "RUN_SESSION_TOTAL_SECONDS", 2.0)
+    started = time.monotonic()
+    run = sf.create_run_session(task_id="ent_task", agent="cicada", run_key="created-0")
+    assert run == sf.RunSession("ent_conv99", "ent_session99", "ent_task:created-0")
+    assert time.monotonic() - started >= 0.5
+
+
+def test_the_refusal_stays_when_the_provenance_write_never_succeeds(monkeypatch):
+    """The requirement is unchanged: if the store keeps timing out the run session is NOT opened
+    (Apis then refuses to spawn). The bound is three attempts."""
+    calls = []
+
+    def always_slow(*_a, **kwargs):
+        calls.append(kwargs.get("timeout"))
+        raise sf.httpx.ReadTimeout("write not accepted within the limit")
+
+    _run_session_fakes(monkeypatch, always_slow)
+    run = sf.create_run_session(task_id="ent_task", plan_id="ent_plan", agent="cicada", run_key="created-0")
+    assert run is None
+    assert calls == [60.0, 60.0, 60.0]
+
+
+
+def test_a_peer_that_keeps_making_progress_cannot_hold_the_provenance_write_open(monkeypatch):
+    """httpx's timeout is per network operation, so a peer that keeps sending bytes never trips it.
+    The provenance write has a wall-clock deadline of its own: it must give up in bounded time,
+    start no attempt after the total is spent, and leave no run session (Apis then refuses)."""
+    import threading
+    import time as _time
+
+    release = threading.Event()
+    started = []
+
+    def never_finishing(*_a, **kwargs):
+        started.append(kwargs.get("timeout"))
+        release.wait(30)  # "progress" without ever completing; ended by the test below
+        raise sf.httpx.ReadTimeout("released")
+
+    _run_session_fakes(monkeypatch, never_finishing)
+    monkeypatch.setattr(sf, "PROVENANCE_STORE_ATTEMPT_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(sf, "PROVENANCE_STORE_TOTAL_SECONDS", 0.8)
+    monkeypatch.setattr(sf, "RUN_SESSION_TOTAL_SECONDS", 0.8)
+    t0 = _time.monotonic()
+    try:
+        run = sf.create_run_session(task_id="ent_task", plan_id="ent_plan", agent="cicada", run_key="created-0")
+        elapsed = _time.monotonic() - t0
+    finally:
+        release.set()
+    assert run is None
+    assert elapsed < 3.0, f"the wait was not bounded: {elapsed:.1f}s"
+    assert 1 <= len(started) <= 3
+
+
+@contextmanager
+def _trickling_server(*, trickle_post: bool):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def _trickle(self):
+            with self.server.count_lock:
+                self.server.calls += 1
+            self.wfile.write(b"HTTP/1.1 200 OK\r\nX-Slow: ")
+            try:
+                while True:
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                    time.sleep(0.02)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def _json(self, payload):
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            if trickle_post:
+                self._trickle()
+            else:
+                self._json({"entities": [
+                    {"entity_type": "conversation", "entity_id": "ent_conv99"},
+                    {"entity_type": "agent_session", "entity_id": "ent_session99"},
+                ]})
+
+        def do_GET(self):
+            self._trickle()
+
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    except PermissionError:
+        pytest.skip("loopback socket bind is denied in this sandbox")
+    server.daemon_threads = True
+    server.count_lock = threading.Lock()
+    server.calls = 0
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server, f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def _live_provenance_workers():
+    return [t for t in threading.enumerate() if t.name.startswith("provenance-")]
+
+
+def _wait_for_workers_to_end():
+    until = time.monotonic() + 2.0
+    while _live_provenance_workers() and time.monotonic() < until:
+        time.sleep(0.02)
+    assert not _live_provenance_workers()
+
+
+def test_provenance_store_deadline_workers_are_bounded_and_reclaimed(monkeypatch):
+    fake_factory = sf._request_client_factory
+    monkeypatch.setattr(sf, "_request_client_factory", sf.httpx.Client)
+    monkeypatch.setattr(sf, "PROVENANCE_STORE_ATTEMPT_TIMEOUT_SECONDS", 0.4)
+    monkeypatch.setattr(sf, "RUN_SESSION_TOTAL_SECONDS", 0.7)
+    callers = []
+    results = []
+    with _trickling_server(trickle_post=True) as (server, url):
+        monkeypatch.setattr(sf, "NEOTOMA_BASE_URL", url)
+        monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "synthetic-token")
+        for i in range(sf.PROVENANCE_WORKERS):
+            caller = threading.Thread(target=lambda n=i: results.append(sf.create_run_session(
+                task_id="ent_task", agent="cicada", run_key=f"created-{n}")))
+            caller.start()
+            callers.append(caller)
+        until = time.monotonic() + 0.5
+        while server.calls < sf.PROVENANCE_WORKERS and time.monotonic() < until:
+            time.sleep(0.01)
+        assert server.calls == sf.PROVENANCE_WORKERS
+        started = time.monotonic()
+        assert sf.create_run_session(task_id="ent_task", agent="cicada", run_key="busy") is None
+        assert time.monotonic() - started < 0.2
+        assert server.calls == sf.PROVENANCE_WORKERS
+        assert len(_live_provenance_workers()) <= sf.PROVENANCE_WORKERS
+        for caller in callers:
+            caller.join(timeout=2)
+        assert all(not caller.is_alive() for caller in callers)
+        assert results == [None] * sf.PROVENANCE_WORKERS
+    _wait_for_workers_to_end()  # no request is released by this test
+    monkeypatch.setattr(sf, "_request_client_factory", fake_factory)
+    response = _run_session_fakes(monkeypatch, lambda *_a, **_k: response({"entities": [
+        {"entity_type": "conversation", "entity_id": "ent_conv99"},
+        {"entity_type": "agent_session", "entity_id": "ent_session99"},
+    ]}))
+    assert sf.create_run_session(task_id="ent_task", agent="cicada", run_key="created-0") is not None
+
+
+def test_readback_trickle_cannot_extend_complete_run_session_deadline(monkeypatch):
+    monkeypatch.setattr(sf, "_request_client_factory", sf.httpx.Client)
+    monkeypatch.setattr(sf, "RUN_SESSION_TOTAL_SECONDS", 0.4)
+    with _trickling_server(trickle_post=False) as (server, url):
+        monkeypatch.setattr(sf, "NEOTOMA_BASE_URL", url)
+        monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "synthetic-token")
+        started = time.monotonic()
+        assert sf.create_run_session(task_id="ent_task", agent="cicada", run_key="created-0") is None
+        assert time.monotonic() - started < 1.5
+        assert server.calls >= 1
+    _wait_for_workers_to_end()
+
+
+def test_expired_scopes_close_clients_and_reclaim_all_permits(monkeypatch):
+    capacity = 4
+    clients = []
+    class BlockingClient:
+        def __init__(self):
+            self.closed = threading.Event()
+            clients.append(self)
+
+        def post(self, *_args, **_kwargs):
+            self.closed.wait(3)
+            raise sf.httpx.ReadTimeout("closed on expiry")
+
+        def close(self):
+            self.closed.set()
+
+    monkeypatch.setattr(sf, "_request_client_factory", BlockingClient, raising=False)
+    def old_uninterruptible_post(*_args, **_kwargs):
+        time.sleep(3)
+        raise sf.httpx.ReadTimeout("old request timed out")
+    monkeypatch.setattr(sf.httpx, "post", old_uninterruptible_post)
+    monkeypatch.setattr("lib.daemon_runtime.neotoma_transient._sleep", lambda _s: None)
+    monkeypatch.setattr(sf, "PROVENANCE_STORE_ATTEMPT_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(sf, "PROVENANCE_STORE_TOTAL_SECONDS", 0.4)
+    monkeypatch.setattr(sf, "RUN_SESSION_TOTAL_SECONDS", 0.4, raising=False)
+    for wave in range(3):
+        results = []
+        callers = [threading.Thread(target=lambda n=i: results.append(sf.create_run_session(
+            task_id="ent_task", agent="cicada", run_key=f"wave-{wave}-{n}")))
+                   for i in range(capacity)]
+        for caller in callers:
+            caller.start()
+        until = time.monotonic() + 0.2
+        while len(_live_provenance_workers()) < capacity and time.monotonic() < until:
+            time.sleep(0.01)
+        assert len(_live_provenance_workers()) <= capacity
+        assert sf.create_run_session(task_id="ent_task", agent="cicada", run_key="busy") is None
+        for caller in callers:
+            caller.join(timeout=2)
+        assert results == [None] * capacity
+        _wait_for_workers_to_end()
+    assert all(client.closed.is_set() for client in clients)
+
+
+def test_blocked_readback_is_aborted_by_complete_deadline(monkeypatch):
+    response = _run_session_fakes(monkeypatch, lambda *_a, **_k: response({"entities": [
+        {"entity_type": "conversation", "entity_id": "ent_conv99"},
+        {"entity_type": "agent_session", "entity_id": "ent_session99"},
+    ]}))
+    clients = []
+    class ReadbackClient:
+        def __init__(self):
+            self.closed = threading.Event()
+            clients.append(self)
+
+        def post(self, *args, **kwargs):
+            return sf.httpx.post(*args, **kwargs)
+
+        def get(self, *_args, **_kwargs):
+            self.closed.wait(3)
+            raise sf.httpx.ReadTimeout("readback client closed")
+
+        def close(self):
+            self.closed.set()
+
+    monkeypatch.setattr(sf, "_request_client_factory", ReadbackClient, raising=False)
+    def old_blocked_get(*_args, **_kwargs):
+        time.sleep(0.8)
+        raise ValueError("old readback escaped the deadline")
+    monkeypatch.setattr(sf.httpx, "get", old_blocked_get)
+    monkeypatch.setattr(sf, "RUN_SESSION_TOTAL_SECONDS", 0.3, raising=False)
+    started = time.monotonic()
+    assert sf.create_run_session(task_id="ent_task", agent="cicada", run_key="created-0") is None
+    assert time.monotonic() - started < 0.6
+    _wait_for_workers_to_end()
+    assert all(client.closed.is_set() for client in clients)

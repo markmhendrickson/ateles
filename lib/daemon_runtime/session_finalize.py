@@ -25,12 +25,15 @@ import hashlib
 import json
 import logging
 import os
+import socket
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import httpx
 
+from .bounded_call import BoundedCallPool, Busy
 from .neotoma_transient import call_with_transient_retry
 
 log = logging.getLogger("daemon_runtime.finalize")
@@ -396,12 +399,105 @@ def build_turn_payload(
     }
 
 
+# One attempt of the run-session store that Apis requires BEFORE it spawns an agent
+# (conversation and agent_session provenance). The hosted Neotoma instance can take
+# well over 20s to accept a write, and a fixed 20s limit made Apis refuse to spawn
+# ("provenance could not be persisted and verified") for every build while reads stayed
+# fast. The refusal stays: provenance is still required. This only stops a slow, healthy
+# write from reading as a failed one, the same limit other Apis stores already use
+# (NEOTOMA_STORE_ATTEMPT_TIMEOUT_SECONDS in swarm_dispatch). Three 60s attempts
+# plus 2s and 5s pauses would be 187s; the write is capped at 175s including
+# pauses. The complete write and five readbacks are capped at 200s, leaving
+# 25s for readbacks when the write spends its full budget.
+PROVENANCE_STORE_ATTEMPT_TIMEOUT_SECONDS = 60.0
+# No new POST attempt starts after this write budget; retry sleeps can add 7s.
+PROVENANCE_STORE_TOTAL_SECONDS = 175.0
+RUN_SESSION_TOTAL_SECONDS = 200.0
+PROVENANCE_WORKERS = 4
+DEFAULT_STORE_ATTEMPT_TIMEOUT_SECONDS = 20.0
+_provenance_pool = BoundedCallPool(PROVENANCE_WORKERS, "provenance")
+_request_client_factory = httpx.Client
+
+
+def _interrupt_client(client: httpx.Client) -> None:
+    """Make a thread blocked in this client's network read return now, then close it.
+
+    ``Client.close()`` alone does NOT wake a thread blocked in ``recv``: it ends only when the
+    read timeout fires (verified with a peer that keeps sending: 8s for an 8s read timeout,
+    against 0s when the socket is shut down first). Shutting the socket down wakes it. The
+    sockets are reached through httpcore's pool; if that layout is not what is expected the
+    shutdown is skipped and the worker ends at its per-operation timeout instead (the
+    process-wide worker cap bounds the damage either way).
+    """
+    try:
+        for connection in list(client._transport._pool._connections):  # type: ignore[attr-defined]
+            sock = getattr(connection._connection._network_stream, "_sock", None)
+            if sock is not None:
+                sock.shutdown(socket.SHUT_RDWR)
+    except Exception:  # noqa: BLE001 - best effort; close() below still runs
+        pass
+    client.close()
+
+
+class _RequestScope:
+    """Own per-request clients so an expired run can interrupt active I/O."""
+
+    def __init__(self, deadline: float) -> None:
+        self.deadline = deadline
+        self._lock = threading.Lock()
+        self._clients: set[httpx.Client] = set()
+        self._aborted = False
+        self._aborted_event = threading.Event()
+
+    def client(self) -> httpx.Client:
+        with self._lock:
+            if self._aborted:
+                raise httpx.ReadTimeout("run-session request scope expired")
+            client = _request_client_factory()
+            self._clients.add(client)
+            return client
+
+    def close_client(self, client: httpx.Client) -> None:
+        try:
+            client.close()
+        finally:
+            with self._lock:
+                self._clients.discard(client)
+
+    def abort(self) -> None:
+        with self._lock:
+            self._aborted = True
+            self._aborted_event.set()
+            clients = tuple(self._clients)
+        for client in clients:
+            try:
+                _interrupt_client(client)
+            except Exception:  # noqa: BLE001 - close all clients even if one fails
+                log.exception("[finalize] could not close an expired request client")
+
+    def wait(self, seconds: float, deadline: float | None = None) -> None:
+        remaining = min(self.deadline, deadline or self.deadline) - time.monotonic()
+        if remaining < seconds:
+            raise httpx.ReadTimeout("provenance store retry would exceed its deadline")
+        if self._aborted_event.wait(seconds):
+            raise httpx.ReadTimeout("run-session request scope expired")
+
+
+def _scoped_request(scope: _RequestScope, method: str, url: str, **kwargs):
+    client = scope.client()
+    try:
+        return getattr(client, method)(url, **kwargs)
+    finally:
+        scope.close_client(client)
+
+
 def _post_store(
     body: dict,
     *,
     retry_transient: bool = False,
     streak_key: str | None = None,
     label: str = "",
+    scope: _RequestScope | None = None,
 ) -> dict | None:
     """POST a /store body. Returns the parsed JSON, or None. Fail-open.
 
@@ -414,20 +510,48 @@ def _post_store(
         log.warning("[finalize] no bearer token — store skipped")
         return None
     streak = streak_key or body.get("idempotency_key")
+    attempt_timeout = (PROVENANCE_STORE_ATTEMPT_TIMEOUT_SECONDS if retry_transient
+                       else DEFAULT_STORE_ATTEMPT_TIMEOUT_SECONDS)
 
-    def _send() -> dict:
-        resp = httpx.post(
-            f"{NEOTOMA_BASE_URL}/store",
-            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            json=body,
-            timeout=20,
-        )
+    deadline = time.monotonic() + PROVENANCE_STORE_TOTAL_SECONDS
+
+    def _post() -> dict:
+        url = f"{NEOTOMA_BASE_URL}/store"
+        kwargs = dict(headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+                      json=body, timeout=attempt_timeout)
+        if scope is None:
+            resp = httpx.post(url, **kwargs)
+        else:
+            client = scope.client()
+            expired = threading.Event()
+            timer = threading.Timer(min(attempt_timeout, max(0.0, deadline - time.monotonic())),
+                                    lambda: (expired.set(), client.close()))
+            timer.daemon = True
+            timer.start()
+            try:
+                resp = client.post(url, **kwargs)
+                if expired.is_set():
+                    raise httpx.ReadTimeout("provenance POST attempt expired")
+            finally:
+                timer.cancel()
+                scope.close_client(client)
         resp.raise_for_status()
         return resp.json()
 
+    def _send() -> dict:
+        if not retry_transient:
+            return _post()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise httpx.ReadTimeout("provenance store total deadline spent")
+        return _post()
+
     try:
         if retry_transient:
-            result = call_with_transient_retry(_send, label="run-session store")
+            result = call_with_transient_retry(
+                _send, label="run-session store",
+                sleep=(lambda seconds: scope.wait(seconds, deadline)) if scope else None,
+            )
         else:
             result = _send()
     except Exception as exc:  # noqa: BLE001 — never crash the caller
@@ -477,6 +601,7 @@ def _entity_readback_matches(
     entity_type: str,
     required_fields: dict[str, str],
     retry_transient: bool = False,
+    scope: _RequestScope | None = None,
 ) -> bool:
     """Read an entity after write and verify the fields carrying identity.
 
@@ -484,17 +609,19 @@ def _entity_readback_matches(
     back wrong is a refusal on the first read.
     """
     def _read() -> dict:
-        response = httpx.get(
-            f"{NEOTOMA_BASE_URL}/entities/{entity_id}",
-            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            timeout=10,
-        )
+        url = f"{NEOTOMA_BASE_URL}/entities/{entity_id}"
+        kwargs = dict(headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}, timeout=10)
+        response = (httpx.get(url, **kwargs) if scope is None
+                    else _scoped_request(scope, "get", url, **kwargs))
         response.raise_for_status()
         return response.json()
 
     try:
         data = (
-            call_with_transient_retry(_read, label=f"{entity_type} readback")
+            call_with_transient_retry(
+                _read, label=f"{entity_type} readback",
+                sleep=scope.wait if scope else None,
+            )
             if retry_transient
             else _read()
         )
@@ -519,20 +646,23 @@ def _relationship_readback_matches(
     target_entity_id: str,
     relationship_type: str,
     retry_transient: bool = False,
+    scope: _RequestScope | None = None,
 ) -> bool:
     """Verify a relationship created by the same store write."""
     def _read() -> dict:
-        response = httpx.get(
-            f"{NEOTOMA_BASE_URL}/entities/{source_entity_id}/relationships",
-            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            timeout=10,
-        )
+        url = f"{NEOTOMA_BASE_URL}/entities/{source_entity_id}/relationships"
+        kwargs = dict(headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}, timeout=10)
+        response = (httpx.get(url, **kwargs) if scope is None
+                    else _scoped_request(scope, "get", url, **kwargs))
         response.raise_for_status()
         return response.json()
 
     try:
         payload = (
-            call_with_transient_retry(_read, label="relationship readback")
+            call_with_transient_retry(
+                _read, label="relationship readback",
+                sleep=scope.wait if scope else None,
+            )
             if retry_transient
             else _read()
         )
@@ -556,12 +686,41 @@ def create_run_session(
     title: str | None = None,
     summary: str | None = None,
 ) -> RunSession | None:
-    """Open and verify the conversation and agent_session for one run."""
+    """Open and verify the conversation and agent_session within one wall-clock bound."""
+    if not NEOTOMA_BEARER_TOKEN:
+        log.warning("[finalize] no bearer token — run session refused")
+        return None
+    deadline = time.monotonic() + RUN_SESSION_TOTAL_SECONDS
+    scope = _RequestScope(deadline)
+    try:
+        return _provenance_pool.call(
+            lambda: _create_run_session_body(
+                task_id=task_id, plan_id=plan_id, agent=agent, run_key=run_key,
+                title=title, summary=summary, scope=scope,
+            ),
+            deadline,
+            on_expire=scope.abort,
+        )
+    except Busy:
+        log.warning("[finalize] provenance workers busy; run session refused")
+        return None
+    except TimeoutError:
+        log.warning("[finalize] complete run-session deadline expired; run session refused")
+        return None
+    except Exception as exc:  # noqa: BLE001 - worker admission/cancellation must fail closed
+        log.error("[finalize] could not run provenance worker: %s", type(exc).__name__)
+        return None
+
+
+def _create_run_session_body(
+    *, task_id: str, plan_id: str | None, agent: str, run_key: str,
+    title: str | None, summary: str | None, scope: _RequestScope,
+) -> RunSession | None:
     native_session_id = f"{task_id}:{run_key}"
     data = _post_store(build_run_session_payload(
         task_id=task_id, plan_id=plan_id, agent=agent,
         run_key=run_key, title=title, summary=summary,
-    ), retry_transient=True)
+    ), retry_transient=True, scope=scope)
     if not data:
         return None
     ids = {
@@ -581,6 +740,7 @@ def create_run_session(
             "session_id": native_session_id,
         },
         retry_transient=True,
+        scope=scope,
     ):
         return None
     if not _entity_readback_matches(
@@ -591,6 +751,7 @@ def create_run_session(
             "native_session_id": native_session_id,
         },
         retry_transient=True,
+        scope=scope,
     ):
         return None
     required_relationships = (
@@ -604,6 +765,7 @@ def create_run_session(
             target_entity_id=target_entity_id,
             relationship_type="REFERS_TO",
             retry_transient=True,
+            scope=scope,
         ):
             return None
     return RunSession(
