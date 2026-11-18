@@ -17,6 +17,79 @@ Operator-approved release executor for Neotoma. Two halves:
   link + advisory flags. `prepare.py` exits immediately; the agent sends its own
   Telegram. It NEVER tags, publishes, or deploys.
 
+### The prepare agent's environment and git hooks
+
+For commands it can inspect, the guard refuses attempts to skip the release
+checkout's git hooks. `spawn_prepare_agent`
+passes it `--settings` with a PreToolUse guard,
+`.claude/hooks/git_hook_bypass_guard.py`. The guard is an allowlist: the agent
+may run only a plain `git` (optionally `-C <path>`) with a subcommand a release
+prep needs (`ALLOWED_SUBCOMMANDS` in the guard: status, diff, log, show,
+fetch, add, commit, push, checkout, switch, merge, worktree and a few reads),
+with no hook-skipping option (`--no-verify`, `commit -n`,
+`--no-post-rewrite`), no `git config` write (reads stay allowed), no writes to
+git or Husky configuration locations, no tag
+creation, and no `GIT_*` or `HUSKY` variable set anywhere in the command.
+Command-local, exported, wrapped, and nested assignments that change program
+lookup or loading are refused, including `PATH`, `LD_*`, `DYLD_*`, Git/SSH
+helpers, pager/editor variables, shell startup variables, language loader
+variables, `HOME`, and `XDG_CONFIG_HOME`. `env -S`, protected `env -u`,
+`command -p`, and `exec -a` are refused as well.
+Everything else around git is refused: wrappers (`env`, `xargs`, `timeout`),
+path-qualified or variable-named git binaries, other global options (`-c`,
+`--config-env`, `--git-dir`, `--work-tree`, `--exec-path`), aliases, command
+and process substitution, and inline interpreter programs, heredocs or pipes
+that feed git to a shell. Program text the guard cannot inspect is refused.
+An earlier denylist was bypassed in each of three review rounds, which is why
+the guard now allows a known surface instead. It is a tripwire, not a
+sandbox: the guarded command is not an operating-system confinement boundary.
+For Bash, Edit, Write and MultiEdit calls, malformed or empty hook input,
+or a missing, empty, or non-string `tool_name`,
+missing command or file path, and an internal judgement error are refused with
+exit 2 and a fixed denial reason. Other tool names pass through; the prepare
+daemon's `--settings` matcher invokes the guard only for those four tools.
+
+Directory-changing wrapper options are refused during preparation. A literal
+`cd` remains available; subsequent relative writes are checked against its
+effective directory. Other shell directory changes are refused.
+The live binding check requires a hook-side refusal receipt for the guarded
+attempt and an allow receipt for the control command. A declined command or
+an absent hook is inconclusive even when no guarded commit lands.
+Preparation uses plain git commands and plain file edits with literal paths.
+The prepare state records a digest of the checkout's hook directories, Husky
+directory, Git configuration and Git-directory entry before the agent starts.
+Publishing compares that digest before any release step; a changed or unreadable
+location stops the release and raises a Telegram notice.
+
+The agent's cwd is the Neotoma checkout, so this repository's own
+`.claude/settings.json` does not reach it; `--settings` is the only way the
+guard is loaded. If the guard file is missing, prepare refuses to spawn the
+agent. The sanctioned way to skip the test stage is the hook's own
+`SKIP_TESTS=1 SKIP_TESTS_REASON="<why>"`, which still runs type-check, lint and
+format.
+
+`_agent_env` starts from the shared runner environment allowlist and then adds
+only the Claude authentication/configuration and gws configuration the prepare
+child needs. Unknown ambient variables, Neotoma storage/target selectors, git
+configuration overrides and unrelated vendor credentials never pass by
+inheritance. The RC email goes out as the swarm mailbox only when valid,
+distinct `OPERATOR_EMAIL` and `ATELES_SWARM_EMAIL` addresses and an existing
+`ATELES_SWARM_GWS_CONFIG_DIR` are set. The shared mapping in
+`lib/approval/email_channel.py` (`gws_config_dir_env`) makes it the child's
+`GOOGLE_WORKSPACE_CLI_CONFIG_DIR` only when the swarm directory exists.
+The ambient Workspace directory is never passed to the prepare child.
+`store_release_result.py` loads its own Neotoma target and signing
+inputs when it runs.
+
+The Bash guard is an accidental-bypass tripwire, not a security boundary: a
+written script or an indirection it cannot inspect can still skip hooks. The
+binding controls are the allowlisted child environment plus the release checks
+that run after the agent.
+
+Before deploying a guard change, run `verify_guard_live.py` on the credentialed
+prepare host. It checks that the real Claude CLI loads and enforces the hook;
+hook CI tests do not replace this pre-deploy live-binding check.
+
 This split exists because release approval can take hours — a launchd daemon
 cannot block in-process that long (unlike Monedula's 120 s payment approval).
 Prepare runs and exits; publish fires later when the operator approves.
@@ -130,36 +203,133 @@ and re-running it would be redundant or unsafe.
 | `NEOTOMA_SANDBOX_URL` | Sandbox host to verify (default `https://neotoma-sandbox.fly.dev`). |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram push (via shared `send.mjs`). |
 | `TELEGRAM_TOPIC_PHOENICURUS` | Optional Telegram topic/thread id for release messages. |
-| `OPERATOR_EMAIL` | Where release RC notifications are emailed (in addition to Telegram). Unset → email is skipped, Telegram only. |
-| `ATELES_SWARM_EMAIL` | Optional `From:` for release email (the shared swarm address, matching the other daemons). |
+| `OPERATOR_EMAIL` | Required valid operator address for RC email and email approval. Missing or invalid → Telegram only. |
+| `ATELES_SWARM_GWS_CONFIG_DIR` | Required existing gws configuration directory signed in as the swarm mailbox. Missing or invalid → Telegram only. |
+| `ATELES_SWARM_EMAIL` | Required valid swarm mailbox address for RC email and email approval; must differ from `OPERATOR_EMAIL`. Missing, invalid, or the same address → Telegram only. |
 
 ## Notification channels
 
-A prepared release candidate is sent to the operator on **both Telegram and
-email**. The spawned prepare agent (step 11–12 of its prompt) posts the full
-rendered notes + RC PR link + `approve/skip` instruction to Telegram, and emails
-the same via `gws gmail +send` (subject `🚀 Release <TAG> ready to approve`) using
-the same `OPERATOR_EMAIL`/`ATELES_SWARM_EMAIL` the shared `lib/notify` Notifier
-uses — so release mail matches every other swarm daemon. Email is **fail-open**:
-if `OPERATOR_EMAIL` is unset or the send fails, the run logs it and continues;
-Telegram is the guaranteed channel and the release is never blocked on email.
+A prepared release candidate always gets a Telegram notification with the full
+rendered notes, RC PR link and `approve/skip` instruction via Telegram. If valid, distinct
+`OPERATOR_EMAIL` and `ATELES_SWARM_EMAIL` addresses and an existing
+`ATELES_SWARM_GWS_CONFIG_DIR` are configured, the prepare agent
+first sends the same notes via `gws gmail +send` (subject `🚀 Release <TAG> ready
+to approve`) from the swarm mailbox. When that email is delivered, the
+Telegram notification offers approval by email reply or through Telegram.
+When any mailbox prerequisite is missing or invalid, or delivery fails, the notification says
+email approval is unavailable and gives the exact Telegram command,
+`approve <version>`. The release is never
+blocked on email.
 
 ## Approval routing — two channels
 
-A prepared release can be approved on **either channel**:
+A prepared release can be approved on Telegram. Email reply approval is offered
+only after the RC email was sent from the configured swarm mailbox.
+Email approval requires the reply to retain the request's correlation token.
+A reply that retains the subject but omits the quoted token cannot approve;
+the operator receives one correction notice per reply with `approve <version>`
+for Telegram and an instruction to quote the request on any new email reply.
+An HTML quote region containing text that cannot be established as part of
+the original request remains unreadable and holds email approval.
 
 **Telegram** — the operator replies `approve <version>`; Ateles flips the
 `release_result` to `approved` and runs `python3 publish.py --version <version>`.
+The existing Telegram `skip <version>` command marks the candidate skipped.
 See the Ateles SOUL.md "Release approval" section.
 
-**Email reply** — the operator replies `approve <version>` to the RC email. The
-routing mirrors the swarm PR-approve flow:
+**Email reply** — after only provably quoted text is removed, the entire
+operator-authored reply must contain exactly one instruction line:
+`approve <version>` (case-insensitive; the `v` prefix is optional). A final
+period or exclamation mark is allowed. The version must match the release in
+the subject. Email `skip <version>` does not discard the candidate; Turdus
+responds with the exact Telegram `skip <version>` discard instruction, including
+when the email omitted the request token. The release email asks only
+for `approve <version>` by reply. The routing mirrors the swarm PR-approve flow:
+
+For a PR merge-ready email, the only instruction line is `APPROVE`, optionally
+followed by that notification's PR number (`7`, `#7`, or `owner/repo#7`). It
+allows the same case and final punctuation rules. The only other authored
+lines allowed are exact correlation lines for that target (`swarm-approve:
+owner/repo#7` or `release-approve: v1.2.3`). A line naming another target,
+including a different PR or version in a correlation line, is not approval.
+
+Only text in known rendered prose elements inside the HTML body counts as
+authored text; unknown elements make the body unreadable. Head, title,
+script, style, template, form values and other non-rendered elements do not
+count. When both plain-text and HTML parts are present, each must yield the same
+authored text; disagreement or a present-but-empty counterpart is unreadable,
+held, and recoverable through the named Telegram approval path. A single
+plain-text part is read as plain text, and a single HTML part is read as HTML.
+For HTML-only replies, every element in the text's ancestor chain must have only allowed inline
+style properties: an allowlisted font family, safe font size and line height, font weight/style,
+text alignment/decoration, bounded margins and padding, white space, wrapping,
+`text-transform:none`, `direction:ltr`, `unicode-bidi:normal`, and inert borders.
+Relative font sizes are multiplied down the
+ancestor chain from a 16px base; a computed size below 8px or a relative
+scale below 0.7 is unreadable. Absolute sizes below 8px are unreadable.
+Every margin and padding side must be nonnegative and at most 100px, 75pt,
+8em/rem, or 10%. Layout dimensions, offsets, transforms, floats, and overflow
+that could hide or displace text are refused. Closed disclosure or conditional
+content (`details` outside its summary, closed `dialog`, `menu`, `slot`,
+`noembed`, `area`/`map`, `object`, `picture`, audio/video fallback, and
+`frameset`) cannot grant approval. Duplicate HTML attributes make the reply
+unreadable. Text colour must be an explicit opaque dark 3- or 6-digit hex,
+RGB(A) or supported dark name; backgrounds must be explicit opaque light colours
+or absent. Unparsed colours, transparency, images, gradients, hiding/layout CSS,
+variables and stylesheet declarations make the body unreadable. Font families
+are limited to Arial, Helvetica, Helvetica Neue, Verdana, Tahoma, Trebuchet MS,
+Calibri, Cambria, Candara, Segoe UI, Aptos, Georgia, Times, Times New Roman,
+Garamond, Palatino, Courier, Courier New, Menlo, Monaco, Consolas, Roboto,
+Open Sans, Lato, system-ui, -apple-system, BlinkMacSystemFont, sans-serif,
+serif, monospace, ui-sans-serif, ui-serif and ui-monospace. Every family in a
+comma-separated list must be allowed. Unknown or symbol fonts, `@font-face`,
+font shorthand, font variant/features/synthesis, unicode range, text transform
+other than `none`, direction other than `ltr`, unicode bidi other than `normal`,
+writing mode and text orientation make the body unreadable. Quoted text is
+removed only when each line starts with `>`, or a terminal `On <date> <name>
+wrote:` / `Le <date> ... a écrit :` / `El <date> ... escribió:` attribution is
+followed only by `>` lines and blanks, or a full `From:`, `Sent:`, `To:`,
+`Subject:` block is followed only by `>` lines and blanks. A full header block
+immediately after `-----Original Message-----` or `Begin forwarded message:`
+also marks quoted original content. Isolated header-shaped and separator lines
+remain authored. No signature is stripped: `--` or `-- ` and every following
+line remain authored, so a signed or otherwise extended approval reply is a
+non-approval and receives the exact-form correction. Bottom-posted HTML or plain-text replies
+are unreadable. Any second instruction, text before or
+after the affirmative, refusal, condition, question, longer sentence, or wrong
+target is a non-approval. For every readable, authenticated non-approval in an
+approval thread, Turdus sends one
+Telegram correction per message ID naming the target, saying no approval was
+recorded, and giving the exact accepted reply. It never routes that reply.
+This includes ordinary replies, questions, skips and blank authored replies
+above a recognizable quote. The subject target must match the correlation token
+in the reply, including when the token appears only in quoted text; a missing
+or mismatched token refuses approval and sends one Telegram notice naming the
+subject target and the reply's correlation target (or its absence), plus the
+exact accepted form: `approve` for that PR or `approve <version>` for that release.
+If authentication
+metadata or the reply body cannot be read, if HTML markup is malformed around
+a quote, or if an HTML-only copy of the notification has no identifiable quote
+boundary, Turdus leaves the reply pending, sends one Telegram unreadable notice
+naming the target, and retries on the next poll. A readable authentication
+failure is rejected and handled.
+If any reply in a sweep is unreadable or a fetch fails, no approval from that
+sweep is routed. Turdus still sends one Telegram correction for each readable,
+authenticated non-approval reply; an exact approval remains pending for a clean
+sweep and gets one Telegram notice per message ID naming its held target and
+offering the Telegram approval path. A failed notice delivery is retried. These
+operator notices go directly to Telegram even when email is the
+primary notification transport, and an ID is recorded as notified only after
+delivery succeeds. Monedula also holds consent on the same incomplete sweep. Its
+multi-line payment replies are atomic: every line must be bound to an item and
+use a verb valid for that item's type before any approval or skip is recorded.
 
 ```
 reply "approve <version>" to the RC email
   → Turdus (Gmail poll) verifies: sender == operator, subject has "ready to
-    approve", body has `release-approve: <version>` token AND unquoted
-    `approve <that exact version>`
+    approve", the original mail carries the `release-approve: <version>`
+    search token, subject names the version, and the whole authored reply
+    contains only `approve <that exact version>` plus matching correlation lines
   → POST /approve-release (Apis, loopback + X-Approve-Secret)
   → swarm_dispatch._handle_release_approve
   → publish.py --version <version> --from-email-approval
@@ -171,8 +341,8 @@ Safety properties (match the PR-approve flow + one extra):
 - **Loopback + shared secret** — `/approve-release` is 127.0.0.1-only and
   requires `APIS_APPROVE_EMAIL_SECRET`; unset → 503, wrong → 401. An email alone
   can't drive a publish without the secret on both daemons.
-- **Unquoted-text guard** — the word `approve` must be the operator's own text,
-  not the quoted `Reply approve …` from the original email.
+- **Unquoted-text guard** — the complete affirmative line must be the
+  operator's own text, not the quoted `Reply approve …` from the original email.
 - **Exact-version match** (operator ruling 2026-07-27) — the reply must name
   *this* release's version, so a stale `approve` from an old release thread can
   never trigger the wrong publish.

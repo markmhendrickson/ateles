@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import urllib.error
@@ -57,6 +58,7 @@ if str(_DAEMON_DIR) not in sys.path:
 from release_checkout_root import (  # noqa: E402
     default_neotoma_repo_root as _default_neotoma_repo_root,
 )
+from release_guard_snapshot import snapshot_release_guards  # noqa: E402
 
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
 # User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
@@ -223,6 +225,13 @@ if str(_REPO_ROOT) not in sys.path:
 
 from lib.daemon_runtime.logging_setup import configure_daemon_logging
 from lib import github_app_token  # noqa: E402
+from lib.approval import email_channel  # noqa: E402
+from lib.approval.email_channel import gws_config_dir_env  # noqa: E402
+from lib.environment_allowlist import (  # noqa: E402
+    ALLOWED_ENVIRONMENT_NAMES,
+    RUNNER_ENVIRONMENT_NAMES,
+    is_allowed_environment_name,
+)
 
 # Rotating + repeat-suppressing (lib/daemon_runtime/logging_setup.py):
 # unbounded retry logging filled a 926 GB disk on 2026-08-18.
@@ -323,7 +332,11 @@ def _spawn_count(head: str) -> int:
     if not head or not SPAWN_COUNT_FILE.exists():
         return 0
     try:
-        sha, _, n = SPAWN_COUNT_FILE.read_text().strip().partition(" ")
+        raw = SPAWN_COUNT_FILE.read_text().strip()
+        if raw.startswith("{"):
+            saved = json.loads(raw)
+            return int(saved.get("count") or 0) if saved.get("head") == head else 0
+        sha, _, n = raw.partition(" ")
         return int(n) if sha == head else 0
     except (ValueError, OSError):
         return 0
@@ -385,7 +398,7 @@ def _record_spawn(head: str) -> int:
     n = _spawn_count(head) + 1
     if head:
         try:
-            SPAWN_COUNT_FILE.write_text(f"{head} {n}")
+            SPAWN_COUNT_FILE.write_text(json.dumps({"head": head, "count": n}))
         except OSError as exc:
             # Losing the counter must not block a release; worst case we retry
             # more than MAX_SPAWNS_PER_HEAD times, which is still better than
@@ -520,8 +533,13 @@ def email_send(subject: str, body: str) -> bool:
     """
     import shutil
 
-    if not OPERATOR_EMAIL:
-        log.info("OPERATOR_EMAIL unset — skipping release email (Telegram only)")
+    if not email_channel.swarm_mailbox_configured():
+        log.info("swarm mailbox unavailable — skipping release email (Telegram only)")
+        return False
+    swarm_gws = (gws_config_dir_env(require_existing=True)
+                 if email_channel.swarm_mailbox_configured() else {})
+    if not swarm_gws:
+        log.warning("swarm mailbox unavailable — skipping release email")
         return False
     gws = shutil.which("gws")
     if not gws:
@@ -533,7 +551,7 @@ def email_send(subject: str, body: str) -> bool:
         cmd += ["--from", SWARM_EMAIL]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
-                           env=os.environ)
+                           env={**os.environ, **swarm_gws})
         if r.returncode != 0:
             log.warning(f"gws +send failed (rc={r.returncode}): "
                         f"{(r.stderr or '').strip()[:200]}")
@@ -922,9 +940,10 @@ def _build_agent_prompt(last_tag: str, commit_count: int) -> str:
         else "Send the Telegram notification to the default chat."
     )
     from_flag = f' --from "{SWARM_EMAIL}"' if SWARM_EMAIL else ""
+    email_available = email_channel.swarm_mailbox_configured()
     email_note = (
-        f"""12. ALSO email the operator the SAME notification (release goes to the
-    inbox, not just Telegram — and the operator can approve BY EMAIL REPLY).
+        f"""11. Email the operator the SAME notification before Telegram. Email
+    approval is available only when this send succeeds.
 
     SEND AS HTML, not raw markdown. The release notes are markdown; if sent as a
     plain --body they render as a literal wall of `##` and `-` characters in
@@ -941,18 +960,21 @@ def _build_agent_prompt(last_tag: str, commit_count: int) -> str:
     The email MUST still contain, as VISIBLE TEXT the operator (and their reply
     quote) will carry:
       (a) the subject starting 🚀 with the phrase "ready to approve" + the version;
-      (b) an approve/skip instruction, e.g. a line: Reply <code>approve &lt;TAG&gt;</code>
-          to publish, or <code>skip &lt;TAG&gt;</code> to discard;
+      (b) an approval instruction, e.g. a line: Reply <code>approve &lt;TAG&gt;</code>
+          to publish. To discard, use <code>skip &lt;TAG&gt;</code> through the
+          existing Telegram release command; email replies cannot discard;
       (c) a line reading exactly `release-approve: <TAG>` (real tag, e.g.
-          `release-approve: v0.20.0`) — Turdus parses this token from the reply
-          body to route an `approve <TAG>` reply to the publish gate, so it MUST be
-          present, exact, and in a form that survives as plain text in a quoted
-          reply (put it in its own <p> or <code> line, NOT only inside an href).
+          `release-approve: v0.20.0`) — Turdus uses this token to discover replies
+          in the mailbox and selects the target release from the reply subject.
+          Keep it present, exact, and visible on its own <p> or <code> line (NOT
+          only inside an href) so it survives as quoted plain text.
 
-    If the gws send fails, log it and continue — Telegram (step 11) is the
-    guaranteed channel; do NOT abort the run over an email failure."""
-        if OPERATOR_EMAIL
-        else "12. (Email notification skipped: OPERATOR_EMAIL is not configured.)"
+    If the gws send fails, log it and add this exact sentence to the Telegram
+    notification: "Email approval unavailable because the RC email failed to
+    send; in Telegram send exactly `approve <TAG>`." Replace <TAG> with the
+    actual version. Do NOT abort the run."""
+        if email_available
+        else "11. Email notification skipped: email approval unavailable because the separate swarm mailbox is not configured. Do not run gws. Add this sentence to Telegram, replacing <TAG> with the actual version: \"Email approval unavailable; in Telegram send exactly `approve <TAG>`.\""
     )
     return f"""You are Phoenicurus, the Neotoma release-preparation agent.
 
@@ -966,6 +988,21 @@ CRITICAL CONSTRAINTS — read carefully:
   irreversible publish step, STOP.
 - Work in an isolated git worktree off origin/main. Do NOT disturb the operator's
   main checkout or any unrelated uncommitted changes.
+- Use plain git commands and plain file edits with literal paths. Do not use
+  find, xargs, parallel, substitution, stdin, or generated destination lists
+  for writes; the guard refuses destinations it cannot judge literally.
+- Never skip git hooks: no `--no-verify`, no `git commit -n`, no `HUSKY=0`, no
+  `core.hooksPath` override. Run git as a plain `git` command (`git -C <path>
+  ...` is fine): no wrapper such as `env`, `xargs` or `timeout`, no alias, no
+  `git config` write, no `$(git ...)` substitution and no git inside
+  `bash -c` or `python -c`. A guard allows only the git commands a release
+  prep needs and refuses everything else. If the pre-commit TEST stage
+  cannot pass for a reason unrelated to the release diff, commit with the hook's
+  own escape hatch, which still runs type-check, lint and format:
+  `SKIP_TESTS=1 SKIP_TESTS_REASON="<why>" git commit ...`
+  and state that reason in the Telegram and email. If any other stage fails, or
+  the hook fails for an environment reason, stop and report it; do not work
+  around it by setting NEOTOMA_ENV or pointing NEOTOMA_DATA_DIR anywhere.
 
 Your job — run the /release skill's PREPARE phase up to (and including) the
 release-candidate PR, then HALT:
@@ -1009,19 +1046,104 @@ Then record + notify:
     The script sets both the `rc_*` and plain field names, and the idempotency
     key, so re-running it is safe. If it exits non-zero, say so in your Telegram
     and email — do NOT report the release as recorded.
-11. Send a Telegram notification with: the version, the FULL rendered release
-    notes, the RC PR URL, and any advisory flags (security sensitive=true,
-    /review findings, CI status). End with: "Reply `approve <TAG>` to publish, or
-    `skip <TAG>` to discard." {topic_note}
 {email_note}
+12. Send a Telegram notification with: the version, the FULL rendered release
+    notes, the RC PR URL, and any advisory flags (security sensitive=true,
+    /review findings, CI status). Include the email-approval status sentence
+    from step 11 when email was unavailable or failed. End with: "Reply
+    `approve <TAG>` to publish, or `skip <TAG>` to discard." {topic_note}
 
 If preflight shows nothing to release, send a one-line Telegram saying so and stop.
 Be precise and terse in the Telegram/email messages. No motivational filler.
 """
 
 
+# The prepare child starts from the shared runner subset, not the daemon's
+# environment. Neotoma names are excluded even when shared code allows one:
+# store_release_result.py deliberately loads its own target and signing inputs
+# from the release runtime, so the agent itself never receives a storage/target
+# selector.
+_PREPARE_AGENT_SHARED_ENV = frozenset(
+    name
+    for name in RUNNER_ENVIRONMENT_NAMES
+    if (
+        name in ALLOWED_ENVIRONMENT_NAMES
+        and is_allowed_environment_name(name)
+        and not name.startswith("NEOTOMA_")
+        and name != "CODEX_HOME"
+    )
+)
+_PREPARE_AGENT_RELEASE_ADDITIONS: dict[str, str] = {
+    # The release prompt sends its prepared-RC notification through gws.
+    "GOOGLE_WORKSPACE_CLI_CONFIG_DIR": "gws account/config selection for the RC email",
+    # Some installations keep Claude's subscription login outside HOME.
+    "CLAUDE_CONFIG_DIR": "Claude CLI subscription configuration location",
+}
+
+# GitHub token names gh reads, in its own precedence order. The agent receives
+# them so it pushes and opens the RC PR as the swarm account, never the keyring's.
+_PREPARE_AGENT_GITHUB_TOKEN_NAMES = ("GH_TOKEN", "GITHUB_TOKEN")
+# The login the RC PR must be opened as. A swarm identity, not operator data.
+RC_GITHUB_LOGIN = os.environ.get("PHOENICURUS_RC_GITHUB_LOGIN", "ateles-agent")  # config-source-ok: swarm account default, env override
+VERIFY_GH_IDENTITY = PROJECT_ROOT / "execution" / "scripts" / "verify_gh_identity.py"
+
+
+def _agent_github_identity_ok(env: dict) -> bool:
+    """True only when the child's GitHub token resolves to RC_GITHUB_LOGIN.
+
+    Runs verify_gh_identity.py with the child's own environment, so the check
+    sees exactly the token the agent will use. Prints no token; any failure,
+    including a missing script or a timeout, counts as not verified.
+    """
+    try:
+        result = subprocess.run(
+            [sys.executable, str(VERIFY_GH_IDENTITY), "--expect-login", RC_GITHUB_LOGIN],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail closed without detail
+        log.error(f"prepare agent GitHub identity check could not run: {type(exc).__name__}")
+        return False
+    if result.returncode != 0:
+        log.error(
+            f"prepare agent GitHub identity check failed (exit {result.returncode}); "
+            f"expected login {RC_GITHUB_LOGIN}"
+        )
+        return False
+    return True
+
+
+# PreToolUse guard loaded into the prepare agent: refuses --no-verify and the
+# other ways of skipping git hooks. The agent runs with cwd in the Neotoma
+# checkout, so this repository's .claude/settings.json does not apply to it;
+# the guard reaches it only through --settings.
+HOOK_BYPASS_GUARD = PROJECT_ROOT / ".claude" / "hooks" / "git_hook_bypass_guard.py"
+
+
+def _agent_settings() -> str:
+    """--settings JSON for the prepare agent's Bash and file-write tools."""
+    command = f"{shlex.quote(sys.executable)} {shlex.quote(str(HOOK_BYPASS_GUARD))}"
+    # local_provider renders the repo's complete validated guard set; prepare
+    # intentionally injects this one release-only guard, so sharing that
+    # renderer would change local_provider's guard set or the prepare child's.
+    return json.dumps({
+        "hooks": {
+            "PreToolUse": [
+                {"matcher": "Bash|Edit|Write|MultiEdit",
+                 "hooks": [{"type": "command", "command": command}]}
+            ]
+        }
+    })
+
+
 def _agent_env() -> dict:
     """Environment for the headless `claude --print` prepare agent.
+
+    Build from the shared runner allowlist, then add only the two
+    release-specific non-secret configuration paths above and one Claude
+    authentication method. Unknown ambient names never pass.
 
     Prefer the Claude Code Max-subscription OAuth token over a pay-per-token
     API key: when BOTH CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are set,
@@ -1032,9 +1154,52 @@ def _agent_env() -> dict:
     agent through the subscription, so releases don't depend on a funded API
     account. If only the API key is present, we leave it untouched.
     """
-    env = dict(os.environ)
-    if env.get("CLAUDE_CODE_OAUTH_TOKEN") and env.get("ANTHROPIC_API_KEY"):
-        env.pop("ANTHROPIC_API_KEY", None)
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name in _PREPARE_AGENT_SHARED_ENV
+    }
+    for name in _PREPARE_AGENT_RELEASE_ADDITIONS:
+        if name in os.environ:
+            env[name] = os.environ[name]
+    # The RC email goes out through gws as the swarm mailbox when one is
+    # configured and present: never inherit the ambient operator account.
+    env.pop("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", None)
+    swarm_gws = (gws_config_dir_env(require_existing=True)
+                 if email_channel.swarm_mailbox_configured() else {})
+    if swarm_gws:
+        env.update(swarm_gws)
+    else:
+        # No swarm mailbox: an unset variable would let gws fall back to its
+        # default login, which on the operator host is the operator's own
+        # mailbox. Point it at an empty directory so any gws call the agent
+        # makes anyway fails for want of a login rather than sending as the
+        # operator. The prompt also tells the agent not to run gws.
+        import tempfile
+
+        env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] = tempfile.mkdtemp(
+            prefix="phoenicurus-prepare-no-gws-"
+        )
+
+    oauth = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if oauth:
+        # Credential-named exception: the child is the Claude CLI, so this is
+        # the subscription credential it genuinely needs to authenticate.
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth
+    elif api_key:
+        # Credential-named fallback retained for installations without OAuth.
+        # It is the selected harness credential, never a credential for the
+        # release target, git, GitHub, Neotoma, or another vendor.
+        env["ANTHROPIC_API_KEY"] = api_key
+    for name in _PREPARE_AGENT_GITHUB_TOKEN_NAMES:
+        # Credential-named exception: the agent pushes release/<TAG> and opens
+        # the RC PR, and must do so as the swarm's GitHub account. Without it gh
+        # silently falls back to the shared keyring's active account (the
+        # operator's), so spawn_prepare_agent verifies the login before spawning.
+        if os.environ.get(name):
+            env[name] = os.environ[name]
+    if oauth and api_key:
         log.info(
             "prepare agent: using CLAUDE_CODE_OAUTH_TOKEN (dropped ANTHROPIC_API_KEY "
             "from the child env so the agent bills the Max subscription, not the "
@@ -1057,16 +1222,51 @@ def spawn_prepare_agent(
         return False
 
     prompt = _build_agent_prompt(last_tag, commit_count)
+    if not HOOK_BYPASS_GUARD.is_file():
+        # Fail closed: without the guard the agent can skip the release
+        # checkout's hooks, which is the failure the guard exists to stop.
+        log.error(f"git hook bypass guard missing at {HOOK_BYPASS_GUARD}")
+        notify_operator(
+            "🔴 Phoenicurus: the git-hook guard for the prepare agent is missing "
+            "from the deployment checkout — not preparing the release."
+        )
+        return False
     if dry_run:
         log.info("[dry-run] would spawn prepare agent with prompt:")
         log.info(prompt)
         return True
 
+    agent_env = _agent_env()
+    if not _agent_github_identity_ok(agent_env):
+        # Fail closed: an agent without the swarm token would push and open the
+        # RC PR as whichever account the shared keyring has active.
+        notify_operator(
+            "🔴 Phoenicurus: the prepare agent's GitHub token does not resolve to "
+            f"{RC_GITHUB_LOGIN} — not preparing the release."
+        )
+        return False
+
+    # The spawn-count marker is already the prepare run's durable state. Add
+    # the independent guard receipt there before the detached child can edit.
+    try:
+        snapshot = snapshot_release_guards(NEOTOMA_REPO_ROOT)
+        raw = SPAWN_COUNT_FILE.read_text() if SPAWN_COUNT_FILE.exists() else ""
+        existing = json.loads(raw) if raw.lstrip().startswith("{") else {}
+        if not isinstance(existing, dict):
+            existing = {}
+        existing.update({"head": head or _head_sha(), "guard_snapshot": snapshot})
+        SPAWN_COUNT_FILE.write_text(json.dumps(existing, sort_keys=True))
+    except (OSError, ValueError, TypeError) as exc:
+        log.error(f"could not capture prepare guard snapshot: {exc}")
+        notify_operator("🔴 Phoenicurus: prepare guard snapshot unavailable; release preparation stopped.")
+        return False
+
     try:
         proc = subprocess.Popen(
-            [claude, "--print", "--dangerously-skip-permissions", prompt],
+            [claude, "--print", "--dangerously-skip-permissions",
+             "--settings", _agent_settings(), prompt],
             cwd=str(NEOTOMA_REPO_ROOT),
-            env=_agent_env(),
+            env=agent_env,
             stdout=open(AGENT_LOG, "a"),
             stderr=subprocess.STDOUT,
             start_new_session=True,
