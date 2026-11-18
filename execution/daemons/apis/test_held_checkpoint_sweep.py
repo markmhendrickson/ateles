@@ -43,7 +43,7 @@ def recovery(monkeypatch):
         state["writes"] += 1
         assert kwargs["idempotency_context"] == "hold-obs-hold"
         state["checkpoints"] = [{
-            "entity_id": "ent_brief", "entity_type": "checkpoint_brief",
+            "entity_id": "ent_brief",
             "snapshot": {"status": "awaiting_operator", "task_entity_id": "ent_task"},
         }]
         return "ent_brief"
@@ -114,7 +114,7 @@ def test_unreadable_checkpoint_collection_denies(recovery, monkeypatch):
 def test_approved_checkpoint_waiting_for_release_is_not_reopened(recovery):
     state, _, _ = recovery
     state["checkpoints"] = [{
-        "entity_id": "ent_approved", "entity_type": "checkpoint_brief",
+        "entity_id": "ent_approved",
         "snapshot": {"status": "approved", "task_entity_id": "ent_task"},
     }]
     assert apis._reconcile_missing_checkpoint("ent_task", apply=True) == "skipped_by_reason"
