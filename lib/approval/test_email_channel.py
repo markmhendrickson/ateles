@@ -1513,7 +1513,7 @@ def test_subject_discovery_without_body_token_is_correction_only(monkeypatch, bo
     def fake_gws(args, timeout=45):
         if "+triage" in args:
             query = args[args.index("--query") + 1]
-            rows = ([{"id": "reply-1", "from": "op@example.com",
+            rows = ([{"id": "m1", "from": "op@example.com",
                       "subject": "RE: Release v1.2.3 ready to approve"}]
                     if "subject:" in query else [])
             return {"complete": True, "messages": rows}
@@ -1525,7 +1525,7 @@ def test_subject_discovery_without_body_token_is_correction_only(monkeypatch, bo
             on_reply_message=lambda *_: seen.append(True))
     assert outcome.kind == "ok"
     assert outcome.texts == [] and seen == []
-    assert [reply.message_id for reply in outcome.correction_only_replies] == ["reply-1"]
+    assert [reply.message_id for reply in outcome.correction_only_replies] == ["m1"]
 
 
 def test_subject_discovery_still_requires_sender_authentication(monkeypatch):
@@ -1535,7 +1535,7 @@ def test_subject_discovery_still_requires_sender_authentication(monkeypatch):
     def fake_gws(args, timeout=45):
         if "+triage" in args:
             return {"complete": True, "messages": [
-                {"id": "reply-1", "from": "op@example.com",
+                {"id": "m1", "from": "op@example.com",
                  "subject": "RE: Release v1.2.3 ready to approve"}]}
         return {"body_text": "yes"}
 
@@ -1561,7 +1561,7 @@ def test_unproven_html_quote_holds_the_whole_reply(monkeypatch, container):
     def fake_gws(args, timeout=45):
         if "+triage" in args:
             return {"complete": True, "messages": [
-                {"id": "reply-1", "from": "op@example.com",
+                {"id": "m1", "from": "op@example.com",
                  "subject": "RE: Release v1.2.3 ready to approve"}]}
         return {"body_html": html}
 
@@ -1569,7 +1569,7 @@ def test_unproven_html_quote_holds_the_whole_reply(monkeypatch, container):
         outcome = ec.read_replies_with_status(["release-approve:"])
     assert outcome.kind == "transport_error"
     assert outcome.texts == []
-    assert [reply.message_id for reply in outcome.unreadable_replies] == ["reply-1"]
+    assert [reply.message_id for reply in outcome.unreadable_replies] == ["m1"]
 
 
 def test_known_quoted_request_remains_readable(monkeypatch):
@@ -1579,7 +1579,7 @@ def test_known_quoted_request_remains_readable(monkeypatch):
     def fake_gws(args, timeout=45):
         if "+triage" in args:
             return {"complete": True, "messages": [
-                {"id": "reply-1", "from": "op@example.com",
+                {"id": "m1", "from": "op@example.com",
                  "subject": "RE: Release v1.2.3 ready to approve"}]}
         return {"body_html": ("<p>approve v1.2.3</p><blockquote>"
                               "<p>release-approve: v1.2.3</p></blockquote>")}

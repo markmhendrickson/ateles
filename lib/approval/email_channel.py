@@ -1088,6 +1088,8 @@ def read_replies_with_status(
                     (("release-approve", correlation_target),
                      ("swarm-approve", correlation_target)) if target
                 )
+                known += tuple(f"[APPROVE-{candidate}]" for candidate in tokens
+                               if re.fullmatch(r"[0-9A-F]{8}", candidate, re.IGNORECASE))
                 html_body, boundary_seen = _extract_authored_html(
                     raw_html, original_request=(request_bodies or {}).get(token),
                     known_quote_lines=known, verify_quote=True)

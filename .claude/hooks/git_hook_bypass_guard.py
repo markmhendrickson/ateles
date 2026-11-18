@@ -246,7 +246,7 @@ _WRAPPERS = frozenset(_WRAPPER_GRAMMAR)
 # an attempted invocation is recognized and refused before generic handling.
 _DENIED_WRAPPERS = frozenset({"script", "parallel", "watch", "chroot", "doas", "sudo"})
 _DENIED_DIRECTORY_PROGRAMS = frozenset({
-    "pushd", "popd", "make", "gmake", "tmux", "screen", "nsenter",
+    "pushd", "popd", "tmux", "screen", "nsenter",
     "runuser", "su",
 })
 # Every wrapper has an explicit write-operand decision. Values name options
@@ -1669,6 +1669,12 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int =
     base = os.path.basename(head.text)
     if base in _DENIED_DIRECTORY_PROGRAMS:
         return f"{base} may change the working directory during release preparation"
+    if base in {"make", "gmake"} and any(
+        word.text in {"-C", "--directory"} or
+        word.text.startswith(("-C", "--directory="))
+        for word in rest[1:]
+    ):
+        return f"{base} directory option is not allowed during release preparation"
     if base == "cd" and (len(rest) > 2 or
                           (len(rest) > 1 and rest[1].text == "-")):
         return "cd working directory cannot be resolved literally"

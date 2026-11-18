@@ -361,7 +361,7 @@ def test_rc_email_absent_swarm_directory_uses_telegram_only(monkeypatch, tmp_pat
     prompt = prepare._build_agent_prompt("v0.19.0", 3)
     assert "gws gmail +send" not in prompt
     assert "Do not run gws" in prompt
-    assert "Email approval unavailable; approve through Telegram instead." in prompt
+    assert "Email approval unavailable; in Telegram send exactly `approve <TAG>`." in prompt
     chosen = prepare._agent_env()["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"]
     assert chosen != str(tmp_path) and os.listdir(chosen) == []
 
@@ -386,7 +386,7 @@ def test_unreadable_mailbox_never_offers_or_sends_approval(
 
     prompt = prepare._build_agent_prompt("v1.2.3", 1)
     assert "gws gmail +send" not in prompt
-    assert "Email approval unavailable; approve through Telegram instead." in prompt
+    assert "Email approval unavailable; in Telegram send exactly `approve <TAG>`." in prompt
     assert "Do not run gws" in prompt
     with patch("shutil.which", return_value="/synthetic/gws"), \
          patch.object(prepare.subprocess, "run") as run:
@@ -402,7 +402,7 @@ def test_rc_email_send_failure_is_in_telegram_instructions(monkeypatch, tmp_path
     prompt = prepare._build_agent_prompt("v0.19.0", 3)
     assert prompt.index("gws gmail +send") < prompt.index("12. Send a Telegram")
     assert ("Email approval unavailable because the RC email failed to\n"
-            "    send; approve through Telegram instead.") in prompt
+            "    send; in Telegram send exactly `approve <TAG>`.") in prompt
     assert "Include the email-approval status sentence" in prompt
 
 

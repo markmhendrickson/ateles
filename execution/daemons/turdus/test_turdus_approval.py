@@ -931,7 +931,7 @@ def test_html_quoted_notification_never_posts(monkeypatch, tmp_path, kind, quote
 ))
 @pytest.mark.parametrize("format", ("plain", "html"))
 def test_authored_approval_routes_once(monkeypatch, tmp_path, kind, approval, format):
-    quote = "Reply APPROVE" if kind == "pr" else "Reply approve v1.2.3 to publish"
+    quote = "swarm-approve: o/r#7" if kind == "pr" else "release-approve: v1.2.3"
     body = ({"body_text": f"{approval}\n> {quote}"} if format == "plain" else
             {"body_html": f"<p>{approval}</p><blockquote>{quote}</blockquote>"})
     posts, state, _ = _poll_authored_reply(monkeypatch, tmp_path, kind, body)
@@ -1017,7 +1017,7 @@ def test_missing_correlation_refuses_even_exact_approval(monkeypatch, tmp_path, 
         include_token=False)
     assert posts == []
     assert state.get("approval_correction_ids") == ["approval-1"]
-    matching = [n for n in notices.sent if "missing correlation token" in n]
+    matching = [n for n in notices.sent if "did not contain" in n]
     assert len(matching) == 1
     assert ("o/r#7" if kind == "pr" else "v1.2.3") in matching[0]
     assert ("`approve`" if kind == "pr" else "`approve v1.2.3`") in matching[0]
