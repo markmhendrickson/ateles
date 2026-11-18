@@ -854,7 +854,10 @@ def test_subject_only_payment_reply_cannot_authorize(
     assert result.approved == set()
     assert len(notices) == 1 and "reply-1" in notices[0][1]
     assert "quote it" in notices[0][0]
-    assert "`attended session`" in notices[0][0]
+    # The email channel offers no Telegram path for this payment, so the notice
+    # must not advertise one (it would not resolve the held payment).
+    assert "Telegram" not in notices[0][0]
+    assert "`attended" not in notices[0][0] and "`yes" not in notices[0][0]
 
 
 @pytest.mark.parametrize("batch", (False, True))

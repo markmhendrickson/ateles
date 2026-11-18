@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 from pathlib import Path
+
+
+def _mode(path: Path) -> bytes:
+    """Permission bits. Git skips a hook that is not executable, so a mode change
+    disables the guard without touching its name or bytes."""
+    return b"%o\0" % stat.S_IMODE(path.stat().st_mode)
 
 
 def _digest_node(path: Path) -> str:
@@ -14,9 +21,9 @@ def _digest_node(path: Path) -> str:
         target = path.resolve(strict=True)
         digest.update(_digest_node(target).encode())
     elif path.is_file():
-        digest.update(b"file\0" + path.read_bytes())
+        digest.update(b"file\0" + _mode(path) + path.read_bytes())
     elif path.is_dir():
-        digest.update(b"dir\0")
+        digest.update(b"dir\0" + _mode(path))
         for child in sorted(path.iterdir()):
             digest.update(child.name.encode() + b"\0" + _digest_node(child).encode())
     elif path.exists():
@@ -30,14 +37,14 @@ def _digest_git_entry(path: Path) -> str:
     if path.is_symlink():
         return "link:" + os.readlink(path)
     if path.is_file():
-        return "file:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        return "file:" + _mode(path).decode() + hashlib.sha256(path.read_bytes()).hexdigest()
     if path.is_dir():
         return "directory"
     raise OSError("release git directory is unavailable")
 
 
 def snapshot_release_guards(root: Path) -> dict[str, str]:
-    """Capture names, types, links, and bytes; unreadable paths fail closed."""
+    """Capture names, types, links, permission bits, and bytes; unreadable paths fail closed."""
     git_entry = root / ".git"
     if git_entry.is_file() and not git_entry.is_symlink():
         contents = git_entry.read_text().strip()

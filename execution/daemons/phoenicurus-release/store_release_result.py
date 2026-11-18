@@ -50,6 +50,9 @@ from pathlib import Path
 # Cloudflare 1010-blocks urllib's default UA on the hosted instance.
 USER_AGENT = "phoenicurus-release/1.0"
 
+# The only release_result statuses the prepare-callable recorder may write.
+PREPARATION_STATUSES = frozenset({"prepared", "pending_approval"})
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "lib" / "daemon_runtime"))
 
@@ -72,7 +75,7 @@ def main() -> int:
     ap.add_argument(
         "--status",
         required=True,
-        help="prepared|pending_approval|approved|publishing|published|failed",
+        help="prepared|pending_approval (approval and publication states are not written here)",
     )
     ap.add_argument("--rc-branch", default="", help="release branch name")
     ap.add_argument("--rc-pr-url", default="", help="RC pull-request URL")
@@ -83,6 +86,16 @@ def main() -> int:
                     help="seconds; generous by default because the hosted instance "
                          "can take 30s+ per DB-backed request (neotoma#2141)")
     args = ap.parse_args()
+
+    # The prepare agent may call this script, so it may only write states that
+    # preparation owns. Approval, publishing and published transitions belong to
+    # the operator approval path and the publisher, which trust an approved
+    # record: a caller-chosen status here would let the agent write one.
+    if args.status not in PREPARATION_STATUSES:
+        print(f"refusing status {args.status!r}: this recorder only writes "
+              f"{', '.join(sorted(PREPARATION_STATUSES))}; approval and publication "
+              "transitions are not recorded here", file=sys.stderr)
+        return 1
 
     state_path = Path(__file__).parent / ".phoenicurus_prepare_spawn_count"
     if args.status == "pending_approval":
@@ -189,11 +202,18 @@ def main() -> int:
                     current.get("guard_snapshot") != state["guard_snapshot"]):
                 raise ValueError("prepare state changed while storing release")
             entries = current.setdefault("release_guards", {})
-            if not isinstance(entries, dict) or args.version in entries:
-                raise ValueError("release already has a guard binding; re-prepare")
-            entries[args.version] = {"version": args.version, "head": args.prepared_head,
-                                     "guard_snapshot": state["guard_snapshot"]}
-            state_path.write_text(json.dumps(current, sort_keys=True))
+            if not isinstance(entries, dict):
+                raise ValueError("release guard bindings are unreadable; re-prepare")
+            binding = {"version": args.version, "head": args.prepared_head,
+                       "guard_snapshot": state["guard_snapshot"]}
+            existing = entries.get(args.version)
+            if existing is None:
+                entries[args.version] = binding
+                state_path.write_text(json.dumps(current, sort_keys=True))
+            elif existing != binding:
+                # A conflicting binding is never replaced. The identical one is a
+                # safe retry: the record is already stored and bound.
+                raise ValueError("release already has a different guard binding; re-prepare")
         except (OSError, ValueError, TypeError) as exc:
             print(f"release stored but guard binding unavailable; do not publish: {exc}",
                   file=sys.stderr)

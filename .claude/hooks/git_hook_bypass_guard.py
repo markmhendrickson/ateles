@@ -1471,7 +1471,7 @@ _RUNTIME_EVAL_TEXT = re.compile(
 # The prepare prompt invokes this reviewed recorder. Pin its bytes so an edited
 # script cannot inherit the exception merely by keeping the same path.
 _RELEASE_RECORDER = Path(__file__).resolve().parents[2] / "execution/daemons/phoenicurus-release/store_release_result.py"
-_RELEASE_RECORDER_SHA256 = "c441f84315d6f151ebc6018f4e5e5c5a52894f6dd7fdc423d4db3ed8ccc1790b"
+_RELEASE_RECORDER_SHA256 = "eacb3d2d65456320d2a472f5ec54f62c5319eb9c6d339f23702d1d9164e6257a"
 
 
 def _stdin_program_violation(runner: str, body: str, depth: int) -> str | None:

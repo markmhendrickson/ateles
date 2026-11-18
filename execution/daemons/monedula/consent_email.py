@@ -778,17 +778,13 @@ def request_and_collect(
             log.error(f"consent correction state unavailable — payments held: {exc}")
             return _block_all(items, "consent_correction_state_unavailable")
     if on_missing_token_reply is not None:
-        forms = "; ".join(
-            f"`{'attended' if item.is_calendar else 'yes'} {item.handler_name}`"
-            for item in items)
         for reply in unnotified_corrections:
             try:
                 delivered = on_missing_token_reply(
                     f"monedula: payment consent for {items[0].payment_date} is held. "
                     "Your email reply did not include a payment code. Reply to "
-                    "the current request and quote it so its code is present. "
-                    f"For Telegram consent, send exactly {forms} for the "
-                    "payment(s) you attended or approved.",
+                    "the current request and quote it so its code is present; "
+                    "no payment is approved until a reply carries it.",
                     f"monedula:missing_token:{reply.message_id}",
                 )
                 if delivered is True:

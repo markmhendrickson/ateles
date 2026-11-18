@@ -29,9 +29,9 @@ to those. To enable the default channel, follow "Enabling checklist".
 
 For legacy email consent, a reply whose subject matches the current request
 but omits its approval code cannot authorize a payment. Monedula sends one
-correction notice per authenticated reply: quote the current request so the
-code is present, or use the exact named `attended <handler>` / `yes <handler>`
-Telegram form when that break-glass channel is active. Unproven text inside an
+correction notice per authenticated reply: reply to the current request and
+quote it so the code is present (the email channel offers no other recovery;
+the Telegram consent form does not resolve an email-channel payment). Unproven text inside an
 HTML quote makes the reply unreadable and holds the payment until a fresh
 request is issued.
 

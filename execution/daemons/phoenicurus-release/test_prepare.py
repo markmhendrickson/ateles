@@ -71,6 +71,23 @@ def test_prepare_guard_digest_detects_changes(tmp_path, change, location):
     assert changed_guard_location(tmp_path, before) == location
 
 
+def test_prepare_guard_digest_detects_a_hook_losing_its_executable_bit(tmp_path):
+    """Git skips a non-executable hook: the guard stops running with name and bytes unchanged."""
+    from release_guard_snapshot import snapshot_release_guards, changed_guard_location
+    _guard_checkout(tmp_path)
+    hook = tmp_path / ".git" / "hooks" / "pre-commit"
+    hook.chmod(0o755)
+    husky = tmp_path / ".husky" / "pre-commit"
+    husky.chmod(0o755)
+    before = snapshot_release_guards(tmp_path)
+    hook.chmod(0o644)
+    assert changed_guard_location(tmp_path, before) == "git hooks"
+    hook.chmod(0o755)
+    assert changed_guard_location(tmp_path, before) is None
+    husky.chmod(0o644)
+    assert changed_guard_location(tmp_path, before) == ".husky"
+
+
 def test_snapshot_is_persisted_before_prepare_child(monkeypatch, tmp_path):
     _guard_checkout(tmp_path)
     state = tmp_path / "prepare.json"
