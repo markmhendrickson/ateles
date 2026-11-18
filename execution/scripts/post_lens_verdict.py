@@ -57,11 +57,11 @@ who commented (`approve_pr_as_app._check_approver_identities`), and a comment is
 not a push, so "approval of the most recent reviewable push" is unaffected.
 Only a PR the App itself opened is refused, as it should be.
 
-Idempotent: one verdict comment per (identity, lens, head). A second post for
-the same head edits that comment in place instead of adding a duplicate (the
-contract `harness_lens_runner.post_verdict` follows). Two or more existing
-matches are refused rather than guessed between. The comment is read back and
-must match what was sent.
+An unchanged-head retry edits the existing comment only when its verdict
+class is identical and it remains the latest lens verdict on the PR. A
+changed class or intervening verdict creates a new comment, preserving each
+review episode in history.
+The marker format is unchanged. The comment is read back and must match.
 
 This tool never prints, logs, or writes a token or key. Exit 0: posted (or
 dry run clear). Exit 1: refused or failed, nothing posted unless the output
@@ -88,6 +88,7 @@ import httpx  # noqa: E402
 from lib import github_app_token as _github_app_token  # noqa: E402
 
 import lens_authors  # noqa: E402
+import review_rounds  # noqa: E402
 import swarm_dispatch  # noqa: E402
 
 GITHUB_API = "https://api.github.com"
@@ -308,7 +309,9 @@ def _comments(client: httpx.Client, repo: str, pr: int, identity: Identity) -> l
         )
         if resp.status_code >= 400:
             raise Refusal(f"could not list comments on {repo}#{pr} (HTTP {resp.status_code})")
-        rows = resp.json() or []
+        rows = resp.json()
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise Refusal("GitHub comment listing is partial or malformed; refusing to post")
         out.extend(rows)
         if len(rows) < 100:
             return out
@@ -316,19 +319,17 @@ def _comments(client: httpx.Client, repo: str, pr: int, identity: Identity) -> l
 
 
 def _existing_for_head(comments: list[dict], *, login: str, marker: str) -> dict | None:
-    matches = [
-        c
-        for c in comments
-        if str(((c.get("user") or {}).get("login")) or "").casefold() == login.casefold()
-        and (str(c.get("body") or "").splitlines() or [""])[0].strip() == marker
-    ]
-    if len(matches) > 1:
-        ids = ", ".join(str(c.get("id")) for c in matches)
-        raise Refusal(
-            f"{len(matches)} comments by {login} already carry {marker} ({ids}); "
-            "refusing to choose one to edit"
-        )
-    return matches[0] if matches else None
+    # GitHub's issue comments API returns creation order, including across
+    # pages. Only the final verdict can be retried without rewriting history.
+    for comment in reversed(comments):
+        first = (str(comment.get("body") or "").splitlines() or [""])[0].strip()
+        if not swarm_dispatch._LENS_MARKER_RE.search(str(comment.get("body") or "")):
+            continue
+        if (first == marker and
+                str(((comment.get("user") or {}).get("login")) or "").casefold() == login.casefold()):
+            return comment
+        return None
+    return None
 
 
 def post_verdict(
@@ -342,7 +343,7 @@ def post_verdict(
     identity: Identity,
     dry_run: bool = False,
 ) -> str:
-    """Validate, then post (or edit in place) the lens verdict. Returns a result line."""
+    """Validate, then post a new episode or edit the latest verdict retry."""
     pr_data = _fetch_pr(client, repo, pr, identity)
     state = str(pr_data.get("state") or "").lower()
     if state != "open" or pr_data.get("merged_at"):
@@ -365,6 +366,15 @@ def post_verdict(
     check_author_admitted(identity, composed)
     marker = swarm_dispatch.compose_lens_review_marker(lens, live)
     existing = _existing_for_head(_comments(client, repo, pr, identity), login=identity.login, marker=marker)
+    if existing and (
+        review_rounds.verdict_class(str(existing.get("body") or ""), lens)
+        != review_rounds.verdict_class(composed, lens)
+        or existing.get("body") != composed
+    ):
+        existing = None
+    if existing and (not isinstance(existing.get("id"), int) or
+                     isinstance(existing.get("id"), bool) or existing["id"] <= 0):
+        raise Refusal("latest lens verdict has no usable comment id; refusing to edit")
     action = "edit" if existing else "create"
     summary = f"lens={lens} head={live} verdict={verdict} as {identity.login} ({identity.via})"
     if dry_run:

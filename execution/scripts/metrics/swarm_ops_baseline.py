@@ -2,7 +2,7 @@
 """Swarm-operations baseline: derived reads over existing records (build-plan step 4).
 
 Computes weekly readings for S1 time_to_completion, S2 dispatch_failure_rate,
-S4 review_rounds_per_pr, S5 cost_per_task (dispatch minutes, a proxy) and the
+S4 reviewed_heads_per_pr, S5 cost_per_task (dispatch minutes, a proxy) and the
 interim S3 operator-intervention proxies, from records the swarm already
 writes: ``harness_event`` (subprocess dispatches), ``task`` (status changes),
 ``checkpoint_brief`` (resolved checkpoints), ``decision_shape_check`` events and
@@ -350,8 +350,8 @@ def weekly_review_rows(prs: list[dict[str, Any]], windows) -> list[dict[str, Any
         reviewed = [p for p in items if p["review_commits"]]
         out.append({"start": start, "end": end, "merged": len(items), "reviewed": len(reviewed),
                     "unreviewed": len(items) - len(reviewed),
-                    "rounds_mean": (sum(len(p["review_commits"]) for p in reviewed) / len(reviewed)) if reviewed else None,
-                    "rounds_max": max((len(p["review_commits"]) for p in reviewed), default=0)})
+                    "reviewed_heads_mean": (sum(len(p["review_commits"]) for p in reviewed) / len(reviewed)) if reviewed else None,
+                    "reviewed_heads_max": max((len(p["review_commits"]) for p in reviewed), default=0)})
     return out
 
 
@@ -451,23 +451,23 @@ def build_readings(*, subprocess_rows, task_rows, checkpoint_rows, shape_rows, r
 
     for repo in sorted({p["repo"] for p in review_prs}):
         for r in weekly_review_rows([p for p in review_prs if p["repo"] == repo], windows):
-            if r["rounds_mean"] is None:
+            if r["reviewed_heads_mean"] is None:
                 continue
             thin = r["reviewed"] < MIN_REVIEWED_PRS
             readings.append(mk(
-                metric_id="S4_review_rounds_per_pr", artifact=f"github:{repo}", start=r["start"], end=r["end"],
-                value=r["rounds_mean"], unit="rounds", collector=COLLECTOR, sourced_at=fetched["reviews"],
+                metric_id="S4_reviewed_heads_per_pr", artifact=f"github:{repo}", start=r["start"], end=r["end"],
+                value=r["reviewed_heads_mean"], unit="reviewed_heads", collector=COLLECTOR, sourced_at=fetched["reviews"],
                 coverage_ratio=0.5 if thin else 1.0,
                 coverage_note=f"fewer than {MIN_REVIEWED_PRS} reviewed PRs merged in the week" if thin else "",
                 probe_ok=True,
                 detail={"merged_prs": r["merged"], "reviewed_prs": r["reviewed"],
-                        "unreviewed_prs": r["unreviewed"], "rounds_max": r["rounds_max"],
+                        "unreviewed_prs": r["unreviewed"], "reviewed_heads_max": r["reviewed_heads_max"],
                         "counts_formal_reviews_only": True}))
     return readings
 
 
 UNITS = {"S1_time_to_completion": "hours", "S2_dispatch_failure_rate": "ratio",
-         "S3p_operator_intervention_proxy": "decided checkpoints/wk", "S4_review_rounds_per_pr": "rounds",
+         "S3p_operator_intervention_proxy": "decided checkpoints/wk", "S4_reviewed_heads_per_pr": "reviewed_heads",
          "S5_cost_per_task": "min/dispatch"}
 
 

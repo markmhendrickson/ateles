@@ -80,7 +80,7 @@ def test_definitions_catalog_shape():
             assert r["baseline_status"] == "awaiting_source", r["metric_id"]
     runnable = {r["metric_id"] for r in records if r["baseline_status"] == "exists"}
     assert {"D1_npm_downloads_weekly", "D2_github_stars", "S1_time_to_completion",
-            "S2_dispatch_failure_rate", "S4_review_rounds_per_pr", "S5_cost_per_task",
+            "S2_dispatch_failure_rate", "S4_reviewed_heads_per_pr", "S5_cost_per_task",
             "S3p_operator_intervention_proxy"} <= runnable
     assert next(r for r in records if r["metric_id"].startswith("S3_"))["baseline_status"] == "capture"
 
@@ -292,7 +292,7 @@ def test_review_rounds_weekly_counts_unreviewed_separately():
            {"repo": "r", "number": 3, "merged_at": "2026-10-08T00:00:00Z", "review_commits": []}]
     (row,) = ops.weekly_review_rows(prs, SWARM_WINDOWS)
     assert row["merged"] == 3 and row["reviewed"] == 2 and row["unreviewed"] == 1
-    assert row["rounds_mean"] == pytest.approx(1.5) and row["rounds_max"] == 2
+    assert row["reviewed_heads_mean"] == pytest.approx(1.5) and row["reviewed_heads_max"] == 2
 
 
 def test_swarm_readings_mark_thin_weeks_partial_and_stay_out_of_baselines():
@@ -354,7 +354,7 @@ def test_every_reading_unit_equals_its_definition_unit():
     assert {r["metric_ref"] for r in readings} == {
         "D1_npm_downloads_weekly", "D2_github_stars", "D4_external_issues_opened", "D5_external_contributors",
         "S1_time_to_completion", "S2_dispatch_failure_rate", "S3p_operator_intervention_proxy",
-        "S4_review_rounds_per_pr", "S5_cost_per_task"}  # every runnable metric is exercised
+        "S4_reviewed_heads_per_pr", "S5_cost_per_task"}  # every runnable metric is exercised
     for r in readings:
         assert r["unit"] == units[r["metric_ref"]], r["metric_ref"]
 
@@ -504,7 +504,7 @@ def test_each_stream_reading_is_stamped_with_its_own_fetch_time():
         "S2_dispatch_failure_rate": "2026-10-12T09:00:00Z", "S5_cost_per_task": "2026-10-12T09:00:00Z",
         "S1_time_to_completion": "2026-10-12T10:00:00Z",
         "S3p_operator_intervention_proxy": "2026-10-12T11:00:00Z",
-        "S4_review_rounds_per_pr": "2026-10-12T13:00:00Z"}
+        "S4_reviewed_heads_per_pr": "2026-10-12T13:00:00Z"}
 
 
 def test_windows_end_before_the_oldest_fetch_not_the_newest():
@@ -860,20 +860,20 @@ def pr(n, rounds, day="2026-10-07T00:00:00Z"):
 @pytest.mark.parametrize("reviewed,status", [(2, "partial"), (3, "ok")])
 def test_s4_reading_thin_boundary_artifact_and_detail(reviewed, status):
     prs = [pr(i, 1 + (i % 2)) for i in range(reviewed)] + [pr(99, 0)]
-    r = build(review_prs=prs)["S4_review_rounds_per_pr|github:o/r"]
+    r = build(review_prs=prs)["S4_reviewed_heads_per_pr|github:o/r"]
     assert r["status"] == status
     assert r["detail"]["reviewed_prs"] == reviewed and r["detail"]["unreviewed_prs"] == 1
     assert r["detail"]["counts_formal_reviews_only"] is True
 
 
 def test_s4_week_with_only_unreviewed_prs_has_no_reading():
-    assert "S4_review_rounds_per_pr|github:o/r" not in build(review_prs=[pr(1, 0), pr(2, 0)])
+    assert "S4_reviewed_heads_per_pr|github:o/r" not in build(review_prs=[pr(1, 0), pr(2, 0)])
 
 
 def test_s4_has_one_artifact_per_repository():
     prs = [{**pr(1, 1), "repo": "o/a"}, {**pr(2, 1), "repo": "o/b"}]
     assert {k for k in build(review_prs=prs) if k.startswith("S4")} == {
-        "S4_review_rounds_per_pr|github:o/a", "S4_review_rounds_per_pr|github:o/b"}
+        "S4_reviewed_heads_per_pr|github:o/a", "S4_reviewed_heads_per_pr|github:o/b"}
 
 
 def test_tokens_are_not_metered_not_zero_when_no_harness_reported_them():
