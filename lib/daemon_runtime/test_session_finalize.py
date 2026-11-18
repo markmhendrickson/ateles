@@ -363,3 +363,28 @@ def test_append_turn_posts_and_fails_open(monkeypatch):
     assert sf.append_turn(conversation_id="ent_conv", role="assistant", content="progress") is True
     monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "")
     assert sf.append_turn(conversation_id="ent_conv", role="assistant", content="x") is False
+
+
+
+def _capture_post_timeout(monkeypatch, **kwargs):
+    seen = {}
+
+    def fake_post(url, **kw):
+        seen["timeout"] = kw.get("timeout")
+        resp = type("R", (), {"raise_for_status": lambda self: None, "json": lambda self: {"ok": True}})()
+        return resp
+
+    monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    monkeypatch.setattr(sf.httpx, "post", fake_post)
+    sf._post_store({"idempotency_key": "k"}, **kwargs)
+    return seen["timeout"]
+
+
+def test_provenance_store_attempt_allows_a_slow_hosted_write(monkeypatch):
+    """The store Apis requires before spawning gets 60s per attempt; a fixed 20s refused every build
+    while the hosted instance was slow."""
+    assert _capture_post_timeout(monkeypatch, retry_transient=True) == 60.0
+
+
+def test_other_stores_keep_the_short_limit(monkeypatch):
+    assert _capture_post_timeout(monkeypatch) == 20.0

@@ -396,6 +396,18 @@ def build_turn_payload(
     }
 
 
+# One attempt of the run-session store that Apis requires BEFORE it spawns an agent
+# (conversation and agent_session provenance). The hosted Neotoma instance can take
+# well over 20s to accept a write, and a fixed 20s limit made Apis refuse to spawn
+# ("provenance could not be persisted and verified") for every build while reads stayed
+# fast. The refusal stays: provenance is still required. This only stops a slow, healthy
+# write from reading as a failed one, the same limit other Apis stores already use
+# (NEOTOMA_STORE_ATTEMPT_TIMEOUT_SECONDS in swarm_dispatch). Worst case with the bounded
+# retries is about three attempts plus the pauses.
+PROVENANCE_STORE_ATTEMPT_TIMEOUT_SECONDS = 60.0
+DEFAULT_STORE_ATTEMPT_TIMEOUT_SECONDS = 20.0
+
+
 def _post_store(
     body: dict,
     *,
@@ -414,13 +426,15 @@ def _post_store(
         log.warning("[finalize] no bearer token — store skipped")
         return None
     streak = streak_key or body.get("idempotency_key")
+    attempt_timeout = (PROVENANCE_STORE_ATTEMPT_TIMEOUT_SECONDS if retry_transient
+                       else DEFAULT_STORE_ATTEMPT_TIMEOUT_SECONDS)
 
     def _send() -> dict:
         resp = httpx.post(
             f"{NEOTOMA_BASE_URL}/store",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             json=body,
-            timeout=20,
+            timeout=attempt_timeout,
         )
         resp.raise_for_status()
         return resp.json()
