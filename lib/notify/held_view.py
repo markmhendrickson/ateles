@@ -22,8 +22,8 @@ CLI:
                                                quarantine unknown prior keys
 
 Queue text is written by daemons and can embed attacker-influenced strings
-(PR titles, issue text). Anything that puts a summary into model context must
-use only the integers and validated handler names from ``summary()``.
+(PR titles, issue text). A caller putting this summary into model context must
+validate names and keys and never include notice text.
 """
 
 from __future__ import annotations
@@ -489,10 +489,10 @@ def actionable_items(main: Path | None = None) -> list[str]:
 def summary(main: Path | None = None) -> dict:
     """Totals over actionable items.
 
-    ``{"total": int, "by_handler": {name: int}, "fingerprint": str}``. Handler
-    names are regex-validated; anything else counts as ``other``. The
-    fingerprint is a sha256 of the contents, so a changed set of notices is
-    detectable without carrying their text anywhere.
+    Handler names are regex-validated; anything else counts as ``other``.
+    Receipt keys are returned separately for callers that validate them.
+    Fingerprints change when notices or receipt states change, without
+    carrying notice text into the session.
     """
     counts: Counter[str] = Counter()
     items = actionable_items(main)
