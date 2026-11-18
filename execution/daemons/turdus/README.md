@@ -15,10 +15,11 @@ three-day reply window has passed before restoring or resetting state.
 Deleting or resetting state sooner replays consumed approvals.
 
 On upgrade, an existing file without the marker is accepted only when it has
-the legacy fields `last_message_id`, `processed_count`, `processed_ids`, and
-optionally `last_poll_at`, with valid values and no other keys. Turdus preserves
-those IDs, fills the new fields empty in memory, and writes the marker only
-after a successful state write. Once the marker exists, every new field is
-required. A deleted marker next to a legacy-shaped file gets the same lenient
-load. State lost before the marker's first successful write is indistinguishable
+the legacy fields `last_message_id` and `processed_count`, optionally with
+`processed_ids` and `last_poll_at`, with valid values and no other keys. A
+missing `processed_ids` becomes an empty list. Turdus preserves any existing
+IDs, fills the new fields empty in memory, and writes the marker only after a
+successful state write. Once the marker exists, every new field is required.
+A deleted marker next to a legacy-shaped file gets the same lenient load.
+State lost before the marker's first successful write is indistinguishable
 from first use; this pre-initialization window remains a recovery limit.

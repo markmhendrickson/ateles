@@ -963,6 +963,42 @@ def test_legacy_state_without_marker_keeps_consumed_reply_and_migrates(monkeypat
     assert turdus._load_state()["processed_ids"] == ["a"]
 
 
+@pytest.mark.parametrize("legacy_state", (
+    {"last_message_id": None, "processed_count": 0},
+    {"last_message_id": "old-message", "processed_count": 1,
+     "last_poll_at": "2026-11-18T12:00:00+00:00"},
+    {"last_message_id": "old-message", "processed_count": 1,
+     "processed_ids": ["old-consumed"]},
+    {"last_message_id": "old-message", "processed_count": 1,
+     "last_poll_at": "2026-11-18T12:00:00+00:00",
+     "processed_ids": ["old-consumed"]},
+), ids=("initial-two-key", "poll-three-key", "ids-three-key", "poll-and-ids-four-key"))
+@pytest.mark.parametrize("marked", (False, True), ids=("legacy", "initialized"))
+def test_historical_turdus_state_shapes_only_migrate_without_marker(
+        monkeypatch, tmp_path, legacy_state, marked):
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps(legacy_state))
+    monkeypatch.setattr(turdus, "_STATE_FILE", state_path)
+    monkeypatch.setattr(turdus, "_poll_gmail_messages", lambda *_: [])
+    marker_path = state_path.with_name(state_path.name + ".initialized")
+    if marked:
+        marker_path.write_text("initialized\n")
+        monkeypatch.setattr(email_channel, "read_replies_with_status",
+                            lambda *_a, **_k: pytest.fail("reader must not run"))
+        notices = _StubNotifier()
+        _run(turdus.poll_once(notices, {}))
+        assert any("reply state is unreadable" in notice for notice in notices.sent)
+    else:
+        monkeypatch.setattr(email_channel, "read_replies_with_status",
+                            lambda *_a, **_k: email_channel.ReadRepliesOutcome("ok", []))
+        notices = _StubNotifier()
+        state = _run(turdus.poll_once(notices, {}))
+        assert not any("reply state is unreadable" in notice for notice in notices.sent)
+        assert state["processed_ids"] == legacy_state.get("processed_ids", [])
+        assert state["last_message_id"] == legacy_state["last_message_id"]
+        assert not marker_path.exists()
+
+
 @pytest.mark.parametrize("marked", (False, True))
 @pytest.mark.parametrize("change", ("valid", "wrong_type", "unknown_key", "duplicate_key"))
 def test_legacy_state_shape_only_loads_unmarked_valid_subset(

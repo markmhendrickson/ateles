@@ -328,8 +328,9 @@ def _load_state() -> dict:
     if not isinstance(state, dict):
         raise StateUnreadableError("Turdus reply state malformed: structure")
     expected = (set(_empty_state()) if initialized else
-                {"last_message_id", "processed_count", "processed_ids"})
-    if not expected <= state.keys() or state.keys() - expected - {"last_poll_at"}:
+                {"last_message_id", "processed_count"})
+    optional = {"last_poll_at"} if initialized else {"last_poll_at", "processed_ids"}
+    if not expected <= state.keys() or state.keys() - expected - optional:
         raise StateUnreadableError("Turdus reply state malformed: fields")
     if not initialized:
         state = {**_empty_state(), **state}
