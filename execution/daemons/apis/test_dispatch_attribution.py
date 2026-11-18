@@ -981,10 +981,12 @@ def test_real_apis_notifier_retries_malformed_thresholds_on_both_entrances(
 
 def test_a_new_window_alerts_again(monkeypatch, tmp_path, ledger) -> None:
     spy = _SpyNotifier()
-    _usage_file(monkeypatch, tmp_path, "codex", [_window(60, resets_in_hours=2)])
+    first = _window(60, resets_in_hours=2)
+    _usage_file(monkeypatch, tmp_path, "codex", [first])
     usage_alerts.check_usage_thresholds("codex", notifier=spy)
     _usage_file(monkeypatch, tmp_path, "codex", [_window(60, resets_in_hours=170)])
-    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    usage_alerts.check_usage_thresholds("codex", notifier=spy,
+        now=datetime.fromisoformat(first["resets_at"]) + timedelta(seconds=1))
     assert len(spy.sent) == 2
 
 
@@ -999,7 +1001,59 @@ def test_reset_offsets_for_one_instant_share_a_dedupe_key(monkeypatch, tmp_path,
     ):
         _usage_file(monkeypatch, tmp_path, "codex", [{"name": "weekly", "used_percent": 60, "resets_at": reset}])
         usage_alerts.check_usage_thresholds("codex", notifier=spy)
-    assert len(spy.sent) == 2
+    assert len(spy.sent) == 1
+
+
+def test_probe_and_manual_window_aliases_share_keys() -> None:
+    reset = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    weekly = {usage_alerts.dedupe_key("codex", name, reset, 50)
+              for name in ("weekly", "weekly_all", "seven_day", "window_10070m")}
+    session = {usage_alerts.dedupe_key("codex", name, reset, 50)
+               for name in ("session", "five_hour", "window_310m")}
+    assert len(weekly) == len(session) == 1
+    assert weekly != session
+
+
+def test_legacy_window_alias_migrates_uncertain_receipt(monkeypatch, tmp_path, ledger) -> None:
+    from lib.notify import held_view, neotoma_sink
+
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    monkeypatch.setattr(neotoma_sink, "migrate_key", lambda *args: True)
+    spy = _SpyNotifier()
+    reset = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    old = f"provider-usage-threshold:codex:seven_day:{reset}:50"
+    spy.inner._mark_dedupe_sending((old,), "apis")
+    spy.inner._mark_delivery_uncertain((old,), "synthetic uncertain outcome")
+    _usage_file(monkeypatch, tmp_path, "codex", [{
+        "name": "window_10070m", "used_percent": 60, "resets_at": reset,
+    }])
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    new = usage_alerts.dedupe_key("codex", "weekly_all", reset, 50)
+    assert not [message for message in spy.delivered if "Provider usage:" in message]
+    assert spy.inner._dedupe_journal[new]["state"] == "delivered_unconfirmed"
+    assert [row["key"] for row in held_view.read_recovery(spy.inner._digest_path)] == [new]
+
+
+def test_reset_correction_finds_recovery_only_key(monkeypatch, tmp_path, ledger) -> None:
+    from lib.notify import held_view, neotoma_sink
+
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    monkeypatch.setattr(neotoma_sink, "migrate_key", lambda *args: True)
+    spy = _SpyNotifier()
+    first = datetime.now(timezone.utc) + timedelta(hours=2)
+    corrected = first + timedelta(hours=3)
+    old = usage_alerts.dedupe_key("codex", "weekly_all", first.isoformat(), 50)
+    spy.inner._raise_recovery(old, "synthetic missing receipt", notify=False)
+    _usage_file(monkeypatch, tmp_path, "codex", [{
+        "name": "weekly_all", "used_percent": 60, "resets_at": corrected.isoformat(),
+    }])
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    new = usage_alerts.dedupe_key("codex", "weekly_all", corrected.isoformat(), 50)
+    assert spy.delivered == []
+    assert spy.inner._dedupe_journal[new]["state"] == "delivered_unconfirmed"
+    assert [row["key"] for row in held_view.read_recovery(spy.inner._digest_path)] == [new]
 
 
 def test_earlier_reset_correction_migrates_without_resolving_or_resending(
@@ -1064,10 +1118,11 @@ def test_legacy_case_and_unparseable_reset_migrate_without_resolution(
     new_key = usage_alerts.dedupe_key("codex", "monthly", reset, 50)
     assert migrated == [(old_key, new_key)]
     assert resolved == [] and spy.sent == []
-    assert list(spy.inner._dedupe_journal) == [new_key]
+    assert spy.inner._dedupe_journal[old_key] == {"state": "migrated", "migration_to": new_key}
+    assert spy.inner._dedupe_journal[new_key]["state"] == "delivered"
 
 
-def test_later_reset_resolves_and_sends_one_new_alert(monkeypatch, tmp_path, ledger) -> None:
+def test_later_reset_within_active_window_is_a_correction(monkeypatch, tmp_path, ledger) -> None:
     from lib.notify import neotoma_sink
 
     resolved = []
@@ -1082,13 +1137,105 @@ def test_later_reset_resolves_and_sends_one_new_alert(monkeypatch, tmp_path, led
         usage_alerts.check_usage_thresholds("codex", notifier=spy)
     first_key = usage_alerts.dedupe_key("codex", "monthly", first.isoformat(), 50)
     second_key = usage_alerts.dedupe_key("codex", "monthly", second.isoformat(), 50)
-    assert resolved == [first_key]
-    assert len(spy.delivered) == 2
-    assert list(spy.inner._dedupe_journal) == [second_key]
+    assert resolved == []
+    assert len(spy.delivered) == 1
+    assert spy.inner._dedupe_journal[first_key]["migration_to"] == second_key
+    assert spy.inner._dedupe_journal[second_key]["state"] == "delivered"
+
+
+@pytest.mark.parametrize("held", [False, True])
+@pytest.mark.parametrize("outcome", ["uncertain", "delivered"])
+@pytest.mark.parametrize("delta_days", [-1, 1])
+def test_reset_correction_preserves_real_notifier_outcome(
+    monkeypatch, tmp_path, ledger, held, outcome, delta_days
+) -> None:
+    from lib.notify import held_view, neotoma_sink
+
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "0")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "")
+    monkeypatch.setattr(neotoma_sink, "migrate_key", lambda *args: True)
+    spy = _SpyNotifier(silenced=held)
+    spy.inner._apprise = object()
+    spy.inner.should_flush_digest = lambda: False
+    first = datetime.now(timezone.utc) + timedelta(days=3)
+    corrected = first + timedelta(days=delta_days)
+    original_transport = spy.inner._deliver
+    transport_calls = []
+
+    def uncertain(message, **kwargs):
+        if "Provider usage:" in message:
+            transport_calls.append(message)
+            raise OSError("synthetic accepted, receipt lost")
+        return False
+
+    if outcome == "uncertain" and not held:
+        spy.inner._deliver = uncertain
+    _usage_file(monkeypatch, tmp_path, "codex", [{
+        "name": "monthly", "used_percent": 60, "resets_at": first.isoformat(),
+    }])
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    if held:
+        assert spy.inner._dedupe_journal[usage_alerts.dedupe_key(
+            "codex", "monthly", first.isoformat(), 50)]["state"] == "held"
+        spy.silenced = False
+        if outcome == "uncertain":
+            spy.inner._deliver = uncertain
+        spy.inner.flush_digest()
+    spy.inner._deliver = original_transport
+    before = len(transport_calls) + len(spy.delivered)
+    _usage_file(monkeypatch, tmp_path, "codex", [{
+        "name": "monthly", "used_percent": 60, "resets_at": corrected.isoformat(),
+    }])
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    spy.inner.flush_digest()
+    assert len(transport_calls) + len(spy.delivered) == before
+    old = usage_alerts.dedupe_key("codex", "monthly", first.isoformat(), 50)
+    new = usage_alerts.dedupe_key("codex", "monthly", corrected.isoformat(), 50)
+    assert spy.inner._dedupe_journal[old]["migration_to"] == new
+    assert spy.inner._dedupe_journal[new]["state"] == (
+        "delivered_unconfirmed" if outcome == "uncertain" else "delivered")
+    recovery = held_view.read_recovery(spy.inner._digest_path)
+    assert len(recovery) == (1 if outcome == "uncertain" else 0)
+    if recovery:
+        assert recovery[0]["key"] == new
+
+
+@pytest.mark.parametrize("held", [False, True])
+def test_real_notifier_new_window_after_previous_end_sends_once(
+    monkeypatch, tmp_path, ledger, held
+) -> None:
+    from lib.notify import neotoma_sink
+
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "0")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "")
+    monkeypatch.setattr(neotoma_sink, "migrate_key", lambda *args: True)
+    spy = _SpyNotifier(silenced=held)
+    spy.inner._apprise = object()
+    spy.inner.should_flush_digest = lambda: False
+    first = datetime.now(timezone.utc) + timedelta(hours=2)
+    second = first + timedelta(days=30)
+    for reset, current in ((first, datetime.now(timezone.utc)),
+                           (second, first + timedelta(seconds=1))):
+        _usage_file(monkeypatch, tmp_path, "codex", [{
+            "name": "monthly", "used_percent": 60, "resets_at": reset.isoformat(),
+        }])
+        usage_alerts.check_usage_thresholds("codex", notifier=spy, now=current)
+        if held:
+            spy.silenced = False
+            spy.inner.flush_digest()
+            spy.silenced = True
+    assert len([message for message in spy.delivered if "Provider usage:" in message]) == 2
 
 
 def test_unreadable_ledger_is_not_described_as_zero_activity(monkeypatch, tmp_path, ledger) -> None:
-    _usage_file(monkeypatch, tmp_path, "codex", [_window(60)])
+    first = _window(60)
+    _usage_file(monkeypatch, tmp_path, "codex", [first])
     spy = _SpyNotifier()
 
     def unreadable(**kwargs):
@@ -1100,7 +1247,8 @@ def test_unreadable_ledger_is_not_described_as_zero_activity(monkeypatch, tmp_pa
     assert "no attributed dispatches" not in spy.sent[0][0]
     monkeypatch.setattr(model_tiering, "top_callers", lambda **kwargs: [])
     _usage_file(monkeypatch, tmp_path, "codex", [_window(60, resets_in_hours=170)])
-    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    usage_alerts.check_usage_thresholds("codex", notifier=spy,
+        now=datetime.fromisoformat(first["resets_at"]) + timedelta(seconds=1))
     assert "no attributed dispatches in the ledger" in spy.sent[1][0]
 
 

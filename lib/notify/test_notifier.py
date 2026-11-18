@@ -1241,7 +1241,10 @@ def test_held_key_migration_moves_receipt_and_notice_together(tmp_path, monkeypa
     assert held_view.notice_identity(queue[0]) == (expected,)
     assert expected in n._dedupe_journal
     if failure is None:
-        assert old not in n._dedupe_journal
+        assert n._dedupe_journal[old] == {"state": "migrated", "migration_to": new}
+    elif failure == "queue":
+        assert not n.flush_digest()
+        assert n.migrate_dedupe(old, new)
     n._in_silence_window = lambda: False
     assert n.flush_digest()
     assert len([message for message in sent if "crossed" in message]) == 1
@@ -1294,17 +1297,21 @@ def test_failed_migration_keeps_sink_key_old_until_local_transition_commits(
     assert open_keys() == {old}
     marker = [row for row in held_view.read_recovery(n._digest_path)
               if row.get("migration_to") == new]
-    assert len(marker) == 1
+    assert len(marker) == (0 if failure == "journal" else 1)
     if failure == "sink":
-        assert old not in n._dedupe_journal and new in n._dedupe_journal
+        assert n._dedupe_journal[old]["state"] == "migrating"
+        assert new in n._dedupe_journal
         assert n.migrate_dedupe(old, new)
         assert open_keys() == {new}
         assert not [row for row in held_view.read_recovery(n._digest_path)
                     if row.get("migration_to") == new]
     else:
-        assert old in n._dedupe_journal and new not in n._dedupe_journal
-        n.clear_dedupe(old)
-        assert open_keys() == set()
+        assert old in n._dedupe_journal
+        if failure == "queue":
+            assert new in n._dedupe_journal
+            assert n._dedupe_journal[old]["state"] == "migrating"
+        assert n.migrate_dedupe(old, new)
+        assert open_keys() == {new}
 
 
 def test_malformed_sink_state_keeps_migration_marker_until_repaired(tmp_path, monkeypatch, capsys):
@@ -1339,6 +1346,153 @@ def test_malformed_sink_state_keeps_migration_marker_until_repaired(tmp_path, mo
     state = json.loads(state_file.read_text())
     assert {entry["key"] for entry in state["entries"].values()
             if entry.get("status") == "open"} == {new}
+
+
+@pytest.mark.parametrize("boundary", ["marker", "journal", "queue", "sink", "final"])
+def test_uncertain_migration_crash_recovers_without_transport(tmp_path, monkeypatch, capsys, boundary):
+    from lib.notify import held_view, neotoma_sink
+
+    old, new = "usage:weekly:old:50", "usage:weekly:new:50"
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "0")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "")
+    monkeypatch.setattr(neotoma_sink, "migrate_key", lambda *args: True)
+    monkeypatch.setattr(Notifier, "_try_deliver", lambda *args, **kwargs: False)
+    sent = []
+    n = _notifier(tmp_path, ALWAYS_SILENT, sent)
+    n.should_flush_digest = lambda: False
+    assert not n.send("crossed", Priority.WARN, handler="apis", dedupe_key=old,
+                      retryable=True)
+    assert n._mark_dedupe_sending((old,), "apis")
+    n._mark_delivery_uncertain((old,), "synthetic uncertain outcome")
+
+    journal_write = n._persist_dedupe_journal
+    queue_write = n._persist_queue
+    sink_write = neotoma_sink.migrate_key
+    writes = 0
+
+    def crash_journal(doc):
+        nonlocal writes
+        result = journal_write(doc)
+        writes += 1
+        if (boundary, writes) in (("marker", 1), ("journal", 2), ("final", 3)):
+            raise SystemExit("synthetic process death")
+        return result
+
+    def crash_queue(items, path=None):
+        result = queue_write(items, path)
+        if boundary == "queue":
+            raise SystemExit("synthetic process death")
+        return result
+
+    def crash_sink(*args):
+        result = sink_write(*args)
+        if boundary == "sink":
+            raise SystemExit("synthetic process death")
+        return result
+
+    monkeypatch.setattr(n, "_persist_dedupe_journal", crash_journal)
+    monkeypatch.setattr(n, "_persist_queue", crash_queue)
+    monkeypatch.setattr(neotoma_sink, "migrate_key", crash_sink)
+    with pytest.raises(SystemExit, match="synthetic process death"):
+        n.migrate_dedupe(old, new)
+    monkeypatch.setattr(neotoma_sink, "migrate_key", sink_write)
+    assert any(row["key"] in (old, new) for row in
+               held_view.journal_receipt_status()[0])
+    held_view.main([])
+    assert "migration" in capsys.readouterr().out.lower()
+    assert held_view.main(["--clear-unconfirmed", new]) == 1
+    assert held_view.main(["--clear"]) == 1
+    restarted = _notifier(tmp_path, NO_SILENCE, sent)
+    restarted.should_flush_digest = lambda: False
+    restarted._recover_sending_entries()
+    assert restarted._dedupe_journal[new]["state"] == "delivered_unconfirmed"
+    assert restarted._dedupe_journal[old]["state"] == "migrated"
+    assert not restarted.send("crossed", Priority.WARN, handler="apis",
+                              dedupe_key=old, retryable=True)
+    assert not restarted.send("crossed", Priority.WARN, handler="apis",
+                              dedupe_key=new, retryable=True)
+    assert not restarted.flush_digest()
+    restarted._in_silence_window = lambda: True
+    assert not restarted.send("crossed", Priority.WARN, handler="apis",
+                              dedupe_key=new, retryable=True)
+    assert sent == []
+    recovery = held_view.read_recovery(restarted._digest_path)
+    assert len(recovery) == 1 and recovery[0]["key"] == new
+    assert not recovery[0].get("migration_to")
+    assert held_view.main(["--clear-unconfirmed", new]) == 0
+    assert old not in restarted._dedupe_journal
+
+
+def test_recovery_only_key_migrates_as_uncertain(tmp_path, monkeypatch):
+    from lib.notify import held_view, neotoma_sink
+
+    monkeypatch.setattr(neotoma_sink, "migrate_key", lambda *args: True)
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    old, new = "usage:monthly:old:50", "usage:monthly:corrected:50"
+    n._raise_recovery(old, "synthetic receipt write failed", notify=False)
+    assert old not in n._dedupe_journal
+    assert n.migrate_dedupe(old, new)
+    assert n._dedupe_journal[new]["state"] == "delivered_unconfirmed"
+    n._raise_recovery(old, "late transport result", notify=False)
+    assert [row["key"] for row in held_view.read_recovery(n._digest_path)] == [new]
+    assert not n.send("crossed", Priority.WARN, handler="apis", dedupe_key=new,
+                      retryable=True)
+    assert sent == []
+
+
+def test_migrating_sending_receipt_creates_one_recovery_record(tmp_path, monkeypatch):
+    from lib.notify import held_view, neotoma_sink
+
+    monkeypatch.setattr(neotoma_sink, "migrate_key", lambda *args: True)
+    n = _notifier(tmp_path, NO_SILENCE, [])
+    old, new = "usage:weekly:old:50", "usage:weekly:corrected:50"
+    assert n._mark_dedupe_sending((old,), "apis")
+    assert n.migrate_dedupe(old, new)
+    assert n._dedupe_journal[new]["state"] == "delivered_unconfirmed"
+    assert [row["key"] for row in held_view.read_recovery(n._digest_path)] == [new]
+
+
+def test_clearing_legacy_alias_resolves_corrected_window(tmp_path, monkeypatch):
+    from lib.notify import neotoma_sink
+
+    monkeypatch.setattr(neotoma_sink, "migrate_key", lambda *args: True)
+    monkeypatch.setattr(neotoma_sink, "resolve", lambda *args: True)
+    n = _notifier(tmp_path, NO_SILENCE, [])
+    old, new = "usage:weekly:no-reset:50", "usage:weekly:corrected:50"
+    assert n._mark_dedupe_delivered_many((old,), "apis")
+    assert n.migrate_dedupe(old, new)
+    n.clear_dedupe(old)
+    assert old not in n._dedupe_journal and new not in n._dedupe_journal
+
+
+def test_journal_recovery_preserves_interrupted_migration(tmp_path, monkeypatch):
+    from lib.notify import held_view, neotoma_sink
+
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "0")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "")
+    monkeypatch.setattr(Notifier, "_try_deliver", lambda *args, **kwargs: False)
+    monkeypatch.setattr(neotoma_sink, "migrate_key", lambda *args: False)
+    n = _notifier(tmp_path, NO_SILENCE, [])
+    old, new = "usage:weekly:old:50", "usage:weekly:corrected:50"
+    assert n._mark_dedupe_delivered_many((old,), "apis")
+    assert not n.migrate_dedupe(old, new)
+    assert [row["migration_to"] for row in held_view.read_recovery(n._digest_path)] == [new]
+    n._dedupe_path.write_bytes(b"{synthetic unreadable journal")
+    assert not n.send("crossed", Priority.WARN, handler="apis",
+                      dedupe_key=new, retryable=True)
+    assert held_view.main(["--clear-unreadable-journal"]) == 0
+    monkeypatch.setattr(neotoma_sink, "migrate_key", lambda *args: True)
+    restarted = _notifier(tmp_path, NO_SILENCE, [])
+    assert restarted._dedupe_journal[new]["state"] == "delivered_unconfirmed"
+    assert restarted._dedupe_journal[old]["state"] == "migrated"
+    assert [row["key"] for row in held_view.read_recovery(n._digest_path)] == [new]
 
 
 def test_sink_resolution_failure_holds_cleared_key_until_retry(tmp_path, monkeypatch):
@@ -1538,10 +1692,12 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
 
     operations = ("send", "drain", "held_receipt_fail", "direct_receipt_fail",
                   "transport_refuse", "transport_uncertain", "crash_pending", "crash_sending", "restart",
-                  "migrate", "migration_queue_fail", "migration_journal_fail",
+                  "migrate", "window_correction", "migration_crash",
+                  "migration_queue_fail", "migration_journal_fail",
                   "migration_sink_fail", "operator_clear", "window_roll",
                   "journal_corrupt", "journal_corrupt_bytes", "journal_reconcile", "malformed_receipt",
                   "unreadable_snapshot_twice")
+    crash_boundaries = set()
     for length in range(1, 4):
         for index, sequence in enumerate(product(operations, repeat=length)):
             root = tmp_path / f"walk-{length}-{index}"
@@ -1590,10 +1746,65 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
                             journal[key]["attempt_at"] = (datetime.now(timezone.utc)
                                 - timedelta(minutes=1)).isoformat()
                             assert n._persist_dedupe_journal(journal)
-                elif operation == "migrate":
+                elif operation in ("migrate", "window_correction"):
                     moved = key.replace(":50", ":corrected:50")
                     if n.migrate_dedupe(key, moved):
                         key = moved
+                elif operation == "migration_crash" and not journal_bad:
+                    moved = key.replace(":50", ":corrected:50")
+                    if (moved != key and key in n._dedupe_journal
+                            and moved not in n._dedupe_journal
+                            and not held_view.receipt_problem(n._dedupe_journal[key])
+                            and n._dedupe_journal[key]["state"] not in ("migrating", "migrated")):
+                        from lib.notify import neotoma_sink
+                        has_queue = any(isinstance(item, dict) and key in item["keys"]
+                                        for item in before)
+                        boundary = ("marker", "journal", "queue", "sink", "final")[index % 5]
+                        if boundary == "queue" and not has_queue:
+                            boundary = "marker"
+                        original_journal = n._persist_dedupe_journal
+                        original_queue = n._persist_queue
+                        original_sink = neotoma_sink.migrate_key
+                        writes = 0
+
+                        def crash_journal(doc):
+                            nonlocal writes
+                            result = original_journal(doc)
+                            writes += 1
+                            if (boundary, writes) in (("marker", 1), ("journal", 2), ("final", 3)):
+                                raise SystemExit("synthetic process death")
+                            return result
+
+                        def crash_queue(items, path=None):
+                            result = original_queue(items, path)
+                            if boundary == "queue":
+                                raise SystemExit("synthetic process death")
+                            return result
+
+                        def crash_sink(*args):
+                            result = original_sink(*args)
+                            if boundary == "sink":
+                                raise SystemExit("synthetic process death")
+                            return result
+
+                        n._persist_dedupe_journal = crash_journal
+                        n._persist_queue = crash_queue
+                        neotoma_sink.migrate_key = crash_sink
+                        try:
+                            with pytest.raises(SystemExit, match="synthetic process death"):
+                                n.migrate_dedupe(key, moved)
+                        finally:
+                            n._persist_dedupe_journal = original_journal
+                            n._persist_queue = original_queue
+                            neotoma_sink.migrate_key = original_sink
+                        crash_boundaries.add(boundary)
+                        state = n._dedupe_journal[key]["state"]
+                        assert state in ("migrating", "migrated"), sequence
+                        n = _notifier(root, ALWAYS_SILENT, sent)
+                        n.should_flush_digest = lambda: False
+                        n._recover_sending_entries()
+                        if n._dedupe_journal.get(key, {}).get("state") == "migrated":
+                            key = moved
                 elif operation.startswith("migration_") and not journal_bad:
                     moved = key.replace(":50", ":corrected:50")
                     has_queue_key = any(isinstance(item, dict) and key in item["keys"]
@@ -1629,7 +1840,8 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
                     if journal_bad:
                         continue
                     recovery = held_view.read_recovery(n._digest_path)
-                    if any(row["key"] == key and row.get("migration_to") for row in recovery):
+                    if any(row.get("migration_to") and
+                           key in (row["key"], row["migration_to"]) for row in recovery):
                         n.clear_dedupe(key)
                     elif (any(row["key"] == key for row in recovery)
                           or any(row["key"] == key for row in
@@ -1640,7 +1852,14 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
                         assert held_view.main([]) == 0
                         keyed = {k for item in before if isinstance(item, dict)
                                  for k in item["keys"]}
-                        if keyed and not keyed.issubset(n._dedupe_journal):
+                        migrating = {k for row in recovery if row.get("migration_to")
+                                     for k in (row["key"], row["migration_to"])}
+                        migrating.update(k for k, entry in n._dedupe_journal.items()
+                                         if isinstance(entry, dict) and (
+                                             entry.get("state") == "migrating"
+                                             or entry.get("migration_from")))
+                        if (keyed and not keyed.issubset(n._dedupe_journal)
+                                or keyed & migrating):
                             assert held_view.main(["--clear"]) == 1
                         else:
                             assert held_view.main(["--clear"]) == 0
@@ -1665,7 +1884,8 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
                         n._dedupe_path.write_text(json.dumps(doc))
                         n.send(f"crossed {key}", Priority.WARN, handler="apis",
                                dedupe_key=key, retryable=True)
-                        assert any(row["key"] == key for row in held_view.read_recovery(n._digest_path))
+                        assert any(key in (row["key"], row.get("migration_to"))
+                                   for row in held_view.read_recovery(n._digest_path))
                 elif operation == "unreadable_snapshot_twice":
                     source = root / "usage.json"
                     for raw in (b"{first synthetic", b"{later synthetic"):
@@ -1697,17 +1917,19 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
                 after = held_view.read_queue(n._digest_path)
                 assert len({held_view.notice_identity(item) for item in after}) == len(after), sequence
                 recovery_keys = {row["key"] for row in held_view.read_recovery(n._digest_path)}
+                recovery_related = recovery_keys | {row["migration_to"] for row in
+                    held_view.read_recovery(n._digest_path) if row.get("migration_to")}
                 for journal_key, entry in (() if journal_bad else n._dedupe_journal.items()):
                     if journal_key == held_view.RECOVERED_AT:
                         continue
                     if held_view.receipt_problem(entry):
-                        assert journal_key in recovery_keys, sequence
+                        assert journal_key in recovery_related, sequence
                         continue
                     if entry.get("state") == "held":
                         assert any(journal_key in item["keys"] for item in after if isinstance(item, dict)) \
-                            or journal_key in recovery_keys, sequence
+                            or journal_key in recovery_keys or entry.get("migration_from") in recovery_keys, sequence
                     if entry.get("state") in ("sending", "delivered_unconfirmed"):
-                        assert (journal_key in recovery_keys or journal_key in {
+                        assert (journal_key in recovery_related or journal_key in {
                             row["key"] for row in held_view.journal_receipt_status()[0]
                         }), sequence
                 delivered = [message.rsplit(" ", 1)[-1] for message in sent
@@ -1716,7 +1938,8 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
                     assert delivered.count(delivered_key) <= 1 + clear_allowance.get(delivered_key, 0), sequence
                 if len(after) < len(before):
                     assert operation in ("drain", "operator_clear", "window_roll",
-                                         "journal_reconcile", "migration_sink_fail"), sequence
+                                        "journal_reconcile", "migration_sink_fail"), sequence
+    assert crash_boundaries == {"marker", "journal", "queue", "sink", "final"}
     capsys.readouterr()
 
 

@@ -229,7 +229,8 @@ def test_new_usage_reset_clears_old_journal_key_and_resolves_sink(on, monkeypatc
     assert len(on.stores()) == 1
 
     reading(first_reset + timedelta(days=7))
-    new_key = usage_alerts.check_usage_thresholds("codex", notifier=notifier)[0]
+    new_key = usage_alerts.check_usage_thresholds(
+        "codex", notifier=notifier, now=first_reset + timedelta(seconds=1))[0]
     sink.flush()
     assert new_key != old_key
     assert not notifier.is_dedupe_open(old_key)
@@ -275,7 +276,7 @@ def test_reset_spelling_migrates_open_sink_alert_without_a_new_send(
     reading(canonical)
     assert usage_alerts.check_usage_thresholds("codex", notifier=notifier) == []
     new_key = usage_alerts.dedupe_key("codex", "weekly_all", canonical, 50)
-    assert not notifier.is_dedupe_open(old_key)
+    assert notifier.is_dedupe_open(old_key)  # stale spelling stays suppressed
     assert notifier.is_dedupe_open(new_key)
     assert len(sends) == 1
     sink.flush()
@@ -283,7 +284,9 @@ def test_reset_spelling_migrates_open_sink_alert_without_a_new_send(
     assert len(on.stores()) == 1
 
     reading((reset + timedelta(days=7)).isoformat())
-    assert len(usage_alerts.check_usage_thresholds("codex", notifier=notifier)) == 1
+    assert len(usage_alerts.check_usage_thresholds(
+        "codex", notifier=notifier, now=reset + timedelta(seconds=1))) == 1
+    assert not notifier.is_dedupe_open(old_key)
     sink.flush()
     assert len(sends) == 2
     assert on.corrections()[0]["entity_id"] == "ent_fake1"

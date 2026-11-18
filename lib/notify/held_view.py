@@ -74,6 +74,13 @@ def receipt_problem(entry: object) -> str | None:
     if not isinstance(entry, dict):
         return "receipt is not an object"
     state = entry.get("state")
+    if state == "migrating":
+        peer = entry.get("migration_to", entry.get("migration_from"))
+        if not isinstance(peer, str) or not peer or not isinstance(entry.get("receipt"), dict):
+            return "migration marker is invalid"
+        return receipt_problem(entry["receipt"])
+    if state == "migrated":
+        return None if isinstance(entry.get("migration_to"), str) and entry["migration_to"] else "migration alias is invalid"
     field = {"held": "held_message", "pending": "pending_at",
              "sending": "attempt_at", "delivered_unconfirmed": "attempt_at",
              "delivered": "notified_at"}.get(state) if isinstance(state, str) else None
@@ -396,8 +403,14 @@ def journal_receipt_status(now: datetime | None = None) -> tuple[list[dict], lis
             uncertain.append({"key": str(key), "cause": "malformed receipt"})
             continue
         state = entry["state"]
+        if state == "migrating" and entry.get("migration_from"):
+            continue  # The old-key marker represents this one transition.
+        if entry.get("migration_from") and entry["migration_from"] in entries:
+            continue  # The destination receipt is staged behind that marker.
         if state == "delivered_unconfirmed":
             uncertain.append({"key": key, "cause": "uncertain send"})
+        elif state == "migrating":
+            uncertain.append({"key": key, "cause": "interrupted key migration"})
         elif state == "sending":
             attempted = datetime.fromisoformat(entry["attempt_at"].replace("Z", "+00:00"))
             age = (current - attempted).total_seconds()
@@ -557,7 +570,7 @@ def _print_notices(main: Path, show_all: bool) -> int:
                 print("  Reconcile unknown deliveries, then run python3 "
                       "lib/notify/held_view.py --clear-unreadable-journal")
             elif row.get("migration_to"):
-                print("  Sink key migration pending; retry migrate_dedupe with the recorded keys.")
+                print("  Key migration pending; retry migrate_dedupe with the recorded keys.")
             elif row.get("cause") == "sink resolution pending":
                 print("  Sink resolution pending; retry clear_dedupe for this key.")
             else:
@@ -569,10 +582,14 @@ def _print_notices(main: Path, show_all: bool) -> int:
         print("RECOVERY REQUIRED: dedupe journal unreadable; preserve it and reconcile unknown deliveries.")
     recovery_keys = {row["key"] for row in recovery}
     for row in journal_uncertain:
-        if row["key"] not in recovery_keys:
-            print(f"RECOVERY REQUIRED: {row['cause']} key={row['key']!r}. "
-                  "After deciding to resend, run python3 lib/notify/held_view.py "
-                  f"--clear-unconfirmed {shlex.quote(row['key'])}")
+        if row["key"] not in recovery_keys or row["cause"] == "interrupted key migration":
+            if row["cause"] == "interrupted key migration":
+                print(f"RECOVERY REQUIRED: interrupted key migration key={row['key']!r}; "
+                      "retry migrate_dedupe before clearing either key.")
+            else:
+                print(f"RECOVERY REQUIRED: {row['cause']} key={row['key']!r}. "
+                      "After deciding to resend, run python3 lib/notify/held_view.py "
+                      f"--clear-unconfirmed {shlex.quote(row['key'])}")
     for row in in_flight:
         print(f"IN FLIGHT: send key={row['key']!r}; no resend is available yet.")
     orphaned = orphaned_held_receipts(main)
@@ -691,6 +708,17 @@ def _clear(main: Path) -> int:
                     if any(key not in journal for item in removed if isinstance(item, dict)
                            for key in item["keys"]):
                         raise ValueError("dedupe receipt missing for keyed notice")
+                    migrations = [row for row in read_recovery(main) if row.get("migration_to")]
+                    if any(isinstance(item, dict) and any(
+                        key in (row["key"], row["migration_to"])
+                        for key in item["keys"] for row in migrations) for item in removed):
+                        raise ValueError("key migration in progress")
+                    if any(isinstance(item, dict) and any(
+                        isinstance(journal.get(key), dict) and (
+                            journal[key].get("state") == "migrating"
+                            or journal[key].get("migration_from"))
+                        for key in item["keys"]) for item in removed):
+                        raise ValueError("key migration in progress")
                     atomic_write(backup, json.dumps((old + removed)[-BACKUP_MAX:]))
                     changed = False
                     for key, entry in journal.items():
@@ -750,7 +778,15 @@ def _clear_unconfirmed(main: Path, key: str) -> int:
                     journal = json.loads(read_text_nofollow(journal_file))
                     if not isinstance(journal, dict):
                         raise ValueError("dedupe journal is not an object")
+                    original_journal = dict(journal)
                     entry = journal.get(key)
+                    if (isinstance(entry, dict) and
+                            (entry.get("state") == "migrating" or entry.get("migration_from"))
+                            or any(isinstance(value, dict) and value.get("state") == "migrating"
+                                   and value.get("migration_to") == key for value in journal.values())
+                            or any(row.get("migration_to") and
+                                   key in (row["key"], row["migration_to"]) for row in records)):
+                        raise ValueError("key migration in progress")
                     if entry is not None and not receipt_problem(entry) and entry.get("state") not in (
                         "sending", "delivered_unconfirmed"
                     ):
@@ -770,17 +806,24 @@ def _clear_unconfirmed(main: Path, key: str) -> int:
                                         datetime.now(timezone.utc).isoformat(), "handler": ""}
                     else:
                         journal.pop(key, None)
+                    aliases = {key}
+                    while True:
+                        newly_linked = {name for name, value in journal.items()
+                                        if isinstance(value, dict)
+                                        and value.get("state") == "migrated"
+                                        and value.get("migration_to") in aliases}
+                        if newly_linked.issubset(aliases):
+                            break
+                        aliases.update(newly_linked)
+                    for alias in aliases - {key}:
+                        journal.pop(alias, None)
                     try:
                         atomic_write(journal_file, json.dumps(journal))
                         write_recovery(main, [row for row in records if row["key"] != key
                                               or row.get("migration_to")
                                               or row.get("cause") == "sink resolution pending"])
                     except Exception:
-                        if entry is None:
-                            journal.pop(key, None)
-                        else:
-                            journal[key] = entry
-                        atomic_write(journal_file, json.dumps(journal))
+                        atomic_write(journal_file, json.dumps(original_journal))
                         raise
                 except Exception as exc:
                     for path in written:
@@ -851,12 +894,21 @@ def _clear_unreadable_journal(main: Path) -> int:
                             # An uncertain or delivered receipt cannot be weakened by
                             # another copy containing an earlier held state.
                             rank = {"held": 1, "pending": 2, "delivered": 3,
-                                    "delivered_unconfirmed": 4}
+                                    "delivered_unconfirmed": 4, "sending": 4,
+                                    "migrated": 5, "migrating": 6}
                             if not isinstance(current, dict) or rank[entry["state"]] > rank[current["state"]]:
                                 journal[key] = entry
                     for row in records:
                         key = row["key"]
-                        if key == "dedupe-journal-unreadable" or row.get("migration_to"):
+                        if key == "dedupe-journal-unreadable":
+                            continue
+                        if row.get("migration_to"):
+                            target = row["migration_to"]
+                            if key not in journal and target not in journal:
+                                journal[key] = {"state": "migrated", "migration_to": target}
+                                journal[target] = {"state": "delivered_unconfirmed",
+                                                   "attempt_at": epoch, "handler": ""}
+                                row["cause"] = "migration state lost during journal recovery"
                             continue
                         journal[key] = {"state": "delivered_unconfirmed",
                                         "attempt_at": epoch, "handler": ""}

@@ -18,8 +18,9 @@ follows it.
 
 Once per threshold per window, and only once it reached the operator. The
 notifier's persistent dedupe journal (ateles#1127) records "this condition was
-reported"; the key names the provider, the window and that window's reset time,
-so the next window (a new ``resets_at``) alerts afresh. The journal is read
+reported"; the key names the provider, the window and that window's reset time.
+A reset correction while the old window is active migrates that key; a window
+whose previous reset has passed alerts afresh. The journal is read
 first, so a check inside an already-reported window costs one small file read.
 No separate state store is added.
 
@@ -97,7 +98,20 @@ def _canonical_window_name(name: object) -> str:
     if not isinstance(name, str):
         return "unavailable"
     cleaned = name.strip().casefold()
-    return cleaned if 0 < len(cleaned) <= 64 else "unavailable"
+    if not 0 < len(cleaned) <= 64:
+        return "unavailable"
+    if cleaned in ("weekly", "seven_day"):
+        return "weekly_all"
+    if cleaned == "session":
+        return "five_hour"
+    match = _MINUTES_NAME.match(cleaned)
+    if match and len(match.group(1)) <= 6:
+        minutes = int(match.group(1))
+        if abs(minutes - 10080) <= 60:
+            return "weekly_all"
+        if abs(minutes - 300) <= 15:
+            return "five_hour"
+    return cleaned
 
 
 def window_span(name: str) -> tuple[timedelta, bool]:
@@ -297,8 +311,8 @@ def check_usage_thresholds(
             if not crossed:
                 continue
             keys = {t: dedupe_key(provider, name, reset_key, t) for t in crossed}
-            if not [t for t in crossed if not _already_reported(probe, keys[t])]:
-                continue
+            # Even a reported destination must reconcile an older spelling:
+            # a reset-time correction can arrive after a previous check.
             retry_key = keys[max(crossed)]
             if _retry_after.get(retry_key, 0.0) > time.monotonic():
                 continue  # this process just failed to deliver it; back off
@@ -329,10 +343,11 @@ def check_usage_thresholds(
                                 continue
                             old_instant = _parse_iso(old_reset)
                             canonical_key = dedupe_key(provider, name, reset_key, int(threshold_text))
-                            if (old_instant is not None and current_instant is not None
-                                    and current_instant > old_instant):
+                            if old_key == canonical_key:
+                                continue
+                            if old_instant is not None and current >= old_instant:
                                 probe.clear_dedupe(old_key)
-                            elif old_key != canonical_key:
+                            else:
                                 migrator = getattr(probe, "migrate_dedupe", None)
                                 if not callable(migrator) or not migrator(old_key, canonical_key):
                                     return  # keep the old key for a later check

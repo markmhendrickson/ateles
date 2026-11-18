@@ -384,6 +384,24 @@ class Notifier:
         tag = f"[{handler}] " if handler else ""
         full_message = f"{tag}{message}"
 
+        # A stale caller must not recreate the old sink key, or a destination
+        # key, while the two-key journal transition is in progress.
+        if dedupe_key:
+            journal = self._dedupe_journal
+            recovery = held_view.read_recovery(self._digest_path)
+            if any(row.get("migration_to") and
+                   (dedupe_key in (row["key"], row["migration_to"])
+                    or any(key in (row["key"], row["migration_to"])
+                           for key in related_dedupe_keys)) for row in recovery):
+                return False
+            if self._migration_reserved(journal, (dedupe_key, *related_dedupe_keys)):
+                for key in (dedupe_key, *related_dedupe_keys):
+                    entry = journal.get(key)
+                    if isinstance(entry, dict) and entry.get("state") == "migrating":
+                        self._raise_recovery(entry.get("migration_from", key),
+                                             "key migration incomplete")
+                return False
+
         # Also store the alert in Neotoma for the operator's harness session
         # (lib/notify/neotoma_sink.py). Additive and fail-open: it never
         # changes routing or the return value and never raises or blocks.
@@ -904,9 +922,21 @@ class Notifier:
         if not isinstance(item, dict):
             return True
         keys = tuple(item["keys"])
+        try:
+            recovery = held_view.read_recovery(self._digest_path)
+        except (OSError, ValueError):
+            return False
+        if any(row.get("migration_to") and any(
+            key in (row["key"], row["migration_to"]) for key in keys)
+            for row in recovery):
+            return False
         entries = self._dedupe_journal
         for key in keys:
             existing = entries.get(key)
+            if isinstance(existing, dict) and (existing.get("state") in ("migrating", "migrated")
+                                                   or existing.get("migration_from")):
+                self._raise_recovery(key, "key migration incomplete")
+                return False
             if key in entries and held_view.receipt_problem(existing):
                 self._raise_recovery(key, "malformed held receipt")
                 return False
@@ -922,6 +952,13 @@ class Notifier:
 
     def _held_already_delivered(self, item: str | dict) -> bool:
         if not isinstance(item, dict):
+            return False
+        try:
+            if any(row.get("migration_to") and any(
+                key in (row["key"], row["migration_to"]) for key in item["keys"])
+                for row in held_view.read_recovery(self._digest_path)):
+                return False
+        except (OSError, ValueError):
             return False
         entry = self._dedupe_journal.get(item["keys"][0], {})
         return isinstance(entry, dict) and not held_view.receipt_problem(entry) \
@@ -1017,9 +1054,9 @@ class Notifier:
     def _dedupe_journal(self) -> dict[str, Any]:
         """Read the persisted dedupe journal; unreadable denies keyed sends.
 
-        Shape: ``{key: {"notified_at": iso8601, "handler": str}}``. A key
-        present here has already been reported and is suppressed on every
-        later ``send(dedupe_key=key)`` until ``clear_dedupe(key)`` removes it.
+        Per-key receipts include pending, held, sending, uncertain, delivered,
+        and recoverable migration states. A reserved key suppresses a later
+        ``send(dedupe_key=key)`` until its state is reconciled or cleared.
         """
         with self._notification_lock:
             try:
@@ -1074,9 +1111,19 @@ class Notifier:
                 if not locked:
                     return False
                 journal = self._dedupe_journal
-                if not change(journal):
-                    return True
+                try:
+                    if not change(journal):
+                        return True
+                except ValueError as exc:
+                    log.warning("[notify] journal transition refused: %s", exc)
+                    return False
                 return self._persist_dedupe_journal(journal)
+
+    @staticmethod
+    def _migration_reserved(journal: dict[str, Any], keys: tuple[str, ...]) -> bool:
+        return any(isinstance(journal.get(key), dict) and (
+            journal[key].get("state") in ("migrating", "migrated")
+            or journal[key].get("migration_from")) for key in keys)
 
     def _persist_dedupe_journal(self, journal: dict[str, Any]) -> bool:
         """Atomically rewrite the dedupe journal. Caller holds its sidecar lock."""
@@ -1109,6 +1156,17 @@ class Notifier:
     def _raise_recovery(self, key: str, cause: str, *, notify: bool = True) -> None:
         """Persist uncertain delivery independently of the dedupe receipt."""
         try:
+            try:
+                journal = self._dedupe_journal
+            except UnreadableDedupeJournal:
+                journal = {}
+            seen = set()
+            while key not in seen:
+                seen.add(key)
+                entry = journal.get(key)
+                if not isinstance(entry, dict) or entry.get("state") != "migrated":
+                    break
+                key = entry["migration_to"]
             with held_view.file_lock(held_view.recovery_lock_path(self._digest_path),
                                      fail_open=False) as locked:
                 if not locked:
@@ -1143,7 +1201,24 @@ class Notifier:
         except UnreadableDedupeJournal:
             self._hold_unreadable_journal(None, "", "")
             return
-        for key, entry in entries:
+        migrations = [(key, entry["migration_to"]) for key, entry in entries
+                      if isinstance(entry, dict) and entry.get("state") == "migrating"
+                      and isinstance(entry.get("migration_to"), str)]
+        try:
+            migrations.extend((row["key"], row["migration_to"])
+                              for row in held_view.read_recovery(self._digest_path)
+                              if row.get("migration_to") and
+                              (row["key"], row["migration_to"]) not in migrations)
+        except (OSError, ValueError):
+            pass  # The journal markers still deny delivery; repair remains visible.
+        for old_key, new_key in migrations:
+            self.migrate_dedupe(old_key, new_key)
+        current = self._dedupe_journal
+        for entry in current.values():
+            if (isinstance(entry, dict) and entry.get("state") == "migrated"
+                    and entry.get("migration_to") not in current):
+                self._quarantine_missing_migration_target(entry["migration_to"])
+        for key, entry in self._dedupe_journal.items():
             if key == held_view.RECOVERED_AT:
                 continue
             if held_view.receipt_problem(entry):
@@ -1183,16 +1258,35 @@ class Notifier:
             cause = "unreadable or future send attempt time"
         self._raise_recovery(key, cause)
 
+    def _quarantine_missing_migration_target(self, key: str) -> None:
+        def quarantine(journal: dict[str, Any]) -> bool:
+            if key in journal:
+                return False
+            journal[key] = {"state": "delivered_unconfirmed",
+                            "attempt_at": self._now_local().isoformat(), "handler": ""}
+            return True
+        self._update_dedupe_journal(quarantine)
+        self._raise_recovery(key, "migrated receipt missing")
+
     def _is_duplicate(self, key: str, *, pending_owned: bool = False,
                       replacement_message: str | None = None) -> bool:
         journal = self._dedupe_journal
         entry = journal.get(key)
+        if entry is None and any(isinstance(value, dict) and value.get("state") == "migrated"
+                                 and value.get("migration_to") == key for value in journal.values()):
+            self._quarantine_missing_migration_target(key)
+            return True
+        if isinstance(entry, dict) and (entry.get("state") in ("migrating", "migrated")
+                                        or entry.get("migration_from")):
+            if entry.get("state") == "migrating":
+                self._raise_recovery(entry.get("migration_from", key), "key migration incomplete")
+            return True
         try:
             recovery = held_view.read_recovery(self._digest_path)
         except Exception:
             log.error("[notify] recovery file unreadable; key %r held", key)
             return True
-        if any(row["key"] == key for row in recovery):
+        if any(row["key"] == key or row.get("migration_to") == key for row in recovery):
             return True
         if key in journal and held_view.receipt_problem(entry):
             if isinstance(entry, dict) and entry.get("state") in (
@@ -1308,6 +1402,8 @@ class Notifier:
 
     def _mark_dedupe_pending(self, key: str, handler: str = "") -> bool:
         def change(journal: dict[str, Any]) -> bool:
+            if self._migration_reserved(journal, (key,)):
+                raise ValueError("key migration in progress")
             journal[key] = {
                 "state": "pending", "pending_at": self._now_local().isoformat(),
                 "handler": handler,
@@ -1317,6 +1413,8 @@ class Notifier:
 
     def _mark_dedupe_pending_many(self, keys: tuple[str, ...], handler: str) -> bool:
         def change(journal: dict[str, Any]) -> bool:
+            if self._migration_reserved(journal, keys):
+                raise ValueError("key migration in progress")
             for key in keys:
                 journal[key] = {"state": "pending", "pending_at": self._now_local().isoformat(),
                                 "handler": handler}
@@ -1327,6 +1425,8 @@ class Notifier:
         attempt = {"state": "sending", "attempt_at": self._now_local().isoformat(),
                    "attempt_id": uuid.uuid4().hex, "handler": handler}
         def change(journal: dict[str, Any]) -> bool:
+            if self._migration_reserved(journal, keys):
+                raise ValueError("key migration in progress")
             for key in keys:
                 journal[key] = attempt.copy()
             return bool(keys)
@@ -1334,6 +1434,8 @@ class Notifier:
 
     def _mark_dedupe_delivered_many(self, keys: tuple[str, ...], handler: str) -> bool:
         def change(journal: dict[str, Any]) -> bool:
+            if self._migration_reserved(journal, keys):
+                raise ValueError("key migration in progress")
             for key in keys:
                 journal[key] = {"state": "delivered", "notified_at": self._now_local().isoformat(),
                                 "handler": handler}
@@ -1342,6 +1444,8 @@ class Notifier:
 
     def _mark_dedupe_delivered(self, key: str, handler: str = "") -> None:
         def change(journal: dict[str, Any]) -> bool:
+            if self._migration_reserved(journal, (key,)):
+                raise ValueError("key migration in progress")
             journal[key] = {
                 "state": "delivered", "notified_at": self._now_local().isoformat(),
                 "handler": handler,
@@ -1353,6 +1457,8 @@ class Notifier:
         self, keys: tuple[str, ...], handler: str, message: str
     ) -> bool:
         def change(journal: dict[str, Any]) -> bool:
+            if self._migration_reserved(journal, keys):
+                raise ValueError("key migration in progress")
             for key in keys:
                 journal[key] = {
                     "state": "held", "held_message": message, "handler": handler,
@@ -1424,7 +1530,8 @@ class Notifier:
             if key in self._dedupe_journal and held_view.receipt_problem(entry):
                 self._raise_recovery(key, "malformed receipt")
                 return
-            if any(row["key"] == key for row in held_view.read_recovery(self._digest_path)):
+            if any(row["key"] == key or row.get("migration_to") == key
+                   for row in held_view.read_recovery(self._digest_path)):
                 return
             def change(journal: dict[str, Any]) -> bool:
                 if key in journal:
@@ -1440,7 +1547,12 @@ class Notifier:
         return self._dedupe_path
 
     def migrate_dedupe(self, old_key: str, new_key: str) -> bool:
-        """Rename a receipt and its queued notice as one local transition."""
+        """Recoverably move a receipt, held notice, recovery row and sink key.
+
+        The first journal write reserves both names. Every later write can be
+        repeated after a process death; the old alias remains a suppressing
+        receipt after completion so a stale caller cannot reuse the old key.
+        """
         if old_key == new_key:
             return True
         try:
@@ -1452,94 +1564,114 @@ class Notifier:
                     if not journal_locked:
                         return False
                     journal = self._dedupe_journal
-                    marker = next((row for row in held_view.read_recovery(self._digest_path)
-                                   if row["key"] == old_key and row.get("migration_to") == new_key), None)
-                    if old_key not in journal:
-                        if marker is None:
-                            return True
-                        if not neotoma_sink.migrate_key(old_key, new_key):
+                    old = journal.get(old_key)
+                    new = journal.get(new_key)
+                    if isinstance(old, dict) and old.get("state") == "migrated":
+                        if old.get("migration_to") != new_key:
                             return False
                         with held_view.file_lock(held_view.recovery_lock_path(self._digest_path),
                                                  fail_open=False) as recovered:
                             if not recovered:
                                 return False
-                            held_view.write_recovery(self._digest_path, [row for row in
-                                held_view.read_recovery(self._digest_path) if row != marker])
+                            records = held_view.read_recovery(self._digest_path)
+                            completed = [({k: v for k, v in {**row, "key": new_key}.items()
+                                           if k != "migration_to"}
+                                          if row["key"] == old_key and row.get("migration_to") == new_key
+                                          and row.get("cause") != "key migration in progress" else row)
+                                         for row in records if not (row["key"] == old_key
+                                         and row.get("migration_to") == new_key
+                                         and row.get("cause") == "key migration in progress")]
+                            if completed != records:
+                                held_view.write_recovery(self._digest_path, completed)
                         return True
-                    if held_view.receipt_problem(journal[old_key]):
-                        self._raise_recovery(old_key, "malformed receipt during migration")
+                    if old is None:
+                        old_recovery = next((row for row in held_view.read_recovery(self._digest_path)
+                                             if row["key"] == old_key), None)
+                        if old_recovery is None:
+                            return new is None or (isinstance(new, dict) and
+                                                   not held_view.receipt_problem(new))
+                        # A failed receipt write can leave only the independent
+                        # recovery row. Its unknown outcome still belongs to
+                        # the corrected window.
+                        old = {"state": "delivered_unconfirmed",
+                               "attempt_at": self._now_local().isoformat(), "handler": ""}
+                    if held_view.receipt_problem(old) or (new is not None and (
+                            held_view.receipt_problem(new)
+                            or new.get("migration_from") != old_key)):
+                        self._raise_recovery(old_key, "conflicting or malformed migration receipt")
                         return False
-                    if new_key in journal:
-                        if held_view.receipt_problem(journal[new_key]):
-                            self._raise_recovery(new_key, "malformed receipt during migration")
-                        return False
-                    if marker is None:
-                        with held_view.file_lock(held_view.recovery_lock_path(self._digest_path),
-                                                 fail_open=False) as recovered:
-                            if not recovered:
-                                return False
-                            records = held_view.read_recovery(self._digest_path)
-                            marker = {"key": old_key, "time": self._now_local().isoformat(),
-                                      "cause": "sink key migration pending", "migration_to": new_key}
-                            held_view.write_recovery(self._digest_path, records + [marker])
-                    queues = {path: held_view.read_queue(path)
-                              for path in (self._digest_path, self._email_path)}
-                    changed: dict[Path, list[str | dict]] = {}
-                    for path, items in queues.items():
-                        replacements = []
-                        for item in items:
-                            if isinstance(item, dict) and old_key in item["keys"]:
-                                replacement = {**item, "keys": [
-                                    new_key if key == old_key else key for key in item["keys"]
-                                ]}
-                                replacements.append(replacement)
-                            else:
-                                replacements.append(item)
-                        if replacements != items:
-                            changed[path] = replacements
-                    written: list[Path] = []
-                    for path, items in changed.items():
-                        if not self._persist_queue(items, path):
-                            for previous in written:
-                                self._persist_queue(queues[previous], previous)
-                            self._raise_recovery(old_key, "queue key migration failed")
+                    if old.get("state") == "migrating":
+                        if old.get("migration_to") != new_key:
+                            self._raise_recovery(old_key, "conflicting migration")
                             return False
-                        written.append(path)
-                    renamed = {**journal, new_key: journal[old_key]}
-                    del renamed[old_key]
-                    if not self._persist_dedupe_journal(renamed):
-                        for previous in written:
-                            self._persist_queue(queues[previous], previous)
-                        self._raise_recovery(old_key, "journal key migration failed")
-                        return False
-                    try:
-                        with held_view.file_lock(
-                            held_view.recovery_lock_path(self._digest_path),
-                            fail_open=False,
-                        ) as recovery_locked:
-                            if not recovery_locked:
-                                raise OSError("recovery lock unavailable")
-                            records = held_view.read_recovery(self._digest_path)
-                            migrated = [{**row, "key": new_key} if row["key"] == old_key
-                                        and not row.get("migration_to")
-                                        else row for row in records]
-                            if migrated != records:
-                                held_view.write_recovery(self._digest_path, migrated)
-                    except Exception as exc:  # noqa: BLE001
-                        log.error("[notify] recovery key migration failed: %s", exc)
-                        self._persist_dedupe_journal(journal)
-                        for previous in written:
-                            self._persist_queue(queues[previous], previous)
-                        self._raise_recovery(old_key, "recovery key migration failed")
-                        return False
+                        receipt = old["receipt"]
+                    else:
+                        receipt = old
+                        if receipt.get("state") == "sending":
+                            receipt = {**receipt, "state": "delivered_unconfirmed"}
+                        reserved = dict(journal)
+                        reserved[old_key] = {"state": "migrating", "migration_to": new_key,
+                                             "receipt": receipt}
+                        reserved[new_key] = {"state": "migrating", "migration_from": old_key,
+                                             "receipt": receipt}
+                        if not self._persist_dedupe_journal(reserved):
+                            return False
+                        journal = reserved
+                    # This is an existing recovery record, annotated in place.
+                    # If there was none, it is the one migration recovery record.
+                    with held_view.file_lock(held_view.recovery_lock_path(self._digest_path),
+                                             fail_open=False) as recovered:
+                        if not recovered:
+                            return False
+                        records = held_view.read_recovery(self._digest_path)
+                        row = next((row for row in records if row["key"] == old_key), None)
+                        if row is None:
+                            cause = ("send outcome unknown" if receipt.get("state") in
+                                     ("sending", "delivered_unconfirmed") else
+                                     "key migration in progress")
+                            row = {"key": old_key, "time": self._now_local().isoformat(),
+                                   "cause": cause}
+                            records.append(row)
+                        if row.get("migration_to") != new_key:
+                            row["migration_to"] = new_key
+                            held_view.write_recovery(self._digest_path, records)
+                    # The destination receipt is durable before a queue rename.
+                    if isinstance(journal.get(new_key), dict) and journal[new_key].get("state") == "migrating":
+                        staged = dict(journal)
+                        staged[new_key] = {**receipt, "migration_from": old_key}
+                        if not self._persist_dedupe_journal(staged):
+                            return False
+                        journal = staged
+                    for path in (self._digest_path, self._email_path):
+                        items = held_view.read_queue(path)
+                        renamed = [{**item, "keys": [new_key if key == old_key else key
+                                                     for key in item["keys"]]}
+                                   if isinstance(item, dict) and old_key in item["keys"]
+                                   else item for item in items]
+                        if renamed != items and not self._persist_queue(renamed, path):
+                            return False
                     if not neotoma_sink.migrate_key(old_key, new_key):
                         return False
                     with held_view.file_lock(held_view.recovery_lock_path(self._digest_path),
                                              fail_open=False) as recovered:
                         if not recovered:
                             return False
-                        held_view.write_recovery(self._digest_path, [row for row in
-                            held_view.read_recovery(self._digest_path) if row != marker])
+                        records = held_view.read_recovery(self._digest_path)
+                        completed = []
+                        for row in records:
+                            if row["key"] == old_key and row.get("migration_to") == new_key:
+                                if row.get("cause") != "key migration in progress":
+                                    completed.append({k: v for k, v in
+                                                      {**row, "key": new_key}.items()
+                                                      if k != "migration_to"})
+                            else:
+                                completed.append(row)
+                        final = dict(self._dedupe_journal)
+                        final[old_key] = {"state": "migrated", "migration_to": new_key}
+                        final[new_key] = receipt
+                        if not self._persist_dedupe_journal(final):
+                            return False
+                        held_view.write_recovery(self._digest_path, completed)
                     return True
         except Exception as exc:  # noqa: BLE001
             log.error("[notify] key migration failed for %r: %s", old_key, exc)
@@ -1556,7 +1688,21 @@ class Notifier:
         """
         try:
             journal = self._dedupe_journal
+            seen = set()
+            while isinstance(journal.get(key), dict) and journal[key].get("state") == "migrated":
+                if key in seen:
+                    self._raise_recovery(key, "cyclic migration alias")
+                    return
+                seen.add(key)
+                key = journal[key]["migration_to"]
             records = held_view.read_recovery(self._digest_path)
+            if any(row.get("migration_to") and key in (row["key"], row["migration_to"])
+                   for row in records):
+                return
+            entry = journal.get(key)
+            if isinstance(entry, dict) and (entry.get("state") in ("migrating", "migrated")
+                                            or entry.get("migration_from")):
+                return
             marker = next((row for row in records if row["key"] == key and row.get("migration_to")), None)
             projection = next((row for row in records if row["key"] == key
                                and row.get("cause") == "sink resolution pending"), None)
@@ -1632,7 +1778,15 @@ class Notifier:
                         return
                     journal = self._dedupe_journal
                     if key in journal:
-                        without_key = {k: v for k, v in journal.items() if k != key}
+                        aliases = {key}
+                        while True:
+                            linked = {name for name, value in journal.items()
+                                      if isinstance(value, dict) and value.get("state") == "migrated"
+                                      and value.get("migration_to") in aliases}
+                            if linked.issubset(aliases):
+                                break
+                            aliases.update(linked)
+                        without_key = {k: v for k, v in journal.items() if k not in aliases}
                         if not self._persist_dedupe_journal(without_key):
                             for previous in written:
                                 self._persist_queue(queues[previous], previous)
@@ -1738,10 +1892,22 @@ class Notifier:
             return False
 
     def dedupe_keys_with_prefix(self, prefix: str) -> tuple[str, ...]:
-        """Journal keys beginning with ``prefix``, for condition cleanup."""
+        """Receipt and recovery keys beginning with ``prefix``.
+
+        A receipt write can fail after transport acceptance. The independent
+        recovery row must still follow a corrected window key.
+        """
         with self._notification_lock:
             try:
-                return tuple(key for key in self._dedupe_journal if key.startswith(prefix))
+                journal = self._dedupe_journal
+                recovery = held_view.read_recovery(self._digest_path)
+                keys = (key for key in (*journal, *(row["key"] for row in recovery))
+                        if key.startswith(prefix) and not (
+                            isinstance(journal.get(key), dict)
+                            and journal[key].get("state") == "migrated"
+                            and not any(row["key"] == key and row.get("migration_to")
+                                        for row in recovery)))
+                return tuple(dict.fromkeys(keys))
             except UnreadableDedupeJournal:
                 self._hold_unreadable_journal(None, "", "")
                 return ()
