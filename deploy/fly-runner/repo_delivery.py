@@ -578,10 +578,34 @@ def export_agent_work(work: Work, *, branch: str, base: str,
                 EXPORT_FAILED, "reading the assigned branch")  # fmt: skip
     if head == base:
         return False
+    # A fetched branch based on an ancestor outside the depth-1 clone is not
+    # an extension of the admitted head. Bundling ^base in that case walks the
+    # fetched branch's other ancestry and can include its entire old tree.
+    # Refuse before making a large bundle; the importer requires this same
+    # ancestry and cannot safely push a divergent head.
+    ancestor = _run([*checkout, "merge-base", "--is-ancestor", base, head], env=env, ident=ident)
+    if isinstance(ancestor, str) or ancestor.returncode != 0:
+        raise RepoWorkError(EXPORT_FAILED, "the branch does not descend from the admitted base")
     _git([*checkout, "bundle", "create", "-q", str(work.export / BUNDLE_NAME),
           f"refs/heads/{branch}", f"^{base}"], env=env, ident=ident, category=EXPORT_FAILED,
          reason="bundling the agent's work")  # fmt: skip
     return True
+
+
+def count_new_commits(work: Work, branch: str, base: str) -> int | str:
+    """A bounded numeric count from the checkout, or unknown if unreadable."""
+    if not base or not isinstance(branch, str) or not isinstance(base, str):
+        return "unknown"
+    env = git_env(work.home, allow="file")
+    done = _run(["-C", str(work.checkout), "rev-list", "--count", f"{base}..refs/heads/{branch}"],
+                env=env)
+    if isinstance(done, str) or done.returncode != 0:
+        return "unknown"
+    raw = done.stdout.strip()
+    if not raw.isdigit() or len(raw) > 5:
+        return "unknown"
+    count = int(raw)
+    return count if count <= 10000 else "unknown"
 
 
 def _open_export(work: Work) -> int:

@@ -322,6 +322,20 @@ def test_a_branch_rewritten_onto_older_history_is_refused(world):
     refused(world, "could not be imported|does not descend")
 
 
+def test_export_refuses_fetched_branch_with_parent_outside_shallow_base(world):
+    src, co = world["src"], world["work"].checkout
+    git(src, "checkout", "-q", "-b", "old-parent-pr", world["old"], home=world["home"])
+    (src / "side.txt").write_text("side\n")
+    git(src, "add", ".", home=world["home"])
+    git(src, "commit", "-qm", "side", home=world["home"])
+    git(src, "push", "-q", str(world["remote"]), "old-parent-pr", home=world["home"])
+    git(co, "fetch", "-q", f"file://{world['remote']}", "old-parent-pr", home=world["home"])
+    git(co, "reset", "-q", "--hard", "FETCH_HEAD", home=world["home"])
+    with pytest.raises(rd.RepoWorkError, match="does not descend from the admitted base"):
+        rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None)
+    assert not (world["work"].export / rd.BUNDLE_NAME).exists()
+
+
 def test_a_full_history_bundle_that_skips_the_base_is_refused(world):
     src = world["src"]
     git(src, "checkout", "-q", "-b", BRANCH, world["old"], home=world["home"])
