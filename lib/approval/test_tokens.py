@@ -113,8 +113,14 @@ class TestParseVerdictVerbPrefix:
         assert parse_verdict("skip v0.20.0", "v0.20.0") is False
 
     def test_skip_with_trailing_content_still_wins(self):
-        # A skip line with trailing words is still decisive over an approve line.
-        assert parse_verdict("approve v0.20.0\nskip this one", "v0.20.0") is False
+        # An extra instruction makes the whole reply ambiguous.
+        assert parse_verdict("approve v0.20.0\nskip this one", "v0.20.0") is None
+
+    def test_closed_grammar_rejects_qualifiers_and_other_targets(self):
+        for reply in ("approve if CI passes", "approve v0.20.0\nwait",
+                      "approve v0.20.0\napprove v0.21.0", "approve v0.21.0",
+                      "please approve v0.20.0"):
+            assert parse_verdict(reply, "v0.20.0") is None
 
     def test_lowercase_bearing_token_matches(self):
         # Token case-normalization: text is uppercased internally, so the token

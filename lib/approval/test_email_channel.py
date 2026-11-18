@@ -13,7 +13,247 @@ from contextlib import contextmanager
 from typing import Any, Iterator
 from unittest.mock import patch
 
+import pytest
+
 from lib.approval import email_channel as ec
+
+
+@pytest.mark.parametrize("colour", (
+    "#0000", "#fff0", "hsla(0,0%,0%,0)", "hwb(0 0% 0% / 0)",
+    "lab(0 0 0 / 0)", "lch(0 0 0 / 0)", "color(srgb 0 0 0 / 0)",
+    "#333333", "rgb(34,34,34)", "black", "hsl(0,0%,0%)",
+))
+def test_html_colour_policy_rejects_unsafe_foreground_or_background(colour):
+    for property_name in ("color", "background"):
+        html = (f"<body><p style='{property_name}:{colour}'>APPROVE</p>"
+                "<blockquote>quoted token</blockquote></body>")
+        body, _ = ec._extract_authored_html(html)
+        if property_name == "color" and colour in {"#333333", "rgb(34,34,34)", "black"}:
+            assert body == "APPROVE"
+        else:
+            assert body == ""
+
+
+@pytest.mark.parametrize("style", (
+    "color:#333;background:#333", "color:rgb(34,34,34);background:#222222",
+    "color:black;background:rgb(0,0,0)", "color:white;background:#fff",
+    "font-size:0", "margin-left:-9999px", "opacity:0", "color:var(--ink)",
+    "color:#222!important", "background-image:url(x)",
+))
+def test_html_unsafe_style_is_unreadable(style):
+    assert ec._extract_authored_html(
+        f"<body><p style='{style}'>APPROVE</p></body>")[0] == ""
+
+
+def test_html_normal_mail_styles_and_terminal_quote_are_readable():
+    html = ("<body style='background:#fff'><p style='color:rgb(34,34,34);"
+            "font-family:Arial;font-size:14px;margin:0'>APPROVE</p>"
+            "<blockquote>quoted token</blockquote></body>")
+    assert ec._extract_authored_html(html)[0] == "APPROVE"
+
+
+@pytest.mark.parametrize("html", (
+    "I withdraw<html><body><p>APPROVE</p></body></html>",
+    "<html><body><p>APPROVE</p></body>I withdraw</html>",
+    "<html><body><p>APPROVE</p></body></html>I withdraw",
+    "<p>APPROVE</p>I withdraw<blockquote>quoted</blockquote>",
+))
+def test_html_text_outside_accounted_container_is_unreadable(html):
+    assert ec._extract_authored_html(html)[0] == ""
+
+
+@pytest.mark.parametrize("tag", ("body", "table", "td"))
+def test_html_background_attribute_is_unreadable(tag):
+    html = f"<{tag} background='image.png'>APPROVE</{tag}>"
+    assert ec._extract_authored_html(html)[0] == ""
+
+
+@pytest.mark.parametrize("attribute", (
+    "bgcolor='#fff'", "color='#222'", "text='#222'", "link='#222'",
+    "vlink='#222'", "alink='#222'", "face='Arial'", "size='14'",
+    "hidden", "aria-hidden='false'", "class='ordinary'", "id='ordinary'",
+    "data-style='display:block'", "stylex='color:#222'", "dir='rtl'",
+))
+def test_html_unaccounted_presentational_attribute_is_unreadable(attribute):
+    assert ec._extract_authored_html(f"<body><p {attribute}>APPROVE</p></body>")[0] == ""
+
+
+@pytest.mark.parametrize("size", ("50%", ".5em", "smaller", "90%", ".9em"))
+def test_nested_relative_font_sizes_cannot_hide_approval(size):
+    html = "<body>" + f"<span style='font-size:{size}'>" * 20
+    html += "APPROVE" + "</span>" * 20 + "</body>"
+    assert ec._extract_authored_html(html)[0] == ""
+
+
+@pytest.mark.parametrize("style", (
+    "font-size:7px", "font-size:5pt", "font-size:60%",
+    "width:99999px", "height:99999px", "max-width:99999px",
+    "max-height:99999px", "min-width:99999px", "min-height:99999px",
+    "top:99999px", "left:99999px", "right:99999px", "bottom:99999px",
+    "inset:99999px", "text-indent:99999px", "letter-spacing:99999px",
+    "word-spacing:99999px", "line-height:99999px", "transform:translateX(99999px)",
+    "translate:99999px", "scale:0", "rotate:180deg", "zoom:0",
+    "float:right", "position:absolute", "position:relative;left:99999px",
+    "overflow:hidden", "overflow-x:hidden", "overflow-y:hidden",
+    "margin:calc(1px)", "padding:var(--space)",
+))
+def test_unbounded_or_conditional_layout_is_unreadable(style):
+    assert ec._extract_authored_html(f"<body><p style='{style}'>APPROVE</p></body>")[0] == ""
+
+
+@pytest.mark.parametrize("property_name", (
+    "margin", "padding", "margin-left", "margin-right", "margin-top",
+    "margin-bottom", "padding-left", "padding-right", "padding-top",
+    "padding-bottom",
+))
+@pytest.mark.parametrize("value", ("99999px", "101px", "76pt", "9em", "11%", "-1px"))
+def test_every_margin_and_padding_side_is_bounded(property_name, value):
+    assert ec._extract_authored_html(
+        f"<body><p style='{property_name}:{value}'>APPROVE</p></body>")[0] == ""
+
+
+@pytest.mark.parametrize("property_name", ("margin", "padding"))
+@pytest.mark.parametrize("value", ("0 99999px", "0 0 99999px", "0 0 0 99999px"))
+def test_each_shorthand_side_is_bounded(property_name, value):
+    assert ec._extract_authored_html(
+        f"<body><p style='{property_name}:{value}'>APPROVE</p></body>")[0] == ""
+
+
+@pytest.mark.parametrize("html", (
+    "<details><p>APPROVE</p></details>", "<dialog>APPROVE</dialog>",
+    "<menu>APPROVE</menu>", "<slot>APPROVE</slot>",
+    "<noembed>APPROVE</noembed>", "<map><area>APPROVE</map>",
+    "<object>APPROVE</object>", "<picture>APPROVE</picture>",
+    "<audio>APPROVE</audio>", "<video>APPROVE</video>",
+    "<frameset>APPROVE</frameset>",
+    '<p style="font-size:14px" style="font-size:0">APPROVE</p>',
+    '<p class="ordinary" class="gmail_quote">APPROVE</p>',
+    '<p hidden="" hidden="false">APPROVE</p>',
+    '<p id="ordinary" id="divRplyFwdMsg">APPROVE</p>',
+))
+def test_ambiguous_visibility_and_duplicate_attributes_are_unreadable(html):
+    assert ec._extract_authored_html(f"<body>{html}</body>")[0] == ""
+
+
+def test_open_details_summary_and_regular_mail_sizes_are_readable():
+    html = ("<body><details open><summary>APPROVE</summary></details>"
+            "<p style='font-size:14px;margin:8px;padding:4px'>ordinary</p></body>")
+    assert ec._extract_authored_html(html)[0].startswith("APPROVE")
+
+
+@pytest.mark.parametrize("size", ("14px", "small", "medium", "1em", "100%"))
+def test_normal_mail_font_sizes_remain_readable(size):
+    assert ec._extract_authored_html(
+        f"<body><p style='font-size:{size}'>APPROVE</p></body>")[0] == "APPROVE"
+
+
+@pytest.mark.parametrize("tail", (
+    "From: Swarm <swarm@example.net>\nI withdraw approval",
+    "From: Swarm <swarm@example.net>\n> old text\nI withdraw approval",
+    "On Tuesday Example wrote:\n> old text\nI withdraw approval",
+))
+def test_plain_header_with_later_authored_text_is_unreadable(tail):
+    body, safe = ec._authored_plain_checked("APPROVE\n" + tail)
+    assert "I withdraw approval" in body or not safe
+    assert body != "APPROVE" or not safe
+
+
+def test_unproven_header_and_signature_are_authored():
+    assert ec._authored_plain_checked("APPROVE\nFrom: Swarm <swarm@example.net>\n> old") == (
+        "APPROVE\nFrom: Swarm <swarm@example.net>", True)
+    assert ec._authored_plain_checked("APPROVE\n-- \nSignature") == (
+        "APPROVE\n--\nSignature", True)
+
+
+@pytest.mark.parametrize("separator", ("-----Original Message-----", "Begin forwarded message:"))
+def test_header_boundary_requires_quoted_tail(separator):
+    headers = "From: Example\nSent: Tuesday\nTo: Operator\nSubject: Request"
+    assert ec._authored_plain_checked(f"APPROVE\n{separator}\n{headers}\n> old") == (
+        "APPROVE", True)
+    assert ec._authored_plain_checked(f"APPROVE\n{separator}\n{headers}\nI withdraw") == (
+        "APPROVE", False)
+    assert ec._authored_plain_checked(f"APPROVE\n{headers}\n> old") == (
+        f"APPROVE\n{headers}", True)
+
+
+@pytest.mark.parametrize("tail", (
+    "I withdraw approval", "One\nTwo\nThree\nFour\nFive",
+    "This line is deliberately more than eighty characters long and makes the signature boundary unsafe.",
+    "Manager, approve later", "Example v1.2.3", "Review PR #7",
+))
+def test_signature_tail_must_be_short_and_benign(tail):
+    assert ec._authored_plain_checked("APPROVE\n-- \n" + tail)[0].endswith(tail)
+
+
+def test_benign_signature_after_affirmative_stays_authored():
+    assert ec._authored_plain_checked("APPROVE\n-- \nExample Name\nEngineer") == (
+        "APPROVE\n--\nExample Name\nEngineer", True)
+
+
+@pytest.mark.parametrize("tail", (
+    "Subject: I rescind my consent", "From: I rescind my consent",
+    "Date: I rescind my consent", "To: I rescind my consent",
+    "Cc: I rescind my consent", "Sent: I rescind my consent",
+    "-- \nI rescind my consent", "--\nI rescind my consent",
+    "-----Original Message-----\nI rescind my consent",
+    "From: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\nI rescind my consent",
+))
+def test_unproven_quote_shapes_preserve_authored_withdrawal(tail):
+    body, safe = ec._authored_plain_checked("approve\n" + tail)
+    assert safe
+    assert "I rescind my consent" in body
+
+
+@pytest.mark.parametrize("quote", (
+    "On Tuesday Example wrote:\n> old request",
+    "Le mardi Exemple a écrit :\n> ancienne demande",
+    "El martes Ejemplo escribió:\n> solicitud anterior",
+    "-----Original Message-----\nFrom: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\n> old request",
+))
+def test_proven_bottom_quote_is_removed(quote):
+    assert ec._authored_plain_checked("approve\n" + quote) == ("approve", True)
+
+
+@pytest.mark.parametrize("font", (
+    "Wingdings", "Arial, Webdings", "Symbol", "Emoji", "Unknown Font",
+))
+def test_unsafe_font_family_and_font_face_are_unreadable(font):
+    assert ec._extract_authored_html(
+        f"<body><p style='font-family:{font}'>APPROVE</p></body>")[0] == ""
+    assert ec._extract_authored_html(
+        f"<body><font face='{font}'>APPROVE</font></body>")[0] == ""
+
+
+@pytest.mark.parametrize("markup", (
+    "<style>@font-face { font-family: Custom; src:url(x) }</style>",
+    "<p style='font:14px Wingdings'>APPROVE</p>",
+    "<p style='font-variant:small-caps'>APPROVE</p>",
+    "<p style='font-feature-settings:normal'>APPROVE</p>",
+    "<p style='font-synthesis:none'>APPROVE</p>",
+    "<p style='unicode-range:U+0-FFFF'>APPROVE</p>",
+    "<p style='text-transform:uppercase'>APPROVE</p>",
+    "<p style='direction:rtl'>APPROVE</p>",
+    "<p style='unicode-bidi:bidi-override'>APPROVE</p>",
+    "<p style='writing-mode:vertical-rl'>APPROVE</p>",
+    "<p style='text-orientation:sideways'>APPROVE</p>",
+))
+def test_unsafe_font_and_text_rendering_are_unreadable(markup):
+    assert ec._extract_authored_html(f"<body>{markup}</body>")[0] == ""
+
+
+@pytest.mark.parametrize("font", (
+    "Arial", "'Helvetica Neue', sans-serif", '"Times New Roman", serif',
+    "Calibri, Arial", "system-ui, -apple-system", "Menlo, monospace",
+))
+def test_common_mail_fonts_remain_readable(font):
+    escaped_font = font.replace('"', "&quot;")
+    assert ec._extract_authored_html(
+        f"<body><p style=\"font-family:{escaped_font}\">APPROVE</p></body>")[0] == "APPROVE"
+
+
+def test_html_bottom_post_after_quote_is_unreadable():
+    assert ec._extract_authored_html(
+        "<body><blockquote>old</blockquote><p>APPROVE</p></body>")[0] == ""
 
 
 def _ok(stdout=""):
@@ -32,7 +272,7 @@ def _google_pass_for_operator_domain() -> dict:
     domain = _os.environ.get("OPERATOR_EMAIL", "").rpartition("@")[2].strip().lower()
     value = (f"mx.google.com; dkim=pass header.i=@{domain} header.s=s; "
              f"dmarc=pass (p=NONE) header.from={domain}")
-    return {"id": "m", "payload": {"headers": [
+    return {"id": "m1", "payload": {"headers": [
         {"name": "Authentication-Results", "value": value}]}}
 
 
@@ -151,7 +391,7 @@ class TestReadReplies:
     def test_only_re_subjects_are_read(self, monkeypatch):
         monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
         monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
-        triage = {"messages": [
+        triage = {"complete": True, "messages": [
             {"id": "m1", "subject": "RE: [ATELES] Approve [APPROVE-TOK]",
              "from": "op@example.com"},
             {"id": "m2", "subject": "[ATELES] Approve [APPROVE-TOK]",
@@ -178,7 +418,7 @@ class TestReadReplies:
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                return {"complete": True, "messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
                                       "from": "op@example.com"}]}
             return {"body_text": "SKIP"}
 
@@ -191,22 +431,77 @@ class TestReadReplies:
         with _mock_inbox(None):
             assert ec.read_replies(["TOK"]) == []
 
-    def test_prefers_body_text_over_html(self, monkeypatch):
-        # The operator's verdict + quoted token live in the plaintext part; the
-        # HTML part must never win when plaintext is present (ateles#286).
+    def test_multipart_requires_matching_authored_text(self, monkeypatch):
         monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
         monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                return {"complete": True, "messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
                                       "from": "op@example.com"}]}
-            return {"body_text": "approve v0.20.0", "body_html": "<p>ignored</p>"}
+            return {"body_text": "approve v0.20.0", "body_html": "<p>APPROVE v0.20.0</p>"}
 
         with _mock_inbox(side_effect=fake_gws_json):
             texts = ec.read_replies(["TOK"])
         assert "approve v0.20.0" in texts[0]
-        assert "ignored" not in texts[0]
+
+    @pytest.mark.parametrize("plain,html", (
+        ("APPROVE", "<p>hold</p>"),
+        ("hold", "<p>APPROVE</p>"),
+        ("APPROVE", "<p hidden>APPROVE</p>"),
+        ("APPROVE", {"unexpected": "shape"}),
+    ))
+    def test_multipart_disagreement_is_unreadable(self, monkeypatch, plain, html):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+
+        def fake_gws_json(args, timeout=45):
+            if "+triage" in args:
+                return {"complete": True, "messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                                      "from": "op@example.com"}]}
+            return {"body_text": plain, "body_html": html}
+
+        with _mock_inbox(side_effect=fake_gws_json):
+            outcome = ec.read_replies_with_status(["TOK"])
+        assert outcome.kind == "transport_error"
+
+    @pytest.mark.parametrize("html", ("", " \n ", "<p></p>"))
+    def test_present_empty_html_disagrees_with_plain_approval(self, monkeypatch, html):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+
+        def fake_gws_json(args, timeout=45):
+            if "+triage" in args:
+                return {"complete": True, "messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                                      "from": "op@example.com"}]}
+            return {"body_text": "APPROVE", "body_html": html}
+
+        with _mock_inbox(side_effect=fake_gws_json):
+            outcome = ec.read_replies_with_status(["TOK"])
+        assert outcome.kind == "transport_error"
+        assert outcome.texts == []
+        assert [reply.message_id for reply in outcome.unreadable_replies] == ["m1"]
+        assert outcome.detail == "reply_quote_boundary_unknown"
+        assert outcome.texts == []
+        assert len(outcome.unreadable_replies) == 1
+
+    @pytest.mark.parametrize("plain", ("", " \n "))
+    def test_present_empty_plain_holds_html_approval(self, monkeypatch, plain):
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+
+        def fake(args, timeout=45):
+            if "+triage" in args:
+                return {"complete": True, "messages": [
+                    {"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                     "from": "op@example.com"}]}
+            return {"body_text": plain, "body_html": "<p>APPROVE</p>"}
+
+        with _mock_inbox(side_effect=fake):
+            outcome = ec.read_replies_with_status(["TOK"])
+        assert outcome.kind == "transport_error"
+        assert outcome.texts == []
+        assert [r.message_id for r in outcome.unreadable_replies] == ["m1"]
 
     def test_falls_back_to_body_html_when_no_plaintext(self, monkeypatch):
         # An HTML-only reply must not read as an empty body and silently drop the
@@ -219,7 +514,7 @@ class TestReadReplies:
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                return {"complete": True, "messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
                                       "from": "op@example.com"}]}
             return {"body_html": "<div dir=\"ltr\">approve v0.20.0</div>"}
 
@@ -322,7 +617,7 @@ class TestSenderVerification:
 
     @staticmethod
     def _triage(from_addr: str) -> dict:
-        return {"messages": [
+        return {"complete": True, "messages": [
             {"id": "m1", "subject": "RE: [ATELES] Approve [APPROVE-TOK]",
              "from": from_addr},
         ]}
@@ -474,7 +769,7 @@ class TestReadRepliesWithStatus:
     def test_read_replies_with_status_ok_empty_texts(self, monkeypatch):
         monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
         monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
-        with _mock_inbox({"messages": []}):
+        with _mock_inbox({"complete": True, "messages": []}):
             outcome = ec.read_replies_with_status(["TOK"])
         assert outcome.kind == "ok"
         assert outcome.texts == []
@@ -527,7 +822,7 @@ _GOOGLE_DMARC_PASS = (
 def _metadata(auth_values: list[str]) -> dict:
     headers = [{"name": "From", "value": "op@example.com"}]
     headers += [{"name": "Authentication-Results", "value": v} for v in auth_values]
-    return {"id": "m", "payload": {"headers": headers}}
+    return {"id": "m1", "payload": {"headers": headers}}
 
 
 def _is_metadata_get(args) -> bool:
@@ -555,7 +850,7 @@ class TestSenderDomainAuthentication:
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [{"id": "m1",
+                return {"complete": True, "messages": [{"id": "m1",
                                       "subject": "RE: x [APPROVE-TOK]",
                                       "from": "Op <op@example.com>"}]}
             if _is_metadata_get(args):
@@ -653,7 +948,7 @@ class TestSenderDomainAuthentication:
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                return {"complete": True, "messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
                                       "from": "op@example.com"}]}
             if _is_metadata_get(args):
                 return _metadata([])
@@ -673,7 +968,7 @@ class TestSenderDomainAuthentication:
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                return {"complete": True, "messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
                                       "from": "op@example.com"}]}
             if _is_metadata_get(args):
                 return _metadata([])
@@ -692,8 +987,23 @@ class TestSenderDomainAuthentication:
     def test_unreadable_metadata_response_is_not_ok(self, monkeypatch):
         """We could not read the authentication result at all: that is a read
         failure, never an 'ok, nothing authenticated' and never a pass."""
-        assert self._run(monkeypatch, None).kind != "ok"
-        assert self._run(monkeypatch, {"unexpected": True}).kind != "ok"
+        for response in (None, {"unexpected": True}):
+            outcome = self._run(monkeypatch, response)
+            assert outcome.kind == "transport_error"
+            assert [reply.message_id for reply in outcome.unreadable_replies] == ["m1"]
+            assert outcome.rejected_replies == ()
+
+    @pytest.mark.parametrize("auth", (
+        {"id": "other", "payload": {"headers": [
+            {"name": "Authentication-Results", "value": _GOOGLE_DMARC_PASS}]}},
+        {"id": "m1", "payload": {"headers": [
+            {"name": "Other", "value": []},
+            {"name": "Authentication-Results", "value": _GOOGLE_DMARC_PASS}]}},
+    ))
+    def test_mismatched_or_invalid_auth_metadata_is_not_ok(self, monkeypatch, auth):
+        outcome = self._run(monkeypatch, auth)
+        assert outcome.kind == "transport_error"
+        assert outcome.texts == []
 
     def test_fail_open_wrapper_also_drops_unauthenticated(self, monkeypatch):
         monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
@@ -701,7 +1011,7 @@ class TestSenderDomainAuthentication:
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                return {"complete": True, "messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
                                       "from": "op@example.com"}]}
             if _is_metadata_get(args):
                 return _metadata([])
@@ -728,7 +1038,7 @@ class TestPartialReadFailsClosed:
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [
+                return {"complete": True, "messages": [
                     {"id": "m1", "subject": "RE: x [APPROVE-TOK]", "from": "op@example.com"},
                     {"id": "m2", "subject": "RE: x [APPROVE-TOK]", "from": "op@example.com"},
                 ]}
@@ -740,13 +1050,16 @@ class TestPartialReadFailsClosed:
             out = ec.read_replies_with_status(["TOK"])
         assert out.kind == "transport_error"
         assert out.texts == []
+        assert [r.message_id for r in out.replies] == ["m1"]
+        assert [(r.message_id, r.subject) for r in out.unreadable_replies] == [
+            ("m2", "RE: x [APPROVE-TOK]")]
 
     def test_one_metadata_fetch_fails_other_succeeds_is_not_ok(self, monkeypatch):
         self._env(monkeypatch)
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
-                return {"messages": [
+                return {"complete": True, "messages": [
                     {"id": "m1", "subject": "RE: x [APPROVE-TOK]", "from": "op@example.com"},
                     {"id": "m2", "subject": "RE: x [APPROVE-TOK]", "from": "op@example.com"},
                 ]}
@@ -766,12 +1079,127 @@ class TestPartialReadFailsClosed:
             if "+triage" in args:
                 if any("TOK2" in a for a in args):
                     return None
-                return {"messages": [
+                return {"complete": True, "messages": [
                     {"id": "m1", "subject": "RE: x [APPROVE-TOK1]", "from": "op@example.com"}]}
             return {"body_text": "APPROVE"}
 
         with _mock_inbox(side_effect=fake_gws_json):
             out = ec.read_replies_with_status(["TOK1", "TOK2"])
+        assert out.kind == "transport_error"
+        assert out.texts == []
+
+    @pytest.mark.parametrize("position", ("first", "second", "only"))
+    @pytest.mark.parametrize("bad", ({"unexpected": []}, {"messages": "bad", "complete": True},
+                                     {"messages": [{"id": 5, "subject": "RE: x",
+                                                    "from": "op@example.com"}], "complete": True}))
+    def test_invalid_triage_response_poison_whole_sweep(self, monkeypatch, position, bad):
+        self._env(monkeypatch)
+        good = {"complete": True, "messages": [
+            {"id": "m1", "subject": "RE: x [APPROVE-TOK]", "from": "op@example.com"}]}
+
+        def fake(args, timeout=45):
+            if "+triage" in args:
+                query = args[args.index("--query") + 1]
+                return bad if position == "only" or (("TOK1" in query) == (position == "first")) else good
+            return {"body_text": "APPROVE"}
+
+        tokens = ["TOK1"] if position == "only" else ["TOK1", "TOK2"]
+        with _mock_inbox(side_effect=fake):
+            out = ec.read_replies_with_status(tokens)
+        assert out.kind == "transport_error"
+        assert out.texts == []
+        assert out.detail == "gws_triage_invalid_response"
+
+    @pytest.mark.parametrize("collection,expected", (
+        ({"complete": True, "messages": []}, "ok"),
+        ({"messages": []}, "transport_error"),
+        ({"complete": True, "messages": [], "nextPageToken": "next"}, "transport_error"),
+        ({"complete": True, "messages": [], "resultSizeEstimate": 2}, "transport_error"),
+        ({"complete": True, "messages": [], "has_more": True}, "transport_error"),
+    ))
+    def test_collection_completeness(self, monkeypatch, collection, expected):
+        self._env(monkeypatch)
+        with _mock_inbox(collection):
+            out = ec.read_replies_with_status(["TOK"], max_msgs=1)
+        assert out.kind == expected
+        if expected != "ok":
+            assert out.texts == []
+            assert "truncated" in out.detail
+
+    def test_full_page_requires_exhaustion_and_does_not_fire_callback(self, monkeypatch):
+        self._env(monkeypatch)
+        seen = []
+
+        def fake(args, timeout=45):
+            if "+triage" in args:
+                query = args[args.index("--query") + 1]
+                if "TOK2" in query:
+                    return {"messages": [], "nextPageToken": "more"}
+                return {"complete": True, "messages": [
+                    {"id": "m1", "subject": "RE: x [APPROVE-TOK1]",
+                     "from": "op@example.com"}]}
+            return {"body_text": "APPROVE"}
+
+        with _mock_inbox(side_effect=fake):
+            out = ec.read_replies_with_status(
+                ["TOK1", "TOK2"], max_msgs=1,
+                on_reply_message=lambda token, mid: seen.append((token, mid)))
+        assert out.kind == "transport_error"
+        assert out.texts == []
+        assert seen == []
+
+    def test_oversized_body_cannot_approve(self, monkeypatch):
+        self._env(monkeypatch)
+
+        def fake(args, timeout=45):
+            if "+triage" in args:
+                return {"complete": True, "messages": [
+                    {"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                     "from": "op@example.com"}]}
+            return {"body_text": "APPROVE" + " " * 262144}
+
+        with _mock_inbox(side_effect=fake):
+            out = ec.read_replies_with_status(["TOK"])
+        assert out.kind == "transport_error"
+        assert out.texts == []
+        assert out.detail == "gws_read_oversized"
+
+    @pytest.mark.parametrize("body", (
+        {"body_text": "APPROVE", "body": "HOLD"},
+        {"body_text": "APPROVE", "plain": []},
+        {"body_text": "APPROVE", "extra": ["x" * 262144]},
+    ))
+    def test_invalid_or_oversized_body_fields_cannot_approve(self, monkeypatch, body):
+        self._env(monkeypatch)
+
+        def fake(args, timeout=45):
+            if "+triage" in args:
+                return {"complete": True, "messages": [
+                    {"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                     "from": "op@example.com"}]}
+            return body
+
+        with _mock_inbox(side_effect=fake):
+            out = ec.read_replies_with_status(["TOK"])
+        assert out.kind == "transport_error"
+        assert out.texts == []
+
+    def test_callback_failure_cannot_return_approval(self, monkeypatch):
+        self._env(monkeypatch)
+
+        def fake(args, timeout=45):
+            if "+triage" in args:
+                return {"complete": True, "messages": [
+                    {"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+                     "from": "op@example.com"}]}
+            return {"body_text": "APPROVE"}
+
+        def failed_callback(_token, _mid):
+            raise RuntimeError("synthetic callback failure")
+
+        with _mock_inbox(side_effect=fake):
+            out = ec.read_replies_with_status(
+                ["TOK"], on_reply_message=failed_callback)
         assert out.kind == "transport_error"
         assert out.texts == []
 
@@ -826,7 +1254,7 @@ def _subprocess_mailbox(calls: list, *, auth_value: str | None, body: str = "ATT
         calls.append((list(cmd), kw.get("env")))
         args = list(cmd[1:])
         if "+triage" in args:
-            out = {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
+            out = {"complete": True, "messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]",
                                  "from": sender}]}
         elif args[:4] == ["gmail", "users", "messages", "get"]:
             headers = [] if auth_value is None else [
@@ -954,3 +1382,62 @@ class TestSwarmMailboxProblems:
         only_dir = " ".join(ec.swarm_mailbox_problems())
         assert "ATELES_SWARM_GWS_CONFIG_DIR" in only_dir
         assert "ATELES_SWARM_EMAIL" not in only_dir
+
+
+def test_gws_config_dir_env_precedence(monkeypatch):
+    # Approval selection never falls back to an ambient Workspace account.
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", "/synthetic/operator-gws")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", "/synthetic/swarm-gws")
+    assert ec.gws_config_dir_env() == {"GOOGLE_WORKSPACE_CLI_CONFIG_DIR": "/synthetic/swarm-gws"}
+    monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR")
+    assert ec.gws_config_dir_env() == {}
+    assert ec.gws_config_dir_env(allow_ambient=True) == {
+        "GOOGLE_WORKSPACE_CLI_CONFIG_DIR": "/synthetic/operator-gws"
+    }
+    monkeypatch.delenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR")
+    assert ec.gws_config_dir_env() == {}
+
+
+def test_gws_config_dir_env_requires_existing_swarm_directory(monkeypatch, tmp_path):
+    swarm = tmp_path / "swarm"
+    ambient = tmp_path / "ambient"
+    ambient.mkdir()
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(swarm))
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", str(ambient))
+    assert ec.gws_config_dir_env(require_existing=True) == {}
+    swarm.mkdir()
+    assert ec.gws_config_dir_env(require_existing=True) == {
+        "GOOGLE_WORKSPACE_CLI_CONFIG_DIR": str(swarm)
+    }
+
+
+@pytest.mark.parametrize("html", (
+    "<blockquote/>QUOTED approve",
+    "<div class='gmail_quote'/>QUOTED approve",
+    "<BLOCKQUOTE />QUOTED approve",
+    "<p>ok</p><blockquote/>QUOTED approve</blockquote>",
+))
+def test_self_closing_syntax_does_not_close_a_quote_container(html):
+    # HTML ignores the slash on a non-void element: the container stays open and
+    # what follows is quoted, so no quoted text is ever emitted as authored text.
+    text, _boundary = ec._extract_authored_html(html)
+    assert "QUOTED" not in text and "approve" not in text.lower().replace("ok", "")
+
+
+@pytest.mark.parametrize("color", (
+    "white", "#fff", "#ffffff", "#fefefe", "#f8f8f8", "rgb(255,255,255)", "rgb(250, 250, 250)",
+    "rgba(255,255,255,1)", "transparent", "rgba(0,0,0,0)", "rgb(0 0 0 / 0%)", "ghostwhite", "snow",
+    "#ffffff00", "WHITE !important",
+))
+def test_near_white_or_transparent_text_is_not_authored_even_without_a_matching_background(color):
+    # The background may come from an ancestor or a style block, which this reader
+    # cannot evaluate, so such text makes the HTML not safely separable.
+    html = f'<body style="background:#fff"><span style="color:{color}">HIDDEN approve</span>x</body>'
+    text, _boundary = ec._extract_authored_html(html)
+    assert "HIDDEN" not in text and "approve" not in text.lower()
+
+
+@pytest.mark.parametrize("color", ("#333", "black", "rgb(20, 20, 20)", "rgba(0,0,0,1)", "darkslategray"))
+def test_ordinary_text_colours_stay_readable(color):
+    text, _boundary = ec._extract_authored_html(f'<body><p style="color:{color}">approve</p></body>')
+    assert "approve" in text.lower()

@@ -3,6 +3,10 @@
 Owns pending-set fingerprinting, Design/UX reply grammar (attendance + marker
 bind), and fail-closed approve semantics. Does NOT invent a second Gmail send
 path — every outbound/inbound call goes through ``lib.approval.email_channel``.
+The shared reader removes quoted text for payment consent too. Monedula uses a
+different verdict grammar from Turdus: calendar obligations require ATTENDED,
+and multi-item replies bind each line to a payment marker; the Turdus
+`approve <version>`/PR predicate cannot represent those payment terms.
 
 State file (``.monedula_consent_email.json`` beside strandings state) stores
 only ``{fingerprint, generation, sent_at}`` — no addresses, bodies, or
@@ -36,7 +40,7 @@ from lib.approval.email_channel import (
     swarm_mailbox_configured,
     swarm_mailbox_problems,
 )
-from lib.approval.tokens import parse_verdict, subject_marker, token_for
+from lib.approval.tokens import subject_marker, token_for
 
 import payment_journal
 
@@ -418,21 +422,18 @@ _MARKER_RE = re.compile(r"\[APPROVE-([0-9A-F]+)\]", re.IGNORECASE)
 
 def _operator_lines(text: str) -> list[str]:
     """Unquoted operator lines from a reply (subject + body)."""
-    up = text
-    body = up
-    for marker in ("\nOn ", "\nON ", "\n-----Original", "\n-----ORIGINAL", "\n________"):
-        idx = body.find(marker)
-        if idx > 0:
-            body = body[:idx]
-            break
+    from lib.approval.email_channel import _authored_plain_checked
+
+    body, safe = _authored_plain_checked(text)
+    if not safe:
+        return ["UNREADABLE OPERATOR REPLY"]
     lines: list[str] = []
-    for line in body.splitlines():
+    for index, line in enumerate(body.splitlines()):
         s = line.strip()
-        if not s or s.startswith(">"):
+        if not s:
             continue
-        if s.upper().startswith("RE:") or s.upper().startswith("[ATELES]"):
-            continue
-        if "JUST HIT REPLY" in s.upper() or "TO DECLINE" in s.upper():
+        if index == 0 and (s.upper().startswith("RE:") or
+                           s.upper().startswith("[ATELES]")):
             continue
         lines.append(s)
     return lines
@@ -448,7 +449,7 @@ def overlay_verdicts(
     texts: list[str],
     unrecognized_lines: list[str] | None = None,
 ) -> tuple[dict[str, HandlerState], bool]:
-    """Apply Design/UX verdict overlay on top of ``parse_verdict``.
+    """Apply the payment-specific, target-bound reply grammar.
 
     Returns (match_token → state, unrecognized_seen).
     SKIP is decisive per match token: once skipped, a later APPROVE/ATTENDED
@@ -462,6 +463,7 @@ def overlay_verdicts(
         match_key(i): "awaiting_approval" for i in items
     }
     decisions: dict[str, HandlerState] = {}
+    held_keys: set[str] = set()
     unrecognized = False
     multi = len(items) > 1
     by_token = {i.token.upper(): i for i in items}
@@ -469,6 +471,26 @@ def overlay_verdicts(
     def _flag(line: str) -> None:
         nonlocal unrecognized
         unrecognized = True
+        def mentions(value: str) -> bool:
+            return bool(value and re.search(
+                rf"(?<![A-Za-z0-9]){re.escape(value)}(?![A-Za-z0-9])",
+                line, re.IGNORECASE))
+
+        named = {
+            match_key(item) for item in items
+            if any(mentions(ref) for ref in (item.token, item.obligation,
+                                             item.match_id, item.label,
+                                             item.handler_name))
+        }
+        if named:
+            held_keys.update(named)
+        elif _MARKER_RE.search(line):
+            # An old request's marker does not name any obligation in this
+            # generation. It must not veto an unrelated new request.
+            if subject_tok in by_token:
+                held_keys.add(match_key(by_token[subject_tok]))
+        else:
+            held_keys.update(states)
         if unrecognized_lines is not None and line not in unrecognized_lines:
             unrecognized_lines.append(line)
 
@@ -489,7 +511,29 @@ def overlay_verdicts(
                 subject_tok = _line_marker_token(line)
                 break
 
-        for line in _operator_lines(text):
+        operator_lines = _operator_lines(text)
+        # A second instruction can withdraw or qualify the first. Reject the
+        # entire authored reply before recording any decision if any line falls
+        # outside the notification's finite reply grammar.
+        valid_lines = True
+        for line in operator_lines:
+            marker = _line_marker_token(line)
+            bound = marker or (None if multi else subject_tok)
+            expected = (rf"\[(?:APPROVE-{re.escape(bound)})\]" if bound else "")
+            verb = (line.split() or [""])[0].upper().rstrip(".!")
+            item = by_token.get(bound or "")
+            if (not bound or bound not in by_token or
+                    re.fullmatch(rf"(?:ATTENDED|APPROVE|YES|SKIP)(?:\s+{expected})?[.!]?",
+                                 line, re.IGNORECASE) is None or
+                    (multi and not marker) or
+                    (item is not None and
+                     ((verb == "ATTENDED" and not item.is_calendar) or
+                      (verb in {"APPROVE", "YES"} and item.is_calendar)))):
+                _flag(line)
+                valid_lines = False
+        if not valid_lines:
+            continue
+        for line in operator_lines:
             first = (line.split() or [""])[0].upper().rstrip(".!")
             line_tok = _line_marker_token(line)
             bound_tok = line_tok or (None if multi else subject_tok)
@@ -535,14 +579,7 @@ def overlay_verdicts(
                     # Calendar requires ATTENDED — bare APPROVE/YES holds.
                     _flag(line)
                     continue
-                # Use parse_verdict for non-calendar approve forms.
-                verdict = parse_verdict(text, item.token)
-                if verdict is True:
-                    _decide(item, "approved")
-                elif verdict is False:
-                    _decide(item, "skipped")
-                else:
-                    _flag(line)
+                _decide(item, "approved")
                 continue
 
             # Authenticated but unparseable content on a line that looks like
@@ -555,7 +592,8 @@ def overlay_verdicts(
                     _flag(line)
 
     for key, state in decisions.items():
-        states[key] = state
+        if key not in held_keys:
+            states[key] = state
     return states, unrecognized
 
 
@@ -715,6 +753,11 @@ def request_and_collect(
             result.blocked.add(key)
         result.reason_code = "consent_reply_read_failed"
         result.channel_ok = False
+        if outcome.detail == "reply_quote_boundary_unknown" and outcome.unreadable_replies:
+            _maybe_send_correction(
+                items, ["Unreadable operator reply"], path.parent,
+                no_reply_needed=settled | unknown,
+            )
         return result
 
     # kind == ok
