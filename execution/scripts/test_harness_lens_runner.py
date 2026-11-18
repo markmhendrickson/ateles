@@ -39,6 +39,7 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR), str(_SCRIPTS_DIR)):
 
 import harness_lens_runner as hlr  # noqa: E402
 import harness_router  # noqa: E402
+import model_tiering  # noqa: E402
 import review_rounds  # noqa: E402
 import skill_runner  # noqa: E402
 import swarm_dispatch  # noqa: E402
@@ -4217,6 +4218,7 @@ def test_run_one_passes_task_entity_id_to_dispatch_for_neotoma_monitoring(
         agent="pavo",
         task_entity_id="ent_898998f41372ce24369fb365",
     )
+    monkeypatch.delenv("ATELES_DISPATCH_SESSION_ID", raising=False)
 
     guarded = hlr.HarnessSandbox(
         provider="codex",
@@ -4278,6 +4280,9 @@ def test_run_one_passes_task_entity_id_to_dispatch_for_neotoma_monitoring(
     )
 
     assert seen["task_entity_id"] == "ent_898998f41372ce24369fb365"
+    assert seen["caller_kind"] == "daemon"
+    assert seen["caller"] == "harness_lens_runner"
+    assert seen["pr"] == "markmhendrickson/ateles#1234"
 
 
 def test_lens_target_task_entity_id_defaults_to_empty_string():
@@ -4916,3 +4921,56 @@ def test_cli_model_selector_contract_refuses_invalid_inputs_before_dispatch(
 @pytest.mark.parametrize("model", [None, "gpt-6-sol", "gpt-5.6-terra", "provider/custom-v1:latest"])
 def test_model_selector_contract_preserves_omission_and_valid_identifiers(model):
     assert hlr.validate_model_selector(model) == model
+
+
+def test_run_one_passes_the_repo_qualified_pr_to_dispatch(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+):
+    """Spend attribution (ent_e5259618cae6cafd4be120e0): the lens
+    route hands ``owner/repo#N`` to ``dispatch_role.dispatch``, which records it
+    as ``pr`` on the tier-ledger rows (test_dispatch_attribution covers that
+    leg)."""
+    _install_minimal_lens_worktree(monkeypatch, target)
+    inner = _delivery_denied_dispatch(target)
+    seen: list[dict] = []
+
+    async def _dispatch(role, task, **kwargs):
+        seen.append(kwargs)
+        return await inner(role, task, **kwargs)
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
+    monkeypatch.setattr(hlr, "current_pr_head", lambda **kwargs: SAMPLE_HEAD)
+
+    import asyncio
+
+    asyncio.run(hlr.run_one(
+        target, provider="codex", post=False, dry_run=False,
+        repo_worktree_name="ateles", scratch_root=tmp_path,
+        brief_path=brief_file, timeout=None,
+    ))
+    assert len(seen) == 1
+    assert seen[0]["pr"] == f"{target.repo}#{target.pr}"
+
+
+def test_main_without_session_id_records_daemon_ledger_row(
+    monkeypatch, tmp_path, brief_file
+):
+    ledger = tmp_path / "tier-ledger.jsonl"
+    monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(ledger))
+    monkeypatch.delenv(model_tiering.SESSION_ID_ENV, raising=False)
+    monkeypatch.setattr(model_tiering, "_PROCESS_CALLER", (None, None))
+
+    async def record_dispatch(*args, **kwargs):
+        model_tiering.record_dispatch(
+            skill="pavo", provider="codex", resolved=None, model=None
+        )
+        return {"ok": True}
+
+    monkeypatch.setattr(hlr, "run_one", record_dispatch)
+    assert hlr.main([
+        "--repo", "owner/repo", "--pr", "1", "--head", SAMPLE_HEAD,
+        "--lens", "pm", "--provider", "codex", "--brief", str(brief_file),
+    ]) == 0
+    row = json.loads(ledger.read_text().splitlines()[0])
+    assert row["caller_kind"] == "daemon"
+    assert row["caller"] == "harness_lens_runner"

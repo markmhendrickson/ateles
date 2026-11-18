@@ -211,6 +211,8 @@ async def _run() -> "object":
         role="aquila",
         timeout=DISPATCH_TIMEOUT_SECONDS,
         notifier=_notifier,
+        caller="aquila",
+        caller_kind="daemon",
     )
 
 

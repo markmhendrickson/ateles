@@ -289,8 +289,13 @@ of the repository, not from the PR). Apply its review criteria.
 # Dispatch
 # --------------------------------------------------------------------------
 def dispatch_once(*, python: str, dispatch_script: Path, role: str, lens: str,
-                  repo: str, task_entity_id: str, task_file: Path) -> dict[str, Any]:
-    """Run dispatch_role.py once; return its JSON envelope (or a synthetic one)."""
+                  repo: str, task_entity_id: str, task_file: Path,
+                  pr: int | None = None) -> dict[str, Any]:
+    """Run dispatch_role.py once; return its JSON envelope (or a synthetic one).
+
+    ``pr`` is passed as ``--pr owner/repo#N`` so the tier-ledger rows of this
+    dispatch name the pull request reviewed (ent_e5259618cae6cafd4be120e0).
+    """
     cmd = [
         python, str(dispatch_script),
         "--role", role,
@@ -300,9 +305,13 @@ def dispatch_once(*, python: str, dispatch_script: Path, role: str, lens: str,
         "--github-read",
         "--action-class", f"lens_review:{lens}",
         "--task-entity-id", task_entity_id,
+        "--caller-kind", "daemon",
+        "--caller", "fly_lens_review",
         "--timeout", str(JOB_TIMEOUT_SECONDS),
         "--json",
     ]
+    if pr is not None:
+        cmd += ["--pr", f"{repo}#{pr}"]
     try:
         # State the approved queue limit to the Fly runner explicitly; a value
         # the caller already set wins.
@@ -388,7 +397,7 @@ def run_lens(*, lens: str, repo: str, pr: int, head: str, task_entity_id: str,
         t0 = clock()
         env = dispatch(python=python, dispatch_script=dispatch_script, role=role,
                        lens=lens, repo=repo, task_entity_id=task_entity_id,
-                       task_file=task_file)
+                       task_file=task_file, pr=pr)
         dur = round(clock() - t0, 1)
         att = {"attempt": attempt, "duration_s": dur, "ok": bool(env.get("ok")),
                "provider": env.get("provider"),

@@ -371,10 +371,10 @@ def load_job(job_dir: Path) -> Job:
         raise JobError("a non-Claude Neotoma proxy job needs an explicit tool grant")
     if "neotoma_tool_allowlist" in spec and (
         neotoma_mcp != "proxy"
-        or not (tool_allowlist == "all" or isinstance(tool_allowlist, list)
+        or not (tool_allowlist in ("all", "tools_only") or isinstance(tool_allowlist, list)
                 and all(isinstance(name, str) for name in tool_allowlist))
     ):
-        raise JobError("neotoma_tool_allowlist must be a list of names or 'all' for a proxy job")
+        raise JobError("neotoma_tool_allowlist must be a list of names or tools_only for a proxy job")
     if "timeout_seconds" not in spec:
         raise JobError("timeout_seconds is missing")
     timeout_seconds = spec["timeout_seconds"]
@@ -1143,7 +1143,7 @@ def start_neotoma_proxy(job: Job, ident: tuple[int, int] | None):
         proxy = module.NeotomaSigningProxy(
             job.neotoma_base_url, sign, allowed_peer_uid=ident[0],
             allowed_tools=grant if isinstance(grant, tuple) else None,
-            allow_all_tools=grant is None or grant == "all",
+            allow_all_tools=grant is None or grant in ("all", "tools_only"),
         )
         port = proxy.start()
         reason = module.health_check(job.neotoma_base_url, sign)

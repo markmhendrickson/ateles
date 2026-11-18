@@ -270,6 +270,7 @@ for _p in (str(REPO_ROOT), str(_DAEMON_DIR)):
 
 # noqa: E402 — path bootstrap above must run first
 import dispatch_role  # noqa: E402
+import model_tiering  # noqa: E402
 from lib.credential_templates import (  # noqa: E402
     is_placeholder_template,
     placeholder_template_sandbox_regexes,
@@ -3005,6 +3006,11 @@ async def run_one(
                 cwd=str(worktree.path),
                 timeout=timeout,
                 task_entity_id=target.task_entity_id,
+                caller="harness_lens_runner",
+                caller_kind="daemon",
+                # Spend attribution (ent_e5259618cae6cafd4be120e0): the ledger
+                # row names the pull request this lens reviewed.
+                pr=f"{target.repo}#{target.pr}",
                 env_extra=sandbox.env_extra,
                 seated_reviewer=False,  # see module docstring: no MCP grant requested
                 command_wrapper=sandbox.command_wrapper,
@@ -3253,6 +3259,9 @@ async def run_compare(
 
 
 def main(argv: list[str] | None = None) -> int:
+    model_tiering.set_process_caller(
+        "daemon", "harness_lens_runner"
+    )
     parser = argparse.ArgumentParser(
         prog="harness_lens_runner",
         description=(

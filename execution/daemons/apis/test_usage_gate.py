@@ -296,6 +296,13 @@ def test_parse_no_event_is_empty() -> None:
     assert usage_probe.parse_rate_limit_windows('{"type":"result"}\nplain text') == []
 
 
+def test_latest_empty_provider_event_does_not_reuse_prior_windows() -> None:
+    empty = json.dumps({"type": "rate_limit_event", "rate_limit_info": {
+        "unifiedWindows": {},
+    }})
+    assert usage_probe.parse_rate_limit_windows(REAL_SHAPE + "\n" + empty) == []
+
+
 def _fake_run(stdout: str, calls: list, returncode: int = 0):
     def run(cmd, **kwargs):
         calls.append((cmd, kwargs))
@@ -411,6 +418,26 @@ def test_refresh_is_skipped_while_reading_is_fresh() -> None:
         {"claude": "/bin/claude"}, env={}, run=_fake_run(REAL_SHAPE, calls),
     )
     assert outcome == {"claude": "fresh"} and calls == []
+
+
+@pytest.mark.parametrize("gated", [False, True])
+def test_fresh_provider_is_probed_once_regardless_of_gate(monkeypatch, gated) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "cursor" if gated else "claude")
+    calls: list = []
+    run = _fake_run('{"type":"result","result":"ok"}', calls)
+    available = {"cursor": "/bin/cursor"}
+    assert usage_probe.refresh_usage_if_stale(available, env={}, now_wall=NOW, run=run) == {
+        "cursor": "refreshed"
+    }
+    assert usage_probe.refresh_usage_if_stale(available, env={}, now_wall=NOW + 1, run=run) == {
+        "cursor": "fresh"
+    }
+    assert len(calls) == 1
+    assert usage_probe.refresh_usage_if_stale(available, env={}, now_wall=NOW + 3600, run=run) == {
+        "cursor": "refreshed"
+    }
+    assert len(calls) == 2
 
 
 def test_refresh_replaces_an_aged_reading() -> None:

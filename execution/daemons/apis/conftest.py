@@ -336,3 +336,25 @@ def _ownership_recheck_is_off(monkeypatch):
 
     monkeypatch.setattr(apis, "_OWNERSHIP_RECHECK_ENABLED", False)
     monkeypatch.setattr(apis, "_ownership_rechecks", {})
+
+
+@pytest.fixture(autouse=True)
+def _usage_alerts_never_build_a_networked_notifier(monkeypatch):
+    """Usage threshold alerts run on every dispatch and usage refresh. Their
+    default sending notifier is ``Notifier.from_neotoma`` (a rubric fetch);
+    a test that does not target alerts gets a plain, transport-less
+    ``Notifier()`` instead. Alert tests inject their own notifier."""
+    import usage_alerts
+    from lib.notify import Notifier
+
+    monkeypatch.setattr(usage_alerts, "_default_notifier_factory", Notifier)
+
+
+@pytest.fixture(autouse=True)
+def _usage_alert_backoff_starts_empty():
+    """The alert retry backoff is process-local; never carry it between tests."""
+    import usage_alerts
+
+    usage_alerts._retry_after.clear()
+    yield
+    usage_alerts._retry_after.clear()

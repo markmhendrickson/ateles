@@ -631,11 +631,11 @@ def test_codex_job_with_a_whole_server_grant_has_explicit_marker(fly_env, monkey
     monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
     job = _codex_neotoma_job(neotoma_tool_grant={"mcpsrv_neotoma": None})
     assert job.neotoma_mcp == "proxy"
-    assert job.neotoma_tool_allowlist == "all"
+    assert job.neotoma_tool_allowlist == "tools_only"
     spec = json.loads(base64.b64decode(next(
         f["raw_value"] for f in fly_runner.job_files(job, fly_runner.FlyConfig.from_env())
         if f["guest_path"].endswith("/job.json"))))
-    assert spec["neotoma_tool_allowlist"] == "all"
+    assert spec["neotoma_tool_allowlist"] == "tools_only"
     assert "mcp_servers.mcpsrv_neotoma.enabled_tools" not in _codex_overrides(job.argv)
 
 
