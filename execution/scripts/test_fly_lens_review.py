@@ -95,6 +95,14 @@ def test_a_private_section_is_never_in_the_posted_verdict(tmp_path, private):
     assert all("details" not in str(v) for post in posts for v in post.values())
 
 
+def test_a_private_marker_above_the_verdict_fails_closed_and_posts_nothing(tmp_path):
+    # The marker before the verdict lines would leave no verdict: never post an empty body.
+    reply = "**\U0001F916 Pavo - Ateles swarm, pm lens panelist**\nPRIVATE-NOTE: the details\n**SIGNED_OFF**\n"
+    rc, posts = run(tmp_path, Script(ok_env(reply), ok_env(reply)), "--post")
+    assert posts == [] and not (tmp_path / "pm.verdict.md").exists()
+    assert rc != 0
+
+
 def test_a_reply_without_a_private_section_is_posted_whole(tmp_path):
     run(tmp_path, Script(ok_env()))
     assert (tmp_path / "pm.verdict.md").read_text() == GOOD

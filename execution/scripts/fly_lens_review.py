@@ -438,6 +438,14 @@ def run_lens(*, lens: str, repo: str, pr: int, head: str, task_entity_id: str,
             if body is not None:
                 body = normalize_header(body, role=role)
                 body, private = split_private(body)
+                public_lines = body.splitlines()
+                if len(public_lines) < 2 or not VERDICT_RE.match(public_lines[1].strip()):
+                    # Removing the private section left no header and verdict: fail closed
+                    # (an unreadable reply, retried once) rather than post an empty body.
+                    last_reason = "the reply had no header and verdict above its private section"
+                    att["problem"] = last_reason
+                    log(f"{lens}: attempt {attempt}: {last_reason}")
+                    continue
                 if private:
                     note = out_dir / f"{lens}.private.txt"
                     note.write_text(private)
