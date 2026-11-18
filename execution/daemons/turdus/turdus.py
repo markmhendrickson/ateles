@@ -137,6 +137,11 @@ GWS_CREDENTIALS_PATH = Path(
 
 # State file to track last processed message ID across restarts
 _STATE_FILE = Path(__file__).parent / ".turdus_state.json"
+_state_hold_notified = False
+
+
+def _state_marker_file() -> Path:
+    return _STATE_FILE.with_name(_STATE_FILE.name + ".initialized")
 
 # Gmail label applied to messages Turdus has fully handled. Used both to tag
 # processed mail and to exclude it from the poll query, so an already-handled
@@ -263,14 +268,51 @@ def _is_invoice(sender: str, subject: str, snippet: str) -> bool:
 # ── State management ──────────────────────────────────────────────────────────
 
 
+class StateUnreadableError(Exception):
+    """The consumed-reply state cannot be trusted."""
+
+
+def _state_evidence_exists() -> bool:
+    """Distinguish first use from unreadable state or marker paths."""
+    found = False
+    for path in (_STATE_FILE, _state_marker_file()):
+        try:
+            path.stat()
+            found = True
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise StateUnreadableError("Turdus reply state path unreadable") from exc
+    return found
+
+
 def _load_state() -> dict:
     """Load persisted state (last_message_id, etc.) from local state file."""
-    if _STATE_FILE.exists():
-        try:
-            return json.loads(_STATE_FILE.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {"last_message_id": None, "processed_count": 0}
+    if not _state_evidence_exists():
+        return {"last_message_id": None, "processed_count": 0}
+    try:
+        state = json.loads(_STATE_FILE.read_text())
+    except (ValueError, OSError) as exc:
+        raise StateUnreadableError("Turdus reply state unreadable") from exc
+    id_fields = ("processed_ids", "unreadable_notice_ids",
+                 "approval_correction_ids", "held_approval_notice_ids",
+                 "held_approval_reply_ids")
+    pending_routes = state.get("approval_route_pending") if isinstance(state, dict) else None
+    if (not isinstance(state, dict) or
+            not isinstance(state.get("processed_count", 0), int) or
+            isinstance(state.get("processed_count", 0), bool) or
+            not isinstance(state.get("last_message_id"), (str, type(None))) or
+            any(not isinstance(state.get(field, []), list) or
+                any(not isinstance(mid, str) for mid in state.get(field, []))
+                for field in id_fields) or
+            (pending_routes is not None and
+             (not isinstance(pending_routes, dict) or
+              any(not isinstance(mid, str) or not isinstance(route, dict) or
+                  not isinstance(route.get("target"), str) or
+                  not isinstance(route.get("release"), bool)
+                  for mid, route in pending_routes.items())))):
+        raise StateUnreadableError("Turdus reply state malformed")
+    return state
 
 
 def _save_state(state: dict) -> bool:
@@ -279,6 +321,15 @@ def _save_state(state: dict) -> bool:
         return True
     temp_path = None
     try:
+        marker_path = _state_marker_file()
+        if not marker_path.exists():
+            try:
+                with marker_path.open("x") as marker:
+                    marker.write("initialized\n")
+                    marker.flush()
+                    os.fsync(marker.fileno())
+            except FileExistsError:
+                pass
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
                                          dir=_STATE_FILE.parent, delete=False) as temp:
             temp_path = Path(temp.name)
@@ -966,16 +1017,40 @@ async def _maybe_handle_swarm_approval(msg: dict, notifier: Notifier) -> bool:
         msg["held_approval_target"] = target
         return False
 
+    reserve = msg.get("reserve_approval")
+    if callable(reserve) and not reserve(target, False):
+        notifier.send(
+            f"{DAEMON_NAME}: email approval for {target} is held because the "
+            "consumed-reply state could not be saved. To approve in Telegram, "
+            "send exactly `approve`.",
+            priority=Priority.BLOCKER, handler=DAEMON_NAME,
+            email_eligible=False,
+        )
+        return False
+
     repository, pr_number = subject_token
     ok = await _post_email_approval(repository, pr_number, sender_addr)
     if ok:
-        notifier.send(
-            f"{DAEMON_NAME}: operator emailed APPROVE for {repository}#{pr_number} "
-            "→ routed to Apis merge gate.",
-            priority=Priority.BLOCKER,
-            handler=DAEMON_NAME, email_eligible=False,
-        )
+        complete = msg.get("complete_approval")
+        finalized = not callable(complete) or complete()
+        if not finalized:
+            log.error(f"[{DAEMON_NAME}] approval route state could not be finalized")
+        else:
+            notifier.send(
+                f"{DAEMON_NAME}: operator emailed APPROVE for {repository}#{pr_number} "
+                "→ routed to Apis merge gate.",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME, email_eligible=False,
+            )
         log.info(f"[{DAEMON_NAME}] email-approve routed for {repository}#{pr_number}")
+    if callable(reserve) and (not ok or not finalized):
+        msg["routing_unknown_notified"] = bool(notifier.send(
+            f"{DAEMON_NAME}: email approval for {target} has an unknown routing "
+            "outcome; the reply will not be replayed. To approve in Telegram, "
+            "send exactly `approve`.",
+            priority=Priority.BLOCKER, handler=DAEMON_NAME,
+            email_eligible=False,
+        ))
     return ok
 
 
@@ -1117,15 +1192,39 @@ async def _maybe_handle_release_approval(msg: dict, notifier: Notifier) -> bool:
         msg["held_approval_target"] = version
         return False
 
+    reserve = msg.get("reserve_approval")
+    if callable(reserve) and not reserve(version, True):
+        notifier.send(
+            f"{DAEMON_NAME}: email approval for {version} is held because the "
+            "consumed-reply state could not be saved. To approve in Telegram, "
+            f"send exactly `approve {version}`.",
+            priority=Priority.BLOCKER, handler=DAEMON_NAME,
+            email_eligible=False,
+        )
+        return False
+
     ok = await _post_release_approval(version, sender_addr)
     if ok:
-        notifier.send(
-            f"{DAEMON_NAME}: operator emailed `approve {version}` → routed to the "
-            "Apis release-publish gate.",
-            priority=Priority.BLOCKER,
-            handler=DAEMON_NAME, email_eligible=False,
-        )
+        complete = msg.get("complete_approval")
+        finalized = not callable(complete) or complete()
+        if not finalized:
+            log.error(f"[{DAEMON_NAME}] release route state could not be finalized")
+        else:
+            notifier.send(
+                f"{DAEMON_NAME}: operator emailed `approve {version}` → routed to the "
+                "Apis release-publish gate.",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME, email_eligible=False,
+            )
         log.info(f"[{DAEMON_NAME}] release-approve routed for {version}")
+    if callable(reserve) and (not ok or not finalized):
+        msg["routing_unknown_notified"] = bool(notifier.send(
+            f"{DAEMON_NAME}: email approval for {version} has an unknown routing "
+            "outcome; the reply will not be replayed. To approve in Telegram, "
+            f"send exactly `approve {version}`.",
+            priority=Priority.BLOCKER, handler=DAEMON_NAME,
+            email_eligible=False,
+        ))
     return ok
 
 
@@ -1138,6 +1237,21 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
 
     Returns updated state dict.
     """
+    global _state_hold_notified
+    try:
+        if _state_evidence_exists():
+            state = _load_state()
+    except StateUnreadableError:
+        if not _state_hold_notified:
+            _state_hold_notified = bool(notifier.send(
+                "Turdus reply state is unreadable; approval routing is held. "
+                "The consumed-reply state file must be restored or reset by the "
+                "operator before email approvals resume.",
+                priority=Priority.BLOCKER, handler=DAEMON_NAME,
+                email_eligible=False,
+            ))
+        return state
+    _state_hold_notified = False
     log.info(f"[{DAEMON_NAME}] Polling Gmail (max={MAX_MESSAGES} messages)...")
 
     processed_ids: list[str] = list(state.get("processed_ids", []))
@@ -1150,11 +1264,58 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
     held_notice_set = set(held_notice_ids)
     held_reply_ids: list[str] = list(state.get("held_approval_reply_ids", []))
     held_reply_set = set(held_reply_ids)
+    pending_routes: dict[str, dict] = dict(state.get("approval_route_pending", {}))
 
     def _mark_handled(mid: str) -> None:
         if mid and mid not in processed_id_set:
             processed_id_set.add(mid)
             processed_ids.append(mid)
+
+    def _reserve_approval(mid: str, target: str, release: bool) -> bool:
+        nonlocal state
+        if not mid or mid in processed_id_set or mid in pending_routes:
+            return False
+        next_routes = {**pending_routes, mid: {"target": target, "release": release}}
+        next_state = {**state, "approval_route_pending": next_routes}
+        if not _save_state(next_state):
+            return False
+        state = next_state
+        pending_routes.update(next_routes)
+        return True
+
+    def _complete_approval(mid: str) -> bool:
+        nonlocal state
+        next_routes = {key: value for key, value in pending_routes.items()
+                       if key != mid}
+        next_ids = [*processed_ids, mid][-_MAX_PROCESSED_IDS:]
+        next_state = {**state, "approval_route_pending": next_routes,
+                      "processed_ids": next_ids}
+        if not _save_state(next_state):
+            return False
+        state = next_state
+        pending_routes.pop(mid, None)
+        _mark_handled(mid)
+        return True
+
+    for mid, route in pending_routes.items():
+        if mid in held_notice_set:
+            continue
+        target = route["target"]
+        exact = f"approve {target}" if route["release"] else "approve"
+        delivered = notifier.send(
+            f"{DAEMON_NAME}: email approval routing outcome for {target} is "
+            "unknown; this reply will not be replayed. To approve in Telegram, "
+            f"send exactly `{exact}`.",
+            priority=Priority.BLOCKER, handler=DAEMON_NAME,
+            email_eligible=False,
+        )
+        if delivered:
+            held_notice_set.add(mid)
+            held_notice_ids.append(mid)
+    if held_notice_ids != state.get("held_approval_notice_ids", []):
+        next_state = {**state, "held_approval_notice_ids": held_notice_ids[-_MAX_PROCESSED_IDS:]}
+        if _save_state(next_state):
+            state = next_state
 
     # Approval replies live in the swarm mailbox. The shared reader performs
     # discovery, authentication and body reads with that mailbox's config.
@@ -1300,7 +1461,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         # be reported once, using only the subject for the target name.
         candidates = list(outcome.rejected_replies) + list(outcome.replies)
         for reply in candidates:
-            if reply.message_id in processed_id_set:
+            if reply.message_id in processed_id_set or reply.message_id in pending_routes:
                 continue
             msg = {"id": reply.message_id, "sender": OPERATOR_EMAIL,
                    "subject": reply.subject, "body": reply.body,
@@ -1311,6 +1472,11 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
                                         reply.correlation_target is not None and
                                         reply.correlation_target.casefold()
                                         not in correction_targets),
+                   "reserve_approval": (lambda target, release,
+                                        mid=reply.message_id:
+                                        _reserve_approval(mid, target, release)),
+                   "complete_approval": (lambda mid=reply.message_id:
+                                         _complete_approval(mid)),
                    "correction_notified": reply.message_id in correction_id_set}
             try:
                 if await _maybe_handle_release_approval(msg, notifier) or await _maybe_handle_swarm_approval(msg, notifier):
@@ -1335,6 +1501,9 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
                 if msg.get("correction_notified") and reply.message_id not in correction_id_set:
                     correction_id_set.add(reply.message_id)
                     correction_ids.append(reply.message_id)
+                if msg.get("routing_unknown_notified") and reply.message_id not in held_notice_set:
+                    held_notice_set.add(reply.message_id)
+                    held_notice_ids.append(reply.message_id)
             except Exception as exc:
                 log.error(f"[{DAEMON_NAME}] approval check failed: {exc}")
     if correction_ids != state.get("approval_correction_ids", []):
@@ -1384,7 +1553,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         # Already handled in a prior cycle — skip entirely so we neither
         # re-create tasks nor re-notify the operator. Checked first so dedup
         # short-circuits even the approval paths below.
-        if msg_id and msg_id in processed_id_set:
+        if msg_id and (msg_id in processed_id_set or msg_id in pending_routes):
             continue
 
         sender = msg.get("sender", msg.get("from", ""))
@@ -1499,7 +1668,10 @@ async def main() -> None:
     )
 
     # 4. Load persisted state
-    state = _load_state()
+    try:
+        state = _load_state()
+    except StateUnreadableError:
+        state = {}
     log.info(
         f"[{DAEMON_NAME}] State loaded: last_message_id={state.get('last_message_id')} "
         f"processed_count={state.get('processed_count', 0)}"
