@@ -1184,6 +1184,45 @@ def test_matching_sent_header_and_quote_approve_payment(monkeypatch, tmp_path, b
     assert result.approved == {item.token for item in items}
 
 
+@pytest.mark.parametrize("variant,approved", (
+    ("matching", True), ("withdrawal", False), ("unquoted", False),
+    ("different_quote", False), ("different_attribution", False),
+    ("parts_disagree", False),
+))
+def test_gmail_multipart_consent_requires_verified_author(monkeypatch, tmp_path,
+                                                          variant, approved):
+    handler = _Handler("invoice", label="Synthetic", amount=25, calendar=False)
+    item = consent_email.build_pending_items([(handler, [{}])], "2026-09-22")[0]
+    subject, original = consent_email.build_request_body([item], superseded=False)
+    quoted_line = original.splitlines()[0]
+    authored = f"APPROVE {subject_marker(item.token)}"
+    attribution = "On Tue, 17 Nov 2026 12:00:00 +0000, Swarm <swarm@example.net> wrote:"
+    plain = f"{authored}\n{attribution}\n> {quoted_line}"
+    html = f"<p>{authored}</p><div class='gmail_quote'><p>{quoted_line}</p></div>"
+    if variant == "withdrawal":
+        plain += "\nI withdraw"
+    elif variant == "unquoted":
+        plain += "\nother text"
+    elif variant == "different_quote":
+        plain = plain.replace(f"> {quoted_line}", "> unrelated")
+    elif variant == "different_attribution":
+        plain = plain.replace("Swarm <swarm@example.net>", "Other <other@example.net>")
+    elif variant == "parts_disagree":
+        html = html.replace(f"<p>{authored}</p>", "<p>HOLD</p>")
+    _arm_email(monkeypatch)
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        item.token, auth_by_id={"m1": [_GOOGLE_PASS]},
+        body_by_id={"m1": {"body_text": plain, "body_html": html}}))
+    monkeypatch.setattr(_ec, "sent_request_body", lambda *_:
+                        _ec.SentRequest(original, "Swarm <swarm@example.net>",
+                                        "Op <op@example.com>", subject,
+                                        "Tue, 17 Nov 2026 12:00:00 +0000"))
+    result = consent_email.request_and_collect(
+        [(handler, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert (item.token in result.approved) is approved
+
+
 @pytest.mark.parametrize("batch", (False, True))
 @pytest.mark.parametrize("shape,approved,unreadable", (
     ("unquoted_tail", False, True),

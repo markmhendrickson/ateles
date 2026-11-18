@@ -258,6 +258,37 @@ def _same_mail_date(left: str, right: str) -> bool:
         return False
 
 
+def _gmail_attribution_end(source: list[str], index: int,
+                           sent_request: SentRequest | None) -> int | None:
+    """Return the first quoted line after a verified Gmail attribution."""
+    if sent_request is None or not sent_request.body:
+        return None
+    for end in (index + 1, index + 2):
+        if end > len(source):
+            continue
+        candidate = " ".join(part.strip() for part in source[index:end])
+        sender_name, sender_address = parseaddr(sent_request.sender)
+        if not sender_name or not sender_address:
+            return None
+        match = re.fullmatch(r"On\s+(.+?)\s+" + re.escape(sender_name) +
+                             r"\s+<([^<>\s]+@[^<>\s]+)>\s+wrote:",
+                             candidate, re.IGNORECASE)
+        if not match:
+            continue
+        date_text, address = match.groups()
+        if _parse_address(address) != _parse_address(sent_request.sender):
+            continue
+        try:
+            shown = parsedate_to_datetime(date_text.rstrip(", ").replace(" at ", " "))
+            sent = parsedate_to_datetime(sent_request.date)
+            if shown.date() != sent.date():
+                continue
+        except (TypeError, ValueError, OverflowError):
+            continue
+        return end
+    return None
+
+
 def _authored_plain_checked(text: str, sent_request: SentRequest | None = None,
                             known_quote_lines: tuple[str, ...] = ()) -> tuple[str, bool]:
     """Keep every authored line; remove only structurally proven quotations."""
@@ -266,9 +297,23 @@ def _authored_plain_checked(text: str, sent_request: SentRequest | None = None,
     saw_quote = False
     for index, line in enumerate(source):
         stripped = line.strip()
+        if stripped.lower().startswith("on "):
+            end = _gmail_attribution_end(source, index, sent_request)
+            if end is not None:
+                original = {" ".join(part.split()).casefold() for part in
+                            sent_request.body.splitlines() if part.strip()}
+                original.update(" ".join(part.split()).casefold()
+                                for part in known_quote_lines)
+                tail = source[end:]
+                if tail and any(part.strip() for part in tail) and all(
+                    not part.strip() or (part.lstrip().startswith(">") and
+                    " ".join(part.lstrip()[1:].split()).casefold() in original)
+                    for part in tail
+                ):
+                    return "\n".join(lines), True
+            if _ATTRIBUTION.fullmatch(stripped) or stripped.lower().startswith("on "):
+                return "\n".join(lines), False
         if _ATTRIBUTION.fullmatch(stripped):
-            # Attribution text is sender-controlled. It cannot prove where the
-            # author's message ends, even if the remaining lines look quoted.
             return "\n".join(lines), False
         if _FORWARD.fullmatch(stripped):
             headers = source[index + 1:index + 1 + len(_OUTLOOK_HEADERS)]

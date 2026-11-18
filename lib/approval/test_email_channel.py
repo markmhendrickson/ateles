@@ -267,6 +267,34 @@ def test_matching_sent_header_and_quoted_body_prove_boundary():
         sent_request=sent)[1] is False
 
 
+@pytest.mark.parametrize("tail,expected", (
+    ("> Reply APPROVE\n> swarm-approve: o/r#7", True),
+    ("> Reply APPROVE\nI withdraw", False),
+    ("> Reply APPROVE\nother text", False),
+    ("> unrelated", False),
+))
+def test_gmail_attribution_requires_exact_sent_request(tail, expected):
+    sent = ec.SentRequest("Reply APPROVE\nswarm-approve: o/r#7",
+                          "Swarm <swarm@example.net>", "Op <op@example.com>",
+                          "READY", "Tue, 17 Nov 2026 12:00:00 +0000")
+    attribution = "On Tue, 17 Nov 2026 12:00:00 +0000, Swarm <swarm@example.net> wrote:"
+    body, safe = ec._authored_plain_checked(f"APPROVE\n{attribution}\n{tail}",
+                                            sent_request=sent)
+    assert safe is expected
+    if expected:
+        assert body == "APPROVE"
+
+
+def test_gmail_attribution_wrapped_line_and_sender_check():
+    sent = ec.SentRequest("request", "Swarm <swarm@example.net>",
+                          "Op <op@example.com>", "READY",
+                          "Tue, 17 Nov 2026 12:00:00 +0000")
+    good = "APPROVE\nOn Tue, 17 Nov 2026 12:00:00 +0000,\nSwarm <swarm@example.net> wrote:\n> request"
+    assert ec._authored_plain_checked(good, sent_request=sent) == ("APPROVE", True)
+    assert ec._authored_plain_checked(good.replace("swarm@example.net", "other@example.net"),
+                                      sent_request=sent)[1] is False
+
+
 @pytest.mark.parametrize("tail", (
     "I withdraw approval", "One\nTwo\nThree\nFour\nFive",
     "This line is deliberately more than eighty characters long and makes the signature boundary unsafe.",

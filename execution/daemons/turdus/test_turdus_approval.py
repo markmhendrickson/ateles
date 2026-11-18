@@ -795,6 +795,38 @@ def _poll_authored_reply(monkeypatch, tmp_path, kind, body_data, *, polls=1,
 
 
 @pytest.mark.parametrize("kind", ("pr", "release"))
+@pytest.mark.parametrize("variant,should_route", (
+    ("matching", True), ("withdrawal", False), ("unquoted", False),
+    ("different_quote", False), ("different_attribution", False),
+    ("parts_disagree", False),
+))
+def test_gmail_multipart_reply_routes_only_verified_author(kind, variant, should_route,
+                                                           monkeypatch, tmp_path):
+    approval = "approve v1.2.3" if kind == "release" else "approve"
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    sent_body = f"Reply {approval}\n{token}"
+    attribution = "On Tue, 17 Nov 2026 12:00:00 +0000, Swarm <swarm@example.net> wrote:"
+    quote = f"> Reply {approval}\n> {token}"
+    plain = f"{approval}\n{attribution}\n{quote}"
+    html = (f"<p>{approval}</p><div class='gmail_quote'>"
+            f"<p>Reply {approval}</p><p>{token}</p></div>")
+    if variant == "withdrawal":
+        plain += "\nI withdraw"
+    elif variant == "unquoted":
+        plain += "\nother text"
+    elif variant == "different_quote":
+        plain = plain.replace(f"> Reply {approval}", "> unrelated")
+    elif variant == "different_attribution":
+        plain = plain.replace("Swarm <swarm@example.net>", "Other <other@example.net>")
+    elif variant == "parts_disagree":
+        html = html.replace(f"<p>{approval}</p>", "<p>hold</p>", 1)
+    posts, _, _ = _poll_authored_reply(
+        monkeypatch, tmp_path, kind, {"body_text": plain, "body_html": html},
+        sent_body=sent_body)
+    assert bool(posts) is should_route
+
+
+@pytest.mark.parametrize("kind", ("pr", "release"))
 @pytest.mark.parametrize("reply", ("yes", "Can you clarify?", "approve"))
 def test_subject_only_reply_never_routes_and_notifies_once(
         monkeypatch, tmp_path, kind, reply):
