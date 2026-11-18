@@ -225,10 +225,11 @@ _WRAPPER_GRAMMAR = {
     "watch": ({"-b", "-c", "-d", "-e", "-g", "-t", "-x"},
               {"-n", "--interval"}, 0, False, set()),
     "parallel": ({"-k", "--keep-order", "--halt-on-error"},
-                 {"-j", "--jobs", "-N", "--max-args", "-S", "--sshlogin"},
+                 {"-j", "--jobs", "-N", "--max-args", "-S", "--sshlogin",
+                  "--results", "--joblog"},
                  0, False, set()),
     "script": ({"-q", "-f", "-e"}, {"-a", "-o", "-O", "-I", "-t"},
-               0, False, {"-c", "--command"}),
+               1, False, {"-c", "--command"}),
     "flock": ({"-s", "-x", "-u", "-n", "-o", "--shared", "--exclusive",
                "--unlock", "--nonblock", "--close"},
               {"-w", "--timeout", "-E", "--conflict-exit-code"}, 1, False, set()),
@@ -239,6 +240,40 @@ _WRAPPER_GRAMMAR = {
     "chroot": ({"--skip-chdir"}, {"--userspec", "--groups"}, 1, False, set()),
 }
 _WRAPPERS = frozenset(_WRAPPER_GRAMMAR)
+# These runners add authority or interpret an opaque command, and release
+# preparation has no documented use for them. Keep their grammar entries so
+# an attempted invocation is recognized and refused before generic handling.
+_DENIED_WRAPPERS = frozenset({"script", "parallel", "watch", "chroot", "doas", "sudo"})
+# Every wrapper has an explicit write-operand decision. Values name options
+# whose operand is opened for writing; True means a leading positional operand
+# is created or modified. All other declared operands are read-only or data.
+_WRAPPER_OPERAND_POLICY = {
+    # Each tuple is (writable option operands, writable leading positional,
+    # unrecognized option or operand policy). Entries are deliberately explicit
+    # so a new grammar entry needs an audited write decision.
+    "env": (frozenset(), False, "deny"),
+    "command": (frozenset(), False, "deny"),
+    "exec": (frozenset(), False, "deny"),
+    "builtin": (frozenset(), False, "deny"),
+    "xargs": (frozenset(), False, "deny"),
+    "nice": (frozenset(), False, "deny"),
+    "timeout": (frozenset(), False, "deny"),
+    "gtimeout": (frozenset(), False, "deny"),
+    "nohup": (frozenset(), False, "deny"),
+    "time": (frozenset({"-o", "--output"}), False, "deny"),
+    "sudo": (frozenset(), False, "deny"),
+    "doas": (frozenset(), False, "deny"),
+    "stdbuf": (frozenset(), False, "deny"),
+    "caffeinate": (frozenset(), False, "deny"),
+    "unbuffer": (frozenset(), False, "deny"),
+    "watch": (frozenset(), False, "deny"),
+    "parallel": (frozenset({"--results", "--joblog"}), False, "deny"),
+    "script": (frozenset({"-o", "-O", "-I"}), True, "deny"),
+    "flock": (frozenset(), True, "deny"),
+    "setsid": (frozenset(), False, "deny"),
+    "ionice": (frozenset(), False, "deny"),
+    "chroot": (frozenset(), False, "deny"),
+}
 _SHELLS = re.compile(r"^(?:sh|bash|zsh|dash|ksh|mksh|fish|tcsh|csh|busybox)$")
 _INTERPRETERS = re.compile(
     r"^(?:python|pypy|node|nodejs|deno|bun|perl|ruby|php|osascript|lua|tclsh|"
@@ -964,7 +999,8 @@ def _enters_protected_dir(path: str) -> bool:
 
 _DIRECT_WRITERS = frozenset({"tee", "sed", "cp", "mv", "ln", "install", "rsync",
                              "rm", "touch", "truncate", "chmod", "chown", "mkdir", "dd",
-                             "tar", "bsdtar", "gtar", "unzip", "ditto", "cpio", "pax", "jar", "7z"})
+                             "tar", "bsdtar", "gtar", "unzip", "ditto", "cpio", "pax", "jar", "7z",
+                             "curl", "wget"})
 
 _ARCHIVE_TOOLS = frozenset({"tar", "bsdtar", "gtar", "unzip", "ditto", "cpio", "pax", "jar", "7z"})
 _ARCHIVE_UNSAFE_OPTIONS = frozenset({
@@ -1174,6 +1210,31 @@ def _wrapped_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | Non
     return None
 
 
+def _download_destinations(base: str, args: list[str]) -> tuple[list[str], list[str]]:
+    """Output files and directories declared by a download command."""
+    output_options = ({"-o", "--output", "-D", "--dump-header",
+                       "-c", "--cookie-jar", "--trace", "--trace-ascii"}
+                      if base == "curl" else
+                      {"-O", "--output-document", "-o", "--output-file",
+                       "-a", "--append-output"})
+    directory_options = ({"--output-dir"} if base == "curl" else
+                         {"-P", "--directory-prefix"})
+    files: list[str] = []
+    directories: list[str] = []
+    for index, arg in enumerate(args):
+        for option in output_options | directory_options:
+            if arg == option and index + 1 < len(args):
+                value = args[index + 1]
+            elif (arg.startswith(option + "=") if option.startswith("--") else
+                  arg.startswith(option) and len(arg) > len(option)):
+                value = arg[len(option):].lstrip("=")
+            else:
+                continue
+            (directories if option in directory_options else files).append(value)
+            break
+    return files, directories
+
+
 def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None:
     for op, target in cmd.redirects:
         if ">" in op and (target.expanded or target.write_glob
@@ -1233,6 +1294,19 @@ def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None
         targets = args
     elif base == "dd":
         targets = [arg[3:] for arg in args if arg.startswith("of=")]
+    elif base in {"curl", "wget"}:
+        targets, directories = _download_destinations(base, args)
+        for directory in directories:
+            if _tree_write_target(directory):
+                return f"{base} writing protected hook or git config path {directory}"
+        if base == "curl" and any(arg in {"-K", "--config"} or arg.startswith("-K")
+                                  or arg.startswith("--config=")
+                                  for arg in args):
+            return "curl output from a config file cannot be inspected"
+        if base == "wget" and any(arg == "-e" or arg.startswith("-e")
+                                  or arg.startswith("--execute")
+                                  for arg in args):
+            return "wget output settings cannot be inspected"
     for target in targets:
         if _protected_path(target):
             return f"{base} writing protected hook or git config path {target}"
@@ -1257,12 +1331,15 @@ def _strip_command_prefix(words: list[Word], *, wrappers: bool = False,
     return rest
 
 
-def _wrapped_executable(words: list[Word]) -> list[Word] | None:
+def _wrapped_executable(words: list[Word], write_targets: list[Word] | None = None) -> list[Word] | None:
     """Return the literal executable and tail, or deny an indeterminate wrapper."""
     rest = words
     while rest and os.path.basename(rest[0].text) in _WRAPPERS:
         base = os.path.basename(rest[0].text)
         flags, values, positionals, assignments, opaque = _WRAPPER_GRAMMAR[base]
+        writable_options, writable_positionals, unknown_policy = _WRAPPER_OPERAND_POLICY[base]
+        if unknown_policy != "deny":
+            return None
         i = 1
         ended = False
         while i < len(rest):
@@ -1289,12 +1366,18 @@ def _wrapped_executable(words: list[Word]) -> list[Word] | None:
             if not ended and option in values:
                 if i + 1 >= len(rest) or rest[i + 1].text == "--":
                     return None
+                if option in writable_options and write_targets is not None:
+                    write_targets.append(rest[i + 1])
                 i += 2
                 continue
             attached = next((name for name in values if (
                 option.startswith(name + "=") if name.startswith("--") else
                 option.startswith(name) and len(option) > len(name))), None)
             if not ended and attached:
+                if attached in writable_options and write_targets is not None:
+                    value = option[len(attached):].lstrip("=")
+                    write_targets.append(Word(value, expanded=word.expanded,
+                                              write_glob=word.write_glob))
                 i += 1
                 continue
             if not ended and option.startswith("-"):
@@ -1305,6 +1388,8 @@ def _wrapped_executable(words: list[Word]) -> list[Word] | None:
             break
         if len(rest) - i <= positionals:
             return None
+        if writable_positionals and write_targets is not None:
+            write_targets.extend(rest[i:i + positionals])
         i += positionals
         executable = rest[i]
         if (executable.expanded or executable.braced or executable.globbed or
@@ -1312,15 +1397,6 @@ def _wrapped_executable(words: list[Word]) -> list[Word] | None:
             return None
         rest = rest[i:]
     return rest if rest else None
-
-
-def _unresolved_wrapped_executable(words: list[Word]) -> bool:
-    return _wrapped_executable(words) is None
-
-
-def _is_git_binary_word(text: str) -> bool:
-    base = os.path.basename(text)
-    return base == "git" or bool(re.fullmatch(rf"git-(?:{_GIT_DASHED})", base))
 
 
 def _mentions_protected_text(body: str) -> bool:
@@ -1623,8 +1699,17 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int =
             return f"{head.text} (only a plain `git` is allowed)"
         return git_violation(rest[1:])
     if base in _WRAPPERS:
-        if _unresolved_wrapped_executable(rest):
+        if base in _DENIED_WRAPPERS:
+            return f"{base} is not allowed during release preparation"
+        write_targets: list[Word] = []
+        executable = _wrapped_executable(rest, write_targets)
+        if executable is None:
             return f"{base} executable name cannot be resolved literally"
+        if any(os.path.basename(w.text) in _DENIED_WRAPPERS for w in rest[1:]):
+            return "a disallowed wrapper is not allowed during release preparation"
+        for target in write_targets:
+            if target.expanded or target.write_glob or _tree_write_target(target.text):
+                return f"{base} writing protected hook or git config path {target.text}"
         hit = _assignment_violation(rest[1:], command_mentions_git=whole_mentions_git)
         if hit:
             return f"{base} {hit}"
@@ -1667,8 +1752,9 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int =
     # Any other command carrying git as a word may be a wrapper this guard
     # does not know (setsid, arch, ionice, chroot ...): git must be the
     # command itself. Commands that only print, search or locate are exempt.
-    if base not in _GIT_WORD_READERS and any(
-            _is_git_binary_word(w.text) for w in rest[1:]):
+    if base not in _GIT_WORD_READERS and (
+            any(_code_mentions_git(w.text, depth) for w in rest[1:])
+            or any(_code_mentions_git(body, depth) for body in cmd.stdin)):
         return f"{base} running git (run plain git as the command itself)"
     return None
 
@@ -1776,9 +1862,11 @@ def _judge(command: str, depth: int, in_substitution: bool) -> str | None:
                     if arg.startswith("of="):
                         written_files.add(os.path.abspath(os.path.expanduser(arg[3:])))
             if writer in {"curl", "wget"}:
-                for j, arg in enumerate(args[:-1]):
-                    if arg in {"-o", "-O", "--output", "--output-document"}:
-                        written_files.add(os.path.abspath(os.path.expanduser(args[j + 1])))
+                files, directories = _download_destinations(writer, args)
+                written_files.update(os.path.abspath(os.path.expanduser(target))
+                                     for target in files)
+                written_trees.update(os.path.abspath(os.path.expanduser(target))
+                                     for target in directories)
             if writer in _ARCHIVE_TOOLS:
                 for target in _tree_destinations(writer, args):
                     written_trees.add(os.path.abspath(os.path.expanduser(target)))
