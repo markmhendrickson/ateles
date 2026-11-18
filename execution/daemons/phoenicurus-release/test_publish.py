@@ -30,10 +30,53 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
 import publish  # noqa: E402
 
 
+def _bound_guards(snapshot):
+    return {"release_guards": {
+        version: {"version": version, "head": "a" * 40, "guard_snapshot": snapshot}
+        for version in ("v1.2.3", "v0.18.8", "v0.19.0", "v0.20.0")}}
+
+
+def test_release_guard_uses_its_own_prepared_entry(monkeypatch, tmp_path):
+    from release_guard_snapshot import snapshot_release_guards, changed_guard_location
+    root = tmp_path / "checkout"
+    (root / ".git" / "hooks").mkdir(parents=True)
+    (root / ".git" / "config").write_text("[core]\n")
+    before = snapshot_release_guards(root)
+    (root / ".git" / "hooks" / "pre-commit").write_text("changed")
+    after = snapshot_release_guards(root)
+    state = tmp_path / "prepare-state.json"
+    entries = _bound_guards(after)
+    entries["release_guards"]["v1.2.3"]["guard_snapshot"] = before
+    state.write_text(json.dumps(entries))
+    monkeypatch.setattr(publish, "PREPARE_STATE_FILE", state)
+    monkeypatch.setattr(publish, "NEOTOMA_REPO_ROOT", root)
+    monkeypatch.setattr(publish, "changed_guard_location", changed_guard_location)
+    notices = []
+    monkeypatch.setattr(publish, "telegram_send", notices.append)
+    with pytest.raises(publish.StepError, match="release guard changed"):
+        publish._verify_prepare_guard_snapshot("v1.2.3")
+    assert notices
+    publish._verify_prepare_guard_snapshot("v0.20.0")
+    (root / ".git" / "hooks" / "pre-commit").unlink()
+    publish._verify_prepare_guard_snapshot("v1.2.3")
+
+
+@pytest.mark.parametrize("entry", (None, {"version": "v1.2.3", "guard_snapshot": {}}))
+def test_release_guard_missing_binding_requires_reprepare(monkeypatch, tmp_path, entry):
+    state = tmp_path / "prepare-state.json"
+    state.write_text(json.dumps({"release_guards": {"v1.2.3": entry}}))
+    monkeypatch.setattr(publish, "PREPARE_STATE_FILE", state)
+    notices = []
+    monkeypatch.setattr(publish, "telegram_send", notices.append)
+    with pytest.raises(publish.StepError, match="re-prepare"):
+        publish._verify_prepare_guard_snapshot("v1.2.3")
+    assert notices and "re-prepare" in notices[0]
+
+
 @pytest.fixture(autouse=True)
 def prepared_guard_state(monkeypatch, tmp_path):
     state = tmp_path / "prepare-state.json"
-    state.write_text(json.dumps({"guard_snapshot": {"synthetic": "digest"}}))
+    state.write_text(json.dumps(_bound_guards({"synthetic": "digest"})))
     monkeypatch.setattr(publish, "PREPARE_STATE_FILE", state)
     monkeypatch.setattr(publish, "changed_guard_location", lambda *_: None)
     monkeypatch.setattr(publish, "telegram_send", lambda *a: None)
@@ -51,7 +94,7 @@ def test_release_stops_before_any_step_when_guard_changes(monkeypatch, tmp_path,
     (root / ".git" / "hooks" / "pre-commit").write_text("guard")
     before = snapshot_release_guards(root)
     state = tmp_path / "prepare-state.json"
-    state.write_text(json.dumps({"guard_snapshot": before}))
+    state.write_text(json.dumps(_bound_guards(before)))
     monkeypatch.setattr(publish, "PREPARE_STATE_FILE", state)
     monkeypatch.setattr(publish, "NEOTOMA_REPO_ROOT", root)
     monkeypatch.setattr(publish, "changed_guard_location", changed_guard_location)
@@ -79,7 +122,7 @@ def test_matching_prepare_guard_allows_release_steps(monkeypatch, tmp_path, resu
     (root / ".git" / "hooks").mkdir(parents=True)
     (root / ".git" / "config").write_text("[core]\n")
     state = tmp_path / "prepare-state.json"
-    state.write_text(json.dumps({"guard_snapshot": snapshot_release_guards(root)}))
+    state.write_text(json.dumps(_bound_guards(snapshot_release_guards(root))))
     monkeypatch.setattr(publish, "PREPARE_STATE_FILE", state)
     monkeypatch.setattr(publish, "NEOTOMA_REPO_ROOT", root)
     monkeypatch.setattr(publish, "changed_guard_location", changed_guard_location)
@@ -110,7 +153,7 @@ def test_selected_checkout_guard_checked_before_release_effect(monkeypatch, tmp_
     hook = root / ".husky" / "pre-commit"
     hook.write_text("guard")
     state = tmp_path / "prepare-state.json"
-    state.write_text(json.dumps({"guard_snapshot": snapshot_release_guards(root)}))
+    state.write_text(json.dumps(_bound_guards(snapshot_release_guards(root))))
     monkeypatch.setattr(publish, "PREPARE_STATE_FILE", state)
     monkeypatch.setattr(publish, "NEOTOMA_REPO_ROOT", root)
     monkeypatch.setattr(publish, "changed_guard_location", changed_guard_location)
@@ -147,7 +190,7 @@ def test_guard_rechecked_between_tag_and_push(monkeypatch, tmp_path):
     hook = root / ".husky" / "pre-commit"
     hook.write_text("guard")
     state = tmp_path / "prepare-state.json"
-    state.write_text(json.dumps({"guard_snapshot": snapshot_release_guards(root)}))
+    state.write_text(json.dumps(_bound_guards(snapshot_release_guards(root))))
     monkeypatch.setattr(publish, "PREPARE_STATE_FILE", state)
     monkeypatch.setattr(publish, "NEOTOMA_REPO_ROOT", root)
     monkeypatch.setattr(publish, "changed_guard_location", changed_guard_location)

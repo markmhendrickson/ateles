@@ -75,12 +75,25 @@ def main() -> int:
     )
     ap.add_argument("--rc-branch", default="", help="release branch name")
     ap.add_argument("--rc-pr-url", default="", help="RC pull-request URL")
+    ap.add_argument("--prepared-head", default="", help="origin/main head prepared")
     ap.add_argument("--notes", default="", help="free-text notes")
     ap.add_argument("--base-url", default=os.environ.get("NEOTOMA_BASE_URL", ""))
     ap.add_argument("--timeout", type=int, default=300,
                     help="seconds; generous by default because the hosted instance "
                          "can take 30s+ per DB-backed request (neotoma#2141)")
     args = ap.parse_args()
+
+    state_path = Path(__file__).parent / ".phoenicurus_prepare_spawn_count"
+    if args.status == "pending_approval":
+        try:
+            state = json.loads(state_path.read_text())
+            if (not args.prepared_head or not isinstance(state, dict) or
+                    state.get("head") != args.prepared_head or
+                    not isinstance(state.get("guard_snapshot"), dict)):
+                raise ValueError("prepare head or guard snapshot does not match")
+        except (OSError, ValueError, TypeError) as exc:
+            print(f"release guard binding unavailable; re-prepare: {exc}", file=sys.stderr)
+            return 1
 
     base = (args.base_url or "").rstrip("/")
     if not base:
@@ -167,6 +180,22 @@ def main() -> int:
         print(f"store returned no entities: {json.dumps(out)[:300]}", file=sys.stderr)
         return 1
     first = ents[0]
+    if args.status == "pending_approval":
+        try:
+            current = json.loads(state_path.read_text())
+            if (not isinstance(current, dict) or current.get("head") != args.prepared_head or
+                    current.get("guard_snapshot") != state["guard_snapshot"]):
+                raise ValueError("prepare state changed while storing release")
+            entries = current.setdefault("release_guards", {})
+            if not isinstance(entries, dict) or args.version in entries:
+                raise ValueError("release already has a guard binding; re-prepare")
+            entries[args.version] = {"version": args.version, "head": args.prepared_head,
+                                     "guard_snapshot": state["guard_snapshot"]}
+            state_path.write_text(json.dumps(current, sort_keys=True))
+        except (OSError, ValueError, TypeError) as exc:
+            print(f"release stored but guard binding unavailable; do not publish: {exc}",
+                  file=sys.stderr)
+            return 1
     print(f"{first.get('entity_id')} ({first.get('action')}) as {signer.sub}")
     return 0
 

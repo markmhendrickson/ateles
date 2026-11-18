@@ -398,7 +398,12 @@ def _record_spawn(head: str) -> int:
     n = _spawn_count(head) + 1
     if head:
         try:
-            SPAWN_COUNT_FILE.write_text(json.dumps({"head": head, "count": n}))
+            raw = SPAWN_COUNT_FILE.read_text() if SPAWN_COUNT_FILE.exists() else ""
+            state = json.loads(raw) if raw.lstrip().startswith("{") else {}
+            if not isinstance(state, dict):
+                state = {}
+            state.update({"head": head, "count": n})
+            SPAWN_COUNT_FILE.write_text(json.dumps(state, sort_keys=True))
         except OSError as exc:
             # Losing the counter must not block a release; worst case we retry
             # more than MAX_SPAWNS_PER_HEAD times, which is still better than
@@ -933,7 +938,7 @@ def _reconcile_against_npm(
 # ---------------------------------------------------------------------------
 
 
-def _build_agent_prompt(last_tag: str, commit_count: int) -> str:
+def _build_agent_prompt(last_tag: str, commit_count: int, prepared_head: str = "") -> str:
     topic_note = (
         f"Use Telegram topic id {TELEGRAM_TOPIC} for the notification."
         if TELEGRAM_TOPIC
@@ -1037,7 +1042,8 @@ Then record + notify:
 
       python3 {Path(__file__).parent}/store_release_result.py \\
         --version <TAG> --status pending_approval \\
-        --rc-branch release/<TAG> --rc-pr-url <RC_PR_URL>
+        --rc-branch release/<TAG> --rc-pr-url <RC_PR_URL> \\
+        --prepared-head {prepared_head}
 
     It signs the write with phoenicurus's AAuth key. A plain POST /store is
     denied: `release_result` has no configured access policy, so it defaults to
@@ -1221,7 +1227,8 @@ def spawn_prepare_agent(
         )
         return False
 
-    prompt = _build_agent_prompt(last_tag, commit_count)
+    prepared_head = head or _head_sha()
+    prompt = _build_agent_prompt(last_tag, commit_count, prepared_head)
     if not HOOK_BYPASS_GUARD.is_file():
         # Fail closed: without the guard the agent can skip the release
         # checkout's hooks, which is the failure the guard exists to stop.
@@ -1254,7 +1261,7 @@ def spawn_prepare_agent(
         existing = json.loads(raw) if raw.lstrip().startswith("{") else {}
         if not isinstance(existing, dict):
             existing = {}
-        existing.update({"head": head or _head_sha(), "guard_snapshot": snapshot})
+        existing.update({"head": prepared_head, "guard_snapshot": snapshot})
         SPAWN_COUNT_FILE.write_text(json.dumps(existing, sort_keys=True))
     except (OSError, ValueError, TypeError) as exc:
         log.error(f"could not capture prepare guard snapshot: {exc}")

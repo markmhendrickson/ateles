@@ -58,8 +58,10 @@ an absent hook is inconclusive even when no guarded commit lands.
 Preparation uses plain git commands and plain file edits with literal paths.
 The prepare state records a digest of the checkout's hook directories, Husky
 directory, Git configuration and Git-directory entry before the agent starts.
-Publishing compares that digest before any release step; a changed or unreadable
-location stops the release and raises a Telegram notice.
+When the agent records the release, the existing state retains an entry keyed by
+the exact version and prepared head. Publishing and resume require that entry
+before any release step; an absent or older unbound entry requires re-preparation.
+A changed or unreadable location stops the release and raises a Telegram notice.
 
 The agent's cwd is the Neotoma checkout, so this repository's own
 `.claude/settings.json` does not reach it; `--settings` is the only way the
@@ -81,10 +83,13 @@ The ambient Workspace directory is never passed to the prepare child.
 `store_release_result.py` loads its own Neotoma target and signing
 inputs when it runs.
 
-The Bash guard is an accidental-bypass tripwire, not a security boundary: a
-written script or an indirection it cannot inspect can still skip hooks. The
-binding controls are the allowlisted child environment plus the release checks
-that run after the agent.
+The Bash guard refuses inline programs and script runs unless their code is
+limited to reviewable operations without process creation or dynamic code.
+The prepare prompt needs plain git, plain file edits, npm commands, and the
+release record script; it needs no inline interpreter program. The guard is an
+accidental-bypass tripwire, not a security boundary. The snapshot cannot tell
+whether a commit hook ran; required green CI on the RC PR is the independent
+control for that case.
 
 Before deploying a guard change, run `verify_guard_live.py` on the credentialed
 prepare host. It checks that the real Claude CLI loads and enforces the hook;
