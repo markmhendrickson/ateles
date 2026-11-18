@@ -133,6 +133,28 @@ def test_missing_queue_for_held_receipt_is_visible(tmp_path, monkeypatch, capsys
     assert "no queue notice" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("broken", ["backup", "journal"])
+def test_clear_preserves_queue_when_prior_state_is_unreadable(
+    tmp_path, monkeypatch, capsys, broken
+):
+    queue = tmp_path / "digest.json"
+    key = "synthetic:held"
+    notice = {"message": "⚠ [apis] synthetic", "keys": [key]}
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(queue))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    queue.write_text(json.dumps([notice]))
+    journal = held_view.journal_path()
+    if broken == "backup":
+        journal.write_text(json.dumps({key: {"state": "held", "held_message": notice["message"],
+                                               "handler": "apis"}}))
+        held_view.backup_path(queue).write_bytes(b"\xff")
+    assert held_view.main([]) == 0
+    capsys.readouterr()
+    assert held_view.main(["--clear"]) == 1
+    assert held_view.read_queue(queue) == [notice]
+    assert "clear failed" in capsys.readouterr().err
+
+
 def test_unconfirmed_alert_appears_in_session_hook(tmp_path, queue):
     record = {"key": "usage:weekly:50", "window": "weekly",
               "time": "2026-11-17T00:00:00Z", "cause": "receipt unknown"}
@@ -263,6 +285,9 @@ def test_clear_uses_identity_when_a_keyed_notice_text_changes(queue, capsys):
     first = {"keys": ["usage:weekly:50"], "message": "⚠ [apis] 50%"}
     latest = {"keys": ["usage:weekly:50"], "message": "⚠ [apis] 55%"}
     queue.write_text(json.dumps([first]))
+    held_view.journal_path().write_text(json.dumps({"usage:weekly:50": {
+        "state": "held", "held_message": first["message"], "handler": "apis",
+    }}))
     assert held_view.main([]) == 0
     queue.write_text(json.dumps([latest]))
     assert held_view.main(["--clear"]) == 0

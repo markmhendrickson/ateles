@@ -668,10 +668,10 @@ def _clear(main: Path) -> int:
             if removed:
                 try:
                     old = json.loads(read_text_nofollow(backup))
-                    old = old if isinstance(old, list) else []
-                except Exception:  # noqa: BLE001 — a missing/corrupt backup restarts
+                    if not isinstance(old, list):
+                        raise ValueError("cleared-notice backup is not a list")
+                except FileNotFoundError:
                     old = []
-                atomic_write(backup, json.dumps((old + removed)[-BACKUP_MAX:]))
                 # Queue -> journal is the shared lock order. A cleared usage
                 # threshold remains settled for this window, while a higher
                 # threshold has its own key and can still alert.
@@ -683,9 +683,15 @@ def _clear(main: Path) -> int:
                     try:
                         journal = json.loads(read_text_nofollow(journal_file))
                     except FileNotFoundError:
+                        if any(isinstance(item, dict) for item in removed):
+                            raise ValueError("dedupe journal missing for keyed notice")
                         journal = {}
                     if not isinstance(journal, dict):
                         raise ValueError("dedupe journal is not an object")
+                    if any(key not in journal for item in removed if isinstance(item, dict)
+                           for key in item["keys"]):
+                        raise ValueError("dedupe receipt missing for keyed notice")
+                    atomic_write(backup, json.dumps((old + removed)[-BACKUP_MAX:]))
                     changed = False
                     for key, entry in journal.items():
                         if (isinstance(entry, dict) and not receipt_problem(entry)

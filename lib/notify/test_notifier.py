@@ -1638,8 +1638,13 @@ def test_retryable_notice_state_walk(tmp_path, monkeypatch, capsys):
                         clear_allowance[key] = clear_allowance.get(key, 0) + 1
                     elif before:
                         assert held_view.main([]) == 0
-                        assert held_view.main(["--clear"]) == 0
-                        clear_allowance[key] = clear_allowance.get(key, 0) + 1
+                        keyed = {k for item in before if isinstance(item, dict)
+                                 for k in item["keys"]}
+                        if keyed and not keyed.issubset(n._dedupe_journal):
+                            assert held_view.main(["--clear"]) == 1
+                        else:
+                            assert held_view.main(["--clear"]) == 0
+                            clear_allowance[key] = clear_allowance.get(key, 0) + 1
                 elif operation == "window_roll":
                     n.clear_dedupe(key)
                     key = key.replace("reset0", "reset1")
