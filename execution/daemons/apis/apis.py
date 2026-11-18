@@ -346,6 +346,50 @@ log = logging.getLogger("apis")
 # an exception-draining callback for the rest of the daemon process lifetime.
 _background_dispatch_tasks: set[asyncio.Task[None]] = set()
 _background_checkpoint_tasks: set[asyncio.Task[None]] = set()
+
+# A timed-out lifecycle correction can still land after the HTTP client gives
+# up. Keep the event loop free while waiting for its task record to catch up.
+GATE_HOLD_PROOF_SECONDS = 60
+GATE_HOLD_PROOF_INTERVAL_SECONDS = 12
+GATE_HOLD_PROOF_MAX_READS = 5
+
+
+async def _prove_gate_hold(
+    task_id: str,
+    reason: str,
+    *,
+    clock=time.monotonic,
+    sleep=asyncio.sleep,
+) -> dict | None:
+    """Return the complete held record, or deny after a bounded read-back."""
+    deadline = clock() + GATE_HOLD_PROOF_SECONDS
+    for attempt in range(GATE_HOLD_PROOF_MAX_READS):
+        remaining = deadline - clock()
+        if remaining <= 0:
+            break
+        try:
+            record = await asyncio.wait_for(
+                asyncio.to_thread(fetch_task_record, task_id), timeout=remaining
+            )
+        except Exception as exc:  # noqa: BLE001 — an unreadable hold denies
+            log.warning("[%s] gate hold read-back failed for %s: %s", DAEMON_NAME, task_id, type(exc).__name__)
+            record = None
+        snapshot = _record_snapshot(record)
+        if (
+            snapshot is not None
+            and normalize_status(snapshot.get("status")) == TaskStatus.AWAITING_APPROVAL.value
+            and snapshot.get("blocked_reason") == reason
+        ):
+            return record
+        # A different, readable status is evidence of a concurrent transition.
+        # Waiting for an old hold to land would risk creating authority for it.
+        if snapshot is not None and normalize_status(snapshot.get("status")) not in (
+            TaskStatus.ROUTED.value, TaskStatus.AWAITING_APPROVAL.value
+        ):
+            break
+        if attempt + 1 < GATE_HOLD_PROOF_MAX_READS:
+            await sleep(min(GATE_HOLD_PROOF_INTERVAL_SECONDS, max(0, deadline - clock())))
+    return None
 # Task ids whose detached run is still in progress. `_seen_created` evicts old
 # ids, so a `task.created` redelivered after eviction would otherwise start a
 # second run alongside the first. Removed when the run ends, however it ends.
@@ -3512,7 +3556,7 @@ async def _dispatch_task(
                 reason=decision.reason,
                 key_suffix=trigger,
             )
-            task_record = fetch_task_record(entity_id)
+            task_record = await _prove_gate_hold(entity_id, decision.reason)
             held_snapshot = _record_snapshot(task_record)
             hold_proven = (
                 held_snapshot is not None
@@ -3561,7 +3605,7 @@ async def _dispatch_task(
                     "execution"
                 )
             notifier.send(
-                f"PLAN checkpoint: {title[:70]}\n"
+                "PLAN checkpoint for held task\n"
                 f"  agent={skill} blast={decision.blast_radius.value} "
                 f"conf={_shown_confidence(confidence, confidence_source)} — "
                 f"{decision.reason}\n"
@@ -3576,7 +3620,11 @@ async def _dispatch_task(
                     + "\n"
                 ).lstrip("\n")
                 + f"  drivers={_confidence_drivers_text(snapshot)}\n"
-                + f"  task={entity_id} brief={brief_id or '(unpersisted)'}",
+                + f"  task={entity_id} brief={brief_id or '(unpersisted)'}"
+                + (
+                    "\n  A retry sweep will raise the checkpoint when the hold is visible."
+                    if not hold_proven or not brief_id else ""
+                ),
                 priority=Priority.BLOCKER,
                 handler=DAEMON_NAME,
             )
