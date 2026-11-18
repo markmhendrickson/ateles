@@ -220,6 +220,7 @@ class WiseTransferHandler(PaymentHandler):
         if not contact:
             return {
                 "status": "manual_required",
+                "failure_class": "pre_submission",
                 "handler": self.name,
                 "error": "Could not load contact",
                 "amount_eur": self.profile.amount_eur,
@@ -232,6 +233,7 @@ class WiseTransferHandler(PaymentHandler):
         if not iban and not rid:
             return {
                 "status": "manual_required",
+                "failure_class": "pre_submission",
                 "handler": self.name,
                 "error": "No IBAN found in contact",
                 "amount_eur": self.profile.amount_eur,
@@ -244,6 +246,7 @@ class WiseTransferHandler(PaymentHandler):
             log.error(f"[{self.name}] WISE_API_TOKEN not set")
             return {
                 "status": "manual_required",
+                "failure_class": "pre_submission",
                 "handler": self.name,
                 "error": "WISE_API_TOKEN not set",
                 "amount_eur": self.profile.amount_eur,
@@ -272,6 +275,7 @@ class WiseTransferHandler(PaymentHandler):
             log.error(f"[{self.name}] Wise transfer exception: {exc}")
             result = {
                 "status": "manual_required",
+                "failure_class": "unknown",
                 "handler": self.name,
                 "error": str(exc),
                 "amount_eur": self.profile.amount_eur,
@@ -281,6 +285,8 @@ class WiseTransferHandler(PaymentHandler):
             }
 
         result["handler"] = self.name
+        if result.get("status") != "sent":
+            result.setdefault("failure_class", "unknown")
 
         if result.get("status") in ("sent", "manual_required"):
             _update_task(self.profile, result)

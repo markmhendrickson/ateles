@@ -285,6 +285,94 @@ chmod +x install.sh
 ./install.sh
 ```
 
+## Retry one definitely failed payment
+
+The supported retry command accepts one original obligation key or journaled
+session key (`<handler>:<event-id>`). It never lists payments. The source
+session must be terminal, and its only attempt must be complete with the
+literal outcome `failed`. Intent-only, pending-session, skipped, successful,
+manual-required and unrecognised outcomes cannot be retried.
+
+A `failed` label alone does not prove that no money moved. Handler outcomes
+therefore carry `failure_class`, and admission depends on the rail:
+
+- **Any rail, `pre_submission`:** the first attempt provably stopped before
+  anything was submitted, so the retry may be raised.
+- **BTC, any class (including `unknown` and historical unclassified rows):**
+  the command reconciles the chain automatically. It reads the payee
+  address's mempool and confirmed history, from two hours before the
+  original intent time onward, through a public Esplora block explorer that
+  needs no credentials (`https://mempool.space/api` by default;
+  `MONEDULA_BTC_EXPLORER_URL` overrides it). Any output paying the payee
+  address in that window refuses the retry, whatever the amount. A lookup that
+  fails, times out, returns something unparseable or cannot be shown complete
+  also refuses. The check runs before the approval is raised, and its evidence
+  (explorer, payee-address SHA-256, window, transaction ids seen, result) is a
+  bound field of the approval, so the operator approves against it. It runs
+  again before the reservation, and the fresh evidence is stored on the
+  journal's retry reservation. The payee address comes from the
+  `payment_profile` the handler pays; the address itself is never stored,
+  only its digest. The payee address is queried rather than the sending
+  wallet because no sending address is configured anywhere the handler
+  reads, and every payment to the payee appears in the payee's history.
+- **Wise, `unknown` or unclassified:** refused. Those need manual
+  reconciliation on the rail; this command does not retry them.
+
+The operator's authenticated answer carries attendance (`attended <handler>`
+or `yes <handler>`). No phrase in it is evidence of non-payment, and a bare
+yes never approves.
+
+The retry approval binds the original attempt as structured fields
+(`retry_of`, `original_intent_at`, `original_outcome_at`,
+`original_failure_class`, `retry_admission`, `reconciliation_evidence`). If
+the journal's record of the original attempt changes after approval, the
+retry is held. A completed obligation's outcome can never be overwritten.
+Raising a retry approval requires the `payment_approval` schema to declare
+these fields: run `execution/scripts/register_payment_approval_schema.py --apply`
+after deploying, otherwise the raise fails its read-back and nothing is
+raised.
+
+From the repository root, preview the one targeted action without writing an
+approval or journal entry:
+
+```bash
+python3 execution/daemons/monedula/payment_retry.py <obligation-or-session-key> --dry-run
+```
+
+Raise the deterministic retry approval:
+
+```bash
+python3 execution/daemons/monedula/payment_retry.py <obligation-or-session-key>
+```
+
+After the coordinator records the operator's authenticated answer on that new
+`payment_approval`, the default command only reports that approval is valid.
+Payment requires an explicit interactive execution:
+
+```bash
+python3 execution/daemons/monedula/payment_retry.py <obligation-or-session-key> --execute
+```
+
+`--execute` refuses non-TTY stdin and requires the operator to type the exact
+amount and payee shown at the prompt. That prompt is a guard against a slip,
+**not an identity control**: anyone who can run the command on this host can
+type it. The control is the `payment_approval` record, whose resolution must
+be authenticated as the configured approver.
+
+The command takes a final judgment of the approval and records its revision
+(the record's snapshot plus the observation each field came from). Under one
+inter-process journal lock it then re-reads the approval and refuses unless
+the revision is unchanged, revalidates the terminal failed source, verifies
+that no retry exists, and records the retry intent, bound to that approval
+revision, as a second attempt under the **original obligation key**. After
+the reservation and immediately before the handler runs, it reads the
+approval once more; if it changed in any way, the reservation is marked
+`aborted`, nothing is paid, and that retry is never attempted again
+automatically. A crash after intent is unknown and can never execute a
+second time. The original attempt remains intact. Every daemon execution
+entrance, including Telegram break-glass, takes the same journal reservation
+before calling a handler.
+
 ## Troubleshooting — reason codes
 
 | Reason code | Check / remediation |

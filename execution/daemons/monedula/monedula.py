@@ -1284,63 +1284,10 @@ def _pending_summaries(triggered: list) -> list[str]:
 
 
 def _parse_reply(reply: str | None, handler_names: list[str]) -> set[str]:
-    """
-    Parse the operator's Telegram reply and return the set of handler names
-    to execute.
+    """Compatibility wrapper around the one shared attendance parser."""
+    from attendance import parse_reply
 
-    Payments are ATTENDANCE-GATED: every recurring payment (yoga, therapy)
-    pays for a session the operator was meant to attend. A calendar event is
-    NOT proof of attendance — sessions get skipped. So approval requires an
-    affirmative that names attendance, and a bare "yes" no longer blanket-
-    approves. Accepted forms:
-
-    "attended all"      / "paid all"        → all handlers
-    "attended yoga"     / "yes yoga"        → {"yoga"}
-    "attended therapy"  / "yes therapy"     → {"therapy"}
-    "no" / "skipped"    / None/timeout      → empty set (skip all)
-
-    Per-handler "yes <name>" / "y <name>" / "<name>" still work as an
-    affirmation that the named session was attended. A naked "yes"/"yes all"
-    with no session named is REJECTED (returns empty set) so the operator
-    can't reflexively approve a skipped session.
-    """
-    if not reply:
-        return set()
-
-    low = reply.lower().strip()
-
-    if low in ("no", "no all", "skip", "skip all", "skipped", "n", "didn't go", "did not attend"):
-        return set()
-
-    # Blanket approval requires an explicit "attended"/"paid"/"all" token —
-    # a naked "yes"/"yes all" is intentionally NOT enough.
-    if low in ("attended all", "paid all", "yes attended", "attended", "all attended"):
-        return set(handler_names)
-
-    # Per-handler attendance confirmation.
-    approved: set[str] = set()
-    for name in handler_names:
-        if low in (
-            f"attended {name}",
-            f"paid {name}",
-            f"yes {name}",
-            f"y {name}",
-            f"{name} attended",
-            name,
-        ):
-            approved.add(name)
-    if approved:
-        return approved
-
-    if low in ("yes", "yes all", "y", "y all"):
-        log.warning(
-            "Bare 'yes' received but payments are attendance-gated — "
-            "need 'attended all' or 'attended <session>'. Treating as skip."
-        )
-        return set()
-
-    log.warning(f"Unrecognised reply: {reply!r} — treating as skip all")
-    return set()
+    return parse_reply(reply, handler_names)
 
 
 def _build_preview_message(
@@ -1509,15 +1456,31 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                     keep.append(match)
                     continue
                 key = payment_journal.session_key(handler.name, eid)
+                started_on = event_session_date(match)
+                current_obligation = (
+                    obligation_key(handler, started_on, eid) if started_on else None
+                )
                 state = payment_journal.session_state(data, key)
                 if state in payment_journal.SESSION_TERMINAL:
-                    continue
-                if state is None and any(
-                    payment_journal.obligation_state(data, legacy) is not None
-                    for legacy in legacy_obligation_keys(
-                        handler, match, matches, _yesterday().isoformat()
+                    payment_journal.note_pending(
+                        jpath,
+                        key,
+                        ended_at=_match_ended_at(match),
+                        started_on=started_on or None,
+                        obligation=current_obligation,
                     )
-                ):
+                    continue
+                legacy_recorded = next(
+                    (
+                        legacy
+                        for legacy in legacy_obligation_keys(
+                            handler, match, matches, _yesterday().isoformat()
+                        )
+                        if payment_journal.obligation_state(data, legacy) is not None
+                    ),
+                    None,
+                )
+                if state is None and legacy_recorded is not None:
                     # Cutover guard: paid (or intent recorded) under the key the
                     # pre-session-window code used. Never raise it again.
                     log.warning(
@@ -1525,17 +1488,24 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                         "the legacy key — marking settled, not raising"
                     )
                     payment_journal.note_pending(
-                        jpath, key, ended_at=_match_ended_at(match)
+                        jpath,
+                        key,
+                        ended_at=_match_ended_at(match),
+                        started_on=started_on or None,
+                        obligation=legacy_recorded,
                     )
                     payment_journal.set_session_state(
                         jpath, key, payment_journal.SESSION_SETTLED
                     )
                     continue
                 seen_keys.add(key)
-                if state is None:
-                    payment_journal.note_pending(
-                        jpath, key, ended_at=_match_ended_at(match)
-                    )
+                payment_journal.note_pending(
+                    jpath,
+                    key,
+                    ended_at=_match_ended_at(match),
+                    started_on=started_on or None,
+                    obligation=current_obligation,
+                )
                 keep.append(match)
             if keep:
                 kept.append((handler, keep))
@@ -2014,13 +1984,12 @@ def main() -> bool:
                 unknown.append(label)
                 _notify_unknown_outcome(unknown, yesterday_str)
                 raise
-            status = (
-                str(result.get("status") or "unreported")
-                if isinstance(result, dict)
-                else "unreported"
-            )
             try:
-                payment_journal.record_outcome(jpath, item.obligation, status)
+                payment_journal.record_outcome(
+                    jpath,
+                    item.obligation,
+                    result if isinstance(result, dict) else "unreported",
+                )
             except payment_journal.JournalError as exc:
                 unknown.append(label)
                 _notify_unknown_outcome(unknown, yesterday_str)
@@ -2163,16 +2132,69 @@ def main() -> bool:
     log.info(f"Approved handlers: {approved}")
 
     # Execute approved payments
+    import payment_journal
+    from consent_email import (
+        build_pending_items,
+        journal_path,
+        match_key,
+        obligation_key,
+    )
+
+    jpath = journal_path()
     all_results = []
     for handler, matches in triggered:
         if handler.name not in approved:
             log.info(f"Skipping {handler.name} (not approved).")
             continue
         for match in matches:
+            try:
+                generation = payment_journal.current_generation(jpath)
+                (item,) = build_pending_items(
+                    [(handler, [match])], yesterday_str, generation
+                )
+                journal = payment_journal.load(jpath)
+                state = payment_journal.obligation_state(journal, item.obligation)
+                if state == payment_journal.STATE_DONE:
+                    log.info(
+                        f"Already paid {handler.name}:{item.match_id or 'solo'} "
+                        "— Telegram break-glass skip."
+                    )
+                    continue
+                if state == payment_journal.STATE_INTENT:
+                    log.error(
+                        f"payment_outcome_unknown {handler.name}:"
+                        f"{item.match_id or 'solo'} — holding, not retrying."
+                    )
+                    continue
+                if (
+                    obligation_key(handler, item.payment_date, item.match_id)
+                    != item.obligation
+                ):
+                    log.error(
+                        f"payment terms changed for {handler.name}; Telegram "
+                        "break-glass approval no longer applies."
+                    )
+                    continue
+                preflight = getattr(handler, "preflight", None)
+                if callable(preflight):
+                    preflight(match)
+                payment_journal.record_intent(
+                    jpath,
+                    item.obligation,
+                    match_key(item),
+                    generation=item.generation,
+                )
+            except payment_journal.JournalError as exc:
+                log.error(
+                    f"payment_journal_unreadable — Telegram break-glass payment "
+                    f"held: {exc}"
+                )
+                return False
             log.info(f"Executing {handler.name} payment...")
             _job = _activity.started(f"executing {handler.name} payment") if _activity else None
             try:
                 result = handler.execute(match)
+                payment_journal.record_outcome(jpath, item.obligation, result)
                 all_results.append((handler, result))
                 log.info(f"{handler.name} result: {result}")
                 if _job:

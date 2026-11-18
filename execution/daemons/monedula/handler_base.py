@@ -12,8 +12,12 @@ The result dict returned by execute() must include at least:
   {
     "status":   "sent" | "failed" | "manual_required",
     "handler":  <handler name>,
+    "failure_class": "pre_submission" | "unknown",  # non-sent results
     ...handler-specific fields...
   }
+
+``pre_submission`` is permitted only when the handler can prove the payment
+step was never started. Every other non-sent result defaults to ``unknown``.
 """
 
 from __future__ import annotations
@@ -57,6 +61,7 @@ class PaymentHandler(abc.ABC):
           {
             "status":  "sent" | "failed" | "manual_required",
             "handler": self.name,
+            "failure_class": "pre_submission" | "unknown",  # unless sent
           }
         Additional fields are handler-specific (e.g. txid, transfer_id, iban).
         """

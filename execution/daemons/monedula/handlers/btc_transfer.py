@@ -22,6 +22,23 @@ try:
 except ImportError:
     from handler_base import PaymentHandler  # type: ignore[no-redef]
 from . import task_writes
+
+
+def _claude_child_env() -> dict[str, str]:
+    """Environment for the payment `claude --print` child.
+
+    When both CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are set, the Claude
+    CLI uses the API key; if that account has no credit the child exits with
+    "Credit balance is too low" before any tool runs, and the payment fails.
+    That is what failed the yoga payment on 2026-11-15, and it is the same rule
+    phoenicurus-release/prepare.py applies to its agent. Drop the API key from
+    the CHILD only, never the daemon's own environment, so the child bills the
+    subscription; when only the API key is present, leave it.
+    """
+    env = dict(os.environ)
+    if env.get("CLAUDE_CODE_OAUTH_TOKEN") and env.get("ANTHROPIC_API_KEY"):
+        env.pop("ANTHROPIC_API_KEY")
+    return env
 from .payment_profile import PaymentProfile
 
 log = logging.getLogger(__name__)
@@ -72,6 +89,7 @@ class BtcTransferHandler(PaymentHandler):
         if not self.profile.btc_address:
             return {
                 "status": "failed",
+                "failure_class": "pre_submission",
                 "handler": self.name,
                 "error": f"{self.profile.prefix}_BTC_ADDRESS not set",
             }
@@ -81,6 +99,7 @@ class BtcTransferHandler(PaymentHandler):
         if not claude_path:
             return {
                 "status": "failed",
+                "failure_class": "pre_submission",
                 "handler": self.name,
                 "error": "claude CLI not found in PATH",
             }
@@ -91,17 +110,19 @@ class BtcTransferHandler(PaymentHandler):
                 capture_output=True,
                 text=True,
                 timeout=300,
-                env=os.environ,
+                env=_claude_child_env(),
             )
         except subprocess.TimeoutExpired:
             return {
                 "status": "failed",
+                "failure_class": "unknown",
                 "handler": self.name,
                 "error": "claude subprocess timed out after 300s",
             }
         except Exception as exc:
             return {
                 "status": "failed",
+                "failure_class": "unknown",
                 "handler": self.name,
                 "error": f"claude subprocess error: {exc}",
             }
@@ -118,12 +139,17 @@ class BtcTransferHandler(PaymentHandler):
             )
             return {
                 "status": "failed",
+                "failure_class": "unknown",
                 "handler": self.name,
                 "error": "No PAYMENT_RESULT line in claude output",
                 "raw_output": output[:500],
             }
 
         payment_result["handler"] = self.name
+        if payment_result.get("status") != "sent":
+            # The subprocess may have reached the wallet before emitting its
+            # result. Its own claim cannot prove that submission never began.
+            payment_result["failure_class"] = "unknown"
 
         if payment_result.get("status") == "sent":
             txid = payment_result.get("txid", "")

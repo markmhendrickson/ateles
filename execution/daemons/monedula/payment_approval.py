@@ -58,6 +58,17 @@ or unconfigured approver identity holds the payment. A later write to either
 field by anyone else moves the provenance to that write and withdraws the
 approval.
 
+RETRY RECORDS
+-------------
+A retry of a failed payment (``payment_retry.py``) is a separate record under
+its own key. It carries the original attempt as structured fields that are
+bound exactly like the payment terms (``RETRY_BOUND_FIELDS``): the original
+obligation key, the original ``intent_at`` and ``outcome_at``, its
+``failure_class``, the admission mode, and, for BTC, the canonical JSON of the
+chain reconciliation the operator approved against. If the journal's record
+of the original attempt changes after approval, the retry no longer matches
+and is held.
+
 BOUND FIELDS ARE FINAL
 ----------------------
 If a profile's amount, payee, reference, session or rail changes after the record
@@ -145,6 +156,16 @@ BOUND_FIELDS = (
     "reference",
 )
 
+# Retry records only: the original attempt and the evidence it was admitted on.
+RETRY_BOUND_FIELDS = (
+    "retry_of",
+    "original_intent_at",
+    "original_outcome_at",
+    "original_failure_class",
+    "retry_admission",
+    "reconciliation_evidence",
+)
+
 # Never written. Asserted by tests so a future field cannot leak them.
 FORBIDDEN_FIELD_NAMES = frozenset(
     {"iban", "wise_iban", "btc_address", "recipient_id", "wise_recipient_id", "memo"}
@@ -170,6 +191,12 @@ FIELD_SPECS: dict[str, tuple[str, str]] = {
     "blocking": ("boolean", "Always true"),
     "confidence_threshold": ("number", "Always 1.0"),
     "title": ("string", "Human-readable title"),
+    "retry_of": ("string", "Retry records: the original obligation key (hash)"),
+    "original_intent_at": ("string", "Retry records: the original attempt's journal intent time (epoch seconds, exact repr)"),
+    "original_outcome_at": ("string", "Retry records: the original attempt's journal outcome time (epoch seconds, exact repr)"),
+    "original_failure_class": ("string", "Retry records: pre_submission, unknown or unclassified"),
+    "retry_admission": ("string", "Retry records: pre_submission or btc_chain_reconciled"),
+    "reconciliation_evidence": ("string", "Retry records: canonical JSON of the chain check approved against; empty when none; never an address"),
 }
 CANONICAL_NAME_FIELDS = [KEY_FIELD]
 ENTITY_SCHEMA_VERSION = "1.0"
@@ -230,7 +257,7 @@ def expected_fields(item: Any) -> dict[str, Any]:
     reference = (
         "" if rail == "btc" else str(getattr(profile, "wise_reference", "") or "")
     )
-    return {
+    fields = {
         "handler": str(item.handler_name),
         "session": str(item.match_id or item.payment_date),
         "session_date": str(item.payment_date),
@@ -240,6 +267,17 @@ def expected_fields(item: Any) -> dict[str, Any]:
         "payee_display_name": payee_display_name(handler),
         "reference": reference,
     }
+    retry = _retry_context(item)
+    if retry is not None:
+        for name in RETRY_BOUND_FIELDS:
+            fields[name] = str(retry.get(name) if retry.get(name) is not None else "")
+    return fields
+
+
+def _retry_context(item: Any) -> dict | None:
+    match = item.match if isinstance(getattr(item, "match", None), dict) else {}
+    retry = match.get("retry_context")
+    return retry if isinstance(retry, dict) else None
 
 
 def _snapshot(entity: dict) -> dict:
@@ -250,6 +288,13 @@ def _snapshot(entity: dict) -> dict:
 
 
 def _title(item: Any) -> str:
+    retry = _retry_context(item)
+    if retry is not None:
+        return (
+            f"Retry of failed payment: {item.label} {item.payment_date} "
+            f"[{str(item.obligation)[:12]}]; payee={payee_display_name(item.handler)}; "
+            f"amount={item.amount_eur} {_currency()}; {retry.get('operator_notice')}"
+        )
     return (
         f"Payment approval: {item.label} {item.payment_date} "
         f"[{str(item.obligation)[:12]}]"
@@ -374,6 +419,7 @@ def raise_request(item: Any) -> dict:
     record reads back with every bound field and ``awaiting_operator`` status.
     """
     fields = expected_fields(item)
+    raised_at = _now().isoformat()
     entity = {
         "entity_type": ENTITY_TYPE,
         "payment_key": str(item.obligation),
@@ -381,7 +427,7 @@ def raise_request(item: Any) -> dict:
         "status": STATUS_AWAITING,
         "blocking": True,
         "confidence_threshold": 1.0,
-        RAISED_AT_FIELD: _now().isoformat(),
+        RAISED_AT_FIELD: raised_at,
         **fields,
     }
     assert not (FORBIDDEN_FIELD_NAMES & set(entity)), "payment_approval leaks a payee detail"
@@ -410,9 +456,36 @@ def raise_request(item: Any) -> dict:
     for name, want in fields.items():
         if back.get(name) != want:
             raise ApprovalError(f"payment_approval field {name!r} did not persist")
+    for name, want in (
+        ("title", entity["title"]),
+        ("blocking", True),
+        ("confidence_threshold", 1.0),
+    ):
+        if back.get(name) != want:
+            raise ApprovalError(f"payment_approval field {name!r} did not persist")
+    if not isinstance(back.get(RAISED_AT_FIELD), str) or not back[RAISED_AT_FIELD]:
+        raise ApprovalError(
+            f"payment_approval field {RAISED_AT_FIELD!r} did not persist"
+        )
     if back.get("status") != STATUS_AWAITING:
         raise ApprovalError("payment_approval did not read back as awaiting_operator")
     return back
+
+
+def approval_revision(entity: dict) -> str:
+    """A digest of exactly what was judged: the snapshot and the observation
+    each field's value came from. Any later write to the record (a rejection,
+    a rewritten answer, a re-bound field) changes it."""
+    import hashlib
+
+    body = {
+        "entity_id": entity.get("entity_id"),
+        "snapshot": _snapshot(entity),
+        "provenance": entity.get("provenance"),
+    }
+    return hashlib.sha256(
+        json.dumps(body, sort_keys=True, default=str).encode()
+    ).hexdigest()
 
 
 def judge(item: Any, entity: dict, parse_reply: Callable[[str | None, list[str]], set[str]]) -> Verdict:
@@ -444,7 +517,10 @@ def judge(item: Any, entity: dict, parse_reply: Callable[[str | None, list[str]]
     want = expected_fields(item)
     if record.get(KEY_FIELD) != str(item.obligation):
         return Verdict("blocked", "record is for a different payment")
-    for name in BOUND_FIELDS:
+    is_retry = _retry_context(item) is not None
+    if not is_retry and any(record.get(name) for name in RETRY_BOUND_FIELDS):
+        return Verdict("blocked", "a retry record cannot approve an ordinary payment")
+    for name in BOUND_FIELDS + (RETRY_BOUND_FIELDS if is_retry else ()):
         if record.get(name) != want[name]:
             return Verdict("blocked", f"approval does not match the payment ({name})")
 
