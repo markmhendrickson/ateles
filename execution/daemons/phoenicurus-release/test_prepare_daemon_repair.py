@@ -68,6 +68,9 @@ class TestSpawnPrepareAgentMissingClaudeCLI:
         # The agent's GitHub identity check is covered in test_prepare.py; this
         # test is about the CLI lookup, so the identity is taken as verified.
         monkeypatch.setattr(prepare, "_agent_github_identity_ok", lambda env: True)
+        monkeypatch.setattr(prepare, "SPAWN_COUNT_FILE", tmp_path / "spawns.json")
+        monkeypatch.setattr(prepare, "snapshot_release_guards", lambda _: {"git hooks": "digest"})
+        monkeypatch.setattr(prepare, "_head_sha", lambda: "a" * 40)
         agent_log = tmp_path / "agent.log"
         monkeypatch.setattr(prepare, "AGENT_LOG", agent_log)
         with patch.object(prepare, "telegram_send") as mock_telegram, patch.object(

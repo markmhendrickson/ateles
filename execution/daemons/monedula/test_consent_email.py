@@ -1131,7 +1131,7 @@ def test_authored_withdrawal_holds_payment(monkeypatch, tmp_path, calendar, tail
     result = consent_email.request_and_collect(
         [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
     assert result.approved == set()
-    assert result.reason_code == "consent_reply_unrecognized"
+    assert result.reason_code in {"consent_reply_unrecognized", "consent_reply_read_failed"}
 
 
 @pytest.mark.parametrize("calendar", (True, False))
@@ -1139,7 +1139,7 @@ def test_authored_withdrawal_holds_payment(monkeypatch, tmp_path, calendar, tail
     "On Tuesday Example wrote:\n> Pending payment(s) — reply to approve or skip. No payment moves until you reply.",
     "-----Original Message-----\nFrom: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\n> Pending payment(s) — reply to approve or skip. No payment moves until you reply.",
 ))
-def test_proven_bottom_quote_can_approve_payment(monkeypatch, tmp_path, calendar, quote):
+def test_unverified_bottom_quote_cannot_approve_payment(monkeypatch, tmp_path, calendar, quote):
     h = _Handler("therapy" if calendar else "oneoff", label="Example", amount=60,
                  calendar=calendar)
     item = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0]
@@ -1150,14 +1150,44 @@ def test_proven_bottom_quote_can_approve_payment(monkeypatch, tmp_path, calendar
         body_by_id={"m1": {"body_text": body}}))
     result = consent_email.request_and_collect(
         [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
-    assert result.approved == {consent_email.match_key(item)}
+    assert result.approved == set()
+    assert result.reason_code == "consent_reply_read_failed"
+
+
+@pytest.mark.parametrize("batch", (False, True))
+def test_matching_sent_header_and_quote_approve_payment(monkeypatch, tmp_path, batch):
+    handlers = [_Handler("session", label="Example", amount=60)]
+    if batch:
+        handlers.append(_Handler("invoice", label="Invoice", amount=25, calendar=False))
+    triggered = [(handler, [{}]) for handler in handlers]
+    items = consent_email.build_pending_items(triggered, "2026-09-22")
+    subject, original = consent_email.build_request_body(items, superseded=False)
+    authored = "\n".join(
+        f"{'ATTENDED' if item.is_calendar else 'APPROVE'} {subject_marker(item.token)}"
+        for item in items)
+    quote = ("-----Original Message-----\nFrom: Swarm <swarm@example.net>\n"
+             "Sent: Tue, 17 Nov 2026 12:00:00 +0000\n"
+             f"To: Op <op@example.com>\nSubject: {subject}\n"
+             f"> {original.splitlines()[0]}")
+    _arm_email(monkeypatch)
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        items[0].token, auth_by_id={"m1": [_GOOGLE_PASS]},
+        body_by_id={"m1": {"body_text": authored + "\n" + quote}}))
+    monkeypatch.setattr(_ec, "sent_request_body", lambda *_:
+                        _ec.SentRequest(original, "Swarm <swarm@example.net>",
+                                        "Op <op@example.com>", subject,
+                                        "Tue, 17 Nov 2026 12:00:00 +0000"))
+    result = consent_email.request_and_collect(triggered, "2026-09-22",
+                                                state_path=tmp_path / "m.json")
+    assert result.approved == {item.token for item in items}
 
 
 @pytest.mark.parametrize("batch", (False, True))
 @pytest.mark.parametrize("shape,approved,unreadable", (
     ("unquoted_tail", False, True),
-    ("quoted_tail", True, False),
-    ("unseparated_headers", False, False),
+    ("quoted_tail", False, True),
+    ("unseparated_headers", False, True),
     ("plain_approves", False, True),
     ("html_approves", False, True),
     ("matching", True, False),
@@ -1214,8 +1244,6 @@ def test_consent_parts_and_quote_boundaries(
                 assert consent_email.accepted_reply_form(item) in sends[1][1]
             else:
                 assert subject_marker(item.token) in sends[1][0]
-    elif shape == "unseparated_headers":
-        assert result.reason_code == "consent_reply_unrecognized"
 
 
 @pytest.mark.parametrize("batch", (False, True))

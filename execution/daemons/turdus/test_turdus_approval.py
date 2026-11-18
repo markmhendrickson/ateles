@@ -770,7 +770,10 @@ def _poll_authored_reply(monkeypatch, tmp_path, kind, body_data, *, polls=1,
                 base = {"complete": True, "messages": []}
             return triage_response(token, base) if triage_response else base
         if "+read" in args:
-            return {"body_text": sent_body} if "sent-1" in args else body_data
+            return ({"body_text": sent_body, "from": "Swarm <swarm@example.net>",
+                     "to": "Op <op@example.com>",
+                     "date": "Tue, 17 Nov 2026 12:00:00 +0000"}
+                    if "sent-1" in args else body_data)
         raise AssertionError(args)
 
     posts = []
@@ -809,7 +812,7 @@ def test_subject_only_reply_never_routes_and_notifies_once(
     target = "v1.2.3" if kind == "release" else "o/r#7"
     command = "approve v1.2.3" if kind == "release" else "approve"
     corrections = [message for message in notices.sent if "did not contain" in message]
-    assert posts == [] and "approval-1" not in state.get("processed_ids", [])
+    assert posts == [] and "approval-1" in state.get("processed_ids", [])
     assert len(corrections) == 1
     assert target in corrections[0] and f"`{command}`" in corrections[0]
     assert "quote the request" in corrections[0]
@@ -1497,18 +1500,20 @@ def test_authored_withdrawal_never_routes(monkeypatch, tmp_path, kind, tail):
         monkeypatch, tmp_path, kind, {"body_text": f"{approval}\n{tail}"}, polls=2)
     assert posts == []
     assert "approval-1" not in state.get("processed_ids", [])
-    assert len([note for note in notices.sent if "no approval was recorded" in note]) == 1
+    assert len([note for note in notices.sent if
+                "no approval was recorded" in note or "could not be read yet" in note]) == 1
 
 
 @pytest.mark.parametrize("kind", ("release", "pr"))
-@pytest.mark.parametrize("quote", (
-    "On Tuesday Example wrote:\n> original",
-    "-----Original Message-----\nFrom: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\n> original",
-    "Begin forwarded message:\nFrom: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\n> original",
-))
-def test_proven_bottom_quote_still_routes(monkeypatch, tmp_path, kind, quote):
+@pytest.mark.parametrize("separator", ("-----Original Message-----", "Begin forwarded message:"))
+def test_verified_header_and_quote_still_routes(monkeypatch, tmp_path, kind, separator):
     approval = "approve v1.2.3" if kind == "release" else "approve"
     token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    subject = ("Release v1.2.3 ready to approve" if kind == "release" else
+               "[Ateles] PR o/r#7 is READY TO MERGE")
+    quote = (f"{separator}\nFrom: Swarm <swarm@example.net>\n"
+             "Sent: Tue, 17 Nov 2026 12:00:00 +0000\n"
+             f"To: Op <op@example.com>\nSubject: {subject}\n> original")
     posts, _, _ = _poll_authored_reply(
         monkeypatch, tmp_path, kind, {"body_text": f"{approval}\n{quote}"},
         sent_body=f"original\n{token}")

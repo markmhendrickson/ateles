@@ -657,6 +657,9 @@ def test_spawn_passes_settings_to_claude(monkeypatch, tmp_path):
     from unittest.mock import patch as _patch
     monkeypatch.setattr(_shutil, "which", lambda name: "/usr/local/bin/claude")
     monkeypatch.setattr(prepare, "AGENT_LOG", tmp_path / "agent.log")
+    monkeypatch.setattr(prepare, "SPAWN_COUNT_FILE", tmp_path / "spawns.json")
+    monkeypatch.setattr(prepare, "snapshot_release_guards", lambda _: {"git hooks": "digest"})
+    monkeypatch.setattr(prepare, "_head_sha", lambda: SHA)
     monkeypatch.setattr(prepare, "_record_spawn_pid", lambda head, pid: None)
     monkeypatch.setenv("NEOTOMA_ENV", "production")
     monkeypatch.setattr(prepare, "_agent_github_identity_ok", lambda env: True)

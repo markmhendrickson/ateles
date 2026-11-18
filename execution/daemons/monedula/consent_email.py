@@ -785,10 +785,14 @@ def request_and_collect(
     if correction_holds:
         held_ids.update(reply.message_id for reply in outcome.replies)
     if notified_ids or held_ids:
-        _save_mark(path, fp, float(mark.get("sent_at") or time.time()),
-                   generation=generation, request_body=original_lines,
-                   notified_reply_ids=sorted(notified_ids),
-                   held_reply_ids=sorted(held_ids))
+        try:
+            _save_mark(path, fp, float(mark.get("sent_at") or time.time()),
+                       generation=generation, request_body=original_lines,
+                       notified_reply_ids=sorted(notified_ids),
+                       held_reply_ids=sorted(held_ids))
+        except (OSError, TypeError, ValueError) as exc:
+            log.error(f"consent correction state unavailable — payments held: {exc}")
+            return _block_all(items, "consent_correction_state_unavailable")
 
     if outcome.kind in ("transport_error", "disabled"):
         log.error(

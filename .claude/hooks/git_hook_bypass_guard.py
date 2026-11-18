@@ -244,7 +244,7 @@ _WRAPPERS = frozenset(_WRAPPER_GRAMMAR)
 # These runners add authority or interpret an opaque command, and release
 # preparation has no documented use for them. Keep their grammar entries so
 # an attempted invocation is recognized and refused before generic handling.
-_DENIED_WRAPPERS = frozenset({"script", "parallel", "watch", "chroot", "doas", "sudo"})
+_DENIED_WRAPPERS = frozenset({"script", "parallel", "watch", "chroot", "doas", "sudo", "xargs"})
 _DENIED_DIRECTORY_PROGRAMS = frozenset({
     "pushd", "popd", "mount", "umount", "tmux", "screen", "nsenter",
     "runuser", "su",
@@ -1255,7 +1255,7 @@ def _download_destinations(base: str, args: list[str]) -> tuple[list[str], list[
 def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None:
     for op, target in cmd.redirects:
         if ">" in op and (target.expanded or target.write_glob
-                         or _tree_write_target(target.text)):
+                         or _tree_write_target(target.text) or _protected_path(target.text)):
             return f"shell redirection writing protected hook or git config path {target.text}"
     if not words:
         return None
@@ -1607,10 +1607,6 @@ def _nested_program_violation(cmd: SimpleCommand, rest: list[Word], depth: int) 
             return True, "eval body assembled by the shell"
         return True, _judge_program_body(" ".join(w.text for w in body), depth)
     starts = [0]
-    if base == "xargs":
-        # Its operand list comes from stdin or -a, outside this command's
-        # literal destination model. Release preparation has no need for it.
-        return "xargs destinations cannot be resolved literally"
     if base in _WRAPPERS:
         executable = _wrapped_executable(rest)
         if executable is None:

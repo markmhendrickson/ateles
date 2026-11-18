@@ -144,7 +144,11 @@ def test_other_nested_shell_forms_refuse_protected_writes(form, body):
     "bash <<< '{body}'", "sh <<'EOF'\n{body}\nEOF",
 ))
 def test_nested_shell_forms_allow_ordinary_write(form):
-    assert_allowed(form.format(body="printf x > src/out"))
+    command = form.format(body="printf x > src/out")
+    if command.startswith(("find ", "xargs ")):
+        assert_refused(command)
+    else:
+        assert_allowed(command)
 
 
 @pytest.mark.parametrize("command", (

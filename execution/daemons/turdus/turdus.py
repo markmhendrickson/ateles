@@ -904,7 +904,7 @@ async def _maybe_handle_swarm_approval(msg: dict, notifier: Notifier) -> bool:
     if sender_addr != OPERATOR_EMAIL:
         return False
     subject = msg.get("subject", "") or ""
-    if _MERGE_READY_SUBJECT_MARKER not in subject:
+    if _MERGE_READY_SUBJECT_MARKER.lower() not in subject.lower():
         return False
     body = msg.get("body") if "body" in msg else _read_message_body(msg.get("id", ""))
     authenticated = msg.get("authenticated")
@@ -1223,7 +1223,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
                 priority=Priority.BLOCKER, handler=DAEMON_NAME,
                 email_eligible=False,
             )
-            if delivered:
+            if delivered and outcome.kind == "ok":
                 correction_id_set.add(mid)
                 correction_ids.append(mid)
                 _mark_handled(mid)
@@ -1263,7 +1263,8 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
                     if delivered:
                         held_notice_set.add(reply.message_id)
                         held_notice_ids.append(reply.message_id)
-                        _mark_handled(reply.message_id)
+                        if correction_targets:
+                            _mark_handled(reply.message_id)
                 if msg.get("correction_notified") and reply.message_id not in correction_id_set:
                     correction_id_set.add(reply.message_id)
                     correction_ids.append(reply.message_id)
