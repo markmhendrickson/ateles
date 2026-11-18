@@ -1,162 +1,25 @@
 #!/usr/bin/env python3
-"""Project the decision register onto three axes: ruled, merged, implemented.
+"""Project the decision register onto ruled, merged, and implemented.
 
-``conformance.md#the-register-of-open-design-decisions`` marks each row **open**
-or **ruled**. That single axis conflates three genuinely different states, and
-the conflation produces wrong reads rather than merely imprecise ones:
+The single-source view reads ``docs/foundation/conformance.md`` from the
+checked-out worktree by default, or ``origin/main`` with ``--source main``.
+The same input produces the same bytes. ``--check`` validates the register and
+renders the projection without writing or comparing a committed file. Read it
+with ``--stdout`` or save it with ``--out``. The output is never authored or
+committed. The separate ``--branches`` view is report-only and reads remote
+branches to show rulings absent from main and row-number collisions.
 
-**ruled**
-    the question has an answer, wherever that answer currently lives.
+The ruled axis asks whether the question has an answer. Merged asks whether
+that ruling is on main. Implemented is checked only where a concrete artefact
+is known; otherwise it is unknown. A reopened row is not ruled. A branch row
+counts as a ruling of a main row only when its normalized question or
+``argued_in`` anchor agrees. An unrelated same-number row is a collision.
 
-**merged**
-    the ruling is on ``origin/main``, so an agent reading the corpus sees it. A
-    ruling on an unmerged branch is ruled and not merged: the register on
-    ``origin/main`` still says **open**, and an executor reading the corpus
-    finds an open question where an answer exists.
-
-**implemented**
-    code or record state actually satisfies the ruling. This axis is **not**
-    inferred from the other two. A ruling's existence is not evidence that
-    anything implements it, and this script reports ``unknown`` — never a
-    guess — for every row it cannot check against a concrete artefact.
-
-**Two documents, not one.** The committed ``decision_state.md`` is a pure
-projection of the checked-out commit: it reads the register at ``origin/main``
-only, and reports nothing that depends on any other branch. It is therefore
-deterministic for a given commit, which is what makes it a ``--check`` gate a
-PR can pass or fail on its own content. The cross-branch view — "a row ruled on
-some branch but not yet merged" — is genuinely useful (decision 101 was ruled on
-``claude/foundation-decision-101-credential-binding`` for weeks before ``main``
-caught up) but it is **not** committed: it is rendered on demand by ``--branches``,
-printed to stdout, never written to disk and never checked. Committing it was
-the second defect this module had. The projection read ``origin/main`` plus
-every ``origin/*`` branch, so the committed file changed whenever *any* branch
-moved — an open PR's own copy went stale from someone else's unrelated push, the
-required "foundation corpus checkers" CI job failed on PRs whose content had not
-changed, and every regeneration moved the document's head and invalidated
-whatever a review lens had already signed off on. A render target that a machine
-cannot reproduce from the commit it is checked out at is not a projection of that
-commit; it is a projection of whatever else happened to be on the remote at fetch
-time. See ``collect_main`` (committed) and ``collect_branches`` (report-only)
-below.
-
-**Round two: which commit "the checked-out commit" means.** Fixing the first
-defect by pinning the read to ``origin/main`` introduced a narrower one: a PR
-that adds or rules a register row could never regenerate this document
-correctly, because ``origin/main`` does not have that row until the PR merges.
-``ateles#1300`` hit this directly -- its own regeneration attempt found
-``--check`` already red against ``origin/main`` for unrelated reasons and
-could not tell that from "my new row makes this red", because reading
-``origin/main`` can never see a row that only exists on the PR's own branch.
-The moment such a PR merged, the committed file was stale on ``main`` with no
-PR-side check able to have caught it. The fix is ``register_at``'s
-``WORKTREE_SOURCE`` and ``collect_main``'s ``source`` parameter: the CLI's
-default (``--source worktree``) reads ``docs/foundation/conformance.md`` off
-the checked-out working tree rather than re-fetching a ref. On this repo's
-``pull_request`` CI binding, ``actions/checkout`` has already materialized
-base-plus-PR as that working tree (GitHub's own ephemeral
-``refs/pull/N/merge`` commit) before this script runs, so the working tree
-*is* the PR's own merge result -- the row it just added is visible, and the
-PR's regeneration matches what the file needs to be once it merges. On the
-``push``-to-``main`` binding the two sources agree, since the working tree is
-that push's own commit, so nothing about that binding's verdict changes.
-``--source main`` keeps the old always-refetch behaviour for a caller with no
-working tree to trust.
-
-**Why this is generated and not authored.** The predecessor plan carried its
-blockers in a hand-maintained ``decision_blockers`` array; a union-reducer defect
-stacked three generations of entries, several of which had become false —
-recording decisions as "NOT YET MERGED" that had merged. A hand-maintained view
-of a moving register is wrong by construction, and re-authoring it is not the
-repair. This script is re-run instead: the output is a render target held to its
-source by ``--check``, the same discipline
-``conformance.md#direction-of-truth-per-class-of-record`` already applies to
-``render_plan_docs.py`` and ``render_reading_projection.py``.
-
-**How each axis is decided.**
-
-*ruled* and *merged*, in the committed document, come from the register table on
-``origin/main`` alone. *ruled* and *merged* in the ``--branches`` report also
-weigh every ``origin/*`` branch that carries a copy of ``conformance.md``: a row
-whose status on ``origin/main`` is open, and which some branch has moved to
-ruled, is **ruled but not merged**, and the branch is named. Only forward
-movement counts: a branch forked before a ruling landed carries a stale copy
-that reads *open* where ``origin/main`` reads *ruled*, and treating that as a
-retraction would invent a reopening no one performed. A row **reopened** on
-``origin/main`` is not ruled — the register's own status vocabulary carries
-``reopened`` distinctly from ``ruled``, and collapsing the two would erase the
-fact that a settled question was unsettled again.
-
-**A branch's ruling counts unless main has since unsettled that row, and unless
-the branch is ruling a different question under the same number.** Decision 95
-is why the first clause exists: it was ruled and reopened the same day, and
-branches forked in between still carry the *superseded* ruling. Reading those as
-rulings main is missing would report a reopened question as answered — inverting
-the very fact the reopening recorded. So a branch's ``ruled`` is refused for any
-row main now reads ``reopened``, and the refusal is reported rather than
-silently dropped.
-
-The second clause exists because a row number is not a stable identity across
-branches. ``ateles#1288`` and the then-open ``ateles#1088`` both used row 111 for
-unrelated questions — ``#1288``'s question landed on ``main`` as row 111, and
-``#1088`` was carrying a *different* ruling under the same number on its branch.
-Matching by number alone reads that as "row 111 ruled on a branch, not yet
-merged" — a real ruling, misreported as pending, when in fact nothing about
-``main``'s row 111 was unmerged at all; the branch was answering a different
-question that happened to reuse the number. So a branch's row is admitted as a
-ruling of ``main``'s row only when the two rows are the **same subject**
-(``same_subject``, below); a same-number row that is not is a **collision** —
-reported by name, on both sides, and never read as a ruling of either.
-
-**Same subject.** Two candidates both look, at first, like a stable name for a
-row's question independent of its number: the question text itself, and
-``argued_in``, the register's own pointer to where the ruling lives (e.g.
-`` `data_model.md#whether-a-rules-end-is-a-date-a-condition-or-a-task` ``).
-Proving this function against the corpus's *live* branches — not synthetic
-cases alone — found both wrong on their own. Row 99's anchor moved from a
-heading describing the open question to one stating the ruling the moment it
-was ruled, with its question text untouched; rows 84, 102 and 107 carry
-question text tightened mid-draft on an open PR branch, with ``argued_in``
-never moving. A key built from either field alone misreads one of these
-ordinary edits as a collision. So two rows are the same subject when
-**either** field agrees — normalized question text equal, or normalized
-``argued_in`` equal — and a collision is declared only when **both** disagree,
-which is what actually happened between ``#1288`` and ``#1088``: neither their
-question text nor their anchors had anything in common, because the two
-authors never saw each other's row.
-
-That staleness test (main-has-since-reopened) is on the row's content,
-deliberately. It was first written as commit ancestry — admit a branch only if
-it descends from main's last commit touching the register — and that was wrong
-in a way that took four disproved theories to find. ``git rev-list -1
-origin/main -- conformance.md`` returns a different commit depending on how a
-checkout built its history, so CI marked 66 refs stale where a developer's clone
-marked 2, and the same source rendered two different documents: decision 93
-ruled on one machine, unruled on the other. A projection whose output depends on
-the machine that rendered it cannot be a ``--check`` gate. Staleness was never a
-history question — a branch is carrying history when *that row's* status has
-moved on, which the two copies of the row state directly.
-
-*implemented* is checked only where a row's own ruling names a concrete artefact
-this repository can be asked about, through the checkers registered in
-``conformance.md#mechanical-checks-on-this-directory``. Everywhere else it is
-``unknown``. ``unknown`` is a first-class value here and not a failure to try:
-``principles.md`` keeps unknown distinct from a conclusion, and an implemented
-axis that guessed would be worth less than no axis at all.
-
-Stdlib only, apart from ``git``. Registered in
-``conformance.md#mechanical-checks-on-this-directory``.
-
-**Where ``--check`` is bound (ateles#1138).** ``scripts/lint.sh`` runs it on every
-invocation, and ``.github/workflows/foundation-checks.yml``'s ``checkers`` job
-runs it both on every ``pull_request`` this job's paths filter matches AND on
-every ``push`` to ``main`` with no paths filter -- the push binding exists
-because the committed document is main's own state, so a push that changes no
-foundation path can still leave it stale, and a paths filter there would skip
-exactly that push silently. Both bindings pass ``--source worktree``
-(explicitly in the workflow, by default in ``lint.sh``) so a row-adding PR
-regenerates against its own merge result rather than a stale ``origin/main``
-(ateles#1138 round two).
+``scripts/lint.sh`` invokes ``--check``. The ``foundation-checks.yml`` checkers
+job binds it on matching pull_request paths and on every push to main without
+a paths filter. CI uploads the current render as an artifact. Both bindings
+use ``--source worktree``, so a PR sees its own merge result. This script is
+stdlib-only apart from git.
 """
 
 from __future__ import annotations
@@ -176,7 +39,7 @@ MAIN_REF = "origin/main"
 
 # Sentinel for `register_at`/`collect_main`: read the register from the
 # checked-out working tree rather than a git ref. This is the default source
-# for the committed document -- see `collect_main` for why a row-adding PR
+# for the single-source projection -- see `collect_main` for why a row-adding PR
 # cannot regenerate correctly against `origin/main` alone.
 WORKTREE_SOURCE = "WORKTREE"
 
@@ -275,10 +138,10 @@ def parse_rows(text: str) -> dict[str, dict[str, str]]:
         lead = STATUS_LEAD_RE.match(cells[-1])
         if not lead:
             continue
-        status_lead = lead.group(1).strip().lower()
-        status = next(
-            (k for k in STATUS_ORDER if status_lead.startswith(k)), status_lead
-        )
+        # Exact match only. A prefix match let "**ruled-ish**" or "**ruled out**"
+        # project as ruled; an unknown value stays as written (and the clean-render
+        # check rejects it) rather than being read as the nearest status.
+        status = lead.group(1).strip().lower()
         rows[m.group(1)] = {
             "question": cells[0],
             "argued_in": cells[1],
@@ -287,6 +150,65 @@ def parse_rows(text: str) -> dict[str, dict[str, str]]:
             "status_cell": cells[-1],
         }
     return rows
+
+
+def validate_register(text: str) -> None:
+    """Reject malformed or duplicate numbered rows in the register table."""
+    lines = text.splitlines()
+    try:
+        start = next(i for i, line in enumerate(lines) if line.startswith("| # | The question |")) + 2
+    except StopIteration as exc:
+        raise ValueError("register table header is missing") from exc
+    seen: set[str] = set()
+    count = 0
+    for line in lines[start:]:
+        if not line.startswith("|"):
+            if line.strip():
+                raise ValueError(f"malformed register row: {line[:100]}")
+            if count:
+                break
+            continue
+        match = ROW_RE.match(line)
+        if not match:
+            raise ValueError(f"malformed register row: {line[:100]}")
+        number = match.group(1)
+        cells = [cell.strip() for cell in match.group(2).split("|")]
+        if len(cells) < 4 or not all(cells[:3]) or not STATUS_LEAD_RE.match(cells[-1]):
+            raise ValueError(f"malformed register row {number}")
+        status = STATUS_LEAD_RE.match(cells[-1]).group(1).strip().lower()
+        if status not in STATUS_ORDER:
+            raise ValueError(
+                f"unknown status {status!r} in register row {number}; "
+                f"allowed: {', '.join(STATUS_ORDER)}"
+            )
+        if number in seen:
+            raise ValueError(f"duplicate register row {number}")
+        seen.add(number)
+        count += 1
+    if not count:
+        raise ValueError("register table has no numbered rows")
+    # The projection (`parse_rows`) reads EVERY numbered row of the document, not only the
+    # contiguous table above: a row after a blank line is projected too. Validate that same
+    # set, so no row can reach the projection without passing the status vocabulary and
+    # the one-row-per-number rule.
+    projected: set[str] = set()
+    for line in lines:
+        match = ROW_RE.match(line)
+        if not match:
+            continue
+        cells = [cell.strip() for cell in match.group(2).split("|")]
+        lead = STATUS_LEAD_RE.match(cells[-1]) if len(cells) >= 4 else None
+        if not lead:
+            continue
+        status = lead.group(1).strip().lower()
+        if status not in STATUS_ORDER:
+            raise ValueError(
+                f"unknown status {status!r} in register row {match.group(1)}; "
+                f"allowed: {', '.join(STATUS_ORDER)}"
+            )
+        if match.group(1) in projected:
+            raise ValueError(f"duplicate register row {match.group(1)}")
+        projected.add(match.group(1))
 
 
 def requalify(text: str) -> str:
@@ -535,7 +457,7 @@ def is_superseded(
 def collect_main(source: str = MAIN_REF) -> list[Row]:
     """Build every row's axes from a single source: ``source``.
 
-    This is the ONLY input to the committed document and to ``--check``. It
+    This is the ONLY input to the generated document and to ``--check``. It
     reads exactly one source, so its output is a pure function of that source
     -- nothing about any other branch, and nothing about which refs a
     particular clone happens to have fetched, can change it. That determinism
@@ -553,15 +475,13 @@ def collect_main(source: str = MAIN_REF) -> list[Row]:
     Pass ``source=WORKTREE_SOURCE`` to read the register straight off the
     checked-out working tree instead of re-fetching a ref. This is what the
     `pull_request` CI binding now does (ateles#1138 round two): a PR that
-    adds or rules a register row cannot regenerate `decision_state.md`
-    correctly against `origin/main` alone, because that row does not exist on
-    `origin/main` until the PR merges -- the render is mechanically incapable
-    of matching what the file will need to be once merged, no matter how
-    carefully the PR regenerates. `actions/checkout` on a `pull_request` event
+    adds or rules a register row cannot render its own projected state
+    against `origin/main` alone, because that row does not exist on
+    `origin/main` until the PR merges. `actions/checkout` on a `pull_request` event
     has already materialized base-plus-PR as the working tree (GitHub's own
     ephemeral `refs/pull/N/merge` commit), so reading the working tree gives
-    the PR's own merge result, and the PR can pass `--check` on its own
-    content before it ever merges. On `push` to `main` the two sources agree
+    the PR's own merge result, and the PR can pass `--check` before it merges.
+    On `push` to `main` the two sources agree
     (the working tree is that push's commit), so switching a caller from one
     to the other never changes that binding's verdict.
 
@@ -722,7 +642,7 @@ def _row_sort_key(num: str) -> tuple[int, str]:
 
 
 def render(rows: list[Row]) -> str:
-    """The committed document. Never edited in place -- regenerate instead.
+    """The generated document. Never edited in place or committed.
 
     A pure function of ``rows`` -- no branch name, no branch count, no
     cross-branch fact appears anywhere below. That is deliberate: this is the
@@ -749,9 +669,9 @@ def render(rows: list[Row]) -> str:
     add("# Decision state: ruled, merged, implemented")
     add("")
     add(
-        "**Kind:** foundation companion; generated, never authored. **Generated by:** "
-        "`execution/scripts/render_decision_state.py`, held equal to its source by "
-        "`--check` in `scripts/lint.sh`. **Source:** the register table at "
+        "**Kind:** foundation companion; generated, never authored or committed. **Generated by:** "
+        "`execution/scripts/render_decision_state.py`; `--check` verifies a clean "
+        "render in `scripts/lint.sh`. **Source:** the register table at "
         "`conformance.md#the-register-of-open-design-decisions`, read from exactly "
         "one source -- the checked-out working tree by default, or "
         f"`{MAIN_REF}` via `--source main` -- so this document is a deterministic "
@@ -773,14 +693,12 @@ def render(rows: list[Row]) -> str:
     )
     add("")
     add(
-        "- **ruled?** — the question has an answer. Read from the register's status "
-        f"on `{MAIN_REF}`."
+        "- **ruled?** — the question has an answer. Read from the selected register source."
     )
     add(
-        "- **merged?** — the ruling is on "
-        f"`{MAIN_REF}`, so an agent reading the corpus sees it. In this document "
+        "- **merged?** — the ruling is present in the selected register source. In this document "
         "**ruled and merged always agree**, because both are read from the same "
-        f"single ref (`{MAIN_REF}`); a ruling that exists only on another branch "
+        "single source; a ruling that exists only on another branch "
         "is invisible here by design — see **Rulings not yet on main**, below, "
         "for how to see it."
     )
@@ -794,8 +712,7 @@ def render(rows: list[Row]) -> str:
     )
     add("")
     add(
-        "A row **reopened** on "
-        f"`{MAIN_REF}` is reported as not ruled. The register's status vocabulary "
+        "A row **reopened** in that source is reported as not ruled. The register's status vocabulary "
         "carries `reopened` distinctly from `ruled`, and collapsing the two would "
         "erase that a settled question was unsettled again."
     )
@@ -810,7 +727,7 @@ def render(rows: list[Row]) -> str:
     add("## Rulings not yet on main")
     add("")
     add(
-        "This document reports only what `origin/main` itself says, so a row ruled "
+        "This document reports only what the selected register source says, so a row ruled "
         "on an open branch or PR reads **open** here — correctly, for what this "
         "document is: a projection of the checked-out commit, not of every branch "
         "that exists at render time. Run `python3 "
@@ -862,7 +779,7 @@ def render_branches(
         f"Source: `{MAIN_REF}` plus every `refs/remotes/origin/*` branch reachable "
         "at render time. This view is not written to disk and is not part of "
         "`--check`: its answer changes whenever any branch moves, which is "
-        "exactly why the committed `decision_state.md` no longer carries it."
+        "exactly why the single-source projection does not carry it."
     )
     add("")
     add(f"- **{len(unmerged)}** row(s) ruled on a branch but not merged to main.")
@@ -1012,12 +929,9 @@ def as_json_branches(
 
 
 HELP_EPILOG = (
-    "--check does not write. It exits 1 when the committed file differs from a "
-    "fresh render or is missing, and 0 when it matches. On either failure, "
-    "write the regenerated file yourself: python3 execution/scripts/"
-    "render_decision_state.py -- the output is generated and is never "
-    "hand-edited; a wrong row is fixed in the register "
-    "(docs/foundation/conformance.md) or in this script, never in the output."
+    "--check renders the register without writing or comparing an output file. "
+    "It exits 1 if the register is missing or malformed or rendering fails. "
+    "Use --stdout to read the current projection, or --out PATH to save it."
 )
 
 
@@ -1031,12 +945,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="compare only -- does not write. Exits 1 if the file on disk "
-        "differs from a fresh render of --source, or if it is missing. On a "
-        "differ or missing file, write the regenerated file yourself with "
-        "python3 execution/scripts/render_decision_state.py -- the output is "
-        "generated and is never hand-edited.",
+        help="render cleanly without writing or comparing an output file; exits 1 "
+        "if the register cannot be read, a row is malformed, or rendering fails",
     )
+    parser.add_argument("--stdout", action="store_true", help="print the projection to stdout")
     parser.add_argument(
         "--json", action="store_true", help="emit JSON to stdout instead of writing"
     )
@@ -1044,17 +956,17 @@ def main(argv: list[str] | None = None) -> int:
         "--branches",
         action="store_true",
         help="print the cross-branch report (rulings not yet on main, and any "
-        "row-number collisions) to stdout instead of rendering the committed "
+        "row-number collisions) to stdout instead of rendering the single-source "
         "document. Never written to disk; not part of --check.",
     )
     parser.add_argument(
         "--source",
         choices=("main", "worktree"),
         default="worktree",
-        help="where the committed document's ONE input comes from: 'worktree' "
+        help="where the generated document's ONE input comes from: 'worktree' "
         "(default) reads docs/foundation/conformance.md as checked out -- on a "
         "pull_request CI run this is base-plus-PR, GitHub's own merge result, "
-        "so a PR that adds a register row regenerates correctly before it "
+        "so a PR that adds a register row renders correctly before it "
         "merges (ateles#1138 round two). 'main' re-fetches origin/main via git "
         "show instead, ignoring the working tree entirely -- the pre-fix "
         "behaviour, kept for a run with no working tree to trust. On push to "
@@ -1074,32 +986,40 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if collisions else 0
 
     source = WORKTREE_SOURCE if args.source == "worktree" else MAIN_REF
-    rows = collect_main(source)
+    if args.check:
+        if source == WORKTREE_SOURCE:
+            path = FOUNDATION_DIR / REGISTER_DOC
+            raw = path.read_text(encoding="utf-8") if path.is_file() else ""
+        else:
+            code, raw = run(["git", "show", f"{source}:{FOUNDATION_DIR}/{REGISTER_DOC}"])
+            if code != 0:
+                raw = ""
+        try:
+            validate_register(raw)
+        except ValueError as exc:
+            print(f"decision state: cannot render register: {exc}", file=sys.stderr)
+            return 1
+    try:
+        rows = collect_main(source)
+        rendered = render(rows)
+        if args.check and (not rendered.startswith("<!-- GENERATED") or "| # | Subject |" not in rendered):
+            raise ValueError("projection output is incomplete")
+    except (OSError, ValueError, SystemExit) as exc:
+        if not args.check:
+            raise
+        print(f"decision state: cannot render register: {exc}", file=sys.stderr)
+        return 1
 
     if args.json:
         sys.stdout.write(as_json(rows))
         return 0
 
-    rendered = render(rows)
-
     if args.check:
-        if not args.out.is_file():
-            print(
-                f"decision state: {args.out} does not exist — regenerate: "
-                "python3 execution/scripts/render_decision_state.py",
-                file=sys.stderr,
-            )
-            return 1
-        current = args.out.read_text(encoding="utf-8")
-        if current != rendered:
-            print(
-                f"decision state: {args.out} differs from a fresh render. "
-                "Do not edit it in place — regenerate: "
-                "python3 execution/scripts/render_decision_state.py",
-                file=sys.stderr,
-            )
-            return 1
-        print(f"decision state: {args.out} matches its source")
+        print(f"decision state: rendered {len(rows)} rows cleanly")
+        return 0
+
+    if args.stdout:
+        sys.stdout.write(rendered)
         return 0
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

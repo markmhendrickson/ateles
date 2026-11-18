@@ -42,7 +42,7 @@ A PR is exempt only when EVERY changed file is one of:
 
 * a generated render target -- never hand-authored, so there is no author
   decision to cite a basis for: ``docs/taxonomy.md``, ``docs/phases.md``,
-  ``docs/architecture.md``, ``docs/foundation/decision_state.md``,
+  ``docs/architecture.md``,
   ``docs/foundation/projection/*.md``, ``docs/agents/*.md``,
   ``.claude/skills/*/SKILL.md`` (CLAUDE.md names these as render targets); or
 * a markdown file under ``docs/`` outside ``docs/foundation/`` (docs-only).
@@ -79,7 +79,6 @@ GENERATED_EXACT = frozenset(
         "docs/taxonomy.md",
         "docs/phases.md",
         "docs/architecture.md",
-        "docs/foundation/decision_state.md",
     }
 )
 GENERATED_PATTERNS = (
@@ -192,7 +191,7 @@ Add one line to the PR body, then edit the PR (this check re-runs on edit):
 
 Exempt, with no line needed: PRs whose every changed file is a generated
 render target (docs/taxonomy.md, docs/phases.md, docs/architecture.md,
-docs/foundation/decision_state.md, docs/foundation/projection/*.md,
+docs/foundation/projection/*.md,
 docs/agents/*.md, .claude/skills/*/SKILL.md) or a markdown file under docs/
 outside docs/foundation/."""
 
