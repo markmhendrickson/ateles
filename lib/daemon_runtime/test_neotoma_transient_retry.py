@@ -32,6 +32,18 @@ def _no_pauses(monkeypatch):
     monkeypatch.setattr(nt, "_sleep", pauses.append)
     monkeypatch.setattr(gating, "NEOTOMA_BEARER_TOKEN", "t")
     monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "t")
+    class FakeClient:
+        def post(self, *args, **kwargs):
+            return httpx.post(*args, **kwargs)
+
+        def get(self, *args, **kwargs):
+            return httpx.get(*args, **kwargs)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sf, "_request_client_factory", FakeClient)
+    monkeypatch.setattr(sf._RequestScope, "wait", lambda _self, seconds, _deadline=None: pauses.append(seconds))
     return pauses
 
 

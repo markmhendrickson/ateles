@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import pytest
+import threading
+import time
+import json
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 from lib.daemon_runtime import session_finalize as sf
 
 
@@ -11,6 +18,21 @@ class _Resp:
 
     def json(self):
         return {}
+
+
+@pytest.fixture(autouse=True)
+def _client_delegates_to_existing_fakes(monkeypatch):
+    class FakeClient:
+        def post(self, *args, **kwargs):
+            return sf.httpx.post(*args, **kwargs)
+
+        def get(self, *args, **kwargs):
+            return sf.httpx.get(*args, **kwargs)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sf, "_request_client_factory", FakeClient, raising=False)
 
 
 # ── pure payload builder ─────────────────────────────────────────────────────
@@ -416,6 +438,8 @@ def _run_session_fakes(monkeypatch, post):
     monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "tok")
     monkeypatch.setattr(sf.httpx, "post", post)
     monkeypatch.setattr(sf.httpx, "get", fake_get)
+    if hasattr(sf, "_RequestScope"):
+        monkeypatch.setattr(sf._RequestScope, "wait", lambda _self, _seconds, _deadline=None: None)
     monkeypatch.setattr("lib.daemon_runtime.neotoma_transient._sleep", lambda _s: None)
     return _Response
 
@@ -474,6 +498,7 @@ def test_a_peer_that_keeps_making_progress_cannot_hold_the_provenance_write_open
     _run_session_fakes(monkeypatch, never_finishing)
     monkeypatch.setattr(sf, "PROVENANCE_STORE_ATTEMPT_TIMEOUT_SECONDS", 0.3)
     monkeypatch.setattr(sf, "PROVENANCE_STORE_TOTAL_SECONDS", 0.8)
+    monkeypatch.setattr(sf, "RUN_SESSION_TOTAL_SECONDS", 0.8)
     t0 = _time.monotonic()
     try:
         run = sf.create_run_session(task_id="ent_task", plan_id="ent_plan", agent="cicada", run_key="created-0")
@@ -483,3 +508,148 @@ def test_a_peer_that_keeps_making_progress_cannot_hold_the_provenance_write_open
     assert run is None
     assert elapsed < 3.0, f"the wait was not bounded: {elapsed:.1f}s"
     assert 1 <= len(started) <= 3
+
+
+@contextmanager
+def _trickling_server(*, trickle_post: bool):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def _trickle(self):
+            with self.server.count_lock:
+                self.server.calls += 1
+            self.wfile.write(b"HTTP/1.1 200 OK\r\nX-Slow: ")
+            try:
+                while True:
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                    time.sleep(0.02)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def _json(self, payload):
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            if trickle_post:
+                self._trickle()
+            else:
+                self._json({"entities": [
+                    {"entity_type": "conversation", "entity_id": "ent_conv99"},
+                    {"entity_type": "agent_session", "entity_id": "ent_session99"},
+                ]})
+
+        def do_GET(self):
+            self._trickle()
+
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    except PermissionError:
+        pytest.skip("loopback socket bind is denied in this sandbox")
+    server.daemon_threads = True
+    server.count_lock = threading.Lock()
+    server.calls = 0
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server, f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def _live_provenance_workers():
+    return [t for t in threading.enumerate() if t.name.startswith("provenance-")]
+
+
+def _wait_for_workers_to_end():
+    until = time.monotonic() + 2.0
+    while _live_provenance_workers() and time.monotonic() < until:
+        time.sleep(0.02)
+    assert not _live_provenance_workers()
+
+
+def test_provenance_store_deadline_workers_are_bounded_and_reclaimed(monkeypatch):
+    fake_factory = sf._request_client_factory
+    monkeypatch.setattr(sf, "_request_client_factory", sf.httpx.Client)
+    monkeypatch.setattr(sf, "PROVENANCE_STORE_ATTEMPT_TIMEOUT_SECONDS", 0.4)
+    monkeypatch.setattr(sf, "RUN_SESSION_TOTAL_SECONDS", 0.7)
+    callers = []
+    results = []
+    with _trickling_server(trickle_post=True) as (server, url):
+        monkeypatch.setattr(sf, "NEOTOMA_BASE_URL", url)
+        for i in range(sf.PROVENANCE_WORKERS):
+            caller = threading.Thread(target=lambda n=i: results.append(sf.create_run_session(
+                task_id="ent_task", agent="cicada", run_key=f"created-{n}")))
+            caller.start()
+            callers.append(caller)
+        until = time.monotonic() + 0.5
+        while server.calls < sf.PROVENANCE_WORKERS and time.monotonic() < until:
+            time.sleep(0.01)
+        assert server.calls == sf.PROVENANCE_WORKERS
+        started = time.monotonic()
+        assert sf.create_run_session(task_id="ent_task", agent="cicada", run_key="busy") is None
+        assert time.monotonic() - started < 0.2
+        assert server.calls == sf.PROVENANCE_WORKERS
+        assert len(_live_provenance_workers()) <= sf.PROVENANCE_WORKERS
+        for caller in callers:
+            caller.join(timeout=2)
+        assert all(not caller.is_alive() for caller in callers)
+        assert results == [None] * sf.PROVENANCE_WORKERS
+    _wait_for_workers_to_end()  # no request is released by this test
+    monkeypatch.setattr(sf, "_request_client_factory", fake_factory)
+    response = _run_session_fakes(monkeypatch, lambda *_a, **_k: response({"entities": [
+        {"entity_type": "conversation", "entity_id": "ent_conv99"},
+        {"entity_type": "agent_session", "entity_id": "ent_session99"},
+    ]}))
+    assert sf.create_run_session(task_id="ent_task", agent="cicada", run_key="created-0") is not None
+
+
+def test_expired_scopes_close_clients_and_reclaim_all_permits(monkeypatch):
+    capacity = 4
+    clients = []
+    class BlockingClient:
+        def __init__(self):
+            self.closed = threading.Event()
+            clients.append(self)
+
+        def post(self, *_args, **_kwargs):
+            self.closed.wait(3)
+            raise sf.httpx.ReadTimeout("closed on expiry")
+
+        def close(self):
+            self.closed.set()
+
+    monkeypatch.setattr(sf, "_request_client_factory", BlockingClient, raising=False)
+    def old_uninterruptible_post(*_args, **_kwargs):
+        time.sleep(3)
+        raise sf.httpx.ReadTimeout("old request timed out")
+    monkeypatch.setattr(sf.httpx, "post", old_uninterruptible_post)
+    monkeypatch.setattr("lib.daemon_runtime.neotoma_transient._sleep", lambda _s: None)
+    monkeypatch.setattr(sf, "PROVENANCE_STORE_ATTEMPT_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(sf, "PROVENANCE_STORE_TOTAL_SECONDS", 0.4)
+    monkeypatch.setattr(sf, "RUN_SESSION_TOTAL_SECONDS", 0.4, raising=False)
+    for wave in range(3):
+        results = []
+        callers = [threading.Thread(target=lambda n=i: results.append(sf.create_run_session(
+            task_id="ent_task", agent="cicada", run_key=f"wave-{wave}-{n}")))
+                   for i in range(capacity)]
+        for caller in callers:
+            caller.start()
+        until = time.monotonic() + 0.2
+        while len(_live_provenance_workers()) < capacity and time.monotonic() < until:
+            time.sleep(0.01)
+        assert len(_live_provenance_workers()) <= capacity
+        assert sf.create_run_session(task_id="ent_task", agent="cicada", run_key="busy") is None
+        for caller in callers:
+            caller.join(timeout=2)
+        assert results == [None] * capacity
+        _wait_for_workers_to_end()
+    assert all(client.closed.is_set() for client in clients)
