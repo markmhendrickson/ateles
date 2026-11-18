@@ -602,6 +602,7 @@ def test_provenance_store_deadline_workers_are_bounded_and_reclaimed(monkeypatch
     results = []
     with _trickling_server(trickle_post=True) as (server, url):
         monkeypatch.setattr(sf, "NEOTOMA_BASE_URL", url)
+        monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "synthetic-token")
         for i in range(sf.PROVENANCE_WORKERS):
             caller = threading.Thread(target=lambda n=i: results.append(sf.create_run_session(
                 task_id="ent_task", agent="cicada", run_key=f"created-{n}")))
@@ -634,6 +635,7 @@ def test_readback_trickle_cannot_extend_complete_run_session_deadline(monkeypatc
     monkeypatch.setattr(sf, "RUN_SESSION_TOTAL_SECONDS", 0.4)
     with _trickling_server(trickle_post=False) as (server, url):
         monkeypatch.setattr(sf, "NEOTOMA_BASE_URL", url)
+        monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "synthetic-token")
         started = time.monotonic()
         assert sf.create_run_session(task_id="ent_task", agent="cicada", run_key="created-0") is None
         assert time.monotonic() - started < 1.5

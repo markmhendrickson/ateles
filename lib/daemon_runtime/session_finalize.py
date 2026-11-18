@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import os
+import socket
 import threading
 import time
 from dataclasses import dataclass
@@ -418,6 +419,26 @@ _provenance_pool = BoundedCallPool(PROVENANCE_WORKERS, "provenance")
 _request_client_factory = httpx.Client
 
 
+def _interrupt_client(client: httpx.Client) -> None:
+    """Make a thread blocked in this client's network read return now, then close it.
+
+    ``Client.close()`` alone does NOT wake a thread blocked in ``recv``: it ends only when the
+    read timeout fires (verified with a peer that keeps sending: 8s for an 8s read timeout,
+    against 0s when the socket is shut down first). Shutting the socket down wakes it. The
+    sockets are reached through httpcore's pool; if that layout is not what is expected the
+    shutdown is skipped and the worker ends at its per-operation timeout instead (the
+    process-wide worker cap bounds the damage either way).
+    """
+    try:
+        for connection in list(client._transport._pool._connections):  # type: ignore[attr-defined]
+            sock = getattr(connection._connection._network_stream, "_sock", None)
+            if sock is not None:
+                sock.shutdown(socket.SHUT_RDWR)
+    except Exception:  # noqa: BLE001 - best effort; close() below still runs
+        pass
+    client.close()
+
+
 class _RequestScope:
     """Own per-request clients so an expired run can interrupt active I/O."""
 
@@ -450,7 +471,7 @@ class _RequestScope:
             clients = tuple(self._clients)
         for client in clients:
             try:
-                client.close()
+                _interrupt_client(client)
             except Exception:  # noqa: BLE001 - close all clients even if one fails
                 log.exception("[finalize] could not close an expired request client")
 
