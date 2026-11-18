@@ -69,7 +69,10 @@ PROFILE_RE = re.compile(r"[A-Za-z0-9_-]+")
 BADGE_CLASS_RE = re.compile(r"[a-z0-9-]+")
 MARKER_NAME_RE = re.compile(r"[a-z0-9-]{1,64}")
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1"}
-BASE_ORIGIN_RE = re.compile(r"(https?)://([a-z0-9.-]+)(?::[0-9]+)?/?")
+_HOST_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+BASE_ORIGIN_RE = re.compile(
+    rf"(https?)://((?:{_HOST_LABEL}\.)*{_HOST_LABEL})(?::[1-9][0-9]{{0,4}})?/?"
+)
 MAX_LIST_PAGES = 100
 BASE_URL_INPUT_ERROR = (
     "NEOTOMA_BASE_URL must not contain credentials, a query, "
@@ -141,6 +144,8 @@ def _check_base_url(base_url: str) -> str:
     except ValueError:
         fail(BASE_URL_INPUT_ERROR)
     host = match.group(2)
+    if len(host) > 253:
+        fail(BASE_URL_INPUT_ERROR)
     if match.group(1) == "http" and host not in LOOPBACK_HOSTS:
         fail(BASE_URL_INPUT_ERROR)
     normalized = base_url.rstrip("/")
