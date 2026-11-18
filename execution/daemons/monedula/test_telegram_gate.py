@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import monedula  # noqa: E402
 import consent_email  # noqa: E402
 import payment_journal  # noqa: E402
+from conftest import initialize_test_journal  # noqa: E402
 from test_payment_approval import env  # noqa: E402,F401 - shared payment fixture
 
 
@@ -87,6 +88,7 @@ class _RecordingHandler:
 @pytest.fixture
 def sent_messages(tmp_path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Neutralise every outbound effect of `main()` except Telegram sends."""
+    initialize_test_journal(tmp_path)
     monkeypatch.setattr(monedula, "STATE_FILE", tmp_path / ".monedula_last_run")
     monkeypatch.setattr(consent_email, "STATE_FILE", tmp_path / "consent.json")
     monkeypatch.setattr(
@@ -691,6 +693,43 @@ def test_partial_approval_executes_only_the_named_handler(
 
 
 # ── Telegram journal failures hold payments at every read/write ───────────────
+
+
+def test_telegram_holds_when_both_journal_files_are_absent(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
+) -> None:
+    handler, polls, resolutions, notifications = _journal_failure_observers(monkeypatch)
+    path = consent_email.journal_path()
+    path.unlink()
+    path.with_name(payment_journal.MARKER_NAME).unlink()
+    monkeypatch.setattr(monedula, "telegram_poll_approval", lambda *a, **k: _attended_therapy(polls))
+
+    assert monedula.main() is False
+    assert not polls and not sent_messages
+    assert not handler.execute_calls and not resolutions
+    assert any("payment journal not initialized" in notice for notice in notifications)
+
+
+def test_telegram_holds_after_unknown_intent_and_both_files_lost(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
+) -> None:
+    handler, polls, resolutions, notifications = _journal_failure_observers(monkeypatch)
+    path = consent_email.journal_path()
+
+    def lose_directory_during_poll(*args, **kwargs):
+        item = consent_email.build_pending_items(
+            [(handler, handler.matches([]))], monedula._yesterday().isoformat()
+        )[0]
+        payment_journal.record_intent(path, item.obligation, "synthetic-token", generation=0)
+        path.unlink()
+        path.with_name(payment_journal.MARKER_NAME).unlink()
+        return _attended_therapy(polls)
+
+    monkeypatch.setattr(monedula, "telegram_poll_approval", lose_directory_during_poll)
+    assert monedula.main() is False
+    assert len(polls) == 1 and len(sent_messages) == 1
+    assert not handler.execute_calls and not resolutions
+    assert any("payment journal not initialized" in notice for notice in notifications)
 
 
 def test_telegram_initial_journal_read_failure_blocks_before_preview(

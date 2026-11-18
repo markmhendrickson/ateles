@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import consent_email  # noqa: E402
 import payment_journal  # noqa: E402
 import monedula  # noqa: E402
+from conftest import initialize_test_journal  # noqa: E402
 from lib.approval.email_channel import ReadRepliesOutcome
 from lib.approval.tokens import subject_marker, token_for
 
@@ -31,6 +32,7 @@ def _swarm_mailbox(monkeypatch, tmp_path):
     Configure one by default so the flow under test is the one that can
     actually succeed; tests of the unconfigured case remove it explicitly.
     """
+    initialize_test_journal(tmp_path)
     cfg = tmp_path / "swarm-gws"
     cfg.mkdir(exist_ok=True)
     # The gate compares the swarm address against OPERATOR_EMAIL, so a test

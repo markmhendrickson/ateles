@@ -7,7 +7,9 @@ Synthetic fixtures only.
 from __future__ import annotations
 
 import ast
+import hashlib
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,6 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import payment_approval  # noqa: E402
 import payment_journal  # noqa: E402
+import consent_email  # noqa: E402
+import monedula  # noqa: E402
+from conftest import initialize_test_journal  # noqa: E402
 from test_session_payments import _event, _Handler, _World  # noqa: E402,F401
 
 
@@ -274,10 +279,10 @@ def test_attended_session_pays_exactly_once(env):
 
 
 def test_journal_first_use_and_loss_marker_hold(tmp_path):
-    path = tmp_path / payment_journal.JOURNAL_NAME
+    path = initialize_test_journal(tmp_path)
     marker = tmp_path / ".monedula_payment_journal.initialized"
     assert payment_journal.load(path)["obligations"] == {}
-    assert not marker.exists()
+    assert marker.is_file()
 
     payment_journal.record_intent(path, "first", "token-1", generation=0)
     assert marker.is_file()
@@ -293,6 +298,82 @@ def test_journal_first_use_and_loss_marker_hold(tmp_path):
     assert payment_journal.obligation_state(payment_journal.load(path), "first") == "intent"
     payment_journal.record_intent(path, "second", "token-2", generation=0)
     assert payment_journal.obligation_state(payment_journal.load(path), "second") == "intent"
+
+
+def test_uninitialized_journal_is_held_and_explicit_init_creates_both_files(tmp_path):
+    path = tmp_path / payment_journal.JOURNAL_NAME
+    marker = tmp_path / payment_journal.MARKER_NAME
+    with pytest.raises(payment_journal.JournalError, match=payment_journal.NOT_INITIALIZED):
+        payment_journal.load(path)
+    result = subprocess.run(
+        [sys.executable, str(Path(payment_journal.__file__)), "init", "--path", str(path)],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert path.is_file() and marker.is_file()
+    assert payment_journal.load(path) == payment_journal._empty()
+
+
+@pytest.mark.parametrize("existing", ["journal", "marker"])
+def test_explicit_init_refuses_either_existing_file_without_editing_it(tmp_path, existing):
+    path = tmp_path / payment_journal.JOURNAL_NAME
+    marker = tmp_path / payment_journal.MARKER_NAME
+    existing_path = path if existing == "journal" else marker
+    existing_path.write_bytes(b"existing sentinel")
+    before = hashlib.sha256(existing_path.read_bytes()).hexdigest()
+    result = subprocess.run(
+        [sys.executable, str(Path(payment_journal.__file__)), "init", "--path", str(path)],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 1
+    assert result.stderr.strip() == payment_journal.INIT_REFUSED
+    assert hashlib.sha256(existing_path.read_bytes()).hexdigest() == before
+    assert not (marker if existing == "journal" else path).exists()
+
+
+def test_partial_init_keeps_marker_and_holds_payments(tmp_path, monkeypatch):
+    path = tmp_path / payment_journal.JOURNAL_NAME
+    marker = tmp_path / payment_journal.MARKER_NAME
+    create = payment_journal._atomic_create
+
+    def fail_second_write(target, data):
+        if target == path:
+            raise payment_journal.JournalError("synthetic journal write failure")
+        create(target, data)
+
+    monkeypatch.setattr(payment_journal, "_atomic_create", fail_second_write)
+    with pytest.raises(payment_journal.JournalError, match="synthetic journal write failure"):
+        payment_journal.init_journal(path)
+    assert marker.is_file() and not path.exists()
+    with pytest.raises(payment_journal.JournalError, match=payment_journal.MISSING_AFTER_FIRST_USE):
+        payment_journal.load(path)
+
+
+def test_default_route_holds_when_both_journal_files_are_absent(env, monkeypatch):
+    w, neo = env
+    path = consent_email.journal_path()
+    path.unlink()
+    path.with_name(payment_journal.MARKER_NAME).unlink()
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda message, **kwargs: alerts.append(message))
+    assert w.tick() is False
+    assert w.handler.execute_calls == [] and neo.writes == 0
+    assert any("payment journal not initialized" in alert for alert in alerts)
+
+
+def test_default_route_holds_after_unknown_intent_and_both_files_lost(env, monkeypatch):
+    w, neo = env
+    w.tick()
+    path = consent_email.journal_path()
+    payment_journal.record_intent(path, neo.only["payment_key"], "synthetic-token", generation=1)
+    path.unlink()
+    path.with_name(payment_journal.MARKER_NAME).unlink()
+    neo.resolve(neo.only["payment_key"], "approved", "attended yoga")
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda message, **kwargs: alerts.append(message))
+    assert w.tick(minutes=15) is False
+    assert w.handler.execute_calls == []
+    assert any("payment journal not initialized" in alert for alert in alerts)
 
 
 def test_existing_journal_without_marker_adds_marker_and_malformed_still_holds(tmp_path):
@@ -316,8 +397,9 @@ def test_marker_with_unreadable_type_holds_when_journal_missing(tmp_path):
         payment_journal.load(path)
 
 
-def test_marker_write_failure_blocks_first_journal_write(tmp_path, monkeypatch):
-    path = tmp_path / payment_journal.JOURNAL_NAME
+def test_journal_write_failure_preserves_initialized_journal(tmp_path, monkeypatch):
+    path = initialize_test_journal(tmp_path)
+    original = path.read_bytes()
 
     def fail_marker(*args, **kwargs):
         raise payment_journal.JournalError("synthetic marker write failure")
@@ -325,7 +407,7 @@ def test_marker_write_failure_blocks_first_journal_write(tmp_path, monkeypatch):
     monkeypatch.setattr(payment_journal, "_atomic_write", fail_marker)
     with pytest.raises(payment_journal.JournalError, match="marker write failure"):
         payment_journal.record_intent(path, "first", "token-1", generation=0)
-    assert not path.exists()
+    assert path.read_bytes() == original
 
 
 def test_legacy_journal_read_survives_marker_failure_but_write_holds(tmp_path, monkeypatch):

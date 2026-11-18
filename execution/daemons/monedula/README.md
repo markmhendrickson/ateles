@@ -296,7 +296,7 @@ chmod +x install.sh
 | `consent_reply_sender_rejected` | A reply carried the consent marker but its From: is not the operator's address. Ignored; payments held; nothing is sent back to that sender |
 | `consent_reply_unauthenticated` | A reply came from the operator's address but could not be authenticated, so it was **not** accepted; payments held. One notice + escalation per request (Notifier key `monedula:consent_reply_unauthenticated:<fp>:g<gen>`). Check that the reply was sent from the operator's own mailbox, that `ATELES_SWARM_GWS_CONFIG_DIR` is signed in as the swarm account (not the operator's), and that `ATELES_MAIL_AUTHSERV_ID` matches the swarm mailbox's provider; then reply again to the current request |
 | `consent_reply_unrecognized` | Authenticated but unparseable line; hold item; correction mail explains form |
-| `payment_journal_unreadable` | The payment journal could not be read or written, or is missing after first use; every payment held. Follow the reconciliation procedure under Idempotency before another payment. |
+| `payment_journal_unreadable` | The payment journal could not be read or written, is absent before explicit initialization, or is missing after first use; every payment held. Follow the reconciliation procedure under Idempotency before another payment. |
 | `payment_outcome_unknown` | A transfer was attempted and its outcome never recorded (crash or rail error mid-transfer). Held and never retried automatically; check the rail, then resolve by hand |
 | `payment_approval_not_accepted` | A record exists but does not permit payment: not written by the configured approver, approved with no answer, answer does not name the session (a bare yes does not approve), or it does not match the payment. The alert names the reason and the record's short key; fix the SAME record (correct `operator_answer` as the resolver) |
 | `invalid_wise_recipient_id` | A profile's `wise_recipient_id` is not a positive integer (Neotoma profile or env `<PREFIX>_WISE_RECIPIENT_ID`). Stranded alert; payments for it are held until it is fixed |
@@ -427,15 +427,24 @@ payee, amount, currency). Order per payment: record intent (fsynced) → execute
 → record outcome. An obligation with a recorded outcome is never paid again;
 one with intent but no outcome is `payment_outcome_unknown` — held and
 escalated, never retried. The journal also issues the monotonically
-increasing request generation. Before the first journal write, Monedula
-durably creates `.monedula_payment_journal.initialized` beside it. If the
-journal is missing after that marker exists, every payment is held, including
-on the default approval and Telegram routes. **Recovery:** first reconcile
-against the chain and wallet; then restore the journal from backup, or
-knowingly remove both the journal and marker for a legitimate fresh start.
-Restoring an older backup is the operator's reconciliation, not an automatic
-recovery. A legacy journal gains the marker on its next successful write;
-loss before any marker exists cannot be distinguished from first use.
+increasing request generation. A missing journal and marker hold every payment
+on both the default approval and Telegram routes. **First use or deliberate
+fresh start:** reconcile against the chain and wallet, then run from the repo
+root:
+
+```bash
+python3 execution/daemons/monedula/payment_journal.py init
+```
+
+The command refuses when either file already exists; it never edits an
+existing journal. Verify that both `.monedula_payment_journal.initialized` and
+`.monedula_payment_journal.json` exist beside `payment_journal.py` and that
+`payment_journal.load()` returns the empty journal. The held payment may be
+requested again on the next tick. **Recovery after loss:** reconcile against
+the chain and wallet before restoring the journal from backup or making a
+deliberate fresh start. Restoring an older backup is the operator's
+reconciliation, not an automatic recovery. A valid legacy journal without a
+marker keeps working and gains the marker on its first valid read.
 Stranded Notifier dedupe: `monedula:stranded:<sorted keys fp>`.
 
 ## Constraints

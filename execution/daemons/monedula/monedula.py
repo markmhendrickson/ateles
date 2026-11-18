@@ -70,7 +70,14 @@ _notify_undeliverable = False
 
 def _payment_journal_alert(detail: str) -> str:
     """Use fixed alert text; journal errors may contain private path details."""
-    from payment_journal import MISSING_AFTER_FIRST_USE
+    from payment_journal import MISSING_AFTER_FIRST_USE, NOT_INITIALIZED
+
+    if detail == NOT_INITIALIZED:
+        return (
+            "monedula: payment journal not initialized "
+            "(payment_journal_unreadable). No payment will execute. "
+            "Reconcile against the chain and wallet, then initialize the journal."
+        )
 
     if detail == MISSING_AFTER_FIRST_USE:
         return (
@@ -86,11 +93,11 @@ def _payment_journal_alert(detail: str) -> str:
 
 
 def _payment_journal_alert_key(detail: str) -> str:
-    from payment_journal import MISSING_AFTER_FIRST_USE
+    from payment_journal import MISSING_AFTER_FIRST_USE, NOT_INITIALIZED
 
     return (
         "monedula:payment_journal_missing"
-        if detail == MISSING_AFTER_FIRST_USE
+        if detail in (MISSING_AFTER_FIRST_USE, NOT_INITIALIZED)
         else _CONSENT_CHANNEL_DEDUPE_KEY
     )
 

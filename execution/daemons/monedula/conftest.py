@@ -22,3 +22,12 @@ from lib.daemon_runtime import logging_setup  # noqa: E402
 REAL_LOG_DIR = logging_setup.LOG_DIR
 TEST_LOG_DIR = Path(tempfile.mkdtemp(prefix="monedula-test-logs-"))
 logging_setup.LOG_DIR = TEST_LOG_DIR
+
+
+def initialize_test_journal(directory: Path) -> Path:
+    """Explicitly bootstrap an isolated journal for payment-route tests."""
+    from payment_journal import JOURNAL_NAME, init_journal
+
+    path = directory / JOURNAL_NAME
+    init_journal(path)
+    return path

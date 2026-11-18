@@ -24,6 +24,8 @@ from datetime import date
 
 import handlers
 import monedula
+import consent_email
+from conftest import initialize_test_journal
 
 
 class _Result:
@@ -89,6 +91,8 @@ def test_failed_fetch_leaves_day_unclaimed(monkeypatch, tmp_path) -> None:
 def test_successful_fetch_claims_the_day(monkeypatch, tmp_path) -> None:
     """The idempotency guard must still hold on the success path."""
     state = tmp_path / ".monedula_last_run"
+    initialize_test_journal(tmp_path)
+    monkeypatch.setattr(consent_email, "STATE_FILE", tmp_path / "consent.json")
     monkeypatch.setattr(monedula, "STATE_FILE", state)
     monkeypatch.setattr(monedula, "fetch_yesterday_events", lambda: [])
     monkeypatch.setattr(handlers, "load_handlers", lambda strandings=None: [])
