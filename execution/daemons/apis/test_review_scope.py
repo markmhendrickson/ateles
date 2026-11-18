@@ -342,7 +342,7 @@ class TestThisRepoCoversEveryRiskCategory:
             "CLAUDE.md", "AGENTS.md", "sub/dir/AGENTS.md", "apps/x/CLAUDE.md",
             ".claude/skills/x/SKILL.md", "docs/policies/agent-data-rules.md",
             "docs/foundation/work_model.md", "docs/foundation/conformance.md",
-            "docs/foundation/decision_state.md", "docs/foundation/principles.md",
+            "docs/foundation/vocabulary.md", "docs/foundation/principles.md",
             "execution/scripts/render_rule_inventory.py", "lib/daemon_runtime/agent_loader.py",
             "scripts/revert_auto_policy.py", ".claude/hooks/rule_injection_gate.py",
             # dependency manifests and lockfiles

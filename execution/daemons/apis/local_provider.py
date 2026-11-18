@@ -81,7 +81,7 @@ DEFAULT_GUARDS_PATH = Path.home() / ".cache" / "ateles" / "claude-local-guards.j
 # so no config value can send it to the local model.
 MECHANICAL_WORK_CLASSES = frozenset({
     "rebase",                       # rebase / update-branch onto the base
-    "regenerate_generated_files",   # test catalog, decision_state, openapi types, ...
+    "regenerate_generated_files",   # test catalog, openapi types, ...
     "carry_forward_check",          # merge-only net-patch comparison
     "ci_log_triage",
     "worktree_hygiene",

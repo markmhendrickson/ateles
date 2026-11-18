@@ -20,11 +20,14 @@ docs/foundation/conformance.md and execution/daemons/apis/foundation.py).
 
 EXEMPT, no line needed: a PR whose every changed file is either
   - a generated render target: docs/taxonomy.md, docs/phases.md,
-    docs/architecture.md, docs/foundation/decision_state.md,
+    docs/architecture.md,
     docs/foundation/projection/*.md, docs/agents/*.md,
     .claude/skills/*/SKILL.md; or
   - a markdown file under docs/ outside docs/foundation/ (docs-only).
 Hand-authored docs/foundation/ files are NOT exempt.
+
+For new decision or revision rows, reserve each number with
+`python3 execution/scripts/reserve_register_number.py reserve <decision|revision>`.
 
 Editing the PR body re-runs the check.
 -->
