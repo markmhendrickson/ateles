@@ -265,7 +265,7 @@ def _valid_percent(raw: object) -> bool:
 
 
 def recovery_window_ends(epoch: str) -> dict[str, dict[str, str]]:
-    """Capture the reset actually recorded for each active window at recovery."""
+    """Capture only resets with unambiguous evidence at recovery."""
     path = Path(os.environ.get("APIS_HARNESS_USAGE_FILE", "").strip() or
                 Path.home() / ".config" / "ateles" / "harness-usage.json")
     try:
@@ -286,36 +286,57 @@ def recovery_window_ends(epoch: str) -> dict[str, dict[str, str]]:
         if observed is None or observed > recovered or not isinstance(windows, list):
             continue
         conflicts: set[str] = set()
+        seen: set[str] = set()
+        unattributable = False
         for window in windows:
-            if (not isinstance(window, dict) or
-                    canonical_window_name(window.get("name")) == "unavailable" or
-                    not _valid_percent(window.get("used_percent")) or
-                    _aware_instant(window.get("resets_at")) is None):
+            if not isinstance(window, dict):
+                unattributable = True
                 continue
             name = canonical_window_name(window.get("name"))
+            if name == "unavailable":
+                unattributable = True
+                continue
+            if name in seen:
+                conflicts.add(name)
+            seen.add(name)
             end = _aware_instant(window.get("resets_at"))
-            if end is not None and end > recovered:
+            if not _valid_percent(window.get("used_percent")) or end is None:
+                conflicts.add(name)
+                continue
+            if end > recovered:
                 normalized_end = end.isoformat()
                 previous = ends.setdefault(provider, {}).get(name)
                 if previous is not None and previous != normalized_end:
                     conflicts.add(name)
                 ends[provider][name] = normalized_end
+        if unattributable:
+            ends.pop(provider, None)
+            continue
         for name in conflicts:
-            ends[provider].pop(name, None)
+            ends.get(provider, {}).pop(name, None)
     return ends
 
 
 def recovered_window_is_new(key: str, recovery: object,
                             now: datetime | None = None) -> bool:
     """Release only after the observed old window ended and a later reset exists."""
-    if not isinstance(recovery, dict) or not isinstance(recovery.get("windows"), dict):
+    if (not isinstance(recovery, dict) or recovery.get("window_proof_version") != 2
+            or not isinstance(recovery.get("windows"), dict)):
         return False  # old epoch-only markers have no proof of a window end
     parsed = parse_usage_key(key)
     if parsed is None:
         return False
     provider, name, reset, _ = parsed
     provider_windows = recovery["windows"].get(provider)
-    old_end = _aware_instant(provider_windows.get(name)) if isinstance(provider_windows, dict) else None
+    if not isinstance(provider_windows, dict):
+        return False
+    seen_names: set[str] = set()
+    for raw_name in provider_windows:
+        canonical = canonical_window_name(raw_name)
+        if canonical == "unavailable" or canonical in seen_names:
+            return False
+        seen_names.add(canonical)
+    old_end = _aware_instant(provider_windows.get(name))
     new_end = _aware_instant(reset)
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -1086,7 +1107,7 @@ def _clear_unreadable_journal(main: Path) -> int:
                                 journal[key] = {"state": "held", "held_message": item["message"],
                                                 "handler": ""}
                     journal[RECOVERED_AT] = (prior_marker if isinstance(prior_marker, dict)
-                                             else {"at": epoch,
+                                             else {"at": epoch, "window_proof_version": 2,
                                                    "windows": recovery_window_ends(epoch)})
                     for path in (main, email_queue_path(main)):
                         queue = read_queue(path)

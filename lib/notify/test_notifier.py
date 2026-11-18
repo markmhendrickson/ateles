@@ -1010,6 +1010,84 @@ def test_recovered_journal_without_window_end_needs_explicit_clear(tmp_path, mon
     assert sent.count("⚠ [apis] cleared") == 1
 
 
+@pytest.mark.parametrize("sibling,release", [
+    ({"name": " weekly ", "used_percent": "invalid", "resets_at": "invalid"}, False),
+    ({"name": "unrelated", "used_percent": "invalid", "resets_at": "invalid"}, True),
+    ({"name": "seven_day", "used_percent": 60, "resets_at": "different"}, False),
+    ({"used_percent": 60, "resets_at": "invalid"}, False),
+])
+def test_recovery_requires_unambiguous_window_evidence(
+    tmp_path, monkeypatch, sibling, release
+):
+    from . import held_view
+
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    usage_path = tmp_path / "usage.json"
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(usage_path))
+    epoch = datetime.now(timezone.utc)
+    old_end = epoch + timedelta(days=2)
+    new_end = old_end + timedelta(days=7)
+    sibling = {**sibling, "resets_at": new_end.isoformat()} if sibling.get("resets_at") == "different" else sibling
+    usage_path.write_text(json.dumps({"cursor": {
+        "observed_at": epoch.isoformat(),
+        "windows": [
+            {"name": "weekly_all", "used_percent": 60,
+             "resets_at": old_end.isoformat()},
+            sibling,
+        ],
+    }}))
+    sent = []
+    notifier = _notifier(tmp_path, NO_SILENCE, sent)
+    notifier._dedupe_path.write_bytes(b"{synthetic unreadable journal")
+    old_key = held_view.usage_key("cursor", "weekly_all", old_end.isoformat(), 50)
+    assert not notifier.send("old", Priority.WARN, handler="apis",
+                             dedupe_key=old_key, retryable=True)
+    assert held_view.main(["--clear-unreadable-journal"]) == 0
+    marker = notifier._dedupe_journal[held_view.RECOVERED_AT]
+    assert ("weekly_all" in marker["windows"].get("cursor", {})) is release
+    notifier._now_local = lambda: old_end + timedelta(seconds=1)
+    new_key = held_view.usage_key("cursor", "weekly_all", new_end.isoformat(), 50)
+    assert notifier.send("new", Priority.WARN, handler="apis",
+                         dedupe_key=new_key, retryable=True) is release
+    assert sent.count("⚠ [apis] new") == int(release)
+    if not release:
+        assert any(row["key"] == new_key for row in held_view.read_recovery(notifier._digest_path))
+        assert held_view.main(["--clear-unconfirmed", new_key]) == 0
+        assert notifier.send("cleared", Priority.WARN, handler="apis",
+                             dedupe_key=new_key, retryable=True)
+        assert sent.count("⚠ [apis] cleared") == 1
+    assert not notifier.send("repeat", Priority.WARN, handler="apis",
+                             dedupe_key=new_key, retryable=True)
+
+
+def test_legacy_recovery_proof_does_not_release_a_key():
+    from . import held_view
+
+    now = datetime.now(timezone.utc)
+    old_end = now - timedelta(days=1)
+    new_end = now + timedelta(days=1)
+    key = held_view.usage_key("cursor", "weekly_all", new_end.isoformat(), 50)
+    assert not held_view.recovered_window_is_new(key, {
+        "at": (now - timedelta(days=2)).isoformat(),
+        "windows": {"cursor": {"weekly_all": old_end.isoformat()}},
+    }, now)
+
+
+def test_conflicting_stored_recovery_names_do_not_release_a_key():
+    from . import held_view
+
+    now = datetime.now(timezone.utc)
+    old_end = now - timedelta(days=1)
+    new_end = now + timedelta(days=1)
+    key = held_view.usage_key("cursor", "weekly_all", new_end.isoformat(), 50)
+    marker = {"at": (now - timedelta(days=2)).isoformat(),
+              "window_proof_version": 2,
+              "windows": {"cursor": {"weekly_all": old_end.isoformat(),
+                                     "seven_day": new_end.isoformat()}}}
+    assert not held_view.recovered_window_is_new(key, marker, now)
+
+
 def test_unreadable_journal_preserves_first_and_latest_distinct_versions(tmp_path):
     n = _notifier(tmp_path, NO_SILENCE, [])
     first = b"{first synthetic broken"

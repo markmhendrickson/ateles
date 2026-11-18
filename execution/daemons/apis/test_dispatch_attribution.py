@@ -1410,7 +1410,7 @@ def test_usage_alert_recovery_state_matrix(
     harness_router.record_usage("codex", [{"name": name, "used_percent": 60,
                                             "resets_at": old_end.isoformat()}])
     epoch = datetime.now(timezone.utc)
-    marker = {"at": epoch.isoformat(),
+    marker = {"at": epoch.isoformat(), "window_proof_version": 2,
               "windows": held_view.recovery_window_ends(epoch.isoformat())}
     canonical = held_view.canonical_window_name(name)
     assert marker["windows"]["codex"][canonical] == old_end.isoformat()
@@ -1556,6 +1556,100 @@ def test_bad_codex_window_preserves_a_valid_crossing(monkeypatch, tmp_path, ledg
     messages = [text for text in spy.delivered if "Provider usage:" in text]
     assert len(messages) == 1
     assert "Usage reading incomplete: 1 provider windows unreadable" in messages[0]
+
+
+@pytest.mark.parametrize("provider,valid_name", [
+    ("claude", "five_hour"), ("claude", "weekly_all"),
+    ("codex", "five_hour"), ("codex", "weekly_all"),
+])
+def test_each_valid_provider_window_alerts_when_its_sibling_is_unreadable(
+    monkeypatch, tmp_path, ledger, provider, valid_name
+) -> None:
+    import usage_probe
+
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    reset = (datetime.now(timezone.utc) + timedelta(days=2)).timestamp()
+    short_valid = valid_name == "five_hour"
+    if provider == "claude":
+        output = json.dumps({"type": "rate_limit_event", "rate_limit_info": {
+            "unifiedWindows": {
+                "five_hour": {"utilization": 0.8 if short_valid else "invalid",
+                              "resetsAt": reset},
+                "seven_day": {"utilization": "invalid" if short_valid else 0.8,
+                              "resetsAt": reset},
+            },
+        }})
+        result = usage_probe.probe_claude(
+            "/bin/claude", env={}, run=lambda *args, **kwargs:
+            subprocess.CompletedProcess(args, 0, output, ""),
+        )
+    else:
+        report = {"rateLimits": {
+            "primary": {"usedPercent": 80 if short_valid else "invalid",
+                        "windowDurationMins": 300,
+                        "resetsAt": reset},
+            "secondary": {"usedPercent": "invalid" if short_valid else 80,
+                          "windowDurationMins": 10080,
+                          "resetsAt": reset},
+        }, "ordinaryUsageAllowed": True}
+        def numeric_reader(*args, **kwargs):
+            windows, problem = usage_probe.parse_codex_rate_limits(report)
+            return usage_probe.ProbeResult(
+                True, "plan windows read", tuple(windows), status="available",
+                source=usage_probe.CODEX_RATE_LIMITS_SOURCE,
+                reading_failure=problem or "",
+            )
+        result = usage_probe.probe_provider(
+            "codex", "/bin/codex", env={}, codex_rate_limits=numeric_reader,
+        )
+    assert result.ok and result.reading_failure == "1 unreadable provider windows"
+    assert [window["name"] for window in result.windows] == [valid_name]
+    harness_router.record_usage(provider, result.windows, provider_probe=True,
+                                probe_detail=result.reading_failure)
+    spy = _SpyNotifier()
+    usage_alerts.check_usage_thresholds(provider, notifier=spy)
+    usage_alerts.check_usage_thresholds(provider, notifier=spy)
+    messages = [text for text in spy.delivered if "Provider usage:" in text]
+    assert len(messages) == 1
+    assert "crossed 50% and 75%" in messages[0]
+    assert "Usage reading incomplete: 1 provider windows unreadable" in messages[0]
+    if short_valid:
+        gate = harness_router.usage_gate(provider)
+        if gate is not None:
+            assert not gate.allowed and "no weekly window" in gate.message
+
+
+def test_nonobject_sibling_does_not_erase_a_valid_alert(
+    monkeypatch, tmp_path, ledger
+) -> None:
+    reset = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    _usage_file(monkeypatch, tmp_path, "claude", [
+        {"name": "five_hour", "used_percent": 80, "resets_at": reset},
+        "invalid",
+    ])
+    spy = _SpyNotifier()
+    usage_alerts.check_usage_thresholds("claude", notifier=spy)
+    usage_alerts.check_usage_thresholds("claude", notifier=spy)
+    messages = [text for text in spy.delivered if "Provider usage:" in text]
+    assert len(messages) == 1
+    assert "Usage reading incomplete: 1 provider windows unreadable" in messages[0]
+
+
+def test_ambiguous_canonical_window_is_not_alerted(
+    monkeypatch, tmp_path, ledger
+) -> None:
+    reset = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    _usage_file(monkeypatch, tmp_path, "claude", [
+        {"name": "seven_day", "used_percent": 80, "resets_at": reset},
+        {"name": "weekly", "used_percent": 80, "resets_at": reset},
+        {"name": "five_hour", "used_percent": 80, "resets_at": reset},
+    ])
+    spy = _SpyNotifier()
+    usage_alerts.check_usage_thresholds("claude", notifier=spy)
+    messages = [text for text in spy.delivered if "Provider usage:" in text]
+    assert len(messages) == 1 and "five_hour window" in messages[0]
+    assert "weekly_all window" not in messages[0]
 
 
 def test_bad_receipt_key_preserves_a_valid_crossing(monkeypatch, tmp_path, ledger) -> None:

@@ -45,6 +45,24 @@ def test_usage_command_makes_selection_use_live_headroom(capsys) -> None:
     assert harness_router.configured_headroom()["claude"] == pytest.approx(0.92)
 
 
+def test_show_keeps_valid_window_visible_from_incomplete_snapshot(capsys, tmp_path) -> None:
+    path = tmp_path / "usage.json"
+    reset = harness_router._iso_from_wall(time.time() + 86400)
+    path.write_text(json.dumps({"claude": {
+        "observed_at": harness_router._iso_from_wall(time.time()),
+        "windows": [
+            {"name": "five_hour", "used_percent": 80, "resets_at": reset},
+            {"name": "weekly_all", "used_percent": "invalid", "resets_at": reset},
+        ],
+    }}))
+    assert harness_usage.main(["show"]) == 0
+    shown = json.loads(capsys.readouterr().out)["claude"]
+    assert [window["name"] for window in shown["windows"]] == ["five_hour"]
+    assert shown["unreadable_windows"] == 1
+    assert shown["reading"]["state"] == harness_router.READING_UNKNOWN
+    assert shown["live"] is None
+
+
 def test_exhausted_command_holds_provider_out(capsys) -> None:
     until = harness_router._iso_from_wall(time.time() + 3 * 86400)
     assert harness_usage.main(["exhausted", "codex", "--until", until]) == 0

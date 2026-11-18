@@ -291,8 +291,18 @@ def check_usage_thresholds(
                 windows.append(valid)
         if harness_router._usage_entry_problem({**entry, "windows": windows}):
             return []
+        seen_names: set[str] = set()
+        ambiguous_names: set[str] = set()
+        for raw_window in raw_windows:
+            raw_name = raw_window.get("name") if isinstance(raw_window, dict) else None
+            name = _canonical_window_name(raw_name)
+            if name in seen_names:
+                ambiguous_names.add(name)
+            seen_names.add(name)
         for window in windows:
             name = _canonical_window_name(window.get("name"))
+            if name in ambiguous_names:
+                continue
             used = _percent(window.get("used_percent"))
             if used is None:
                 continue

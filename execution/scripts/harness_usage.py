@@ -167,7 +167,11 @@ def _provider_view(
     headroom, source = resolved
     reading = harness_router.usage_reading(provider)
     windows = harness_router.usage_windows(provider)
-    unknown = reading.is_unknown
+    raw_entry = harness_router._read_json_object(harness_router._usage_path()).get(provider)
+    raw_windows = raw_entry.get("windows") if isinstance(raw_entry, dict) else None
+    unreadable_windows = (sum(harness_router.normalize_usage_window(window) is None
+                              for window in raw_windows) if isinstance(raw_windows, list) else 0)
+    unknown = reading.is_unknown and unreadable_windows == 0
     row: dict[str, object] = {
         "headroom": None if source == harness_router.HEADROOM_SOURCE_UNKNOWN else headroom,
         "headroom_source": source,
@@ -184,6 +188,7 @@ def _provider_view(
         },
         "cooling": _cooling_view(provider),
         "windows": [] if unknown else windows,
+        "unreadable_windows": unreadable_windows,
         "usage_gate": _gate_view(
             provider, values[provider],
             headroom_unknown=source == harness_router.HEADROOM_SOURCE_UNKNOWN,

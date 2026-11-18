@@ -37,9 +37,9 @@ with no model turn, for example::
 five-hour one).  Interactive Codex sessions record the same ``rate_limits`` on
 every ``token_count`` event in their rollout files, which is the same data.
 ``codex exec --json`` emits no rate-limit event, so the app-server request is
-the only turn-free source.  ``read_codex_rate_limits`` uses it; a reading that
-is absent, malformed, or has no weekly window is INCONCLUSIVE, never a verdict,
-and the adapter then falls through to the native request probe below.
+the only turn-free source. ``read_codex_rate_limits`` retains each valid window
+for alerts; a report with no valid windows falls through to the native request
+probe. The weekly gate refuses dispatch without a complete weekly reading.
 
 Cursor does not expose numeric plan windows.  Its adapter (and Codex's
 fallback) run the smallest provider-native request in an isolated temporary
@@ -287,12 +287,11 @@ def _codex_window_name(minutes: int) -> str:
 def parse_codex_rate_limits(result: object) -> tuple[list[dict[str, object]], str | None]:
     """Windows from an ``account/rateLimits/read`` result, and why not if none.
 
-    Returns usable windows and an optional incomplete-reading reason. With no
-    usable weekly window, returns ``([], reason)``.
+    Returns every usable window and an optional incomplete-reading reason.
     Every window is validated (finite non-negative percent, whole-minute
     duration, finite reset) so a malformed report cannot reach the snapshot; a
-    percent above 100 is capped.  A reading with no weekly-length window is
-    refused here, because the gate cannot pace without one.  An account the
+    percent above 100 is capped. The weekly gate separately refuses a reading
+    with no weekly-length window. An account the
     server says may not use Codex (``ordinaryUsageAllowed`` false) while its
     weekly window shows room is contradictory, so it is inconclusive too.
     """
@@ -347,9 +346,10 @@ def parse_codex_rate_limits(result: object) -> tuple[list[dict[str, object]], st
         return [], (first_problem or "no usage windows")
     weekly = next((w for w in windows if w["name"] == "weekly_all"), None)
     if weekly is None:
-        return [], "no weekly-length window, so the weekly pace cannot be computed"
+        return windows, (f"{unreadable} unreadable provider windows" if unreadable
+                         else "no weekly-length window, so the weekly pace cannot be computed")
     if result.get("ordinaryUsageAllowed") is False and float(weekly["used_percent"]) < 100.0:  # type: ignore[arg-type]
-        return [], "server reports ordinary usage not allowed while the weekly window shows room"
+        return windows, "server reports ordinary usage not allowed while the weekly window shows room"
     return windows, (f"{unreadable} unreadable provider windows" if unreadable else None)
 
 
@@ -530,7 +530,7 @@ def probe_provider(
     """Run one provider adapter and return capacity evidence without writing it.
 
     Codex first tries its numeric plan windows (``read_codex_rate_limits``); a
-    reading that is inconclusive falls through to the native request probe, and
+    reading with no valid windows falls through to the native request probe, and
     if that is inconclusive too the result is ``unknown`` carrying both reasons.
     """
     if provider == "claude":

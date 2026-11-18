@@ -326,6 +326,15 @@ def usage_reading(provider: str, *, now_wall: float | None = None) -> UsageReadi
     """
     moment = time.time() if now_wall is None else now_wall
     max_age = usage_max_age_seconds()
+    raw_entry = _read_json_object(_usage_path()).get(provider)
+    if raw_entry is not None and _usage_entry_problem(raw_entry):
+        observed = (_wall_from_iso(raw_entry.get("observed_at"))
+                    if isinstance(raw_entry, dict) else None)
+        return UsageReading(
+            provider, READING_UNKNOWN, observed,
+            max(0.0, moment - observed) if observed is not None else None,
+            max_age, "usage report incomplete or malformed",
+        )
     entry = _read_usage_object().get(provider)
     if not isinstance(entry, dict):
         return UsageReading(
@@ -1186,10 +1195,10 @@ def persisted_cooling(
 
 
 def usage_windows(provider: str) -> list[dict[str, object]]:
-    """Return the recorded usage windows (session, weekly, ...) for a provider."""
-    entry = _read_usage_object().get(provider)
+    """Return individually valid windows, including from an incomplete report."""
+    entry = _read_json_object(_usage_path()).get(provider)
     windows = entry.get("windows") if isinstance(entry, dict) else None
-    return [dict(w) for w in windows if isinstance(w, dict)] if isinstance(windows, list) else []
+    return [item for w in windows if (item := normalize_usage_window(w)) is not None] if isinstance(windows, list) else []
 
 
 def render_wall(wall: float) -> str:
@@ -1459,6 +1468,10 @@ def usage_gate(provider: str, *, now_wall: float | None = None) -> UsageGate | N
         problem = "no usage windows"
     else:
         problem = next((p for p in map(_window_problem, windows) if p), None)
+        if problem is None:
+            names = [canonical_window_name(w["name"]) for w in windows]
+            if len(names) != len(set(names)):
+                problem = "duplicate canonical window name"
     if problem is not None:
         return _refused(
             normalized, GATE_MALFORMED,
@@ -1467,6 +1480,17 @@ def usage_gate(provider: str, *, now_wall: float | None = None) -> UsageGate | N
             moment, entry=entry, observed_at=observed_at, **common,
         )
     assert observed_at is not None and isinstance(windows, list)
+    probe_detail = raw_probe.get("detail") if isinstance(raw_probe, dict) else None
+    if isinstance(probe_detail, str) and (
+        re.fullmatch(r"[1-9]\d* unreadable provider windows", probe_detail)
+        or "ordinary usage not allowed" in probe_detail
+    ):
+        return _refused(
+            normalized, GATE_MALFORMED,
+            f"usage reading incomplete for {normalized} ({probe_detail}); refusing new "
+            "frontier dispatch until a complete reading is recorded",
+            moment, entry=entry, observed_at=observed_at, **common,
+        )
     age = max(0.0, moment - observed_at)
     common.update(observed_at=observed_at, age_seconds=age)
     if age > max_age:
