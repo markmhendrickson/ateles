@@ -25,6 +25,7 @@ import payment_journal  # noqa: E402
 import monedula  # noqa: E402
 from lib.approval.email_channel import ReadRepliesOutcome
 from lib.approval.tokens import subject_marker, token_for
+from lib.approval.testing_support import payment_sent_notice, sent_notice
 from lib.approval.test_email_channel import triage_contract_response
 
 
@@ -745,6 +746,7 @@ def test_email_consent_approved_on_later_tick_executes_once(monkeypatch, tmp_pat
 import json as _json  # noqa: E402
 
 from lib.approval import email_channel as _ec  # noqa: E402
+_PRODUCTION_SENT_LOOKUP = _ec.sent_request_body
 
 _GOOGLE_PASS = (
     "mx.google.com; dkim=pass header.i=@example.com header.s=s; "
@@ -781,7 +783,67 @@ def _arm_email(monkeypatch):
     monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
     monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
     monkeypatch.setattr(_ec, "_gws", lambda: "/bin/gws")
-    monkeypatch.setattr(consent_email, "send_request", lambda *a, **k: True)
+    sent = {}
+    save_mark = consent_email._save_mark
+    load_mark = consent_email._load_mark
+
+    def save_with_sent_request(path, *args, **kwargs):
+        result = save_mark(path, *args, **kwargs)
+        if isinstance(kwargs.get("request_body"), str):
+            sent["request"] = payment_sent_notice(kwargs["request_body"])
+        return result
+
+    def load_with_sent_request(path):
+        mark = load_mark(path)
+        if isinstance(mark.get("request_body"), str):
+            sent["request"] = payment_sent_notice(mark["request_body"])
+        return mark
+
+    monkeypatch.setattr(consent_email, "_save_mark", save_with_sent_request)
+    monkeypatch.setattr(consent_email, "_load_mark", load_with_sent_request)
+    monkeypatch.setattr(consent_email, "send_request", lambda *_: True)
+    monkeypatch.setattr(_ec, "sent_request_body",
+                        lambda token, subject: sent.get("request"))
+
+
+@pytest.mark.parametrize("proof", ("absent", "ambiguous", "unreadable", "present"))
+def test_payment_sent_request_proof_controls_consent(monkeypatch, tmp_path, proof):
+    handler = _Handler("session", label="Synthetic", amount=60)
+    triggered = [(handler, [{}])]
+    item = consent_email.build_pending_items(triggered, "2026-09-22")[0]
+    subject, body = consent_email.build_request_body([item], superseded=False)
+    _arm_email(monkeypatch)
+    # Restore the production lookup for this test; the fake gws boundary below
+    # provides zero, two, unreadable, or one sender-built notice.
+    monkeypatch.setattr(_ec, "sent_request_body", _PRODUCTION_SENT_LOOKUP)
+    base = _fake_gws(item.token, auth_by_id={"m1": [_GOOGLE_PASS]},
+                     body_by_id={"m1": f"ATTENDED {subject_marker(item.token)}"})
+
+    def fake(args, timeout=45):
+        if "+triage" in args and args[args.index("--query") + 1].startswith("in:sent"):
+            count = {"absent": 0, "ambiguous": 2,
+                     "unreadable": 1, "present": 1}[proof]
+            return {"complete": True, "messages": [
+                {"id": f"sent-{index}", "subject": subject,
+                 "from": "Swarm <swarm@example.net>"}
+                for index in range(count)]}
+        if "+triage" in args:
+            return {"complete": True, "messages": [{
+                "id": "m1", "subject": f"RE: {subject}",
+                "from": "Op <op@example.com>"}]}
+        if "+read" in args and any(str(arg).startswith("sent-") for arg in args):
+            return None if proof == "unreadable" else {
+                "body_text": body, "from": "Swarm <swarm@example.net>",
+                "to": "Op <op@example.com>",
+                "date": "Tue, 17 Nov 2026 12:00:00 +0000"}
+        return base(args, timeout=timeout)
+
+    monkeypatch.setattr(_ec, "gws_json", fake)
+    result = consent_email.request_and_collect(triggered, "2026-09-22",
+                                               state_path=tmp_path / "m.json")
+    assert result.approved == ({item.token} if proof == "present" else set())
+    if proof != "present":
+        assert result.reason_code == "consent_reply_read_failed"
 
 
 def test_real_read_authenticated_operator_attended_is_approved(monkeypatch, tmp_path):
@@ -1567,6 +1629,7 @@ def test_cli_triage_contract_controls_payment_execution(
     handlers = [_Handler("session_a", label="Synthetic A", amount=60)]
     if batch:
         handlers.append(_Handler("session_b", label="Synthetic B", amount=40))
+    _arm_email(monkeypatch)
     _email_env(monkeypatch)
     _install(monkeypatch, handlers, tmp_path)
     _quiet_main(monkeypatch)
@@ -1576,8 +1639,11 @@ def test_cli_triage_contract_controls_payment_execution(
 
     def fake(args, timeout=45):
         if "+triage" in args:
+            pending = consent_email.build_pending_items(
+                [(h, h.matches([{}])) for h in handlers], "2026-09-22", 1)
+            subject, _body = consent_email.build_request_body(pending, superseded=False)
             row = {"date": "2026-11-18T10:00:00Z", "from": "Op <operator@example.com>",
-                   "id": "synthetic-reply", "subject": "RE: synthetic consent"}
+                   "id": "synthetic-reply", "subject": f"RE: {subject}"}
             return triage_contract_response(shape, fault, row, 40)
         if args[:4] == ["gmail", "users", "messages", "get"]:
             return {"id": "synthetic-reply", "payload": {"headers": [
@@ -1653,7 +1719,9 @@ def test_real_read_partial_failure_holds_every_payment(monkeypatch, tmp_path, fa
                            {"body_html": "<style>ATTENDED</style>"}
                            if failure == "html_empty" else
                            {} if failure == "body_empty" else None)}))
-    outcome = _ec.read_replies_with_status([tok])
+    request_subject, request_body = consent_email.build_request_body(items, superseded=False)
+    outcome = _ec.read_replies_with_status(
+        [tok], request_bodies={tok: sent_notice(tok, request_subject, request_body)})
     assert outcome.kind == "transport_error"
     assert outcome.texts == []
     assert [reply.message_id for reply in outcome.replies] == ["m1"]
@@ -2209,6 +2277,7 @@ def test_consent_round_trip_through_the_swarm_mailbox_pays_once(monkeypatch, tmp
 
     calls: list = []
     sent_subjects: list = []
+    sent_bodies: list = []
     auth = ("mx.google.com; dkim=pass header.i=@example.com header.s=s; "
             "dmarc=pass (p=NONE) header.from=example.com")
 
@@ -2218,16 +2287,30 @@ def test_consent_round_trip_through_the_swarm_mailbox_pays_once(monkeypatch, tmp
         out: object = {}
         if args[:2] == ["gmail", "+" + "send"]:
             sent_subjects.append(args[args.index("--subject") + 1])
+            sent_bodies.append(args[args.index("--body") + 1])
         elif "+triage" in args:
-            out = {"complete": True, "messages": [
-                {"id": "r1", "subject": f"RE: {s}", "from": "Op <operator@example.com>"}
-                for s in sent_subjects
-            ]}
+            query = args[args.index("--query") + 1]
+            if query.startswith("in:sent"):
+                out = {"complete": True, "messages": [
+                    {"id": "sent-1", "subject": s,
+                     "from": "Swarm <swarm@example.net>"}
+                    for s in sent_subjects]}
+            else:
+                out = {"complete": True, "messages": [
+                    {"id": "r1", "subject": f"RE: {s}",
+                     "from": "Op <operator@example.com>"}
+                    for s in sent_subjects]}
         elif args[:4] == ["gmail", "users", "messages", "get"]:
             out = {"id": "r1", "payload": {"headers": [
                 {"name": "Authentication-Results", "value": auth}]}}
         elif "+read" in args:
-            out = {"body_text": "ATTENDED"}
+            if "sent-1" in args:
+                out = {"body_text": sent_bodies[-1],
+                       "from": "Swarm <swarm@example.net>",
+                       "to": "Op <operator@example.com>",
+                       "date": "Tue, 17 Nov 2026 12:00:00 +0000"}
+            else:
+                out = {"body_text": "ATTENDED"}
         return _sp.CompletedProcess(cmd, 0, stdout=_j.dumps(out), stderr="")
 
     monkeypatch.setattr(_ec.subprocess, "run", fake_run)

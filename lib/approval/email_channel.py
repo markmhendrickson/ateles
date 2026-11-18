@@ -1034,6 +1034,9 @@ def sent_request_body(token: str, reply_subject: str, *, max_msgs: int = 40) -> 
         return None
     sender = str(sent.get("from") or candidates[0].get("from") or "")
     recipient = str(sent.get("to") or "")
+    if (_parse_address(sender) != swarm or
+            _parse_address(recipient) != _parse_address(operator_email())):
+        return None
     date = str(sent.get("date") or candidates[0].get("date") or "")
     return SentRequest(body, sender, recipient, subject, date)
 
@@ -1216,13 +1219,24 @@ def read_replies_with_status(
             if isinstance(original_request, SentRequest):
                 sent_request = original_request
                 original_request = sent_request.body
-            if sent_request is not None and isinstance(original_request, str):
+            approval_candidate = (not correction_query and any(
+                candidate.casefold() in (subject + "\n" + raw_source).casefold()
+                for candidate in tokens))
+            if approval_candidate and not (isinstance(original_request, str)
+                                           and original_request.strip()):
+                saw_transport_error = True
+                transport_detail = "sent_request_unproven"
+                unreadable_replies.append(ApprovalReply(mid, subject))
+                continue
+            if isinstance(original_request, str):
                 request_lines = {" ".join(line.split()).casefold() for line in
                                  original_request.splitlines()}
-                subject_text = " ".join(subject.split()).casefold()
                 known = tuple(line for line in known
                               if " ".join(line.split()).casefold() in request_lines or
-                              (line.startswith("[APPROVE-") and line.casefold() in subject_text))
+                              (sent_request is not None and
+                               line.startswith("[APPROVE-") and
+                               line.casefold() in
+                               " ".join(sent_request.subject.split()).casefold()))
             body, plain_safe = _authored_plain_checked(
                 plain, sent_request=sent_request, known_quote_lines=known)
             def normalize(line: str) -> str:
@@ -1316,7 +1330,8 @@ def read_replies(
     must distinguish transport failure from an empty inbox (payment consent).
     """
     outcome = read_replies_with_status(
-        tokens, max_msgs=max_msgs, on_reply_message=on_reply_message
+        tokens, max_msgs=max_msgs, on_reply_message=on_reply_message,
+        request_bodies=sent_request_body,
     )
     if outcome.kind == "ok":
         return outcome.texts

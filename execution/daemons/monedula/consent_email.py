@@ -754,9 +754,7 @@ def request_and_collect(
         on_sender_rejected=_on_rejected,
         on_unauthenticated_operator_reply=_on_unauthenticated,
         correction_queries=[f"[Ateles] Monedula consent {items[0].payment_date}"],
-        request_bodies=(lambda token, subject:
-                        email_channel.sent_request_body(token, subject) or original_lines)
-        if isinstance(original_lines, str) else {},
+        request_bodies=email_channel.sent_request_body,
     )
 
     notified_ids = set(mark.get("notified_reply_ids") or []) if already_sent else set()

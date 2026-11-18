@@ -16,6 +16,7 @@ from unittest.mock import patch
 import pytest
 
 from lib.approval import email_channel as ec
+from lib.approval.testing_support import sent_notice
 
 
 def triage_contract_response(shape: str, fault: str, row: dict, max_msgs: int = 2):
@@ -449,8 +450,16 @@ def _mock_inbox(gws_json: Any = None, *, side_effect: Any = None,
             return _google_pass_for_operator_domain()
         return inner(args, timeout=timeout)
 
+    original_read = ec.read_replies_with_status
+
+    def read_with_notice(tokens, *args, **kwargs):
+        kwargs.setdefault("request_bodies", sent_notice)
+        return original_read(tokens, *args, **kwargs)
+
     with patch.object(ec, "_gws", return_value="/bin/gws"), \
-         patch.object(ec, "gws_json", side_effect=dispatch):
+         patch.object(ec, "gws_json", side_effect=dispatch), \
+         patch.object(ec, "sent_request_body", side_effect=sent_notice), \
+         patch.object(ec, "read_replies_with_status", side_effect=read_with_notice):
         yield
 
 
@@ -1200,7 +1209,7 @@ class TestPartialReadFailsClosed:
             return {"body_text": "APPROVE"}
 
         with _mock_inbox(side_effect=fake_gws_json):
-            out = ec.read_replies_with_status(["TOK"])
+            out = ec.read_replies_with_status(["TOK"], request_bodies=sent_notice)
         assert out.kind == "transport_error"
         assert out.texts == []
         assert [r.message_id for r in out.replies] == ["m1"]
@@ -1454,7 +1463,7 @@ class TestSwarmMailboxRouting:
         with patch.object(ec.shutil, "which", return_value="/bin/gws"), \
              patch.object(ec.subprocess, "run",
                           side_effect=_subprocess_mailbox(calls, auth_value=_GMAIL_PASS)):
-            out = ec.read_replies_with_status(["TOK"])
+            out = ec.read_replies_with_status(["TOK"], request_bodies=sent_notice)
         # An authenticated inbound operator reply in the swarm mailbox counts.
         assert out.kind == "ok" and len(out.texts) == 1
         kinds = {("+triage" in a and "triage") or ("+read" in a and "read")
@@ -1517,7 +1526,7 @@ class TestAuthservIdConfig:
             with patch.object(ec.shutil, "which", return_value="/bin/gws"), \
                  patch.object(ec.subprocess, "run",
                               side_effect=_subprocess_mailbox(calls, auth_value=auth)):
-                out = ec.read_replies_with_status(["TOK"])
+                out = ec.read_replies_with_status(["TOK"], request_bodies=sent_notice)
             assert out.kind == "ok" and len(out.texts) == expected
 
 
@@ -1679,3 +1688,26 @@ def test_known_quoted_request_remains_readable(monkeypatch):
     with _mock_inbox(side_effect=fake_gws):
         outcome = ec.read_replies_with_status(["release-approve:"])
     assert outcome.kind == "ok" and len(outcome.texts) == 1
+
+
+@pytest.mark.parametrize("recipient,proven", (
+    ("Op <op@example.com>", True),
+    ("Other <other@example.com>", False),
+    ("", False),
+))
+def test_sent_request_lookup_requires_operator_recipient(monkeypatch, recipient, proven):
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
+
+    def fake(args, timeout=45):
+        if "+triage" in args:
+            return {"complete": True, "messages": [{
+                "id": "sent-1", "subject": "Release v1.2.3 ready to approve",
+                "from": "Swarm <swarm@example.net>"}]}
+        return {"body_text": "release-approve: v1.2.3",
+                "from": "Swarm <swarm@example.net>", "to": recipient}
+
+    monkeypatch.setattr(ec, "gws_json", fake)
+    request = ec.sent_request_body("release-approve:",
+                                   "Re: Release v1.2.3 ready to approve")
+    assert (request is not None) is proven
