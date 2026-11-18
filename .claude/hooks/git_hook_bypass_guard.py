@@ -1213,6 +1213,51 @@ def _strip_command_prefix(words: list[Word], *, wrappers: bool = False,
     return rest
 
 
+def _unresolved_wrapped_executable(words: list[Word]) -> bool:
+    """Locate each executable after a wrapper without treating data as code."""
+    rest = words
+    value_options = {
+        "env": {"-u", "--unset", "-C", "--chdir"},
+        "sudo": {"-u", "--user", "-g", "--group", "-h", "--host"},
+        "doas": {"-u"},
+        "nice": {"-n", "--adjustment"},
+        "xargs": {"-I", "-L", "-n", "-P", "-s", "-E", "-d"},
+        "stdbuf": {"-i", "-o", "-e"},
+        "flock": {"-w", "-E"},
+    }
+    while rest and os.path.basename(rest[0].text) in _WRAPPERS:
+        base = os.path.basename(rest[0].text)
+        i = 1
+        while i < len(rest):
+            word = rest[i]
+            if word.text == "--":
+                i += 1
+                break
+            if base == "env" and _ASSIGNMENT.match(word.text):
+                i += 1
+                continue
+            if word.text in value_options.get(base, set()):
+                i += 2
+                continue
+            if word.text.startswith("-"):
+                i += 1
+                continue
+            if base in {"timeout", "gtimeout"} and i == 1:
+                i += 1  # duration before the command
+                continue
+            if base == "flock" and i == 1:
+                i += 1  # lock file or descriptor before the command
+                continue
+            break
+        if i >= len(rest):
+            return False
+        executable = rest[i]
+        if executable.expanded or executable.braced or executable.globbed or executable.concatenated:
+            return True
+        rest = rest[i:]
+    return False
+
+
 def _is_git_binary_word(text: str) -> bool:
     base = os.path.basename(text)
     return base == "git" or bool(re.fullmatch(rf"git-(?:{_GIT_DASHED})", base))
@@ -1513,10 +1558,7 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int =
             return f"{head.text} (only a plain `git` is allowed)"
         return git_violation(rest[1:])
     if base in _WRAPPERS:
-        # A wrapper can execute any later word. Until its full option grammar
-        # proves which one is data, an expanded word cannot be trusted as a
-        # literal executable name.
-        if any(w.expanded or w.braced or w.globbed or w.concatenated for w in rest[1:]):
+        if _unresolved_wrapped_executable(rest):
             return f"{base} executable name cannot be resolved literally"
         hit = _assignment_violation(rest[1:], command_mentions_git=whole_mentions_git)
         if hit:

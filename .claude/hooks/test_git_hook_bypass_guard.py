@@ -664,6 +664,9 @@ def test_whole_command_assembly_is_refused(command):
 
 
 @pytest.mark.parametrize("command", ("cat src/output", "env echo ready",
+                                     'env echo "$TEXT"',
+                                     'command echo "$TEXT"',
+                                     'sudo -u "$USER" echo "$TEXT"',
                                      "printf ready | cat", "'cat' src/output"))
 def test_literal_executables_remain_allowed(command):
     assert_allowed(command)
