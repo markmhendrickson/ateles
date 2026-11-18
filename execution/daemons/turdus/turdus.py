@@ -49,6 +49,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -272,14 +273,29 @@ def _load_state() -> dict:
     return {"last_message_id": None, "processed_count": 0}
 
 
-def _save_state(state: dict) -> None:
+def _save_state(state: dict) -> bool:
     """Persist state to local state file."""
     if DRY_RUN:
-        return
+        return True
+    temp_path = None
     try:
-        _STATE_FILE.write_text(json.dumps(state, indent=2))
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                         dir=_STATE_FILE.parent, delete=False) as temp:
+            temp_path = Path(temp.name)
+            temp.write(json.dumps(state, indent=2))
+            temp.flush()
+            os.fsync(temp.fileno())
+        os.replace(temp_path, _STATE_FILE)
+        return True
     except OSError as exc:
         log.warning(f"[{DAEMON_NAME}] Failed to save state: {exc}")
+        return False
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 # ── Gmail poll via gws CLI ────────────────────────────────────────────────────
@@ -1132,6 +1148,8 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
     correction_id_set = set(correction_ids)
     held_notice_ids: list[str] = list(state.get("held_approval_notice_ids", []))
     held_notice_set = set(held_notice_ids)
+    held_reply_ids: list[str] = list(state.get("held_approval_reply_ids", []))
+    held_reply_set = set(held_reply_ids)
 
     def _mark_handled(mid: str) -> None:
         if mid and mid not in processed_id_set:
@@ -1181,6 +1199,57 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
     correction_targets: set[str] = set()
     unknown_correction = False
     if outcome.kind in ("ok", "transport_error"):
+        # A same-sweep correction consumes older bound approvals before either
+        # notice is attempted. Notice delivery cannot determine future routing.
+        for reply in outcome.correction_only_replies:
+            if reply.message_id in correction_id_set or reply.message_id in processed_id_set:
+                continue
+            subject = reply.subject
+            if _RELEASE_READY_SUBJECT_MARKER.lower() in subject.lower():
+                match = re.search(r"\bRelease\s+(v[0-9][\w.+-]*)", subject, re.IGNORECASE)
+            elif _MERGE_READY_SUBJECT_MARKER.lower() in subject.lower():
+                match = re.search(r"\bPR\s+([A-Za-z0-9._-]+/[A-Za-z0-9._-]+#\d+)", subject)
+            else:
+                match = None
+            if match:
+                correction_targets.add(match.group(1).casefold())
+            else:
+                unknown_correction = True
+        if outcome.kind == "ok" and (correction_targets or unknown_correction):
+            for reply in outcome.replies:
+                target = reply.correlation_target
+                if target and (unknown_correction or target.casefold() in correction_targets):
+                    _mark_handled(reply.message_id)
+                    if reply.message_id not in held_reply_set:
+                        held_reply_set.add(reply.message_id)
+                        held_reply_ids.append(reply.message_id)
+            if processed_ids != state.get("processed_ids", []):
+                next_state = {**state,
+                              "processed_ids": processed_ids[-_MAX_PROCESSED_IDS:],
+                              "held_approval_reply_ids": held_reply_ids[-_MAX_PROCESSED_IDS:]}
+                if not _save_state(next_state):
+                    return state
+                state = next_state
+        for reply in outcome.replies:
+            if reply.message_id not in held_reply_set or reply.message_id in held_notice_set:
+                continue
+            target = reply.correlation_target
+            if not target:
+                continue
+            exact_form = (f"approve {target}" if
+                          _RELEASE_READY_SUBJECT_MARKER.lower() in
+                          reply.subject.lower() else "approve")
+            delivered = notifier.send(
+                f"{DAEMON_NAME}: exact email approval for {target} is held "
+                "because another reply in its sweep was unreadable or "
+                "did not carry the request token. "
+                f"To approve in Telegram, send exactly `{exact_form}`.",
+                priority=Priority.BLOCKER, handler=DAEMON_NAME,
+                email_eligible=False,
+            )
+            if delivered:
+                held_notice_set.add(reply.message_id)
+                held_notice_ids.append(reply.message_id)
         for reply in outcome.correction_only_replies:
             mid = reply.message_id
             subject = reply.subject
@@ -1263,8 +1332,6 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
                     if delivered:
                         held_notice_set.add(reply.message_id)
                         held_notice_ids.append(reply.message_id)
-                        if correction_targets:
-                            _mark_handled(reply.message_id)
                 if msg.get("correction_notified") and reply.message_id not in correction_id_set:
                     correction_id_set.add(reply.message_id)
                     correction_ids.append(reply.message_id)

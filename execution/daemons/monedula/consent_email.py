@@ -764,6 +764,16 @@ def request_and_collect(
     fresh_corrections = [reply for reply in outcome.correction_only_replies
                          if reply.message_id not in notified_ids]
     correction_holds = bool(fresh_corrections)
+    if correction_holds:
+        held_ids.update(reply.message_id for reply in outcome.replies)
+        try:
+            _save_mark(path, fp, float(mark.get("sent_at") or time.time()),
+                       generation=generation, request_body=original_lines,
+                       notified_reply_ids=sorted(notified_ids),
+                       held_reply_ids=sorted(held_ids))
+        except (OSError, TypeError, ValueError) as exc:
+            log.error(f"consent correction state unavailable — payments held: {exc}")
+            return _block_all(items, "consent_correction_state_unavailable")
     if on_missing_token_reply is not None:
         forms = "; ".join(
             f"`{'attended' if item.is_calendar else 'yes'} {item.handler_name}`"
@@ -782,8 +792,6 @@ def request_and_collect(
                     notified_ids.add(reply.message_id)
             except Exception as exc:  # noqa: BLE001 — a failed notice cannot approve
                 log.warning(f"consent missing-token notice failed: {exc}")
-    if correction_holds:
-        held_ids.update(reply.message_id for reply in outcome.replies)
     if notified_ids or held_ids:
         try:
             _save_mark(path, fp, float(mark.get("sent_at") or time.time()),

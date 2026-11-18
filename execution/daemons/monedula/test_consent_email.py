@@ -8,6 +8,7 @@ kwargs, fingerprint file, log event names. Synthetic fixtures only.
 from __future__ import annotations
 
 import html
+import json
 import logging
 import sys
 import types
@@ -2408,14 +2409,22 @@ def test_new_bound_reply_can_follow_notified_tokenless_reply(monkeypatch, tmp_pa
     monkeypatch.setattr(_ec, "_fetch_auth_results", lambda _: [_GOOGLE_PASS])
     notices = []
     path = tmp_path / "m.json"
+
+    def notice(message, key):
+        assert "old" in json.loads(path.read_text())["held_reply_ids"]
+        notices.append(message)
+        return len(notices) > 1
+
     first = consent_email.request_and_collect(
         triggered, "2026-09-22", state_path=path,
-        on_missing_token_reply=lambda msg, key: notices.append(msg) or True)
+        on_missing_token_reply=notice)
     assert first.approved == set()
     assert len(first.blocked) == len(items)
+    assert "old" in json.loads(path.read_text())["held_reply_ids"]
     sweep["number"] = 2
     second = consent_email.request_and_collect(
         triggered, "2026-09-22", state_path=path,
-        on_missing_token_reply=lambda msg, key: notices.append(msg) or True)
+        on_missing_token_reply=notice)
     assert second.approved == {item.token for item in items}
-    assert len(notices) == 1
+    assert len(notices) == 2
+    assert "correction" in json.loads(path.read_text())["notified_reply_ids"]

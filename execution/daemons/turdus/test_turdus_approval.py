@@ -1909,11 +1909,27 @@ def test_notified_tokenless_reply_does_not_hold_new_bound_reply(monkeypatch, tmp
     monkeypatch.setattr(turdus, "_post_email_approval", post)
     monkeypatch.setattr(turdus, "_post_release_approval", post)
     notices = _StubNotifier()
+    original_send = notices.send
+    attempts = []
+
+    def send(message, **kwargs):
+        if "exact email approval" in message:
+            assert "bound-old" in json.loads(
+                (tmp_path / "state.json").read_text())["held_approval_reply_ids"]
+            attempts.append(message)
+            if len(attempts) == 1:
+                return False
+        return original_send(message, **kwargs)
+
+    notices.send = send
     state = _run(turdus.poll_once(notices, {"last_message_id": None}))
     assert not posts
+    assert "bound-old" in state["held_approval_reply_ids"]
+    assert "bound-old" in json.loads((tmp_path / "state.json").read_text())["held_approval_reply_ids"]
     sweep["number"] = 2
-    _run(turdus.poll_once(notices, state))
+    _run(turdus.poll_once(notices, turdus._load_state()))
     assert len(posts) == 1
+    assert len(attempts) == 2
     assert len([note for note in notices.sent if "did not contain" in note]) == 1
 
 

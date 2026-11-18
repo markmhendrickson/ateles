@@ -763,6 +763,7 @@ def tag_and_push(version: str, dry_run: bool) -> None:
     if dry_run:
         log.info(f"[dry-run] would tag {version} and push tag")
         return
+    _verify_prepare_guard_snapshot()
     run(["git", "tag", "-a", version, "-m", f"Release {version}"])
     # merge_rc_pr always merges server-side via `gh pr merge` — there is no
     # local-merge code path in this file — so origin/main is already up to
@@ -772,6 +773,7 @@ def tag_and_push(version: str, dry_run: bool) -> None:
         f"git push origin main (already up to date on origin). Pushing tag "
         f"{version} only."
     )
+    _verify_prepare_guard_snapshot()
     run(["git", "push", "origin", version])
 
 
@@ -845,6 +847,7 @@ def npm_publish_local(version: str, dry_run: bool) -> None:
             run(["npm", "publish", "--dry-run"], env=npm_env, timeout=900)
             log.info("[dry-run] npm publish --dry-run completed")
             return
+        _verify_prepare_guard_snapshot()
         run(["npm", "publish"], env=npm_env, timeout=900)
         # Verify registry reflects the new version.
         published = _registry_version(npm_env)
@@ -888,6 +891,7 @@ def github_release(version: str, notes_path: Path | None, dry_run: bool) -> None
         ["gh", "release", "view", version, "--json", "isDraft"], check=False
     ).returncode == 0
     if not exists:
+        _verify_prepare_guard_snapshot()
         run(
             [
                 "gh", "release", "create", version,
@@ -999,6 +1003,19 @@ STEP_ORDER = [
 ]
 
 
+def _verify_prepare_guard_snapshot() -> None:
+    try:
+        state = json.loads(PREPARE_STATE_FILE.read_text())
+        expected = state.get("guard_snapshot") if isinstance(state, dict) else None
+        changed = changed_guard_location(NEOTOMA_REPO_ROOT, expected)
+    except (OSError, ValueError, TypeError) as exc:
+        raise StepError(f"prepare guard snapshot unreadable: {exc}") from exc
+    if changed:
+        message = f"release guard changed at {changed}; release stopped"
+        telegram_send(message)
+        raise StepError(message)
+
+
 def publish_release(
     release: dict,
     version: str,
@@ -1008,14 +1025,7 @@ def publish_release(
     email_approval: bool = False,
 ) -> None:
     if not dry_run:
-        try:
-            state = json.loads(PREPARE_STATE_FILE.read_text())
-            expected = state.get("guard_snapshot") if isinstance(state, dict) else None
-            changed = changed_guard_location(NEOTOMA_REPO_ROOT, expected)
-        except (OSError, ValueError, TypeError) as exc:
-            raise StepError(f"prepare guard snapshot unreadable: {exc}") from exc
-        if changed:
-            raise StepError(f"release guard changed at {changed}; release stopped")
+        _verify_prepare_guard_snapshot()
     f = _entity_fields(release)
     # The exact entity find_release resolved; every status write targets it.
     entity_id = str(release.get("entity_id") or "") or None
@@ -1078,14 +1088,22 @@ def publish_release(
         # exactly how the v0.18.8 incident's missing bump commit slipped
         # through undetected.
         preflight_post_merge(version, dry_run)
+        if not dry_run:
+            _verify_prepare_guard_snapshot()
         tag_and_push(version, dry_run)
     if resume_idx <= STEP_ORDER.index("npm_publish"):
+        if not dry_run:
+            _verify_prepare_guard_snapshot()
         npm_publish(version, dry_run)
     if resume_idx <= STEP_ORDER.index("github_release"):
+        if not dry_run:
+            _verify_prepare_guard_snapshot()
         github_release(version, notes_path, dry_run)
     if resume_idx <= STEP_ORDER.index("deploy_sandbox"):
         deploy_sandbox(version, dry_run)
     if resume_idx <= STEP_ORDER.index("publish_github_release_draft"):
+        if not dry_run:
+            _verify_prepare_guard_snapshot()
         publish_github_release_draft(version, dry_run)
     summary = post_release(version, dry_run)
 
