@@ -315,14 +315,24 @@ def _load_state() -> dict:
     if not _state_evidence_exists():
         return _empty_state()
     try:
+        _state_marker_file().stat()
+        initialized = True
+    except FileNotFoundError:
+        initialized = False
+    except OSError as exc:
+        raise StateUnreadableError("Turdus reply state path unreadable") from exc
+    try:
         state = json.loads(_STATE_FILE.read_text(), object_pairs_hook=_unique_state_keys)
     except (ValueError, OSError) as exc:
         raise StateUnreadableError("Turdus reply state unreadable") from exc
     if not isinstance(state, dict):
         raise StateUnreadableError("Turdus reply state malformed: structure")
-    expected = set(_empty_state())
+    expected = (set(_empty_state()) if initialized else
+                {"last_message_id", "processed_count", "processed_ids"})
     if not expected <= state.keys() or state.keys() - expected - {"last_poll_at"}:
         raise StateUnreadableError("Turdus reply state malformed: fields")
+    if not initialized:
+        state = {**_empty_state(), **state}
     if type(state["processed_count"]) is not int or state["processed_count"] < 0:
         raise StateUnreadableError("Turdus reply state malformed: processed_count")
     last_id = state["last_message_id"]
@@ -361,6 +371,13 @@ def _save_state(state: dict) -> bool:
     temp_path = None
     try:
         marker_path = _state_marker_file()
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                         dir=_STATE_FILE.parent, delete=False) as temp:
+            temp_path = Path(temp.name)
+            temp.write(json.dumps(state, indent=2))
+            temp.flush()
+            os.fsync(temp.fileno())
+        os.replace(temp_path, _STATE_FILE)
         if not marker_path.exists():
             try:
                 with marker_path.open("x") as marker:
@@ -369,13 +386,6 @@ def _save_state(state: dict) -> bool:
                     os.fsync(marker.fileno())
             except FileExistsError:
                 pass
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
-                                         dir=_STATE_FILE.parent, delete=False) as temp:
-            temp_path = Path(temp.name)
-            temp.write(json.dumps(state, indent=2))
-            temp.flush()
-            os.fsync(temp.fileno())
-        os.replace(temp_path, _STATE_FILE)
         return True
     except OSError as exc:
         log.warning(f"[{DAEMON_NAME}] Failed to save state: {exc}")

@@ -932,6 +932,73 @@ def test_first_use_reply_state_is_empty(monkeypatch, tmp_path):
     assert not state_path.with_name(state_path.name + ".initialized").exists()
 
 
+def test_legacy_state_without_marker_keeps_consumed_reply_and_migrates(monkeypatch, tmp_path):
+    state_path = tmp_path / "legacy.json"
+    marker_path = state_path.with_name(state_path.name + ".initialized")
+    state_path.write_text(json.dumps({"last_message_id": None, "processed_count": 1,
+                                     "last_poll_at": "2026-11-18T12:00:00+00:00",
+                                     "processed_ids": ["a"]}))
+    monkeypatch.setattr(turdus, "_STATE_FILE", state_path)
+    monkeypatch.setattr(turdus, "DRY_RUN", False)
+    monkeypatch.setattr(turdus, "_poll_gmail_messages", lambda *_: [])
+    reply = email_channel.ApprovalReply("a", "Re: Release v1.2.3 ready to approve",
+                                        "approve v1.2.3", correlation_target="v1.2.3")
+    monkeypatch.setattr(email_channel, "read_replies_with_status",
+                        lambda *_a, **_k: email_channel.ReadRepliesOutcome(
+                            "ok", [reply.body], replies=(reply,)))
+    posts = []
+
+    async def post(*args):
+        posts.append(args)
+        return True
+
+    monkeypatch.setattr(turdus, "_maybe_handle_release_approval", post)
+    notices = _StubNotifier()
+    state = _run(turdus.poll_once(notices, {}))
+    assert not any("reply state is unreadable" in message for message in notices.sent)
+    assert state["processed_ids"] == ["a"]
+    assert posts == []
+    assert turdus._save_state(state)
+    assert marker_path.exists()
+    assert turdus._load_state()["processed_ids"] == ["a"]
+
+
+@pytest.mark.parametrize("marked", (False, True))
+@pytest.mark.parametrize("change", ("valid", "wrong_type", "unknown_key", "duplicate_key"))
+def test_legacy_state_shape_only_loads_unmarked_valid_subset(
+        monkeypatch, tmp_path, marked, change):
+    state_path = tmp_path / "legacy.json"
+    state = {"last_message_id": None, "processed_count": 1,
+             "last_poll_at": "2026-11-18T12:00:00+00:00", "processed_ids": ["a"]}
+    if change == "wrong_type":
+        state["processed_ids"] = [42]
+    elif change == "unknown_key":
+        state["unexpected"] = True
+    contents = json.dumps(state)
+    if change == "duplicate_key":
+        contents = contents[:-1] + ', "processed_ids": ["a"]}'
+    state_path.write_text(contents)
+    monkeypatch.setattr(turdus, "_STATE_FILE", state_path)
+    if marked:
+        state_path.with_name(state_path.name + ".initialized").write_text("initialized\n")
+    if change == "valid" and not marked:
+        assert turdus._load_state()["processed_ids"] == ["a"]
+    else:
+        with pytest.raises(turdus.StateUnreadableError):
+            turdus._load_state()
+
+
+def test_marker_write_failure_fails_save_after_state_write(monkeypatch, tmp_path):
+    state_path = tmp_path / "state.json"
+    marker_path = tmp_path / "missing" / "state.json.initialized"
+    monkeypatch.setattr(turdus, "_STATE_FILE", state_path)
+    monkeypatch.setattr(turdus, "_state_marker_file", lambda: marker_path)
+    monkeypatch.setattr(turdus, "DRY_RUN", False)
+    assert not turdus._save_state(_full_reply_state())
+    assert state_path.exists()
+    assert not marker_path.exists()
+
+
 def test_missing_initialized_reply_state_holds(monkeypatch, tmp_path):
     state_path = tmp_path / "missing.json"
     monkeypatch.setattr(turdus, "_STATE_FILE", state_path)
@@ -1035,7 +1102,6 @@ def test_missing_consumed_ids_never_posts_approval(monkeypatch, tmp_path, kind):
     monkeypatch.setattr(turdus, "_STATE_FILE", state_path)
     monkeypatch.setattr(turdus, "DRY_RUN", False)
     state = _full_reply_state()
-    state["processed_ids"] = ["approval-1"]
     del state["processed_ids"]
     state_path.write_text(json.dumps(state))
     state_path.with_name(state_path.name + ".initialized").write_text("initialized\n")
