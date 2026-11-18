@@ -264,7 +264,10 @@ of the repository, not from the PR). Apply its review criteria.
 - Report EVERY finding of a class at once, not one variant.
 - If you find a security weakness OUTSIDE this PR's scope, put no details in
   the verdict body; write only "One out-of-scope hardening observation was
-  recorded privately." and give the details only in your final reply.
+  recorded privately." in the body, and put the details AFTER a line reading
+  `PRIVATE-NOTE:` at the very end of your reply. Everything from that line on
+  is removed before anything is posted and is kept privately; nothing above
+  that line is ever private, and your whole reply is otherwise posted as-is.
 
 ## Output (your entire reply is the verdict body)
 - Line 1: your attribution header, e.g. `**🤖 {role.capitalize()} — Ateles swarm, {lens} lens panelist**`.
@@ -348,6 +351,30 @@ def extract_verdict(stdout: str) -> str | None:
     return None
 
 
+# A line that opens a private section of a lens reply. The brief asks for `PRIVATE-NOTE:`; the
+# second shape is what a lens wrote unprompted ("*Private to the requesting session ...*") and
+# was posted publicly once, so both are recognised. Everything from the first such line on (and a
+# directly preceding horizontal rule) is private: never posted, kept in a 0600 file.
+PRIVATE_LINE_RE = re.compile(
+    r"^\s*(?:[`*_]*PRIVATE-NOTE:[`*_]*|[`*_]*Private to the requesting session)", re.IGNORECASE)
+
+
+def split_private(body: str) -> tuple[str, str]:
+    """(public body, private text). The private text is "" when the reply has no private section."""
+    lines = body.splitlines()
+    for i, line in enumerate(lines):
+        if PRIVATE_LINE_RE.match(line):
+            cut = i
+            j = i - 1
+            while j >= 0 and not lines[j].strip():
+                j -= 1
+            if j >= 0 and re.fullmatch(r"\s*(?:-{3,}|\*{3,}|_{3,})\s*", lines[j]):
+                cut = j
+            public = "\n".join(lines[:cut]).rstrip() + "\n"
+            return public, "\n".join(lines[cut:]).strip() + "\n"
+    return body, ""
+
+
 def normalize_header(body: str, *, role: str) -> str:
     """Rewrite a colon-separated line 1 into the contract's dash form.
 
@@ -410,6 +437,12 @@ def run_lens(*, lens: str, repo: str, pr: int, head: str, task_entity_id: str,
             body = extract_verdict(str(env.get("stdout", "")))
             if body is not None:
                 body = normalize_header(body, role=role)
+                body, private = split_private(body)
+                if private:
+                    note = out_dir / f"{lens}.private.txt"
+                    note.write_text(private)
+                    os.chmod(note, 0o600)
+                    log(f"{lens}: a private section was removed from the verdict (kept in {note.name})")
                 path = out_dir / f"{lens}.verdict.md"
                 path.write_text(body)
                 token = VERDICT_RE.search(body.splitlines()[1]).group(1)  # type: ignore[union-attr]

@@ -77,6 +77,37 @@ def test_verdict_file_shape_and_summary(tmp_path):
     assert "duration_s" in rec
 
 
+@pytest.mark.parametrize("private", [
+    "PRIVATE-NOTE: the details of an out-of-scope observation",
+    "`PRIVATE-NOTE:` the details",
+    "---\n*Private to the requesting session (do not post):* the details of an observation",
+    "\n\n---\n\n**Private to the requesting session**: the details",
+])
+def test_a_private_section_is_never_in_the_posted_verdict(tmp_path, private):
+    reply = GOOD + "\nOne out-of-scope hardening observation was recorded privately.\n\n" + private + "\n"
+    rc, posts = run(tmp_path, Script(ok_env(reply)), "--post")
+    assert rc == 0
+    verdict = (tmp_path / "pm.verdict.md").read_text()
+    assert "details" not in verdict and "Private to the requesting session" not in verdict
+    assert "recorded privately" in verdict and verdict.endswith("\n")
+    note = tmp_path / "pm.private.txt"
+    assert "details" in note.read_text() and (note.stat().st_mode & 0o777) == 0o600
+    assert all("details" not in str(v) for post in posts for v in post.values())
+
+
+def test_a_reply_without_a_private_section_is_posted_whole(tmp_path):
+    run(tmp_path, Script(ok_env()))
+    assert (tmp_path / "pm.verdict.md").read_text() == GOOD
+    assert not (tmp_path / "pm.private.txt").exists()
+
+
+def test_the_brief_names_the_private_note_marker_and_never_tells_a_lens_to_use_its_reply(tmp_path):
+    run(tmp_path, Script(ok_env()))
+    brief = (tmp_path / "pm.brief.md").read_text()
+    assert "PRIVATE-NOTE:" in brief
+    assert "give the details only in your final reply" not in brief
+
+
 def test_retries_once_on_mechanical_failure(tmp_path):
     d = Script(fail_env(), ok_env())
     rc, _ = run(tmp_path, d)
