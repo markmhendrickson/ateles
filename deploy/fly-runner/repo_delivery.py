@@ -592,6 +592,13 @@ def export_agent_work(work: Work, *, branch: str, base: str,
     ancestor = _run([*checkout, "merge-base", "--is-ancestor", base, head], env=env, ident=ident)
     if isinstance(ancestor, str) or ancestor.returncode != 0:
         raise RepoWorkError(EXPORT_FAILED, "the branch does not descend from the admitted base")
+    # A branch that descends from the base can still merge in unrelated history,
+    # which `^base` would bundle whole. The importer refuses any merge commit, so
+    # refuse the same shape here, before a bundle is built.
+    merges = _git([*checkout, "rev-list", "--min-parents=2", f"{base}..refs/heads/{branch}"],
+                  env=env, ident=ident, category=EXPORT_FAILED, reason="looking for merges")
+    if merges.strip():
+        raise RepoWorkError(EXPORT_FAILED, "the branch contains a merge commit")
     _git([*checkout, "bundle", "create", "-q", str(work.export / BUNDLE_NAME),
           f"refs/heads/{branch}", f"^{base}"], env=env, ident=ident, category=EXPORT_FAILED,
          reason="bundling the agent's work")  # fmt: skip

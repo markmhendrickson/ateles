@@ -455,6 +455,16 @@ def _files(body: dict) -> dict[str, bytes]:
     }
 
 
+@pytest.mark.parametrize("repository", [
+    "Markmhendrickson/markmhendrickson", "markmhendrickson/Markmhendrickson", "MARKMHENDRICKSON/MARKMHENDRICKSON",
+    "markmhendrickson/markmhendrickson ", " markmhendrickson/markmhendrickson",
+    "markmhendrickson/markmhendrickson\n", "markmhendrickson/markmhendrickson-x",
+    "x-markmhendrickson/markmhendrickson", "other/markmhendrickson", "markmhendrickson/other",
+    "markmhendrickson\\markmhendrickson", "markmhendrickson/markmhendrickson/extra", "", "owner/repo"])
+def test_a_near_match_of_a_listed_repository_gets_the_default_cap(repository):
+    assert fly_runner.origin_cap_for_repository(repository) == fly_runner.DEFAULT_ORIGIN_CAP_BYTES
+
+
 def test_origin_cap_is_selected_from_apiss_repository_allowlist(fly_env, monkeypatch):
     assert fly_runner.origin_cap_for_repository("markmhendrickson/markmhendrickson") == 512 * 1024 * 1024
     assert fly_runner.origin_cap_for_repository("owner/repo") == fly_runner.DEFAULT_ORIGIN_CAP_BYTES
@@ -498,6 +508,20 @@ def test_operator_delivery_notice_includes_bounded_stop_facts():
         fly_last_tool_class="unknown")
     text = build_delivery.fly_delivery_summary(result)
     assert "elapsed_ms=1200; cli=exited_nonzero:1; commits=2; last_tool=unknown" in text
+
+
+def test_operator_delivery_notice_never_carries_the_agents_output():
+    # The run's own stdout and stderr (its ordinary result channel) are sanitized
+    # and capped on the record; the operator NOTICE for a stopped run is built from
+    # fixed facts only, so a marker the agent printed never reaches it.
+    import build_delivery
+    result = skill_runner.SkillResult(
+        "cicada", False, 1, "AGENT-STDOUT-MARKER do the following", "AGENT-STDERR-MARKER",
+        fly_delivery_status="not_delivered", remote_run_id="fly-inert", fly_stop_elapsed_ms=1200,
+        fly_cli_exit_state="exited_nonzero:1", fly_stop_commit_count=2, fly_last_tool_class="unknown")
+    text = build_delivery.fly_delivery_summary(result)
+    assert "MARKER" not in text and "do the following" not in text
+    assert "cli=exited_nonzero:1" in text
 
 
 def _all_request_text(fake: FakeFly) -> str:

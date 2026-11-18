@@ -131,7 +131,8 @@ def _pr(number):
             "head": {"ref": BRANCH, "repo": {"full_name": REPO}}, "base": {"ref": "main"}}
 
 
-def _job(tmp_path, *, delivery=DELIVERY, secrets=None, argv=None, stdin=None, timeout=600):
+def _job(tmp_path, *, delivery=DELIVERY, secrets=None, argv=None, stdin=None, timeout=600,
+         origin_cap_bytes=None):
     job_dir = tmp_path / "job"
     (job_dir / "secrets").mkdir(parents=True)
     secrets = {"LANIUS_NEOTOMA_TOKEN": ROLE_TOKEN, run_job.DELIVERY_TOKEN_NAME: TOKEN} \
@@ -143,6 +144,8 @@ def _job(tmp_path, *, delivery=DELIVERY, secrets=None, argv=None, stdin=None, ti
             "probe_env_names": [], "probe_paths": [], "child_user": ""}
     if delivery is not None:
         spec["delivery"] = delivery
+    if origin_cap_bytes is not None:
+        spec["origin_cap_bytes"] = origin_cap_bytes
     (job_dir / "job.json").write_text(json.dumps(spec))
     if argv is None:
         argv = ["codex", "exec", "--cd", run_job.WORKSPACE_PLACEHOLDER, "-"] if delivery \
@@ -468,6 +471,30 @@ def test_no_time_for_the_cli_after_the_clone_is_unknown_not_timed_out(world, mon
     rc, record = _run(_job(world["tmp"]), lambda *a, **k: pytest.fail("the CLI must not run"))
     assert record["delivery_status"] == "no_time"
     assert record["cli_exit_state"] == "unknown"
+
+
+@pytest.mark.parametrize("cap", [512 * 1024 * 1024 + 1, 513 * 1024 * 1024, 2**40, 0, -1, True, False,
+                                 "536870912", 536870912.0, None])
+def test_an_untrusted_job_origin_cap_never_raises_the_cap_above_the_default(world, monkeypatch, cap):
+    # Apis is the only source of a cap above the default, through the job it writes (its own
+    # table decides; the runner never reads the table). Whatever else the job file carries
+    # (an oversized, zero, negative, boolean, string, float or null value) can only fall to
+    # the 300 MiB default: a clone of 400 MiB, between the default and the ceiling, is refused.
+    four_hundred = 400 * 1024 * 1024
+    assert rd.MAX_ORIGIN_BYTES < four_hundred < rd.ABSOLUTE_ORIGIN_CEILING_BYTES
+    monkeypatch.setattr(rd, "_size", lambda _path: four_hundred)
+    rc, record = _run(_job(world["tmp"], origin_cap_bytes=cap),
+                      lambda *a, **k: pytest.fail("the CLI must not run after a refused clone"))
+    assert record["delivery_status"] == "clone_failed"
+    assert record["delivery_reason"] == "clone_refused: the clone is larger than the accepted size"
+
+
+def test_the_cap_apis_chose_is_honoured_up_to_the_ceiling(world, monkeypatch):
+    four_hundred = 400 * 1024 * 1024
+    monkeypatch.setattr(rd, "_size", lambda _path: four_hundred)
+    rc, record = _run(_job(world["tmp"], origin_cap_bytes=rd.ABSOLUTE_ORIGIN_CEILING_BYTES),
+                      _agent(world))
+    assert record["delivery_status"] == "opened"
 
 
 def test_a_rejected_push_never_forces_and_opens_no_pull_request(world):

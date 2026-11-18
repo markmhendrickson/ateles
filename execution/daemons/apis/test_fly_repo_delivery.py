@@ -354,6 +354,24 @@ def test_export_refuses_fetched_branch_with_parent_outside_shallow_base(world):
     assert not (world["work"].export / rd.BUNDLE_NAME).exists()
 
 
+def test_export_refuses_a_descendant_that_merges_unrelated_history_before_bundling(world):
+    co = world["work"].checkout
+    git(co, "checkout", "-q", "--orphan", "side-history", home=world["home"])
+    git(co, "rm", "-rqf", ".", home=world["home"])
+    (co / "unrelated.txt").write_text("unrelated history\n")
+    git(co, "add", ".", home=world["home"])
+    git(co, "commit", "-qm", "unrelated root", home=world["home"])
+    git(co, "checkout", "-q", BRANCH, home=world["home"])
+    git(co, "merge", "-q", "--allow-unrelated-histories", "--no-ff", "-m", "merge side", "side-history",
+        home=world["home"])
+    # The merge descends from the admitted base, so the ancestry refusal passes;
+    # the merge refusal must stop it before any bundle exists.
+    with pytest.raises(rd.RepoWorkError, match="the branch contains a merge commit") as exc:
+        rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None)
+    assert exc.value.category == rd.EXPORT_FAILED
+    assert not (world["work"].export / rd.BUNDLE_NAME).exists()
+
+
 def test_a_full_history_bundle_that_skips_the_base_is_refused(world):
     src = world["src"]
     git(src, "checkout", "-q", "-b", BRANCH, world["old"], home=world["home"])
@@ -377,7 +395,9 @@ def test_a_merge_commit_is_refused(world):
     git(co, "checkout", "-q", BRANCH, home=world["home"])
     agent_commit(world, name="main.txt")
     git(co, "merge", "-q", "--no-ff", "-m", "merge", "side", home=world["home"])
-    rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None)
+    # Export now refuses a merge before bundling; the importer's own refusal must still
+    # hold for a bundle the agent made itself, so plant one.
+    plant_bundle(world, f"refs/heads/{BRANCH}", f"^{world['base']}")
     refused(world, "merge commit")
 
 
