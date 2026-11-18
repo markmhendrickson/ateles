@@ -37,14 +37,13 @@ class NumberedRow:
 
 
 def candidate_cells(line: str) -> tuple[str, ...] | None:
-    """Every pipe-led table line is a candidate, regardless of its first cell.
-
-    More than three spaces (or a tab) is invalid Markdown table indentation,
-    but still returned so a misplaced numbered row cannot disappear silently.
-    """
-    if not line.lstrip().startswith("|"):
+    """Split a pipe-containing line, including GFM's optional leading pipe."""
+    line = _visible_line(line)
+    if not _has_unescaped_pipe(line):
         return None
-    content = line.lstrip()[1:].rstrip()
+    content = line.strip()
+    if content.startswith("|"):
+        content = content[1:]
     if content.endswith("|"):
         content = content[:-1]
     cells: list[str] = []
@@ -60,6 +59,35 @@ def candidate_cells(line: str) -> tuple[str, ...] | None:
             part.append(char)
     cells.append("".join(part).strip())
     return tuple(cells)
+
+
+def _visible_line(line: str) -> str:
+    """Remove invisible formatting characters and one blockquote marker."""
+    line = "".join(char for char in line if unicodedata.category(char) != "Cf")
+    line = line.lstrip()
+    return re.sub(r"^>\s?", "", line).lstrip()
+
+
+def _has_unescaped_pipe(line: str) -> bool:
+    return any(char == "|" and (i == 0 or line[i - 1] != "\\") for i, char in enumerate(line))
+
+
+def _row_error(kind: str, index: int, reason: str = "malformed") -> ValueError:
+    return ValueError(f"line {index}: {reason} {kind} row")
+
+
+def _row_number(number: str, index: int, kind: str) -> str:
+    if not NUMBER.fullmatch(number):
+        raise _row_error(kind, index)
+    return number
+
+
+def _invalid_indent(line: str) -> bool:
+    return bool(re.match(r"^(?:\t| {4,})", line))
+
+
+def _block_start(line: str) -> bool:
+    return line.lstrip().startswith(">")
 
 
 def has_digit(cell: str) -> bool:
@@ -86,63 +114,59 @@ def _outside_number_cell(cells: tuple[str, ...]) -> bool:
 
 
 def decision_rows(text: str) -> dict[str, dict[str, str]]:
-    """Validate and return the entire decision register; no candidate is skipped.
-
-    A malformed line gets a fixed error and source line number. Never include
-    source text in errors: malformed input can contain controls or secrets.
-    """
+    """Validate every line of the register table block, including pipe-less lines."""
     lines = text.splitlines()
     start, end = _section_bounds(lines)
     rows: dict[str, dict[str, str]] = {}
-    header = separator = False
+    header = separator = in_table = False
     for index, line in enumerate(lines):
+        location = index + 1
+        inside = start <= index < end
         cells = candidate_cells(line)
-        if cells is None:
-            # A pipe-less numeric row is still malformed, never an omission.
-            if re.match(r"^\s*[0-9]+\s*\|", line):
-                if not start <= index < end:
-                    raise ValueError(
-                        f"line {index + 1}: numbered table row outside the register section"
-                    )
-                raise ValueError(f"line {index + 1}: malformed register row")
-            continue
-        location = f"line {index + 1}"
-        if not start <= index < end:
+        if not inside:
             if cells and _outside_number_cell(cells):
-                raise ValueError(
-                    f"{location}: numbered table row outside the register section"
-                )
+                raise ValueError(f"line {location}: numbered table row outside the register section")
             continue
-        if not re.fullmatch(r" {0,3}\|.*", line):
-            raise ValueError(f"{location}: malformed register row indentation")
-        if not line.rstrip().endswith("|"):
-            raise ValueError(f"{location}: malformed register row")
-        if len(cells) == 5 and cells[0] == "#":
+        if not line.strip():
+            in_table = False
+            continue
+        if cells and len(cells) == 5 and cells[0] == "#":
             if header:
-                raise ValueError(f"{location}: duplicate register table header")
-            header = True
+                raise ValueError(f"line {location}: duplicate register table header")
+            header = in_table = True
             continue
-        if len(cells) == 5 and all(SEPARATOR.fullmatch(cell) for cell in cells):
+        if cells and len(cells) == 5 and all(SEPARATOR.fullmatch(cell) for cell in cells):
             if separator:
-                raise ValueError(f"{location}: duplicate register table separator")
+                raise ValueError(f"line {location}: duplicate register table separator")
+            if not header:
+                raise _row_error("register", location)
             separator = True
             continue
-        if len(cells) != 5 or not NUMBER.fullmatch(cells[0]) or not all(cells[1:4]):
-            raise ValueError(f"{location}: malformed register row")
-        number = cells[0]
+        if not header:
+            if cells:
+                raise _row_error("register", location)
+            continue
+        if not in_table and cells is None:
+            continue
+        if _invalid_indent(line) or _block_start(line):
+            raise _row_error("register", location, "malformed indentation in")
+        if cells is None or len(cells) != 5 or not all(cells[1:4]) or not separator:
+            raise _row_error("register", location)
+        # A row after a blank line is a second table or lost register text.
+        if not in_table:
+            raise _row_error("register", location)
+        number = _row_number(cells[0], location, "register")
         lead = STATUS_LEAD.match(cells[4])
         if lead is None:
-            raise ValueError(f"{location}: malformed register row status")
+            raise ValueError(f"line {location}: malformed register row status")
         status = lead.group(1)
         if status not in STATUSES:
-            raise ValueError(f"{location}: unknown status in register row")
+            raise ValueError(f"line {location}: unknown status in register row")
         if number in rows:
-            raise ValueError(f"{location}: duplicate register row {number}")
+            raise ValueError(f"line {location}: duplicate register row {number}")
         rows[number] = {
             "question": cells[1],
             "argued_in": cells[2],
-            # Preserve the existing projection's bytes for a historical cell
-            # containing an inline-code pipe; row validation still sees one cell.
             "blocks": cells[3].split("|", 1)[0].strip(),
             "status": status,
             "status_cell": cells[4],
@@ -157,21 +181,36 @@ def decision_rows(text: str) -> dict[str, dict[str, str]]:
 
 
 def revision_rows(text: str) -> list[NumberedRow]:
-    """Numbered revision rows, using the same candidate and number classifier."""
+    """Read each revision table block without silently losing body lines."""
     rows: list[NumberedRow] = []
+    header = separator = in_table = False
     for index, line in enumerate(text.splitlines(), 1):
+        if not line.strip() or line.startswith("## "):
+            in_table = False
+            if line.startswith("## "):
+                header = separator = False
+            continue
         cells = candidate_cells(line)
-        if cells is None:
+        if cells and len(cells) == 3 and cells[0] == "Revision":
+            header = in_table = True
+            separator = False
             continue
-        if not re.fullmatch(r" {0,3}\|.*", line):
-            if has_digit(cells[0]):
-                raise ValueError(f"line {index}: malformed revision row indentation")
+        if header and cells and len(cells) == 3 and all(SEPARATOR.fullmatch(cell) for cell in cells):
+            separator = True
             continue
+        if not in_table:
+            if cells and has_digit(cells[0]) and OUTSIDE_LABEL_WIDTHS.get(cells[0]) != len(cells):
+                raise _row_error("revision", index)
+            continue
+        if _invalid_indent(line) or _block_start(line):
+            raise _row_error("revision", index, "malformed indentation in")
+        if not separator or cells is None or len(cells) != 3:
+            raise _row_error("revision", index)
+        if cells[0] == "—" and all(cells[1:]):
+            continue  # historical revision without an assigned number
         legacy = re.fullmatch(r"([0-9]+),\s+.+", cells[0]) if cells else None
-        if cells and (NUMBER.fullmatch(cells[0]) or legacy):
-            rows.append(
-                NumberedRow(legacy.group(1) if legacy else cells[0], cells, index)
-            )
-        elif cells and has_digit(cells[0]):
-            raise ValueError(f"line {index}: malformed revision row")
+        number = _row_number(legacy.group(1) if legacy else cells[0], index, "revision")
+        if not all(cells[1:]):
+            raise _row_error("revision", index)
+        rows.append(NumberedRow(number, cells, index))
     return rows

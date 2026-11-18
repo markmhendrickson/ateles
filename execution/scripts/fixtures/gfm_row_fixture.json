@@ -1,0 +1,158 @@
+{
+ "header_rows": 1,
+ "note": "rows = body rows GitHub's /markdown API (gfm) renders, header excluded; row 1 is always present, so rows == 2 means the shape was rendered as an extra table row",
+ "cases": {
+  "pipe_led:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "pipe_led:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "bare:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "bare:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "bold:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "bold:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "dash:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "dash:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "dot:directly_after": {
+   "rows": 1,
+   "in_table": true
+  },
+  "dot:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "x:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "x:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "link:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "link:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "strike:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "strike:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "html_s:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "html_s:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "escaped:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "escaped:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "arabic_digits:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "arabic_digits:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "fullwidth:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "fullwidth:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "zwsp_pipe:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "zwsp_pipe:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "blockquote:directly_after": {
+   "rows": 1,
+   "in_table": true
+  },
+  "blockquote:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "html_tr:directly_after": {
+   "rows": 1,
+   "in_table": true
+  },
+  "html_tr:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "no_pipe_text:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "no_pipe_text:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "label_only_pipe_end:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "label_only_pipe_end:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "indent4_pipe:directly_after": {
+   "rows": 1,
+   "in_table": true
+  },
+  "indent4_pipe:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "tab_pipe:directly_after": {
+   "rows": 1,
+   "in_table": true
+  },
+  "tab_pipe:after_blank": {
+   "rows": 1,
+   "in_table": true
+  }
+ }
+}

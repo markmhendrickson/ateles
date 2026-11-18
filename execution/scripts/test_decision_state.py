@@ -805,7 +805,7 @@ class TestRenderCleanly(unittest.TestCase):
             self.assertEqual(ds.main(["--check", "--source", "worktree"]), 1)
         self.assertIn("malformed register row", error.getvalue())
 
-    def test_broken_row_prefix_fails(self):
+    def test_optional_leading_pipe_renders(self):
         import contextlib
         import io
 
@@ -813,8 +813,8 @@ class TestRenderCleanly(unittest.TestCase):
                                  "2 | broken prefix | `doc.md#q` | — | **open** |\n")
         error = io.StringIO()
         with contextlib.redirect_stderr(error):
-            self.assertEqual(ds.main(["--check", "--source", "worktree"]), 1)
-        self.assertIn("malformed register row", error.getvalue())
+            self.assertEqual(ds.main(["--check", "--source", "worktree"]), 0)
+        self.assertIn("2", ds.parse_rows(self.register.read_text()))
 
     def _check_error(self, text: str) -> tuple[int, str]:
         import contextlib
@@ -838,13 +838,13 @@ class TestRenderCleanly(unittest.TestCase):
         text = register(**{"1": "**open**"}) + "\n" + "| 2 | later row | `doc.md#q` | \u2014 | **rulled** |\n"
         code, err = self._check_error(text)
         self.assertEqual(code, 1)
-        self.assertIn("unknown status", err)
+        self.assertIn("malformed register row", err)
 
     def test_a_duplicate_number_after_a_blank_line_fails(self):
         text = register(**{"1": "**open**"}) + "\n" + "| 1 | again | `doc.md#q` | \u2014 | **open** |\n"
         code, err = self._check_error(text)
         self.assertEqual(code, 1)
-        self.assertIn("duplicate register row 1", err)
+        self.assertIn("malformed register row", err)
 
     def test_a_malformed_numbered_row_after_a_blank_line_fails(self):
         """Not just a bad status: a row with no bold status at all must not be silently omitted."""

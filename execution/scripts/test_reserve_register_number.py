@@ -198,7 +198,12 @@ def test_one_new_revision_may_appear_in_several_document_tables(clones: tuple[Pa
     """A pass that amends several documents adds one row to each table under ONE number."""
     _, first, _ = clones
     revisions = first / "docs" / "foundation" / "revisions.md"
-    revisions.write_text(revisions.read_text() + "| 18 | pass | first doc |\n\n## Other\n| 18 | pass | second doc |\n")
+    revisions.write_text(
+        revisions.read_text()
+        + "| 18 | pass | first doc |\n\n## Other\n"
+        + "| Revision | Pass | What changed |\n|---|---|---|\n"
+        + "| 18 | pass | second doc |\n"
+    )
     assert run(first, "check", "revision").returncode == 1  # not reserved yet
     assert run(first, "reserve", "revision").stdout.strip() == "18"
     assert run(first, "check", "revision").returncode == 0

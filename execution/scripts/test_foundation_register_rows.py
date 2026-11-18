@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import sys
 import unittest
 import unittest.mock
@@ -14,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import render_decision_state as ds
 import reserve_register_number as reserve
 import check_foundation_register_narrative as narrative
-from foundation_register_rows import candidate_cells, decision_rows, has_digit
+from foundation_register_rows import candidate_cells, decision_rows, has_digit, revision_rows
 
 
 def register(**rows: str) -> str:
@@ -175,3 +176,161 @@ class TestRegisterCandidateAccounting(unittest.TestCase):
             self.assertEqual([kind for kind, _ in results], [results[0][0]] * 3, cell)
             if results[0][0] == "rows" and cell != "999–1000":
                 self.assertEqual(results, [results[0]] * 3, cell)
+
+
+# Rendered with GitHub's /markdown API (mode=gfm) on 2026-11-18. To refresh,
+# send header + delimiter + row 1 + each shape to `gh api markdown` with
+# {"text": markdown, "mode": "gfm"}, and count <tbody><tr> in the HTML.
+GFM_SHAPES = {
+    "pipe_led": "| 999 | q | a | b | **open** |",
+    "bare": "999 | q | a | b | **open** |",
+    "bold": "**999** | q | a | b | **open** |",
+    "dash": "999- | q | a | b | **open** |",
+    "dot": "999. | q | a | b | **open** |",
+    "x": "999x | q | a | b | **open** |",
+    "link": "[999](#x) | q | a | b | **open** |",
+    "strike": "~~999~~ | q | a | b | **open** |",
+    "html_s": "<s>999</s> | q | a | b | **open** |",
+    "escaped": r"999 \| q | a | b | **open** |",
+    "arabic_digits": "٩٩٩ | q | a | b | **open** |",
+    "fullwidth": "９９９ | q | a | b | **open** |",
+    "zwsp_pipe": "\u200b| 998 | q | a | b | **open** |",
+    "blockquote": "> | 999 | q | a | b | **open** |",
+    "html_tr": "<tr><td>999</td></tr>",
+    "no_pipe_text": "plain table body text",
+    "label_only_pipe_end": "label |",
+    "indent4_pipe": "    | 999 | q | a | b | **open** |",
+    "tab_pipe": "\t| 999 | q | a | b | **open** |",
+}
+
+
+class TestGfmTableBlock(unittest.TestCase):
+    def test_github_fixture_and_reader_parity(self):
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures/gfm_row_fixture.json").read_text()
+        )["cases"]
+        self.assertEqual({name.split(":")[0] for name in fixture}, set(GFM_SHAPES))
+        decision_base = "## The register of open design decisions\n" + register(**{"1": "**open**"})
+        revision_base = (
+            "## Example\n| Revision | Pass | What changed |\n|---|---|---|\n"
+            "| 1 | pass | change |\n"
+        )
+        for key, result in fixture.items():
+            shape, placement = key.split(":")
+            line = GFM_SHAPES[shape]
+            gap = "\n" if placement == "after_blank" else ""
+            decision = decision_base + gap + line + "\n"
+            revision_line = line.replace("| q | a | b | **open** |", "| p | c |")
+            revision = revision_base + gap + revision_line + "\n"
+            self.assertEqual(result["rows"] == 2, placement == "directly_after" and shape not in
+                             {"dot", "blockquote", "html_tr", "indent4_pipe", "tab_pipe"})
+            expected_error = not (placement == "directly_after" and shape in
+                                  {"pipe_led", "bare", "zwsp_pipe"})
+            if placement == "after_blank" and "|" not in line:
+                expected_error = False
+            decision_readers = (
+                lambda: ds.parse_rows(decision),
+                lambda: reserve.numbers("decision", decision),
+                lambda: narrative.parse_register(decision),
+            )
+            revision_readers = (
+                lambda: revision_rows(revision),
+                lambda: reserve.numbers("revision", revision),
+            )
+            for readers, should_error in (
+                (decision_readers, expected_error),
+                (revision_readers, expected_error and not
+                 (placement == "after_blank" and shape == "label_only_pipe_end")),
+            ):
+                for reader in readers:
+                    with self.subTest(key=key, reader=reader):
+                        if should_error:
+                            with self.assertRaisesRegex(ValueError, "line [56]"):
+                                reader()
+                        else:
+                            reader()
+
+    def test_pipeless_lines_in_each_table_position(self):
+        decision_base = "## The register of open design decisions\n" + register(**{"1": "**open**"})
+        revision_base = "## Example\n| Revision | Pass | Change |\n|---|---|---|\n| 1 | p | c |\n"
+        for base, reader in ((decision_base, decision_rows), (revision_base, revision_rows)):
+            for text in (base.replace("|---|", "no pipe\n|---|", 1),
+                         base.replace("| 1 |", "no pipe\n| 1 |", 1),
+                         base + "no pipe\n"):
+                with self.subTest(base=base[:20], text=text[:90]):
+                    with self.assertRaisesRegex(ValueError, "line "):
+                        reader(text)
+            # A blank line closes the GFM table. Plain prose can follow it.
+            reader(base + "\nno pipe\n")
+
+    def test_outside_section_optional_pipe_and_unicode_digits(self):
+        base = "## The register of open design decisions\n" + register(**{"1": "**open**"})
+        for line in ("**999** | q | a | b | **open** |", "999- | q | a | b | **open** |",
+                     "[999](#x) | q | a | b | **open** |", "٩٩٩ | q | a | b | **open** |",
+                     "\u200b| 998 | q | a | b | **open** |", "> | 999 | q | a | b | **open** |"):
+            with self.subTest(line=line):
+                with self.assertRaises(ValueError):
+                    decision_rows(line + "\n" + base)
+                with self.assertRaises(ValueError):
+                    revision_rows("## Other\n" + line)
+
+    def test_spacing_and_tabs_are_accounted(self):
+        base = "## The register of open design decisions\n" + register(**{"1": "**open**"})
+        revision = "| Revision | Pass | Change |\n|---|---|---|\n| 1 | p | c |\n"
+        for prefix in (" ", "  ", "   ", "    ", "     ", "\t"):
+            line = prefix + "999 | q | a | b | **open** |\n"
+            revision_line = prefix + "999 | p | c |\n"
+            for reader, text in ((decision_rows, base + line),
+                                 (revision_rows, revision + revision_line)):
+                with self.subTest(prefix=repr(prefix), reader=reader):
+                    if len(prefix) <= 3 and prefix != "\t":
+                        reader(text)
+                    else:
+                        with self.assertRaises(ValueError):
+                            reader(text)
+
+    def test_cli_modes_and_branch_copy_reject_malformed_rows_without_writing(self):
+        import tempfile
+        from test_decision_state import FakeGit
+
+        base = "## The register of open design decisions\n" + register(**{"1": "**open**"})
+        shapes = ("bold", "dash", "link", "arabic_digits", "blockquote", "zwsp_pipe")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "conformance.md"
+            with unittest.mock.patch.object(ds, "FOUNDATION_DIR", root):
+                for shape in shapes:
+                    for gap in ("", "\n"):
+                        text = base + gap + GFM_SHAPES[shape] + "\n"
+                        source.write_text(text)
+                        valid = shape == "zwsp_pipe" and not gap
+                        for mode in (("--check",), ("--json",), ("--stdout",), ("--out",)):
+                            target = root / "projection.md"
+                            target.unlink(missing_ok=True)
+                            args = list(mode) + ([str(target)] if mode == ("--out",) else [])
+                            out, err = io.StringIO(), io.StringIO()
+                            with (contextlib.redirect_stdout(out), contextlib.redirect_stderr(err)):
+                                code = ds.main(args)
+                            with self.subTest(shape=shape, gap=bool(gap), mode=mode):
+                                self.assertEqual(code, 0 if valid else 1, err.getvalue())
+                                if not valid:
+                                    self.assertIn("line ", err.getvalue())
+                                    self.assertFalse(target.exists())
+                        fake = FakeGit({ds.MAIN_REF: base, "origin/feature": text}, ["origin/feature"])
+                        with unittest.mock.patch.object(ds, "FOUNDATION_DIR", Path("docs/foundation")), \
+                             unittest.mock.patch.object(ds, "run", fake), \
+                             contextlib.redirect_stdout(io.StringIO()), \
+                             contextlib.redirect_stderr(io.StringIO()):
+                            branch_code = ds.main(["--branches", "--json"])
+                        self.assertEqual(branch_code, 0 if valid else 1, (shape, bool(gap)))
+
+    def test_every_gfm_table_body_candidate_is_row_or_error(self):
+        base = "## The register of open design decisions\n" + register(**{"1": "**open**"})
+        parsed = errors = 0
+        for shape, line in GFM_SHAPES.items():
+            text = base + line + "\n"
+            try:
+                parsed += len(decision_rows(text)) - 1
+            except ValueError:
+                errors += 1
+        self.assertEqual(parsed + errors, len(GFM_SHAPES))
