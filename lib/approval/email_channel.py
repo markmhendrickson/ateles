@@ -34,11 +34,30 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
-from email.utils import parseaddr
+from email.utils import parseaddr, parsedate_to_datetime
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable, Literal
 
 log = logging.getLogger("ateles.approval.email")
+
+
+@dataclass(frozen=True)
+class ApprovalReply:
+    message_id: str
+    subject: str
+    body: str = ""
+    authenticated: bool = True
+    correlation_target: str | None = None
+
+
+@dataclass(frozen=True)
+class SentRequest:
+    body: str
+    sender: str
+    recipient: str
+    subject: str
+    date: str
 
 
 @dataclass(frozen=True)
@@ -49,7 +68,8 @@ class ReadRepliesOutcome:
       - ``ok``              — transport succeeded; ``texts`` may be empty (no reply yet)
       - ``transport_error`` — ANY gws fetch in the sweep failed (triage, auth
                               metadata, or body); ``texts`` is always ``[]``,
-                              never a partial set
+                              never a partial set. ``replies`` may hold readable,
+                              authenticated messages for correction-only handling.
       - ``disabled``        — ``ATELES_NOTIFY_EMAIL`` is not armed
 
     Payment-consent callers MUST use this form and treat non-``ok`` as blocked
@@ -60,33 +80,479 @@ class ReadRepliesOutcome:
     kind: Literal["ok", "transport_error", "disabled"]
     texts: list[str]
     detail: str = ""
+    replies: tuple[ApprovalReply, ...] = ()
+    rejected_replies: tuple[ApprovalReply, ...] = ()
+    unreadable_replies: tuple[ApprovalReply, ...] = ()
+    correction_only_replies: tuple[ApprovalReply, ...] = ()
+
+
+_ATTRIBUTION = re.compile(
+    r"(?i)^(?:on\s+\S.+\s+\S.+\s+wrote:|"
+    r"le\s+\S.+\s+\S.+\s+a écrit\s*:|"
+    r"el\s+\S.+\s+\S.+\s+escribió:)$"
+)
+_FORWARD = re.compile(r"(?i)^(?:-----Original Message-----|Begin forwarded message:)$")
+_OUTLOOK_HEADERS = ("from:", "sent:", "to:", "subject:")
+
+_NON_RENDERED = frozenset({
+    "head", "title", "script", "style", "template", "noscript", "object",
+    "iframe", "svg", "math", "canvas", "audio", "video", "select", "option",
+    "datalist", "textarea", "meta", "menu", "slot", "noembed",
+    "picture", "frameset",
+})
+_RENDERED_PROSE = frozenset({
+    "html", "body", "p", "div", "span", "blockquote", "a", "b", "strong",
+    "i", "em", "u", "s", "del", "ins", "mark", "small", "big", "sub", "sup",
+    "ul", "ol", "li", "table", "thead", "tbody", "tfoot", "tr", "td", "th",
+    "h1", "h2", "h3", "h4", "h5", "h6", "font", "center", "pre", "code",
+    "q", "cite", "address", "section", "article", "header", "footer", "main",
+    "aside", "details", "summary", "dl", "dt", "dd",
+    "dialog",
+})
+_HTML_ATTRS = frozenset({"style", "dir", "class", "id", "type", "href", "open"})
+_QUOTE_CLASSES = frozenset({
+    "gmail_quote", "gmail_extra", "yahoo_quoted", "protonmail_quote",
+    "msoquote", "outlookmessageheader", "gmail_attr", "moz-cite-prefix",
+})
+_QUOTE_IDS = frozenset({"divrplyfwdmsg", "appendonsend"})
+_DARK_NAMES = {"black": (0, 0, 0), "navy": (0, 0, 128),
+               "darkblue": (0, 0, 139), "midnightblue": (25, 25, 112),
+               "darkslategray": (47, 79, 79), "dimgray": (105, 105, 105)}
+_LIGHT_NAMES = {"white": (255, 255, 255)}
+_SAFE_STYLE = frozenset({"font-family", "font-size", "font-weight", "font-style",
+                         "text-align", "text-decoration", "line-height", "white-space",
+                         "word-wrap", "overflow-wrap", "direction", "color",
+                         "background", "background-color"})
+_SAFE_FONTS = frozenset({
+    "arial", "helvetica", "helvetica neue", "verdana", "tahoma", "trebuchet ms",
+    "calibri", "cambria", "candara", "segoe ui", "aptos", "georgia", "times",
+    "times new roman", "garamond", "palatino", "courier", "courier new",
+    "menlo", "monaco", "consolas", "roboto", "open sans", "lato",
+    "system-ui", "-apple-system", "blinkmacsystemfont", "sans-serif", "serif",
+    "monospace", "ui-sans-serif", "ui-serif", "ui-monospace",
+})
+_LAYOUT_VALUE = re.compile(r"(0|\d+(?:\.\d+)?)(px|pt|em|rem|%)?")
+_LAYOUT_LIMITS = {"px": 100, "pt": 75, "em": 8, "rem": 8, "%": 10}
+
+
+def _rgba(value: str) -> tuple[int, int, int, float] | None:
+    """Parse only opaque, unambiguous CSS colours used by the approval policy."""
+    value = value.strip().lower()
+    if value in _DARK_NAMES | _LIGHT_NAMES:
+        return (*(_DARK_NAMES | _LIGHT_NAMES)[value], 1.0)
+    match = re.fullmatch(r"#([0-9a-f]{3}|[0-9a-f]{6})", value)
+    if match:
+        digits = match.group(1)
+        if len(digits) == 3:
+            return (*(int(c * 2, 16) for c in digits), 1.0)
+        return (*(int(digits[i:i + 2], 16) for i in (0, 2, 4)), 1.0)
+    match = re.fullmatch(
+        r"rgba?\(\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\s*[, ]\s*(\d{1,3})"
+        r"\s*(?:[,/]\s*(1(?:\.0+)?|0?\.\d+|0))?\s*\)", value)
+    if match:
+        channels = tuple(int(match.group(i)) for i in (1, 2, 3))
+        alpha = float(match.group(4)) if match.group(4) else 1.0
+        if all(channel <= 255 for channel in channels):
+            return (*channels, alpha)
+    return None
+
+
+def _safe_colour(value: str, *, background: bool) -> bool:
+    if not background and value.strip().lower() in _DARK_NAMES:
+        return True
+    rgba = _rgba(value)
+    return bool(rgba and rgba[3] == 1.0 and
+                (all(c >= 224 for c in rgba[:3]) if background else
+                 all(c <= 100 for c in rgba[:3])))
+
+
+def _safe_font_family(value: str) -> bool:
+    families = value.split(",")
+    return bool(families) and all(
+        (family.strip().strip('"\'').casefold() in _SAFE_FONTS and
+         (family.strip()[0] not in '"\'' or family.strip()[-1] == family.strip()[0]))
+        for family in families if family.strip()
+    ) and all(family.strip() for family in families)
+
+
+def _safe_style(style: str, parent_px: float = 16, relative_scale: float = 1) -> tuple[bool, float, float]:
+    font_px = parent_px
+    scale = relative_scale
+    if re.search(r"(?i)/\*|[{}]|(?:var|calc|env)\s*\(", style):
+        return False, font_px, scale
+    for declaration in style.split(";"):
+        if not declaration.strip():
+            continue
+        if declaration.count(":") != 1:
+            return False, font_px, scale
+        name, value = (part.strip().lower() for part in declaration.split(":", 1))
+        if not value or "!important" in value:
+            return False, font_px, scale
+        if name in {"color", "background", "background-color"}:
+            if not _safe_colour(value, background=name != "color"):
+                return False, font_px, scale
+        elif name == "font-family":
+            if not _safe_font_family(value):
+                return False, font_px, scale
+        elif name in {"text-transform", "direction", "unicode-bidi"}:
+            if value != {"text-transform": "none", "direction": "ltr",
+                         "unicode-bidi": "normal"}[name]:
+                return False, font_px, scale
+        elif name == "font-size":
+            keyword = {"small": 13, "medium": 16, "large": 18,
+                       "smaller": .8, "larger": 1.2}
+            size = re.fullmatch(r"(\d+(?:\.\d+)?)(px|pt|em|rem|%)", value)
+            if value in {"smaller", "larger"}:
+                factor = keyword[value]
+                font_px *= factor
+                scale *= factor
+            elif value in {"small", "medium", "large"}:
+                font_px = keyword[value]
+            elif size:
+                amount = float(size.group(1))
+                unit = size.group(2)
+                if unit in {"em", "%"}:
+                    factor = amount if unit == "em" else amount / 100
+                    font_px *= factor
+                    scale *= factor
+                else:
+                    font_px = amount * {"px": 1, "pt": 4 / 3, "rem": 16}[unit]
+            else:
+                return False, font_px, scale
+            if font_px < 8 or scale < .7:
+                return False, font_px, scale
+        elif name == "line-height":
+            if value != "normal":
+                measure = _LAYOUT_VALUE.fullmatch(value)
+                if not measure or not .7 <= float(measure.group(1)) * {
+                    None: 1, "px": 1 / font_px, "pt": 4 / (3 * font_px),
+                    "em": 1, "rem": 16 / font_px, "%": .01,
+                }[measure.group(2)] <= 3:
+                    return False, font_px, scale
+        elif name in {"margin", "padding"} or re.fullmatch(
+                r"(?:margin|padding)-(?:top|right|bottom|left)", name):
+            values = value.split()
+            if not 1 <= len(values) <= (4 if name in {"margin", "padding"} else 1):
+                return False, font_px, scale
+            for item in values:
+                measure = _LAYOUT_VALUE.fullmatch(item)
+                if not measure or float(measure.group(1)) > _LAYOUT_LIMITS.get(
+                        measure.group(2), 0):
+                    return False, font_px, scale
+        elif name.startswith("border"):
+            if value not in {"none", "0", "0px"}:
+                return False, font_px, scale
+        elif name not in _SAFE_STYLE:
+            return False, font_px, scale
+    return True, font_px, scale
+
+
+def _hiding_style(style: str) -> bool:
+    return not _safe_style(style)[0]
+
+
+def _same_mail_date(left: str, right: str) -> bool:
+    try:
+        return parsedate_to_datetime(left).timestamp() == parsedate_to_datetime(right).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _gmail_attribution_end(source: list[str], index: int,
+                           sent_request: SentRequest | None) -> int | None:
+    """Return the first quoted line after a verified Gmail attribution."""
+    if sent_request is None or not sent_request.body:
+        return None
+    for end in (index + 1, index + 2):
+        if end > len(source):
+            continue
+        candidate = " ".join(part.strip() for part in source[index:end])
+        sender_name, sender_address = parseaddr(sent_request.sender)
+        if not sender_name or not sender_address:
+            return None
+        match = re.fullmatch(r"On\s+(.+?)\s+" + re.escape(sender_name) +
+                             r"\s+<([^<>\s]+@[^<>\s]+)>\s+wrote:",
+                             candidate, re.IGNORECASE)
+        if not match:
+            continue
+        date_text, address = match.groups()
+        if _parse_address(address) != _parse_address(sent_request.sender):
+            continue
+        try:
+            shown = parsedate_to_datetime(date_text.rstrip(", ").replace(" at ", " "))
+            sent = parsedate_to_datetime(sent_request.date)
+            if shown.date() != sent.date():
+                continue
+        except (TypeError, ValueError, OverflowError):
+            continue
+        return end
+    return None
+
+
+def _authored_plain_checked(text: str, sent_request: SentRequest | None = None,
+                            known_quote_lines: tuple[str, ...] = ()) -> tuple[str, bool]:
+    """Keep every authored line; remove only structurally proven quotations."""
+    lines: list[str] = []
+    source = text.splitlines()
+    saw_quote = False
+    for index, line in enumerate(source):
+        stripped = line.strip()
+        if stripped.lower().startswith("on "):
+            end = _gmail_attribution_end(source, index, sent_request)
+            if end is not None:
+                original = {" ".join(part.split()).casefold() for part in
+                            sent_request.body.splitlines() if part.strip()}
+                original.update(" ".join(part.split()).casefold()
+                                for part in known_quote_lines)
+                tail = source[end:]
+                if tail and any(part.strip() for part in tail) and all(
+                    not part.strip() or (part.lstrip().startswith(">") and
+                    " ".join(part.lstrip()[1:].split()).casefold() in original)
+                    for part in tail
+                ):
+                    return "\n".join(lines), True
+            if _ATTRIBUTION.fullmatch(stripped) or stripped.lower().startswith("on "):
+                return "\n".join(lines), False
+        if _ATTRIBUTION.fullmatch(stripped):
+            return "\n".join(lines), False
+        if _FORWARD.fullmatch(stripped):
+            headers = source[index + 1:index + 1 + len(_OUTLOOK_HEADERS)]
+            expected = ((sent_request.sender, sent_request.date,
+                         sent_request.recipient, sent_request.subject)
+                        if sent_request else ())
+            if len(headers) == len(_OUTLOOK_HEADERS) and expected and all(
+                header.strip().casefold().startswith(name) and
+                ( _same_mail_date(header.strip()[len(name):].strip(), value)
+                  if name == "sent:" else
+                  ( _parse_address(header.strip()[len(name):].strip()) == _parse_address(value)
+                    if name in {"from:", "to:"} else
+                    header.strip()[len(name):].strip().casefold() == value.casefold()))
+                for header, name, value in zip(headers, _OUTLOOK_HEADERS, expected)
+            ):
+                tail = source[index + 1 + len(_OUTLOOK_HEADERS):]
+                original = {" ".join(part.split()).casefold() for part in
+                            sent_request.body.splitlines() if part.strip()}
+                original.update(" ".join(part.split()).casefold() for part in known_quote_lines)
+                if tail and all(not part.strip() or (
+                    part.lstrip().startswith(">") and
+                    " ".join(part.lstrip()[1:].split()).casefold() in original
+                ) for part in tail):
+                    return "\n".join(lines), True
+            return "\n".join(lines), False
+        if re.match(r"(?i)^(?:from|sent|to|subject|date|cc):\s*\S", stripped):
+            return "\n".join(lines), False
+        if stripped.startswith(">"):
+            saw_quote = True
+            continue
+        if stripped:
+            if saw_quote:
+                return "\n".join([*lines, stripped]), False
+            lines.append(stripped)
+    return "\n".join(lines), True
+
+
+def _authored_plain(text: str) -> str:
+    body, safe = _authored_plain_checked(text)
+    return body if safe else ""
+
+
+class _AuthoredHTML(HTMLParser):
+    """Extract visible authored text while discarding quoted subtrees."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.quoted_parts: list[str] = []
+        self.stack: list[tuple[str, bool]] = []
+        self.quote_depth = 0
+        self.non_rendered_depth = 0
+        self.structured = False
+        self.body_depth = 0
+        self.boundary_seen = False
+        self.terminal = False
+        self.unsafe = False
+        self.font_stack: list[tuple[float, float]] = []
+        self.closed_dialog_stack: list[bool] = []
+
+    _VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img",
+                       "input", "link", "meta", "param", "source", "track", "wbr"})
+    _MAX_STACK = 64
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        names = [name.lower() for name, _ in attrs]
+        if len(names) != len(set(names)):
+            self.unsafe = True
+        attrs_by_name = dict(attrs)
+        classes = set((attrs_by_name.get("class") or "").lower().split())
+        element_id = (attrs_by_name.get("id") or "").lower()
+        if (set(names) - _HTML_ATTRS or
+                ("dir" in attrs_by_name and
+                 (attrs_by_name["dir"] or "").lower() != "ltr") or
+                ("class" in attrs_by_name and
+                 (not classes or not classes <= _QUOTE_CLASSES)) or
+                ("id" in attrs_by_name and element_id not in _QUOTE_IDS) or
+                ("type" in attrs_by_name and
+                 (tag != "div" or (attrs_by_name["type"] or "").lower() != "cite")) or
+                ("href" in attrs_by_name and tag != "a") or
+                ("open" in attrs_by_name and tag not in {"details", "dialog"})):
+            self.unsafe = True
+        parent_px, parent_scale = self.font_stack[-1] if self.font_stack else (16, 1)
+        style_safe, font_px, scale = _safe_style(
+            attrs_by_name.get("style") or "", parent_px, parent_scale)
+        if tag == "small":
+            font_px *= .8
+            scale *= .8
+        elif tag == "big":
+            font_px *= 1.2
+            scale *= 1.2
+        if font_px < 8 or scale < .7:
+            self.unsafe = True
+        if tag not in _RENDERED_PROSE and tag not in _NON_RENDERED and tag not in self._VOID:
+            self.unsafe = True
+        if (not style_safe or
+                (tag == "link" and "stylesheet" in (attrs_by_name.get("rel") or "").lower().split())):
+            self.unsafe = True
+        if tag in {"html", "head", "body"}:
+            self.structured = True
+        if tag == "body":
+            self.body_depth += 1
+        quote = (tag == "blockquote"
+                 or bool(classes & (_QUOTE_CLASSES - {"gmail_attr", "moz-cite-prefix"}))
+                 or element_id in _QUOTE_IDS
+                 or (tag == "div" and (attrs_by_name.get("type") or "").lower() == "cite"))
+        if ("gmail_attr" in classes or "moz-cite-prefix" in classes
+                or element_id in _QUOTE_IDS):
+            # A visual reply header is sender-controlled and is not part of
+            # the sent request's body. Do not infer a safe quote boundary.
+            self.unsafe = True
+            self.terminal = True
+            self.boundary_seen = True
+        if tag in self._VOID:
+            if tag == "area":
+                self.unsafe = True
+            if tag == "hr" and self.quote_depth == 0 and not self.non_rendered_depth:
+                self.parts.append("\n")
+            elif tag == "br" and self.quote_depth == 0 and not self.non_rendered_depth:
+                self.parts.append("\n")
+            elif tag == "br" and self.quote_depth:
+                self.quoted_parts.append("\n")
+            return
+        if len(self.stack) >= self._MAX_STACK:
+            self.unsafe = True
+            return
+        if quote:
+            self.quote_depth += 1
+            self.boundary_seen = True
+        if tag in _NON_RENDERED:
+            self.non_rendered_depth += 1
+        closed_dialog = tag == "dialog" and "open" not in attrs_by_name
+        if closed_dialog:
+            self.non_rendered_depth += 1
+        self.stack.append((tag, quote))
+        self.font_stack.append((font_px, scale))
+        self.closed_dialog_stack.append(closed_dialog)
+        if tag in ("p", "div", "li", "tr") and self.quote_depth == 0 and not self.non_rendered_depth:
+            self.parts.append("\n")
+        elif tag in ("p", "div", "li", "tr") and self.quote_depth:
+            self.quoted_parts.append("\n")
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # HTML ignores the slash on a non-void element: `<blockquote/>` OPENS a
+        # blockquote. Treat it as a start tag only, so a quote container written
+        # that way keeps hiding what follows (and an unclosed one is unreadable).
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._VOID:
+            return
+        if not self.stack or self.stack[-1][0] != tag:
+            self.unsafe = True
+            return
+        _, quote = self.stack.pop()
+        self.font_stack.pop()
+        closed_dialog = self.closed_dialog_stack.pop()
+        if quote:
+            self.quote_depth -= 1
+        if tag in _NON_RENDERED:
+            self.non_rendered_depth -= 1
+        if closed_dialog:
+            self.non_rendered_depth -= 1
+        if tag == "body":
+            self.body_depth -= 1
+        if tag in ("p", "div", "li", "tr") and self.quote_depth == 0 and not self.non_rendered_depth:
+            self.parts.append("\n")
+        elif tag in ("p", "div", "li", "tr") and self.quote_depth:
+            self.quoted_parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if data.strip() and (not self.stack or
+                             (self.structured and not self.body_depth and
+                              not self.non_rendered_depth)):
+            self.unsafe = True
+            return
+        tags = [tag for tag, _ in self.stack]
+        if data.strip() and (any(tag in {"menu", "slot", "noembed", "object",
+                                 "picture", "audio", "video", "frameset"}
+                                 for tag in tags) or
+                             ("details" in tags and "summary" not in tags) or
+                             "dialog" in tags):
+            self.unsafe = True
+        if self.stack and self.stack[-1][0] == "style":
+            # Empty rules cannot affect rendering. A rule with declarations
+            # can affect any descendant through selectors and cascade.
+            if "@font-face" in data.casefold() or data.strip() and not re.fullmatch(
+                r"(?:\s*[.#]?[a-zA-Z][\w-]*\s*\{\s*\}\s*)+", data):
+                self.unsafe = True
+        if self.quote_depth and not self.non_rendered_depth:
+            self.quoted_parts.append(data)
+        if self.quote_depth or self.non_rendered_depth or (self.structured and not self.body_depth):
+            return
+        if self.boundary_seen and data.strip():
+            self.unsafe = True
+        if self.terminal:
+            return
+        self.parts.append(data)
+
+    def unknown_decl(self, data: str) -> None:
+        self.unsafe = True
+
+
+def _extract_authored_html(html: str, *, original_request: str | None = None,
+                           known_quote_lines: tuple[str, ...] = (),
+                           verify_quote: bool = False) -> tuple[str, bool]:
+    """Return authored text only when the HTML can be separated safely."""
+    parser = _AuthoredHTML()
+    try:
+        parser.feed(html)
+        parser.close()
+    except Exception:  # noqa: BLE001 — malformed HTML cannot grant approval
+        return "", False
+    if parser.unsafe or parser.stack or parser.rawdata:
+        return "", False
+    if verify_quote:
+        originals = {" ".join(line.split()).casefold() for line in
+                     (original_request or "").splitlines() if line.strip()}
+        originals.update(" ".join(line.split()).casefold() for line in known_quote_lines)
+        quoted = [" ".join(line.split()).casefold() for line in
+                  "".join(parser.quoted_parts).splitlines() if line.strip()]
+        if any(line not in originals for line in quoted):
+            return "", False
+    body, safe = _authored_plain_checked("".join(parser.parts))
+    return (body if safe else ""), parser.boundary_seen
 
 
 def _strip_html(html: str) -> str:
-    """Reduce an HTML email part to plain text good enough for verdict parsing.
+    """Plain authored text from HTML, retained for callers of this helper."""
+    return _extract_authored_html(html)[0]
 
-    Only used for the HTML-only fallback (a reply with no plaintext part). Drops
-    <script>/<style> blocks, turns block-level tag boundaries into newlines so a
-    verb keeps leading its line, removes the remaining tags, and unescapes the
-    handful of entities that show up in real replies. Not a general HTML
-    sanitizer — just enough that `<p>approve v0.20.0</p>` reads as
-    `approve v0.20.0`.
-    """
-    if not html:
-        return ""
-    # Remove script/style content entirely.
-    html = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", html)
-    # Block-level boundaries → newlines so lines don't run together.
-    html = re.sub(r"(?i)<\s*(br|/p|/div|/li|/tr|/h[1-6])\s*/?>", "\n", html)
-    # Drop all remaining tags.
-    html = re.sub(r"<[^>]+>", "", html)
-    # Unescape the common entities seen in plain replies.
-    for ent, ch in (("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"),
-                    ("&gt;", ">"), ("&quot;", '"'), ("&#39;", "'")):
-        html = html.replace(ent, ch)
-    # Collapse runs of blank lines / trailing spaces.
-    lines = [ln.strip() for ln in html.splitlines()]
-    return "\n".join(ln for ln in lines if ln)
+
+def _unmarked_notification_copy(body: str) -> bool:
+    """An HTML-only copy of an instruction with its token has no safe boundary."""
+    return bool(re.search(
+        r"(?i)\breply\s+(?:approve|attended|to approve|with one line per payment)\b",
+        body,
+    )
+                and re.search(r"(?i)(?:swarm-approve:|release-approve:|\[APPROVE-[0-9A-F]+\])", body))
 
 
 def email_enabled() -> bool:
@@ -110,6 +576,26 @@ def _swarm_config_dir() -> str:
     return os.path.expanduser(
         os.environ.get("ATELES_SWARM_GWS_CONFIG_DIR", "").strip()
     )
+
+
+def gws_config_dir_env(*, allow_ambient: bool = False,
+                       require_existing: bool = False) -> dict[str, str]:
+    """The gws config selection for a child process, as an env fragment.
+
+    Non-approval reads may explicitly opt into the ambient directory. Approval
+    sends pass ``require_existing=True`` so a missing
+    swarm directory cannot select the operator's mailbox or gws default.
+    ``_gws_env`` separately checks the full swarm mailbox configuration.
+    """
+    swarm_dir = _swarm_config_dir()
+    if swarm_dir and (not require_existing or os.path.isdir(swarm_dir)):
+        return {_GWS_CONFIG_ENV: swarm_dir}
+    if not allow_ambient:
+        return {}
+    ambient = os.environ.get(_GWS_CONFIG_ENV, "")
+    if require_existing and not os.path.isdir(os.path.expanduser(ambient)):
+        return {}
+    return {_GWS_CONFIG_ENV: ambient} if ambient else {}
 
 
 def swarm_mailbox_problems() -> list[str]:
@@ -162,7 +648,9 @@ def _gws_env() -> dict[str, str] | None:
         )
         return None
     env = dict(os.environ)
-    env[_GWS_CONFIG_ENV] = _swarm_config_dir()
+    # Configured implies ATELES_SWARM_GWS_CONFIG_DIR is set, so the shared
+    # mapping always selects the swarm mailbox here.
+    env.update(gws_config_dir_env())
     return env
 
 
@@ -193,8 +681,9 @@ def _gws() -> str | None:
 def gws_json(args: list[str], timeout: int = 45) -> Any:
     """Run a `gws` command and parse its JSON, tolerating the banner preamble.
 
-    gws prints a keyring/format banner before the JSON, so we start parsing at
-    the first '{' or '['. Returns None on any failure (fail-open).
+    gws can print a keyring/format banner before the JSON, including a banner
+    beginning with '['. Parse only a complete JSON value at a line start.
+    Returns None on any failure (fail-open).
     """
     gws = _gws()
     if not gws:
@@ -209,10 +698,15 @@ def gws_json(args: list[str], timeout: int = 45) -> Any:
             log.warning(f"gws {args[:2]} failed: {(r.stderr or '').strip()[:160]}")
             return None
         out = r.stdout or ""
-        start = min([i for i in (out.find("{"), out.find("[")) if i >= 0] or [-1])
-        if start < 0:
+        if len(out.encode("utf-8")) > 1048576:
+            log.warning(f"gws {args[:2]} response exceeds approval read limit")
             return None
-        return json.loads(out[start:])
+        for match in re.finditer(r"(?m)^[ \t]*[\[{]", out):
+            try:
+                return json.loads(out[match.start():])
+            except json.JSONDecodeError:
+                continue
+        return None
     except Exception as exc:  # noqa: BLE001
         log.warning(f"gws json error: {exc}")
         return None
@@ -408,20 +902,21 @@ def _fetch_auth_results(message_id: str) -> list[str] | None:
                     timeout=30)
     if not isinstance(data, dict):
         return None
+    if "id" in data and data["id"] != message_id:
+        return None
     payload = data.get("payload")
     if not isinstance(payload, dict):
         return None
     headers = payload.get("headers")
-    if headers is None:
-        headers = []
     if not isinstance(headers, list):
         return None
     values: list[str] = []
     for h in headers:
-        if not isinstance(h, dict):
+        if (not isinstance(h, dict) or not isinstance(h.get("name"), str) or
+                not isinstance(h.get("value"), str)):
             return None
-        if str(h.get("name") or "").strip().lower() == "authentication-results":
-            values.append(str(h.get("value") or ""))
+        if h["name"].strip().lower() == "authentication-results":
+            values.append(h["value"])
     return values
 
 
@@ -444,12 +939,118 @@ def sender_domain_authenticated(auth_results: list[str]) -> bool:
     return _auth_result_authorizes(auth_results[0], domain)
 
 
+def _complete_triage_rows(data: Any, max_msgs: int) -> tuple[list[dict] | None, str]:
+    """Accept only a complete, structurally valid mailbox collection."""
+    if not isinstance(data, (dict, list)):
+        return None, "gws_triage_invalid_response"
+    if len(json.dumps(data).encode("utf-8")) > 1048576:
+        return None, "gws_triage_oversized"
+    if isinstance(data, dict) and "messages" in data and "results" in data:
+        return None, "gws_triage_invalid_response"
+    rows = data if isinstance(data, list) else data.get("messages", data.get("results"))
+    if not isinstance(rows, list):
+        return None, "gws_triage_invalid_response"
+    if any(not isinstance(row, dict) or
+           not isinstance(row.get("id"), str) or not row["id"] or
+           not isinstance(row.get("subject"), str) or
+           ("date" in row and not isinstance(row["date"], str)) or
+           not isinstance(row.get("from", row.get("sender", row.get("From"))), str)
+           for row in rows):
+        return None, "gws_triage_invalid_response"
+    if isinstance(data, list):
+        return (rows, "") if len(rows) < max_msgs else (None, "gws_triage_truncated")
+    if "query" in data and not isinstance(data["query"], str):
+        return None, "gws_triage_invalid_response"
+    if "complete" in data and not isinstance(data["complete"], bool):
+        return None, "gws_triage_invalid_response"
+    if data.get("complete") is False or len(rows) >= max_msgs:
+        return None, "gws_triage_truncated"
+    for key in ("nextPageToken", "next_page_token", "nextPage", "next_page",
+                "continuation", "continuationToken"):
+        if key in data and data[key] is not None and not isinstance(data[key], str):
+            return None, "gws_triage_invalid_response"
+        if key in data and data[key] not in (None, ""):
+            return None, "gws_triage_truncated"
+    for key in ("has_more", "hasMore", "truncated"):
+        if key in data and not isinstance(data[key], bool):
+            return None, "gws_triage_invalid_response"
+    if data.get("has_more") or data.get("hasMore") or data.get("truncated"):
+        return None, "gws_triage_truncated"
+    for key in ("total", "totalCount", "resultSizeEstimate"):
+        if key in data:
+            if type(data[key]) is not int or data[key] < len(rows):
+                return None, "gws_triage_invalid_response"
+            if data[key] > len(rows):
+                return None, "gws_triage_truncated"
+    complete = (len(rows) < max_msgs or data.get("complete") is True or
+                data.get("has_more") is False or data.get("hasMore") is False or
+                data.get("truncated") is False or
+                any(key in data and data[key] in (None, "") for key in
+                    ("nextPageToken", "next_page_token", "nextPage", "next_page",
+                     "continuation", "continuationToken")) or
+                any(key in data and data[key] == len(rows) for key in
+                    ("total", "totalCount")))
+    if not complete:
+        return None, "gws_triage_truncated"
+    return rows, ""
+
+
+def sent_request_body(token: str, reply_subject: str, *, max_msgs: int = 40) -> SentRequest | None:
+    """Read the matching sent notice; missing or ambiguous evidence proves no quote."""
+    # The target is in the reply subject, while the token is in the sent body.
+    subject = re.sub(r"^\s*re:\s*", "", reply_subject, flags=re.IGNORECASE).strip()
+    payment_token = bool(re.fullmatch(r"[0-9A-F]{8}", token, re.IGNORECASE))
+    if not subject or (token not in {"release-approve:", "swarm-approve:"}
+                       and not payment_token):
+        return None
+    target = (None if payment_token else
+              re.search(r"\bRelease\s+(v[0-9][\w.+-]*)", subject, re.IGNORECASE)
+              if token == "release-approve:" else
+              re.search(r"\bPR\s+([A-Za-z0-9._-]+/[A-Za-z0-9._-]+#\d+)", subject))
+    if target is None and not payment_token:
+        return None
+    marker = f"[APPROVE-{token}]" if payment_token else f"{token} {target.group(1)}"
+    query = f'in:sent "{marker}"'
+    data = gws_json(["gmail", "+triage", "--format", "json", "--max",
+                     str(max_msgs), "--query", query])
+    rows, _ = _complete_triage_rows(data, max_msgs)
+    if rows is None:
+        return None
+    swarm = os.environ.get("ATELES_SWARM_EMAIL", "").strip().casefold()
+    candidates = [row for row in rows
+                  if row["subject"].strip().casefold() == subject.casefold()
+                  and _parse_address(str(row.get("from") or "")).casefold() == swarm]
+    if len(candidates) != 1:
+        return None
+    sent = gws_json(["gmail", "+read", "--id", candidates[0]["id"],
+                     "--headers", "--format", "json"], timeout=30)
+    if not isinstance(sent, dict):
+        return None
+    body = sent.get("body_text")
+    if not isinstance(body, str):
+        html = sent.get("body_html")
+        body = _extract_authored_html(html)[0] if isinstance(html, str) else None
+    if not body or marker.casefold() not in body.casefold():
+        return None
+    sender = str(sent.get("from") or candidates[0].get("from") or "")
+    recipient = str(sent.get("to") or "")
+    if (_parse_address(sender) != swarm or
+            _parse_address(recipient) != _parse_address(operator_email())):
+        return None
+    date = str(sent.get("date") or candidates[0].get("date") or "")
+    return SentRequest(body, sender, recipient, subject, date)
+
+
 def read_replies_with_status(
     tokens: list[str],
     max_msgs: int = 40,
     on_reply_message: Callable[[str, str], None] | None = None,
     on_sender_rejected: Callable[[], None] | None = None,
     on_unauthenticated_operator_reply: Callable[[], None] | None = None,
+    require_enabled: bool = True,
+    correction_queries: list[str] | None = None,
+    request_bodies: dict[str, str | SentRequest] | Callable[[str, str], str | SentRequest | None] | None = None,
+    exclude_reply: Callable[[str, str, str], bool] | None = None,
 ) -> ReadRepliesOutcome:
     """Statusful inbox sweep — distinguish empty-ok from transport failure.
 
@@ -467,10 +1068,12 @@ def read_replies_with_status(
     operator-facing message. The reply is still ignored. When this callback
     is not given, ``on_sender_rejected`` fires instead (prior behaviour).
     """
-    if not email_enabled():
+    if require_enabled and not email_enabled():
         return ReadRepliesOutcome(kind="disabled", texts=[], detail="ATELES_NOTIFY_EMAIL")
-    if not tokens:
+    if not tokens and not correction_queries:
         return ReadRepliesOutcome(kind="ok", texts=[], detail="")
+    if type(max_msgs) is not int or max_msgs < 1:
+        return ReadRepliesOutcome(kind="transport_error", texts=[], detail="gws_triage_invalid_limit")
     if not _gws():
         return ReadRepliesOutcome(
             kind="transport_error", texts=[], detail="gws_cli_missing"
@@ -483,28 +1086,47 @@ def read_replies_with_status(
         )
 
     texts: list[str] = []
+    replies: list[ApprovalReply] = []
+    rejected_replies: list[ApprovalReply] = []
+    unreadable_replies: list[ApprovalReply] = []
+    correction_only_replies: list[ApprovalReply] = []
+    callback_pairs: list[tuple[str, str]] = []
     seen_ids: set[str] = set()
     saw_transport_error = False
     transport_detail = ""
 
-    for token in tokens:
+    for token in [*tokens, *(correction_queries or [])]:
+        correction_query = token in (correction_queries or [])
+        query = f'newer_than:3d subject:"{token}"' if correction_query else f"newer_than:3d {token}"
         data = gws_json(["gmail", "+triage", "--format", "json", "--max",
-                         str(max_msgs), "--query", f"newer_than:3d {token}"])
+                         str(max_msgs), "--query", query])
         if data is None:
             # gws_json fail-opens to None on any transport/parse failure.
             # For statusful callers that is distinct from "zero matching msgs".
             saw_transport_error = True
             transport_detail = "gws_triage_failed"
             continue
-        msgs: list[dict] = []
-        if isinstance(data, dict):
-            msgs = data.get("messages") or data.get("results") or []
-        elif isinstance(data, list):
-            msgs = data
+        msgs, error = _complete_triage_rows(data, max_msgs)
+        if msgs is None:
+            saw_transport_error = True
+            transport_detail = error
+            continue
         for m in msgs:
-            mid = str(m.get("id") or "")
-            subject = str(m.get("subject") or "")
+            mid = m["id"]
+            subject = m["subject"]
+            if len(mid) > 256 or len(subject) > 8192:
+                saw_transport_error = True
+                transport_detail = "gws_triage_oversized"
+                continue
             if not mid or mid in seen_ids or not subject.upper().startswith("RE:"):
+                continue
+            if correction_query and token.casefold() not in subject.casefold():
+                continue
+            # A caller may discard a reply only with independent proof that it
+            # belongs to an earlier request. Apply this before any body read,
+            # including the subject-wide correction search.
+            if exclude_reply is not None and exclude_reply(mid, m.get("date", ""), subject):
+                seen_ids.add(mid)
                 continue
             # AUTHORIZATION, not merely authentication. The triage query is a
             # full-text mailbox search for the token, so ANY message carrying
@@ -525,6 +1147,7 @@ def read_replies_with_status(
                     except Exception as exc:  # noqa: BLE001
                         log.warning(f"on_sender_rejected callback failed: {exc}")
                 continue
+            seen_ids.add(mid)
             # The From address is text the sender chose. Require Gmail's own
             # record that the operator's domain authorized this message before
             # its body is read or its verdict counted. Unreadable metadata is a
@@ -534,12 +1157,14 @@ def read_replies_with_status(
             if auth_results is None:
                 saw_transport_error = True
                 transport_detail = "gws_auth_metadata_failed"
+                unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
             if not sender_domain_authenticated(auth_results):
                 log.warning(
                     "approval: ignoring reply — sender domain authentication "
                     "absent or not a pass (address matched, identity unknown)"
                 )
+                rejected_replies.append(ApprovalReply(mid, subject, authenticated=False))
                 cb = on_unauthenticated_operator_reply or on_sender_rejected
                 if cb is not None:
                     try:
@@ -547,51 +1172,157 @@ def read_replies_with_status(
                     except Exception as exc:  # noqa: BLE001
                         log.warning(f"reply-rejected callback failed: {exc}")
                 continue
-            seen_ids.add(mid)
             body_data = gws_json(["gmail", "+read", "--id", mid, "--headers",
                                   "--format", "json"], timeout=30)
-            if body_data is None:
+            if not isinstance(body_data, dict):
                 saw_transport_error = True
                 transport_detail = "gws_read_failed"
+                unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
-            body = ""
-            if isinstance(body_data, dict):
-                # Prefer plaintext (where the operator's verdict + the quoted
-                # token live). Fall back to the HTML part only if that is all gws
-                # returns — an HTML-only reply must not read as an empty body and
-                # silently drop the approval (the ateles#286 failure mode: a live
-                # release approval was lost because the reader missed the
-                # plaintext key).
-                body = str(body_data.get("body_text")
-                           or body_data.get("body")
-                           or body_data.get("text")
-                           or body_data.get("plain") or "")
-                if not body:
-                    # HTML-only: strip tags so the verb leads its line, otherwise
-                    # parse_verdict (which keys off the FIRST word of a line) sees
-                    # "<p>approve" and returns None — a non-empty-but-unparseable
-                    # body would still drop the approval. Tag-strip makes an
-                    # HTML-only `approve <version>` reply actually register.
-                    raw_html = str(body_data.get("body_html") or "")
-                    if raw_html:
-                        body = _strip_html(raw_html)
-                    else:
-                        body = str(body_data.get("snippet") or "")
-            if on_reply_message is not None:
+            if len(json.dumps(body_data).encode("utf-8")) > 262144:
+                saw_transport_error = True
+                transport_detail = "gws_read_oversized"
+                unreadable_replies.append(ApprovalReply(mid, subject))
+                continue
+            # A triage snippet, subject, preview, or header can contain both
+            # verdict and token, but none proves that the full reply was read.
+            plain_keys = [key for key in ("body_text", "body", "text", "plain")
+                          if key in body_data]
+            if (any(not isinstance(body_data[key], str) for key in plain_keys) or
+                    len({body_data[key] for key in plain_keys}) > 1):
+                saw_transport_error = True
+                transport_detail = "gws_read_invalid_response"
+                unreadable_replies.append(ApprovalReply(mid, subject))
+                continue
+            plain_key = plain_keys[0] if plain_keys else None
+            plain_present = plain_key is not None
+            plain = body_data[plain_key] if plain_present else ""
+            # The sent request is the only acceptable proof for a mail-client
+            # attribution/header block. Missing metadata leaves it unreadable.
+            sent_request = None
+            raw_html = body_data.get("body_html")
+            # Preserve the target from the matched request token before quote
+            # removal. The affirmative must still come from authored text.
+            raw_source = plain + "\n" + (raw_html if isinstance(raw_html, str) else "")
+            token_pattern = (r"release-approve:\s*(v[0-9][0-9A-Za-z.\-+]*)"
+                             if token == "release-approve:" else
+                             r"swarm-approve:\s*([A-Za-z0-9._-]+/[A-Za-z0-9._-]+#\d+)")
+            targets = set(re.findall(token_pattern, raw_source, re.IGNORECASE))
+            correlation_target = next(iter(targets)) if len(targets) == 1 else None
+            known = tuple(
+                f"{prefix}: {target}" for prefix, target in
+                (("release-approve", correlation_target),
+                 ("swarm-approve", correlation_target)) if target
+            )
+            if re.fullmatch(r"[0-9A-F]{8}", token, re.IGNORECASE):
+                known += (f"[APPROVE-{token}]",)
+            if callable(request_bodies):
                 try:
-                    on_reply_message(token, mid)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning(f"on_reply_message callback failed: {exc}")
-            texts.append(f"{subject}\n{body}")
+                    original_request = request_bodies(token, subject)
+                except Exception:  # noqa: BLE001 — missing proof cannot approve
+                    original_request = None
+            else:
+                original_request = (request_bodies or {}).get(token)
+            if isinstance(original_request, SentRequest):
+                sent_request = original_request
+                original_request = sent_request.body
+            approval_candidate = (not correction_query and any(
+                candidate.casefold() in (subject + "\n" + raw_source).casefold()
+                for candidate in tokens))
+            if approval_candidate and not (isinstance(original_request, str)
+                                           and original_request.strip()):
+                saw_transport_error = True
+                transport_detail = "sent_request_unproven"
+                unreadable_replies.append(ApprovalReply(mid, subject))
+                continue
+            if isinstance(original_request, str):
+                request_lines = {" ".join(line.split()).casefold() for line in
+                                 original_request.splitlines()}
+                known = tuple(line for line in known
+                              if " ".join(line.split()).casefold() in request_lines or
+                              (sent_request is not None and
+                               line.startswith("[APPROVE-") and
+                               line.casefold() in
+                               " ".join(sent_request.subject.split()).casefold()))
+            body, plain_safe = _authored_plain_checked(
+                plain, sent_request=sent_request, known_quote_lines=known)
+            def normalize(line: str) -> str:
+                return " ".join(line.split()).casefold()
+            originals = {normalize(line) for line in
+                         (original_request or "").splitlines() if line.strip()}
+            originals.update(normalize(line) for line in known)
+            quoted_plain = [normalize(line.lstrip()[1:].strip()) for line in
+                            plain.splitlines() if line.lstrip().startswith(">")
+                            and line.lstrip()[1:].strip()]
+            if any(line not in originals for line in quoted_plain):
+                plain_safe = False
+            html_body = ""
+            html_present = "body_html" in body_data
+            if isinstance(raw_html, str) and html_present:
+                html_body, boundary_seen = _extract_authored_html(
+                    raw_html, original_request=original_request,
+                    known_quote_lines=known, verify_quote=True)
+                if html_body and not boundary_seen and _unmarked_notification_copy(html_body):
+                    html_body = ""
+            if not plain_safe or (plain_present and html_present and
+                                  (not html_body.strip() or
+                                   [line.casefold() for line in body.splitlines()] !=
+                                   [line.casefold() for line in html_body.splitlines()])):
+                saw_transport_error = True
+                transport_detail = "reply_quote_boundary_unknown"
+                unreadable_replies.append(ApprovalReply(mid, subject))
+                continue
+            if not plain_present:
+                body = html_body
+            # A blank authored reply above a recognizable quote is readable:
+            # it is a non-approval, so Turdus owes a correction.
+            blank_quoted_reply = bool(plain and not body and
+                                      (any(line.lstrip().startswith(">") for line in plain.splitlines())
+                                       or any(_ATTRIBUTION.match(line.strip()) or _FORWARD.match(line.strip())
+                                              for line in plain.splitlines())))
+            if not body.strip() and not blank_quoted_reply:
+                saw_transport_error = True
+                transport_detail = "reply_quote_boundary_unknown"
+                unreadable_replies.append(ApprovalReply(mid, subject))
+                continue
+            reply = ApprovalReply(mid, subject, body,
+                                  correlation_target=correlation_target)
+            has_token = any(candidate.casefold() in (subject + "\n" + raw_source).casefold()
+                            for candidate in tokens)
+            if correction_query or not has_token:
+                correction_only_replies.append(reply)
+            else:
+                texts.append(f"{subject}\n{body}")
+                callback_pairs.append((token, mid))
+                replies.append(reply)
 
     # Any fetch failure within the sweep fails the WHOLE read: a verdict set
     # built from only the messages that loaded is incomplete, and acting on it
     # could honour one reply while missing a later one that changes it.
     if saw_transport_error:
         return ReadRepliesOutcome(
-            kind="transport_error", texts=[], detail=transport_detail or "gws_failed"
+            kind="transport_error", texts=[], detail=transport_detail or "gws_failed",
+            replies=tuple(replies),
+            rejected_replies=tuple(rejected_replies),
+            unreadable_replies=tuple(unreadable_replies),
+            correction_only_replies=tuple(correction_only_replies),
         )
-    return ReadRepliesOutcome(kind="ok", texts=texts, detail="")
+    if on_reply_message is not None:
+        for token, mid in callback_pairs:
+            try:
+                on_reply_message(token, mid)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"on_reply_message callback failed: {exc}")
+                return ReadRepliesOutcome(
+                    kind="transport_error", texts=[], detail="reply_callback_failed",
+                    replies=tuple(replies), rejected_replies=tuple(rejected_replies),
+                    unreadable_replies=tuple(unreadable_replies),
+                    correction_only_replies=tuple(correction_only_replies),
+                )
+    return ReadRepliesOutcome(kind="ok", texts=texts, detail="",
+                              replies=tuple(replies),
+                              rejected_replies=tuple(rejected_replies),
+                              correction_only_replies=tuple(correction_only_replies))
 
 
 def read_replies(
@@ -606,7 +1337,8 @@ def read_replies(
     must distinguish transport failure from an empty inbox (payment consent).
     """
     outcome = read_replies_with_status(
-        tokens, max_msgs=max_msgs, on_reply_message=on_reply_message
+        tokens, max_msgs=max_msgs, on_reply_message=on_reply_message,
+        request_bodies=sent_request_body,
     )
     if outcome.kind == "ok":
         return outcome.texts
