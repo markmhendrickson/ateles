@@ -28,6 +28,36 @@ log = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.parent  # ateles repo root
 
+# Credentials the claude CLI would use instead of the subscription login.
+# Monedula loads the shared dotenv, so they are dropped from the CLI's
+# environment. Covers ``_METERED_CREDENTIALS`` in
+# ``execution/daemons/apis/skill_runner.py`` (a test asserts it is a subset;
+# importing that module here would pull in the whole Apis runner) plus
+# ``ANTHROPIC_AUTH_TOKEN``, a custom authorization credential the CLI also
+# honours. The Apis runner never passes that one, because its children start
+# from an allowlist; this handler starts from the daemon's environment.
+_METERED_CREDENTIALS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "CURSOR_API_KEY",
+)
+
+# CLI output meaning the metered account refused a model call. ``--print`` does
+# not show tool calls, so this text cannot prove that no wallet call ran before
+# it: the outcome stays unknown (docs/foundation/payments.md, the unknown case).
+_CREDIT_BALANCE_TOO_LOW = "Credit balance is too low"
+
+
+class PaymentOutcomeUnknown(RuntimeError):
+    """The transfer may or may not have been sent.
+
+    Raised rather than returned, so the payment loop takes its unknown-outcome
+    path: the journal keeps the intent with no outcome, the operator is told
+    the outcome is unknown, and later ticks hold the obligation rather than
+    closing or retrying it until a rail read settles it.
+    """
+
 
 class BtcTransferHandler(PaymentHandler):
     """Generic BTC transfer handler parameterised by a PaymentProfile."""
@@ -83,6 +113,7 @@ class BtcTransferHandler(PaymentHandler):
                 "status": "failed",
                 "handler": self.name,
                 "error": "claude CLI not found in PATH",
+                "failure_stage": "pre_submission",
             }
 
         try:
@@ -91,7 +122,7 @@ class BtcTransferHandler(PaymentHandler):
                 capture_output=True,
                 text=True,
                 timeout=300,
-                env=os.environ,
+                env=_cli_env(),
             )
         except subprocess.TimeoutExpired:
             return {
@@ -112,6 +143,19 @@ class BtcTransferHandler(PaymentHandler):
         )
 
         payment_result = _parse_payment_result(output)
+        # Case-folded: a refusal in any casing is still the unknown case, so it
+        # must never fall through to the terminal "failed" return below.
+        if payment_result is None and _CREDIT_BALANCE_TOO_LOW.casefold() in (
+            output + (result.stderr or "")
+        ).casefold():
+            # A wallet call before the refusal cannot be ruled out, so this is
+            # the unknown case, not a failure: the chain is checked before any
+            # retry or manual payment.
+            log.error(f"[{self.name}] claude CLI refused: {_CREDIT_BALANCE_TOO_LOW}")
+            raise PaymentOutcomeUnknown(
+                f"{self.name}: claude CLI refused ({_CREDIT_BALANCE_TOO_LOW}); "
+                "outcome unknown, check the chain before any retry or manual payment"
+            )
         if payment_result is None:
             log.error(
                 f"[{self.name}] No PAYMENT_RESULT line found in output:\n{output[:1000]}"
@@ -151,6 +195,14 @@ class BtcTransferHandler(PaymentHandler):
         else:
             error = result.get("error", "unknown error")
             return f"❌ {self.profile.label} payment failed: {error}"
+
+
+def _cli_env() -> dict[str, str]:
+    """The CLI's environment: ``os.environ`` minus the metered API keys.
+
+    Every other variable is kept; the btc-wallet MCP the CLI launches needs its own.
+    """
+    return {k: v for k, v in os.environ.items() if k not in _METERED_CREDENTIALS}
 
 
 def _find_claude() -> str | None:

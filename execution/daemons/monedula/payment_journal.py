@@ -25,19 +25,30 @@ timestamps and status strings — no payee names, account numbers or amounts.
 
 Fail closed (``docs/foundation/principles.md#5``): an unreadable or malformed
 journal raises :class:`JournalError`; callers hold every payment rather than
-treat the journal as empty.
+treat the journal as empty. The adjacent first-use marker is durably written
+before the first journal write. If the journal is absent while the marker
+remains, every payment is held. For a legitimate fresh start, the operator
+first reconciles against the chain and wallet, then restores the journal from
+backup or knowingly removes both files. Restoring an older backup is an
+operator reconciliation, never an automatic recovery. A journal lost before
+any marker exists cannot be distinguished from first use.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 JOURNAL_NAME = ".monedula_payment_journal.json"
+MARKER_NAME = ".monedula_payment_journal.initialized"
+MISSING_AFTER_FIRST_USE = (
+    "payment journal missing after first use; reconcile before any payment"
+)
 
 STATE_INTENT = "intent"
 STATE_DONE = "done"
@@ -58,10 +69,22 @@ def _empty() -> dict[str, Any]:
 
 
 def load(path: Path) -> dict[str, Any]:
-    """Return the journal. A missing file is an empty journal; anything
-    unreadable or structurally wrong raises :class:`JournalError`."""
-    if not path.exists():
+    """Return the journal; loss after first use holds all payments.
+
+    A journal with no marker is a legacy deployment: create the marker when
+    possible, but do not fail a valid read if that write fails. Every journal
+    write must establish the marker durably first. A journal lost before any
+    marker existed cannot be distinguished from genuine first use.
+    """
+    marker = path.with_name(MARKER_NAME)
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        if _marker_present(marker):
+            raise JournalError(MISSING_AFTER_FIRST_USE)
         return _empty()
+    except OSError as exc:
+        raise JournalError(f"payment journal unreadable: {type(exc).__name__}") from exc
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
@@ -79,11 +102,40 @@ def load(path: Path) -> dict[str, Any]:
         data["sessions"] = {}
     elif not isinstance(data["sessions"], dict):
         raise JournalError("payment journal malformed")
+    try:
+        _ensure_marker(marker)
+    except JournalError:
+        # A valid legacy journal remains readable. Its next write must
+        # establish the marker before changing any payment state.
+        pass
     return data
 
 
-def _write(path: Path, data: dict[str, Any]) -> None:
-    """Atomic, fsynced replace. Any failure raises :class:`JournalError`."""
+def _marker_present(path: Path) -> bool:
+    """Count even an unreadable file or broken link as an existing marker."""
+    try:
+        path.lstat()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise JournalError(f"payment journal marker unreadable: {type(exc).__name__}") from exc
+
+
+def _ensure_marker(path: Path) -> None:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        _atomic_write(path, {"version": 1, "created_at": time.time()})
+        return
+    except OSError as exc:
+        raise JournalError(f"payment journal marker unreadable: {type(exc).__name__}") from exc
+    if not stat.S_ISREG(mode):
+        raise JournalError("payment journal marker is not a regular file")
+
+
+def _atomic_write(path: Path, data: dict[str, Any]) -> None:
+    """Atomic, fsynced replace for the journal and its first-use marker."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".journal-", dir=str(path.parent))
@@ -108,6 +160,12 @@ def _write(path: Path, data: dict[str, Any]) -> None:
         raise JournalError(
             f"payment journal write failed: {type(exc).__name__}"
         ) from exc
+
+
+def _write(path: Path, data: dict[str, Any]) -> None:
+    """Establish durable first-use evidence before any journal write."""
+    _ensure_marker(path.with_name(MARKER_NAME))
+    _atomic_write(path, data)
 
 
 def current_generation(path: Path) -> int:
