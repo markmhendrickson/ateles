@@ -210,7 +210,7 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
 
             result = asyncio.run(dispatch_role.dispatch(
                 ROLE, "Check the gates.", provider=provider, cwd=cwd_arg,
-                seated_reviewer=True))  # fmt: skip
+                seated_reviewer=True, caller_kind="interactive"))  # fmt: skip
             code = 0 if result.ok else 1
             seated_envelope = {
                 "ok": result.ok, "stdout": result.stdout, "error": result.error,

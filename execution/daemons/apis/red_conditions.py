@@ -221,6 +221,8 @@ class ApisNotifier(Notifier):
         bypass_silence: bool = False,
         dedupe_key: str | None = None,
         email_eligible: bool = True,
+        retryable: bool = False,
+        related_dedupe_keys: tuple[str, ...] = (),
     ) -> bool:
         try:
             if is_surfaced_red(message):
@@ -234,6 +236,8 @@ class ApisNotifier(Notifier):
             bypass_silence,
             dedupe_key,
             email_eligible,
+            retryable,
+            related_dedupe_keys,
         )
 
     def _record_red(self, message: str) -> None:

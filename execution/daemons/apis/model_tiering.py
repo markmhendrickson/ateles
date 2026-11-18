@@ -58,6 +58,7 @@ failed prior attempt), not a classifier's guess.
 from __future__ import annotations
 
 import argparse
+import contextvars
 import json
 import logging
 import os
@@ -764,6 +765,155 @@ USAGE_EVENT = "usage"
 DISPATCH_EVENT = "dispatch"
 
 
+# ── Caller attribution (provider spend governance, ent_e5259618cae6cafd4be120e0) ─
+#
+# On 2026-11-15 a provider's monthly allowance burned in about seven hours and
+# only a manual cross-log audit showed interactive sessions, not the Apis
+# daemon, had launched the dispatches. Every ledger row now says who launched
+# it and for what. Each field is written on every row, as an explicit ``null``
+# when unknown: nothing is inferred from a process name or a prompt.
+#
+# How a dispatch knows its caller:
+# * a daemon entrypoint calls ``set_process_caller("daemon", "<name>")`` once at
+#   startup, so every dispatch that process makes is attributed to it;
+# * ``dispatch_role.py`` (the interactive entrypoint) sets ``"interactive"``
+#   and the caller from ``--caller`` or the ``ATELES_DISPATCH_SESSION_ID``
+#   environment variable an interactive session exports;
+# * ``skill_runner.run_skill(caller=, caller_kind=, pr=)`` binds the resolved
+#   attribution for the duration of one dispatch (``bind_attribution``), and
+#   both ledger writers read it from there.
+
+CALLER_KIND_DAEMON = "daemon"
+CALLER_KIND_INTERACTIVE = "interactive"
+CALLER_KINDS: tuple[str, ...] = (CALLER_KIND_DAEMON, CALLER_KIND_INTERACTIVE)
+
+# Exported by an interactive session (Claude Code, Codex, Cursor) before it
+# runs dispatch_role, so its dispatches name the session. Read only by the
+# dispatching process; never passed to the child. Deliberately NOT declared in
+# lib/environment_allowlist.py: a daemon must never carry it, or its
+# dispatches would be attributed to a session.
+SESSION_ID_ENV = "ATELES_DISPATCH_SESSION_ID"
+
+ATTRIBUTION_FIELDS: tuple[str, ...] = ("caller_kind", "caller", "task_entity_id", "pr")
+
+
+@dataclass(frozen=True)
+class DispatchAttribution:
+    """Who launched one dispatch, and for which task or pull request."""
+
+    caller_kind: str | None = None
+    caller: str | None = None
+    task_entity_id: str | None = None
+    pr: int | str | None = None
+
+    def as_fields(self) -> dict:
+        return {name: getattr(self, name) for name in ATTRIBUTION_FIELDS}
+
+
+_PROCESS_CALLER: tuple[str | None, str | None] = (None, None)
+_CURRENT_ATTRIBUTION: "contextvars.ContextVar[DispatchAttribution | None]" = (
+    contextvars.ContextVar("ateles_dispatch_attribution", default=None)
+)
+
+
+def _clean(value: object) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+def normalize_caller_kind(value: object) -> str | None:
+    """``daemon`` / ``interactive``; anything else is unknown (``None``)."""
+    text = (_clean(value) or "").lower()
+    return text if text in CALLER_KINDS else None
+
+
+def normalize_pr(value: object) -> int | str | None:
+    """A PR number as an int when it is one (``"#12"`` -> 12), else the text."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    text = _clean(value)
+    if text is None:
+        return None
+    digits = text.lstrip("#")
+    if digits.isdigit():
+        number = int(digits)
+        return number if number > 0 else None
+    return text
+
+
+def set_process_caller(caller_kind: str | None, caller: str | None) -> None:
+    """Declare this process's caller once, at its entrypoint.
+
+    An invalid kind is stored as unknown rather than refused: attribution is
+    reporting and must never stop a daemon from starting.
+    """
+    global _PROCESS_CALLER
+    _PROCESS_CALLER = (normalize_caller_kind(caller_kind), _clean(caller))
+
+
+def process_caller() -> tuple[str | None, str | None]:
+    return _PROCESS_CALLER
+
+
+def resolve_attribution(
+    *,
+    caller: str | None = None,
+    caller_kind: str | None = None,
+    task_entity_id: str | None = None,
+    pr: object = None,
+) -> DispatchAttribution:
+    """Combine explicit values, the process default and the session variable.
+
+    Precedence per field: an explicit argument, then the process's declared
+    caller (``set_process_caller``), then — for an interactive process, or one
+    that declared nothing — the ``ATELES_DISPATCH_SESSION_ID`` environment
+    variable. A field nothing supplies is ``None``.
+    """
+    kind = normalize_caller_kind(caller_kind)
+    name = _clean(caller)
+    process_kind, process_name = _PROCESS_CALLER
+    if kind is None:
+        kind = process_kind
+    if name is None and (kind is None or kind == process_kind):
+        name = process_name
+    if name is None and kind in (None, CALLER_KIND_INTERACTIVE):
+        session = _clean(os.environ.get(SESSION_ID_ENV))
+        if session is not None:
+            name = session
+            kind = kind or CALLER_KIND_INTERACTIVE
+    return DispatchAttribution(
+        caller_kind=kind,
+        caller=name,
+        task_entity_id=_clean(task_entity_id),
+        pr=normalize_pr(pr),
+    )
+
+
+def bind_attribution(attribution: DispatchAttribution) -> contextvars.Token:
+    """Make ``attribution`` current for this dispatch; reset with the token."""
+    return _CURRENT_ATTRIBUTION.set(attribution)
+
+
+def reset_attribution(token: contextvars.Token) -> None:
+    _CURRENT_ATTRIBUTION.reset(token)
+
+
+def current_attribution() -> DispatchAttribution:
+    """The bound attribution, else one resolved from the process alone."""
+    bound = _CURRENT_ATTRIBUTION.get()
+    return bound if bound is not None else resolve_attribution()
+
+
+def _attribution_fields(attribution: "DispatchAttribution | None") -> dict:
+    try:
+        return (attribution or current_attribution()).as_fields()
+    except Exception as exc:  # noqa: BLE001 — attribution never breaks a dispatch
+        log.warning(f"[apis] model_tiering: attribution unavailable (non-fatal): {exc}")
+        return {name: None for name in ATTRIBUTION_FIELDS}
+
+
 def new_dispatch_id() -> str:
     """A key tying one dispatch's start row to its usage row in the ledger."""
     return uuid.uuid4().hex
@@ -787,6 +937,7 @@ def record_dispatch(
     resolved: "ResolvedTier | None",
     model: str | None,
     dispatch_id: str | None = None,
+    attribution: "DispatchAttribution | None" = None,
 ) -> str:
     """Log and ledger one dispatch's tiering; return the log marker.
 
@@ -795,6 +946,10 @@ def record_dispatch(
 
     ``dispatch_id`` ties this start row to the usage row ``record_dispatch_usage``
     appends when the dispatch ends (tokens and cost are not known until then).
+
+    ``attribution`` defaults to the one bound for the current dispatch
+    (``bind_attribution``); its four fields are always written, ``null`` when
+    unknown.
     """
     tier, source = describe_tiering(resolved, model)
     marker = f"tiering={tier}({source}) model={model or 'default'}"
@@ -810,6 +965,7 @@ def record_dispatch(
         "model": model or "",
         "escalation_reasons": list(resolved.escalation_reasons) if resolved else [],
     }
+    row.update(_attribution_fields(attribution))
     _append_ledger_row(row)
     return marker
 
@@ -837,6 +993,7 @@ def record_dispatch_usage(
     requested_model: str | None,
     usage: object,
     ok: bool | None = None,
+    attribution: "DispatchAttribution | None" = None,
 ) -> None:
     """Append the end-of-dispatch spend row for one dispatch.
 
@@ -865,6 +1022,7 @@ def record_dispatch_usage(
     for name in USAGE_TOKEN_FIELDS:
         row[name] = getattr(usage, name, None)
     row["total_cost_usd"] = getattr(usage, "total_cost_usd", None)
+    row.update(_attribution_fields(attribution))
     _append_ledger_row(row)
 
 
@@ -883,8 +1041,8 @@ def tier_counts(
     """Dispatch counts per tier (and per action class) from the ledger.
 
     ``{"total": n, "by_tier": {...}, "by_class": {"class": {"tier": n}}}``.
-    Malformed lines are skipped, not fatal: one torn write must not blind the
-    report. A missing ledger is an empty report, never an error.
+    Malformed lines are counted in ``unreadable_rows`` while valid rows remain
+    visible. A missing ledger is an empty report, never an error.
 
     ``with_reasons`` adds ``"by_reason": {reason: {"total": n, "by_class":
     {class: n}}}``: how many escalated dispatches each signal appears on, so a
@@ -900,20 +1058,18 @@ def tier_counts(
     by_class: dict[str, dict[str, int]] = {}
     by_reason: dict[str, dict] = {}
     total = 0
-    path = tier_ledger_path()
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        lines = []
-    for line in lines:
-        try:
-            row = json.loads(line)
-            tier = str(row["tier"])
-            when = datetime.fromisoformat(str(row["ts"]))
-        except (ValueError, KeyError, TypeError):
-            continue
+    parsed_rows, unreadable_rows = _read_ledger_rows()
+    for row in parsed_rows:
         if row.get("event") == USAGE_EVENT:
             continue  # a spend row for a dispatch already counted by its start row
+        tier = row.get("tier")
+        if not isinstance(tier, str) or not tier:
+            unreadable_rows += 1
+            continue
+        when = _row_time(row)
+        if when is None:
+            unreadable_rows += 1
+            continue
         if cutoff is not None and when < cutoff:
             continue
         total += 1
@@ -929,7 +1085,9 @@ def tier_counts(
                 entry = by_reason.setdefault(name, {"total": 0, "by_class": {}})
                 entry["total"] += 1
                 entry["by_class"][klass] = entry["by_class"].get(klass, 0) + 1
-    report = {"total": total, "by_tier": by_tier, "by_class": by_class}
+    report = {"total": total, "by_tier": by_tier, "by_class": by_class,
+              "unreadable_rows": unreadable_rows,
+              "attribution_available": bool(parsed_rows) or unreadable_rows == 0}
     if with_reasons:
         report["by_reason"] = by_reason
     return report
@@ -944,7 +1102,17 @@ class LedgerReadError(Exception):
         super().__init__(f"cannot read tier ledger {path}: {self.cause}")
 
 
-USAGE_GROUPS: tuple[str, ...] = ("provider", "model", "tier", "action_class", "skill")
+class LedgerPartialReadError(Exception):
+    """A row iterator cannot silently represent a partially readable ledger."""
+
+    def __init__(self, unreadable_rows: int) -> None:
+        self.unreadable_rows = unreadable_rows
+        super().__init__(f"tier ledger has {unreadable_rows} unreadable rows")
+
+
+USAGE_GROUPS: tuple[str, ...] = (
+    "provider", "model", "tier", "action_class", "skill", "caller_kind", "caller",
+)
 
 
 def usage_totals(
@@ -960,9 +1128,9 @@ def usage_totals(
     reported it, and a measured zero stays ``0``. ``reported_rows`` is the
     number of dispatches that field's sum covers, so a total built from only
     some of a group's ``dispatches`` is visibly partial, field by field.
-    Malformed lines and start rows are skipped; a missing ledger is an empty
-    report. A ledger that exists but cannot be read raises ``LedgerReadError``
-    rather than reporting as empty.
+    Malformed lines count in ``unreadable_rows``; start rows do not contribute
+    usage. A missing ledger is empty. An unreadable file raises
+    ``LedgerReadError`` rather than reporting as empty.
     """
     if group_by not in USAGE_GROUPS:
         raise ValueError(f"group_by must be one of {', '.join(USAGE_GROUPS)}")
@@ -971,24 +1139,17 @@ def usage_totals(
         cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
     groups: dict[str, dict] = {}
     rows = 0
-    path = tier_ledger_path()
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        lines = []  # no ledger yet is "no spend", not a failure
-    except (OSError, UnicodeError) as exc:
-        raise LedgerReadError(path, exc) from exc
+    parsed_rows, unreadable_rows = _read_ledger_rows()
 
     def _number(value: object) -> bool:
         return isinstance(value, (int, float)) and not isinstance(value, bool)
 
-    for line in lines:
-        try:
-            row = json.loads(line)
-            when = datetime.fromisoformat(str(row["ts"]))
-        except (ValueError, KeyError, TypeError):
+    for row in parsed_rows:
+        when = _row_time(row)
+        if when is None:
+            unreadable_rows += 1
             continue
-        if not isinstance(row, dict) or row.get("event") != USAGE_EVENT:
+        if row.get("event") != USAGE_EVENT:
             continue
         if cutoff is not None and when < cutoff:
             continue
@@ -1012,7 +1173,270 @@ def usage_totals(
         if _number(cost):
             entry["cost"]["total_usd"] = (entry["cost"]["total_usd"] or 0.0) + float(cost)
             entry["cost"]["reported_rows"] += 1
-    return {"group_by": group_by, "rows": rows, "groups": groups}
+    return {"group_by": group_by, "rows": rows, "groups": groups,
+            "unreadable_rows": unreadable_rows,
+            "attribution_available": bool(parsed_rows) or unreadable_rows == 0}
+
+
+SUMMARY_KEY_FIELDS: tuple[str, ...] = (
+    "provider", "model", "caller_kind", "caller", "task_entity_id", "pr",
+)
+# Which model a summary group's ``model`` names: the one the harness reported
+# on a usage row, else the one the dispatch requested.
+MODEL_REPORTED = "reported"
+MODEL_REQUESTED = "requested"
+# A summary group is either a dispatch's (start row plus the usage rows joined
+# to it by ``dispatch_id``) or usage rows whose start row is not in the ledger.
+GROUP_DISPATCH = "dispatch"
+GROUP_USAGE_ONLY = "usage_without_dispatch"
+NULL_KEY = None
+
+
+def _ledger_lines() -> list[str]:
+    path = tier_ledger_path()
+    try:
+        return path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeError) as exc:
+        raise LedgerReadError(path, exc) from exc
+
+
+def _row_time(row: dict) -> datetime | None:
+    try:
+        when = datetime.fromisoformat(str(row["ts"]))
+    except (ValueError, KeyError, TypeError):
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def _read_ledger_rows() -> tuple[list[dict], int]:
+    rows: list[dict] = []
+    unreadable = 0
+    for line in _ledger_lines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            unreadable += 1
+            continue
+        if (not isinstance(row, dict) or _row_time(row) is None
+                or row.get("event") not in (None, "", DISPATCH_EVENT, USAGE_EVENT)):
+            unreadable += 1
+            continue
+        rows.append(row)
+    return rows, unreadable
+
+
+def iter_ledger_rows(*, since: datetime | None = None):
+    """Yield parsed ledger rows (dicts with a parseable ``ts``), oldest first.
+
+    A partial ledger raises instead of appearing complete. Rows written before attribution existed simply
+    lack those keys; readers use ``row.get`` and see ``None``. A missing ledger
+    yields nothing; an unreadable one raises ``LedgerReadError``.
+    """
+    rows, unreadable_rows = _read_ledger_rows()
+    if unreadable_rows:
+        raise LedgerPartialReadError(unreadable_rows)
+    for row in rows:
+        when = _row_time(row)
+        if since is not None and when < since:
+            continue
+        yield row
+
+
+def attribution_summary(*, since_hours: float | None = None) -> dict:
+    """Dispatches and tokens per provider/model/caller/task/PR from the ledger.
+
+    ``{"since_hours": h, "dispatch_rows": n, "usage_rows": n, "groups": [
+    {"group", "provider", "model", "model_label", "requested_model",
+     "caller_kind", "caller", "task_entity_id", "pr",
+     "dispatches": n, "usage_rows": n,
+     "tokens": {field: {"sum": int | None, "reported_rows": n, "null_rows": n}}},
+    ...]}``, groups ordered by dispatch count (descending).
+
+    One dispatch is one group. A usage row is joined to its start row by
+    ``dispatch_id`` and counted under the start row's keys, so a dispatch that
+    requested ``opus`` and was reported as ``claude-opus-5`` is not split in
+    two. A usage row is joined even when its start row is older than the
+    window (only rows inside the window are counted). The group's ``model`` is
+    the model the harness reported on its usage rows when it named one
+    (``model_label: "reported"``; several are joined with ", "), else the
+    requested one (``"requested"``); ``requested_model`` is always the start
+    row's. Usage rows with no matching start row (none recorded, or written
+    before ``dispatch_id`` existed) still count, under ``group:
+    "usage_without_dispatch"`` and their own row's keys.
+
+    ``dispatches`` counts start rows (one per provider attempt); token totals
+    come from the end-of-dispatch usage rows. A key field nobody recorded —
+    including every field on a row written before attribution existed — is
+    ``None`` in the group key, never a guessed value. For tokens, ``sum`` is
+    ``None`` when no row reported the field, a measured zero stays ``0``, and
+    ``null_rows`` counts usage rows that did not report it, so unknown is never
+    folded into zero.
+    """
+    since = None
+    if since_hours is not None:
+        since = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+
+    def _key_value(row: dict, name: str):
+        value = row.get(name)
+        if name == "pr":
+            return normalize_pr(value)
+        return _clean(value)
+
+    def _key(row: dict) -> tuple:
+        return tuple(_key_value(row, name) for name in SUMMARY_KEY_FIELDS)
+
+    def _number(value: object) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    rows, unreadable_rows = _read_ledger_rows()
+    # Every start row's keys, whether or not it falls in the window, so a usage
+    # row in the window still joins a dispatch that started before it.
+    start_keys: dict[str, tuple] = {}
+    for row in rows:
+        if (row.get("event") or DISPATCH_EVENT) == DISPATCH_EVENT:
+            dispatch_id = _clean(row.get("dispatch_id"))
+            if dispatch_id is not None:
+                start_keys[dispatch_id] = _key(row)
+
+    groups: dict[tuple, dict] = {}
+    dispatch_rows = usage_rows = 0
+    for row in rows:
+        if since is not None and _row_time(row) < since:  # type: ignore[operator]
+            continue
+        event = row.get("event") or DISPATCH_EVENT  # the oldest rows had no event
+        if event not in (DISPATCH_EVENT, USAGE_EVENT):
+            continue
+        if event == DISPATCH_EVENT:
+            kind, key = GROUP_DISPATCH, _key(row)
+        else:
+            joined = start_keys.get(_clean(row.get("dispatch_id")) or "")
+            if joined is not None:
+                kind, key = GROUP_DISPATCH, joined
+            else:
+                kind, key = GROUP_USAGE_ONLY, _key(row)
+        entry = groups.get((kind, key))
+        if entry is None:
+            entry = {"group": kind, **dict(zip(SUMMARY_KEY_FIELDS, key))}
+            entry["requested_model"] = entry["model"] if kind == GROUP_DISPATCH else None
+            entry.update({
+                "dispatches": 0,
+                "usage_rows": 0,
+                "_reported": set(),
+                "tokens": {
+                    name: {"sum": None, "reported_rows": 0, "null_rows": 0}
+                    for name in USAGE_TOKEN_FIELDS
+                },
+            })
+            groups[(kind, key)] = entry
+        if event == DISPATCH_EVENT:
+            dispatch_rows += 1
+            entry["dispatches"] += 1
+            continue
+        usage_rows += 1
+        entry["usage_rows"] += 1
+        row_model = _clean(row.get("model"))
+        if row_model is not None and _clean(row.get("model_source")) == MODEL_REPORTED:
+            entry["_reported"].add(row_model)
+        for name in USAGE_TOKEN_FIELDS:
+            value = row.get(name)
+            field_entry = entry["tokens"][name]
+            if _number(value):
+                field_entry["sum"] = (field_entry["sum"] or 0) + int(value)
+                field_entry["reported_rows"] += 1
+            else:
+                field_entry["null_rows"] += 1
+
+    for entry in groups.values():
+        reported = sorted(entry.pop("_reported"))
+        if reported:
+            entry["model"] = ", ".join(reported)
+            entry["model_label"] = MODEL_REPORTED
+        else:
+            # No harness-reported model: the dispatch's requested model (a
+            # usage-only row falls back to it too); nothing recorded is None.
+            entry["model_label"] = MODEL_REQUESTED if entry["model"] is not None else None
+    ordered = sorted(
+        groups.values(),
+        key=lambda g: (-g["dispatches"], -g["usage_rows"], g["group"],
+                       tuple(str(g[n]) for n in SUMMARY_KEY_FIELDS)),
+    )
+    return {
+        "since_hours": since_hours,
+        "dispatch_rows": dispatch_rows,
+        "usage_rows": usage_rows,
+        "groups": ordered,
+        "unreadable_rows": unreadable_rows,
+        "attribution_available": bool(rows) or unreadable_rows == 0,
+    }
+
+
+def top_callers(*, since: datetime | None = None, provider: str | None = None,
+                limit: int = 3, with_read_status: bool = False):
+    """``[(caller_kind, caller, dispatches)]``: the busiest callers by start rows."""
+    counts: dict[tuple[str | None, str | None], int] = {}
+    rows, unreadable_rows = _read_ledger_rows()
+    for row in rows:
+        if since is not None and _row_time(row) < since:
+            continue
+        if (row.get("event") or DISPATCH_EVENT) != DISPATCH_EVENT:
+            continue
+        if provider is not None and str(row.get("provider") or "") != provider:
+            continue
+        key = (_clean(row.get("caller_kind")), _clean(row.get("caller")))
+        counts[key] = counts.get(key, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], str(kv[0])))
+    callers = [(kind, name, n) for (kind, name), n in ranked[:limit]]
+    if with_read_status:
+        return callers, unreadable_rows
+    if unreadable_rows:
+        raise LedgerPartialReadError(unreadable_rows)
+    return callers
+
+
+def render_attribution_summary(report: dict) -> str:
+    """Plain-text table for ``--summary`` (``null`` marks an unrecorded field)."""
+
+    def _cell(value: object) -> str:
+        return "null" if value is None else str(value)
+
+    def _tok(entry: dict) -> str:
+        total = entry["sum"]
+        text = "null" if total is None else str(total)
+        if entry["null_rows"]:
+            text += f" ({entry['null_rows']} null)"
+        return text
+
+    window = report.get("since_hours")
+    lines = [
+        f"Ledger {tier_ledger_path()}"
+        + (f", last {window:g}h" if window is not None else ", all rows")
+        + f": {report['dispatch_rows']} dispatches, {report['usage_rows']} usage rows",
+    ]
+    if report.get("unreadable_rows"):
+        lines.append(f"{report['unreadable_rows']} ledger rows unreadable; totals are incomplete"
+                     if report.get("attribution_available") else
+                     f"attribution unavailable: {report['unreadable_rows']} ledger rows unreadable")
+    header = ("group", "provider", "model", "model_is", "caller_kind", "caller",
+              "task", "pr", "dispatches", "input_tokens", "output_tokens",
+              "total_tokens")
+    rows = [header]
+    for g in report["groups"]:
+        group_label = (
+            "usage, no dispatch row" if g["group"] == GROUP_USAGE_ONLY else "dispatch"
+        )
+        rows.append((
+            group_label, _cell(g["provider"]), _cell(g["model"]),
+            _cell(g.get("model_label")), _cell(g["caller_kind"]),
+            _cell(g["caller"]), _cell(g["task_entity_id"]), _cell(g["pr"]),
+            str(g["dispatches"]), _tok(g["tokens"]["input_tokens"]),
+            _tok(g["tokens"]["output_tokens"]), _tok(g["tokens"]["total_tokens"]),
+        ))
+    widths = [max(len(r[i]) for r in rows) for i in range(len(header))]
+    for r in rows:
+        lines.append("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+    return "\n".join(lines)
 
 
 # ── Config validation: `model_tiering.py --check <file> [<file> ...]` ─────────
@@ -1148,16 +1572,45 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="model_tiering",
         description=(
-            "Validate model-tiering config files before installing them. Pass "
-            "an action_policy file, a vendor_binding file, or both (the two "
-            "are then cross-checked). Exit 0 valid, 1 invalid."
+            "Validate model-tiering config files before installing them "
+            "(--check: pass an action_policy file, a vendor_binding file, or "
+            "both, which are then cross-checked; exit 0 valid, 1 invalid), or "
+            "summarise the tier ledger by caller (--summary, read-only)."
+        ),
+    )
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
+        "--check", nargs="+", metavar="FILE",
+        help="config file(s) to validate; the kind is detected from the shape",
+    )
+    mode.add_argument(
+        "--summary", action="store_true",
+        help=(
+            "read-only: dispatches and tokens from the tier ledger, grouped by "
+            "provider, model, caller_kind, caller, task and PR"
         ),
     )
     parser.add_argument(
-        "--check", nargs="+", metavar="FILE", required=True,
-        help="config file(s) to validate; the kind is detected from the shape",
+        "--since-hours", type=float, default=24.0,
+        help="with --summary: only rows from the last N hours (default 24; 0 = all)",
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="with --summary: print JSON",
     )
     args = parser.parse_args(argv)
+
+    if args.summary:
+        since = args.since_hours if args.since_hours and args.since_hours > 0 else None
+        try:
+            report = attribution_summary(since_hours=since)
+        except LedgerReadError as exc:
+            print(f"ERROR {exc}")
+            return 1
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            print(render_attribution_summary(report))
+        return 0
 
     exit_code = 0
     loaded: dict[str, dict] = {}

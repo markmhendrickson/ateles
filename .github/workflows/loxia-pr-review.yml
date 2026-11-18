@@ -207,4 +207,17 @@ jobs:
           LOXIA_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
           LOXIA_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           LOXIA_HEAD_REF: refs/loxia/pr-head
+          APIS_TIER_LEDGER_FILE: ${{ runner.temp }}/loxia-tier-ledger.jsonl
         run: python execution/scripts/loxia_review.py
+
+      - name: Preserve Loxia spend audit
+        if: always()
+        env:
+          APIS_TIER_LEDGER_FILE: ${{ runner.temp }}/loxia-tier-ledger.jsonl
+        run: |
+          if [ -f "$APIS_TIER_LEDGER_FILE" ]; then
+            echo '### Loxia provider spend audit' >> "$GITHUB_STEP_SUMMARY"
+            echo '```jsonl' >> "$GITHUB_STEP_SUMMARY"
+            cat "$APIS_TIER_LEDGER_FILE" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi

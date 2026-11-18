@@ -55,11 +55,15 @@ import time
 from pathlib import Path
 
 _APIS_DIR = Path(__file__).resolve().parents[1] / "daemons" / "apis"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 if str(_APIS_DIR) not in sys.path:
     sys.path.insert(0, str(_APIS_DIR))
 
 import harness_router  # noqa: E402
 import model_tiering  # noqa: E402
+import usage_alerts  # noqa: E402
 import usage_probe  # noqa: E402
 
 
@@ -214,7 +218,9 @@ def _refresh_providers() -> int:
         "CURSOR_API_KEY",
     }
     env = {key: value for key, value in os.environ.items() if key not in metered}
-    outcome = usage_probe.refresh_usage_if_stale(binaries, env=env, force=True)
+    outcome = usage_probe.refresh_usage_if_stale(
+        binaries, env=env, force=True, alert_in_background=False,
+    )
     print(json.dumps(outcome, indent=2))
     print(
         "note: this ran under YOUR login and environment; the daemon refreshes under "
@@ -311,10 +317,18 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0
     if args.command == "tiers":
-        print(json.dumps(
-            model_tiering.tier_counts(
+        try:
+            report = model_tiering.tier_counts(
                 since_hours=args.since_hours, with_reasons=args.reasons
-            ),
+            )
+        except model_tiering.LedgerReadError as exc:
+            print(json.dumps({"error": {"kind": "ledger_unreadable",
+                                        "path": str(exc.path), "cause": exc.cause}},
+                             indent=2, sort_keys=True))
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(
+            report,
             indent=2,
             sort_keys=True,
         ))
@@ -326,6 +340,9 @@ def main(argv: list[str] | None = None) -> int:
             harness_router.record_usage(args.provider, args.window)
         except ValueError as exc:
             parser.error(str(exc))
+        # Alert a 50%/75% crossing now, even if no dispatch follows
+        # (ent_e5259618cae6cafd4be120e0). Never raises.
+        usage_alerts.check_after_usage_write(args.provider)
     elif args.command == "exhausted":
         until = harness_router._wall_from_iso(args.until)
         if until is None:

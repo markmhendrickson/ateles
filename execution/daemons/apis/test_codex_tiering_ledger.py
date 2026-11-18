@@ -346,4 +346,7 @@ def test_a_ledger_that_cannot_be_read_is_an_error_not_an_empty_report(
 def test_a_missing_or_empty_ledger_is_no_spend(ledger) -> None:
     assert model_tiering.usage_totals()["rows"] == 0
     ledger.write_text("")
-    assert model_tiering.usage_totals() == {"group_by": "provider", "rows": 0, "groups": {}}
+    assert model_tiering.usage_totals() == {
+        "group_by": "provider", "rows": 0, "groups": {},
+        "attribution_available": True, "unreadable_rows": 0,
+    }
