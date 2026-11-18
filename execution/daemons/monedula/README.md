@@ -322,11 +322,13 @@ gate fails closed on every uncertain case:
 
 | Condition | Outcome |
 |---|---|
-| Message from the configured operator | approval accepted |
+| Message from the configured operator, bound to this preview | approval accepted |
 | Message from anyone else in the chat | ignored, logged |
 | `TELEGRAM_ALLOWED_USER_ID` unset | `channel_error` + escalation, no reply accepted |
 | `TELEGRAM_ALLOWED_USER_ID` non-numeric | `channel_error` + escalation |
 | Message with no sender id (channel post) | ignored |
+| Reply to an older preview, or dated before this preview | ignored; no payment intent |
+| Preview send receipt missing its message id or date | `channel_error` + escalation |
 
 Absence of a configured principal is the **absence of authority, never a
 wildcard**. Before this was enforced, an unset value skipped the identity check
@@ -362,7 +364,11 @@ failures show up as the alerts in the troubleshooting table.
 
 `telegram_poll_approval` returns one of three outcomes:
 
-- **`reply`** — a real message arrived. `_parse_reply` decides approval as
+- **`reply`** — a message from the configured operator is bound to the current
+  preview: its reply target matches the preview message id when Telegram supplies
+  one, and its date is at or after the preview send date. A plain message without
+  a reply target must still pass the date check and have a message id newer than
+  the preview (Telegram dates have only second precision). `_parse_reply` decides approval as
   always. An explicit decline (`"no"`, unrecognized text, a bare "yes") is a
   clean run: exit 0, no escalation, same as it has always been.
 - **`timeout`** — the poll ran to its deadline with no message. Treated as a

@@ -54,6 +54,7 @@ function parseArgs() {
     topic: null,
     plain: false,
     html: false,
+    json: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -75,6 +76,8 @@ function parseArgs() {
       // HTML mode leaves '*' and '_' untouched, so it is safe for bodies
       // containing REFERS_TO / **emphasis** as long as <>& are escaped.
       parsed.html = true;
+    } else if (args[i] === '--json') {
+      parsed.json = true;
     }
   }
 
@@ -142,16 +145,16 @@ function sendTelegramMessage(text, messageThreadId = null, plain = false, html =
 }
 
 async function main() {
-  const { text, topic, plain, html } = parseArgs();
+  const { text, topic, plain, html, json } = parseArgs();
 
   if (!text) {
-    console.error('Usage: node send.mjs --text "Message text" [--topic TOPIC_ID] [--plain] [--html]');
+    console.error('Usage: node send.mjs --text "Message text" [--topic TOPIC_ID] [--plain] [--html] [--json]');
     process.exit(1);
   }
 
   try {
     const result = await sendTelegramMessage(text, topic, plain, html);
-    console.log('Message sent successfully:', result.result.message_id);
+    console.log(json ? JSON.stringify(result) : `Message sent successfully: ${result.result.message_id}`);
   } catch (err) {
     console.error('Failed to send message:', err.message);
     process.exit(1);

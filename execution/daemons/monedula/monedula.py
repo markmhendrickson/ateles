@@ -732,10 +732,17 @@ def _task_to_preview_item(task: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def telegram_send(text: str) -> None:
+@dataclass(frozen=True)
+class TelegramPreview:
+    message_id: int
+    sent_at: int
+
+
+def telegram_send(text: str) -> TelegramPreview | None:
     """
     Send a Telegram message via the shared Node.js send.mjs helper,
-    falling back to telegram-send CLI.
+    falling back to telegram-send CLI. Only a verified Telegram response
+    supplies a receipt; the CLI fallback cannot authorize an approval poll.
     """
     import shutil
 
@@ -743,13 +750,25 @@ def telegram_send(text: str) -> None:
     send_script = PROJECT_ROOT / "execution" / "lib" / "telegram" / "send.mjs"
     if node and send_script.exists():
         try:
-            args = [node, str(send_script), "--text", text]
+            args = [node, str(send_script), "--text", text, "--json"]
             if TELEGRAM_TOPIC_MONEDULA:
-                args += ["--thread-id", TELEGRAM_TOPIC_MONEDULA]
-            subprocess.run(args, timeout=15, capture_output=True, env=os.environ)
-            return
+                args += ["--topic", TELEGRAM_TOPIC_MONEDULA]
+            completed = subprocess.run(
+                args, timeout=15, capture_output=True, env=os.environ, check=True
+            )
+            response = json.loads(completed.stdout)
+            result = response.get("result") if response.get("ok") is True else None
+            result = result if isinstance(result, dict) else {}
+            message_id = result.get("message_id")
+            sent_at = result.get("date")
+            if (type(message_id) is int and message_id > 0
+                    and type(sent_at) is int and sent_at > 0
+                    and str((result.get("chat") or {}).get("id")) == TELEGRAM_CHAT_ID):
+                return TelegramPreview(message_id, sent_at)
+            log.error("Telegram send receipt is incomplete; approval will be held")
+            return None
         except Exception as exc:
-            log.warning(f"send.mjs failed: {exc}, trying fallback")
+            log.warning(f"send.mjs failed ({type(exc).__name__}); trying fallback")
 
     telegram_cmd = shutil.which("telegram-send")
     if telegram_cmd:
@@ -759,6 +778,7 @@ def telegram_send(text: str) -> None:
             )
         except Exception as exc:
             log.warning(f"telegram-send fallback failed: {exc}")
+    return None
 
 
 def telegram_long_poll_once(timeout_sec: int = 120) -> str | None:
@@ -912,7 +932,9 @@ def _resolve_operator_principal() -> tuple[int | None, str]:
                       "(TELEGRAM_ALLOWED_USER_ID is not a numeric user id)")
 
 
-def telegram_poll_approval(timeout_sec: int = 120) -> TelegramPollResult:
+def telegram_poll_approval(
+    timeout_sec: int = 120, preview: TelegramPreview | None = None
+) -> TelegramPollResult:
     """Long-poll Telegram getUpdates for an approval reply.
 
     Structured sibling of `telegram_long_poll_once`. A 409 Conflict (another
@@ -922,6 +944,12 @@ def telegram_poll_approval(timeout_sec: int = 120) -> TelegramPollResult:
     burning the full timeout on a lock we cannot acquire only delays the
     escalation that should fire instead.
     """
+    if (preview is None or type(preview.message_id) is not int
+            or preview.message_id <= 0 or type(preview.sent_at) is not int
+            or preview.sent_at <= 0):
+        log.error("Telegram preview receipt unavailable — refusing approval")
+        return TelegramPollResult(kind="channel_error", error_detail="preview_receipt_unavailable")
+
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         log.error(
             "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — channel_error, cannot poll"
@@ -1006,6 +1034,9 @@ def telegram_poll_approval(timeout_sec: int = 120) -> TelegramPollResult:
         updates = data.get("result") or []
         for update in updates:
             update_id = update.get("update_id", 0)
+            if type(update_id) is not int or update_id < offset:
+                log.info("Ignoring Telegram update already consumed or without an id")
+                continue
             offset = max(offset, update_id + 1)
             offset_file.write_text(str(offset))
 
@@ -1025,6 +1056,19 @@ def telegram_poll_approval(timeout_sec: int = 120) -> TelegramPollResult:
                 log.warning(
                     f"Ignoring Telegram message from non-operator sender "
                     f"(user_id={user_id!r}) — not an approval")
+                continue
+
+            reply_to = msg.get("reply_to_message")
+            reply_id = reply_to.get("message_id") if isinstance(reply_to, dict) else None
+            message_date = msg.get("date")
+            message_id = msg.get("message_id")
+            if ((reply_to is not None and reply_id != preview.message_id)
+                    or type(message_date) is not int
+                    or message_date < preview.sent_at
+                    or (reply_to is None and
+                        (type(message_id) is not int
+                         or message_id <= preview.message_id))):
+                log.info("Ignoring Telegram message outside current preview")
                 continue
 
             text = (msg.get("text") or "").strip()
@@ -2186,10 +2230,10 @@ def main() -> bool:
 
     preview_msg = _build_preview_message(triggered, yesterday_str, due_tasks=due_tasks)
     log.info("Sending payment preview to Telegram...")
-    telegram_send(preview_msg)
+    preview = telegram_send(preview_msg)
 
     # Wait for operator reply (2 minutes)
-    poll_result = telegram_poll_approval(timeout_sec=120)
+    poll_result = telegram_poll_approval(timeout_sec=120, preview=preview)
 
     if poll_result.kind in ("channel_error", "timeout"):
         # Channel failure, NOT a decline. Fail closed (no execute, same as a
