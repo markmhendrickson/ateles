@@ -731,6 +731,38 @@ def test_pages_without_total_still_read_as_before(routed):
     assert srv._observation_page_problem({"observations": [{}]}, 3, 500) is None
 
 
+def test_a_short_last_page_a_few_rows_past_its_total_is_the_end_of_a_window_scan_not_an_error():
+    # The server counts, then reads the page; a busy event type gains rows in between, so
+    # the last page of a newest-first scan can hold a handful more rows than `total`.
+    page = srv._observation_page_problem
+    two_rows = {"observations": [{}, {}], "total": 5}
+    assert page(two_rows, 4, 500) == "total (smaller than the rows returned)"  # default: strict
+    assert page(two_rows, 4, 500, srv._SCAN_COUNT_DRIFT) is None
+    assert srv._observation_read_ends(two_rows, 4, 500) is True
+    # A shortfall beyond the drift bound, or on a FULL page, is still a failed read.
+    big = {"observations": [{}] * 3, "total": 100 + 3 - srv._SCAN_COUNT_DRIFT - 1}
+    assert page(big, 100, 500, srv._SCAN_COUNT_DRIFT) == "total (smaller than the rows returned)"
+    full = {"observations": [{}, {}], "total": 5}
+    assert page(full, 4, 2, srv._SCAN_COUNT_DRIFT) == "total (smaller than the rows returned)"
+
+
+def test_the_window_scan_reads_to_the_end_when_the_last_page_races_the_count(monkeypatch):
+    calls = []
+
+    def fake_query(body):
+        calls.append(dict(body))
+        if body.get("limit") == 1:
+            return {"observations": [{"id": "c1"}], "total": 3}
+        rows = [{"id": f"r{i}", "observed_at": "2026-09-10T12:00:00Z"} for i in range(3)]
+        return {"observations": rows, "total": 1, "offset": body["offset"]}  # 2 short of its rows
+
+    monkeypatch.setattr(srv, "_obs_query", fake_query)
+    out = srv._scan_type_window(_RUNNER_TYPE, _SCAN_START, FIXED_NOW, 2000)
+    assert out["error"] is None, out
+    assert len(out["rows"]) == 3
+    assert out["complete"] is True
+
+
 def test_observation_page_check_states_the_complete_rule():
     page = srv._observation_page_problem
     short_more = "observations (short page while total reports more)"

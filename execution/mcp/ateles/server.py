@@ -3617,7 +3617,17 @@ def _read_error(what: str) -> str:
     return f"{what}: {_describe_transport_error() or 'request failed'}"
 
 
-def _observation_page_problem(data: Any, offset: int, limit: int) -> str | None:
+#: How many rows a SHORT final page of a window scan may hold beyond the page's `total`.
+#: The server counts, then reads the page in a separate statement, and a busy event type
+#: gains rows between the two, so the last page of a newest-first scan can carry a handful
+#: more rows than `total` allows. That is a race at the end of the read, not a malformed
+#: page; a larger shortfall, or one on a full page, is still a failed read.
+_SCAN_COUNT_DRIFT = 50
+
+
+def _observation_page_problem(
+    data: Any, offset: int, limit: int, allow_drift: int = 0
+) -> str | None:
     """The field that makes an observation page unreadable; None when it is sound.
 
     Applies the page rule stated above `_checkpoint_page_problem` (a and c to
@@ -3645,7 +3655,9 @@ def _observation_page_problem(data: Any, offset: int, limit: int) -> str | None:
         if not _is_count(total):
             return "total"
         if total < offset + rows:
-            return "total (smaller than the rows returned)"
+            drift = offset + rows - total
+            if not (allow_drift and rows < limit and drift <= allow_drift):
+                return "total (smaller than the rows returned)"
         if rows < limit and total > offset + rows:
             return "observations (short page while total reports more)"
     next_cursor = data.get("next_cursor")
@@ -3782,7 +3794,7 @@ def _scan_type_window(
                 "rows": rows,
                 "error": _read_error(f"{entity_type} scan at offset {offset}"),
             }
-        problem = _observation_page_problem(data, offset, limit)
+        problem = _observation_page_problem(data, offset, limit, _SCAN_COUNT_DRIFT)
         if problem:
             return {
                 "rows": rows,
