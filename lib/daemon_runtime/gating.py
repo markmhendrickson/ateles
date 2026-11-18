@@ -1291,6 +1291,9 @@ def _server_error_detail(exc: Exception) -> str:
     return f" [server: {code} {message}]" if code or message else ""
 
 
+CHECKPOINT_WRITE_ATTEMPT_TIMEOUT_SECONDS = 15
+
+
 def write_checkpoint_brief(
     *,
     task_entity_id: str,
@@ -1451,7 +1454,10 @@ def write_checkpoint_brief(
             # content-bound idempotency key.
             headers = {"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}
             if signer is None:
-                return httpx.post(store_url, headers=headers, json=body, timeout=15)
+                return httpx.post(
+                    store_url, headers=headers, json=body,
+                    timeout=CHECKPOINT_WRITE_ATTEMPT_TIMEOUT_SECONDS,
+                )
             headers.update(
                 signer.sign_headers(
                     method="POST",
@@ -1464,7 +1470,7 @@ def write_checkpoint_brief(
                 store_url,
                 headers=headers,
                 content=encoded_request_body,
-                timeout=15,
+                timeout=CHECKPOINT_WRITE_ATTEMPT_TIMEOUT_SECONDS,
             )
 
         resp = call_with_transient_retry(

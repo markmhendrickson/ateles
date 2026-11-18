@@ -295,6 +295,7 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     require_fresh_checkpoint_approval,
     stamp_checkpoint_dispatched,
     CHECKPOINT_APPROVED_NO_RELEASE,
+    CHECKPOINT_WRITE_ATTEMPT_TIMEOUT_SECONDS,
     CHECKPOINT_APPROVED_STATES,
     CHECKPOINT_AWAITING_OPERATOR,
     CHECKPOINT_REJECTED_STATES,
@@ -5261,7 +5262,8 @@ def _newest_checkpoint_superseded(
 
 
 def _classify_checkpoints_for_hold(
-    checkpoints: list[dict], task_record: dict, *, hold_time: datetime | None = None
+    checkpoints: list[dict], task_record: dict, *, hold_time: datetime | None = None,
+    hold_observation_id: str | None = None,
 ) -> tuple[list[dict], list[dict], list[dict], bool]:
     """Partition pending, answered and superseded briefs for a held task.
 
@@ -5275,6 +5277,8 @@ def _classify_checkpoints_for_hold(
     superseded: list[dict] = []
     unknown = False
     revision = entity_record_digest(task_record) if hold_time is not None else None
+    exact_hold_time: datetime | None = None
+    hold_time_read = False
     for row in checkpoints:
         status = str((_record_snapshot(row) or {}).get("status") or "").strip().lower()
         if status == CHECKPOINT_AWAITING_OPERATOR:
@@ -5294,6 +5298,28 @@ def _classify_checkpoints_for_hold(
                 answered.append(row)
             elif created_at is None:
                 unknown = True
+            else:
+                # last_observation_at is a safe age floor, but another task
+                # observation can follow the hold and its answer. Resolve the
+                # hold observation itself before calling an older answer stale.
+                if not hold_time_read:
+                    hold_time_read = True
+                    observations = fetch_entity_observations_strict(task_record["entity_id"])
+                    hold_observation = next(
+                        (item for item in observations or []
+                         if item.get("id") == hold_observation_id), None
+                    )
+                    if hold_observation is not None:
+                        for field in ("ingested_at", "observed_at", "created_at"):
+                            exact_hold_time = _checkpoint_created_at(
+                                {"created_at": hold_observation.get(field)}
+                            )
+                            if exact_hold_time is not None:
+                                break
+                if exact_hold_time is None:
+                    unknown = True
+                elif created_at >= exact_hold_time:
+                    answered.append(row)
     return pending, answered, superseded, unknown
 
 
@@ -5395,6 +5421,15 @@ def reissue_held_task_checkpoint(
             "missing or unrecognized status, or a different task); whether the "
             "hold was retired is unknown, nothing was filed",
         )
+    _pending_rows, answered_rows, _superseded_rows, _unknown_answer = (
+        _classify_checkpoints_for_hold(existing, record)
+    )
+    approved_unreleased = {
+        row.get("entity_id") for row in answered_rows
+        if isinstance(row, dict) and row.get("entity_id")
+        and read_checkpoint_resolution(_record_snapshot(row) or {}) == "approved"
+        and not checkpoint_already_dispatched(_record_snapshot(row) or {})
+    }
     current_id: str | None = None
     stale_pending: list[str] = []
     restricted_pending: list[tuple[str, str]] = []
@@ -5419,10 +5454,7 @@ def reissue_held_task_checkpoint(
                 # or retired as "stale", and never counted as ordinary authority.
                 restricted_pending.append((checkpoint_id, scope_reason))
                 continue
-        if (
-            read_checkpoint_resolution(item_snapshot) == "approved"
-            and not checkpoint_already_dispatched(item_snapshot)
-        ):
+        if checkpoint_id in approved_unreleased:
             return ReissueResult(
                 task_id,
                 "skipped",
@@ -5661,13 +5693,18 @@ HELD_CHECKPOINT_SWEEP_WINDOW_DAYS = 7
 HELD_CHECKPOINT_SWEEP_PAGE_SIZE = 20
 HELD_CHECKPOINT_SWEEP_BUDGET_SECONDS = 45
 HELD_CHECKPOINT_SWEEP_SAFETY_MARGIN_SECONDS = 60
-HELD_CHECKPOINT_WRITE_RETRY_BUDGET_SECONDS = 15 * (len(RETRY_PAUSES_SECONDS) + 1) + sum(RETRY_PAUSES_SECONDS)
+HELD_CHECKPOINT_WRITE_RETRY_BUDGET_SECONDS = (
+    CHECKPOINT_WRITE_ATTEMPT_TIMEOUT_SECONDS * (len(RETRY_PAUSES_SECONDS) + 1)
+    + sum(RETRY_PAUSES_SECONDS)
+)
 HELD_CHECKPOINT_SWEEP_MIN_AGE_SECONDS = max(
     120,
     GATE_HOLD_PROOF_SECONDS + HELD_CHECKPOINT_WRITE_RETRY_BUDGET_SECONDS
     + HELD_CHECKPOINT_SWEEP_SAFETY_MARGIN_SECONDS,
 )
 _held_checkpoint_sweep_offset = 0
+_held_checkpoint_unreconstructable_warned: dict[tuple[str, str], None] = {}
+HELD_CHECKPOINT_WARNING_CACHE_LIMIT = 1024
 
 
 def _reconcile_missing_checkpoint(task_id: str, *, apply: bool, now: datetime | None = None) -> str:
@@ -5697,7 +5734,8 @@ def _reconcile_missing_checkpoint(task_id: str, *, apply: bool, now: datetime | 
     if existing is None or any(_malformed_checkpoint_row(row, task_id) for row in existing):
         return "unreconstructable"
     pending, answered, _superseded, unknown_answer = _classify_checkpoints_for_hold(
-        existing, first, hold_time=hold_time.astimezone(timezone.utc)
+        existing, first, hold_time=hold_time.astimezone(timezone.utc),
+        hold_observation_id=(first.get("provenance") or {}).get("blocked_reason"),
     )
     if unknown_answer:
         return "unreconstructable"
@@ -5762,7 +5800,8 @@ def _reconcile_missing_checkpoint(task_id: str, *, apply: bool, now: datetime | 
     if refreshed is None or any(_malformed_checkpoint_row(row, task_id) for row in refreshed):
         return "unreconstructable"
     refreshed_pending, refreshed_answered, _, refreshed_unknown = _classify_checkpoints_for_hold(
-        refreshed, current, hold_time=hold_time.astimezone(timezone.utc)
+        refreshed, current, hold_time=hold_time.astimezone(timezone.utc),
+        hold_observation_id=observation_id,
     )
     if refreshed_pending or refreshed_answered or refreshed_unknown:
         return "skipped_by_reason" if not refreshed_unknown else "unreconstructable"
@@ -5844,9 +5883,23 @@ def sweep_missing_gate_checkpoints(
         try:
             outcome = _reconcile_missing_checkpoint(task_id, apply=apply, now=now())
         except Exception as exc:  # noqa: BLE001 — one task cannot stop recovery
-            log.warning("[%s] held-checkpoint sweep read failed for %s: %s", DAEMON_NAME, task_id, type(exc).__name__)
+            log.debug("[%s] held-checkpoint sweep read failed for %s: %s", DAEMON_NAME, task_id, type(exc).__name__)
             outcome = "unreconstructable"
         counts[outcome] += 1
+        if outcome == "unreconstructable":
+            try:
+                current_record = fetch_task_record(task_id)
+            except Exception:  # noqa: BLE001 — reporting cannot abort the page
+                current_record = None
+            hold_observation = str(((current_record or {}).get("provenance") or {}).get("blocked_reason") or "")
+            warning_key = (task_id, hold_observation)
+            if warning_key not in _held_checkpoint_unreconstructable_warned:
+                if len(_held_checkpoint_unreconstructable_warned) >= HELD_CHECKPOINT_WARNING_CACHE_LIMIT:
+                    _held_checkpoint_unreconstructable_warned.pop(next(iter(_held_checkpoint_unreconstructable_warned)))
+                _held_checkpoint_unreconstructable_warned[warning_key] = None
+                log.warning("[%s] held-checkpoint sweep cannot reconstruct task %s hold %s", DAEMON_NAME, task_id, hold_observation or "unknown")
+            else:
+                log.debug("[%s] held-checkpoint sweep still cannot reconstruct task %s hold %s", DAEMON_NAME, task_id, hold_observation or "unknown")
         if outcome in ("candidate", "raised"):
             counts["candidates"] += 1
             if candidates is not None:

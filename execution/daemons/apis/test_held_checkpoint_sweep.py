@@ -11,11 +11,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import apis  # noqa: E402
-try:
-    import held_checkpoint_sweep as cli  # noqa: E402
-except ImportError:
-    cli = None  # The pre-change baseline has no sweep entry point.
+import reissue_held_checkpoints as cli  # noqa: E402
 from lib.daemon_runtime.gating import BlastRadius, ExecutionPolicy, GateAction, GateDecision
+from lib.daemon_runtime.neotoma_transient import RETRY_PAUSES_SECONDS
 
 
 def task(status="awaiting_approval", reason="gate reason", observation="obs-hold", observed_at="2026-01-01T00:00:00Z"):
@@ -81,6 +79,10 @@ def test_fresh_hold_is_skipped_and_old_hold_is_raised(recovery):
 
 def test_sweep_age_floor_exceeds_proof_window():
     assert apis.HELD_CHECKPOINT_SWEEP_MIN_AGE_SECONDS >= 120
+    assert apis.HELD_CHECKPOINT_WRITE_RETRY_BUDGET_SECONDS == (
+        apis.CHECKPOINT_WRITE_ATTEMPT_TIMEOUT_SECONDS * (len(RETRY_PAUSES_SECONDS) + 1)
+        + sum(RETRY_PAUSES_SECONDS)
+    )
     assert (apis.HELD_CHECKPOINT_SWEEP_MIN_AGE_SECONDS - apis.GATE_HOLD_PROOF_SECONDS
             >= apis.HELD_CHECKPOINT_WRITE_RETRY_BUDGET_SECONDS
             + apis.HELD_CHECKPOINT_SWEEP_SAFETY_MARGIN_SECONDS)
@@ -195,6 +197,36 @@ def test_answer_landing_during_sweep_blocks_write(recovery, monkeypatch):
     assert state["writes"] == 0
 
 
+def test_answer_between_hold_and_later_task_update_is_not_reopened(recovery, monkeypatch):
+    state, _, _ = recovery
+    state["task"] = task(observed_at="2026-01-01T00:02:00Z")
+    state["checkpoints"] = [{
+        "entity_id": "ent_answer", "created_at": "2026-01-01T00:01:00Z",
+        "snapshot": {"status": "rejected", "task_entity_id": "ent_task"},
+    }]
+    monkeypatch.setattr(apis, "read_authenticated_checkpoint_authorization", lambda *_a: None)
+    monkeypatch.setattr(apis, "fetch_entity_observations_strict", lambda _id: [
+        {"id": "obs-hold", "observed_at": "2026-01-01T00:00:00Z"},
+    ])
+    assert apis._reconcile_missing_checkpoint("ent_task", apply=True) == "skipped_by_reason"
+    assert state["writes"] == 0
+
+
+def test_answer_to_previous_hold_does_not_block_current_hold(recovery, monkeypatch):
+    state, _, _ = recovery
+    state["task"] = task(observed_at="2026-01-01T00:02:00Z")
+    state["checkpoints"] = [{
+        "entity_id": "ent_old_answer", "created_at": "2025-12-31T23:59:00Z",
+        "snapshot": {"status": "rejected", "task_entity_id": "ent_task"},
+    }]
+    monkeypatch.setattr(apis, "read_authenticated_checkpoint_authorization", lambda *_a: None)
+    monkeypatch.setattr(apis, "fetch_entity_observations_strict", lambda _id: [
+        {"id": "obs-hold", "observed_at": "2026-01-01T00:00:00Z"},
+    ])
+    assert apis._reconcile_missing_checkpoint("ent_task", apply=False) == "candidate"
+    assert state["writes"] == 0
+
+
 def test_successful_write_without_readback_is_not_reported_raised(recovery, monkeypatch):
     state, _, _ = recovery
     monkeypatch.setattr(apis, "fetch_checkpoint_record", lambda _id: None)
@@ -235,6 +267,22 @@ def test_partial_query_page_is_unknown_not_empty(recovery, monkeypatch):
     assert state["writes"] == 0
 
 
+def test_unreconstructable_hold_warns_once_then_debug(recovery, monkeypatch, caplog):
+    state, _, _ = recovery
+    state["task"] = task(observation="")
+    monkeypatch.setattr(apis, "query_entities", lambda *a, **kw: {
+        "entities": [{"entity_id": "ent_task"}], "total": 1,
+    })
+    apis._held_checkpoint_unreconstructable_warned.clear()
+    with caplog.at_level("DEBUG"):
+        apis.sweep_missing_gate_checkpoints(apply=True)
+        apis.sweep_missing_gate_checkpoints(apply=True)
+    messages = [record.message for record in caplog.records
+                if record.levelname == "WARNING" and "cannot reconstruct task" in record.message]
+    assert len(messages) == 1
+    assert state["writes"] == 0
+
+
 def test_one_shot_dry_run_reports_counts_without_titles(monkeypatch, capsys):
     called = []
 
@@ -244,10 +292,23 @@ def test_one_shot_dry_run_reports_counts_without_titles(monkeypatch, capsys):
         return {"scanned": 1, "candidates": 1, "unreconstructable": 0}, 1
 
     monkeypatch.setattr(cli, "sweep_missing_gate_checkpoints", sweep)
-    monkeypatch.setattr(sys, "argv", ["held_checkpoint_sweep.py", "--once", "--dry-run"])
+    monkeypatch.setattr(sys, "argv", ["reissue_held_checkpoints.py", "--gate-hold-only"])
     assert cli.main() == 0
     assert called == [False]
     output = capsys.readouterr().out
     assert '"candidates": 1' in output
     assert '"action": "would_raise_checkpoint"' in output
     assert "Generic task" not in output
+
+
+def test_gate_hold_cli_dry_run_exits_one_on_unreconstructable(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "sweep_missing_gate_checkpoints", lambda **_kw: (
+        {"unreconstructable": 1, "scanned": 1}, 0
+    ))
+    monkeypatch.setattr(sys, "argv", ["reissue_held_checkpoints.py", "--gate-hold-only"])
+    assert cli.main() == 1
+    assert '"unreconstructable": 1' in capsys.readouterr().out
+
+
+def test_gate_hold_recovery_has_one_cli_entry_point():
+    assert not Path(apis.__file__).with_name("held_checkpoint_sweep.py").exists()
