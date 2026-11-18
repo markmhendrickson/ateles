@@ -1270,9 +1270,9 @@ def find_unadmitted_objections(
     for comment in comments:
         lens_authors.require_marked_author(comment)
     for lens, agent in LENS_AGENTS.items():
-        marker = compose_lens_review_marker(lens, head_sha)
         for c in comments:
-            if marker not in (c.get("body") or ""):
+            parsed = lens_authors.verdict_marker(c.get("body"))
+            if not parsed or parsed.lens != lens or parsed.head != head_sha.lower() or parsed.retired:
                 continue
             if lens_authors.is_swarm_comment(c, authors):
                 continue

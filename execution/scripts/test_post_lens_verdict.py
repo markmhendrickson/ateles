@@ -325,6 +325,19 @@ def test_indented_marker_is_not_an_editable_retry(monkeypatch, tmp_path):
     assert client.writes[0][0] == "POST" and client.comments[0]["body"] == old
 
 
+@pytest.mark.parametrize("shape", ["indented", "quoted", "fenced"])
+def test_embedded_marker_without_author_is_outside_poster_history(monkeypatch, tmp_path, shape):
+    marker = swarm_dispatch.compose_lens_review_marker("arch", HEAD)
+    old = {
+        "indented": "    " + marker + "\n" + GOOD_BODY,
+        "quoted": "> " + marker + "\n" + GOOD_BODY,
+        "fenced": "```\n" + marker + "\n" + GOOD_BODY + "```",
+    }[shape]
+    client = _Client(comments=[{"id": 41, "body": old}])
+    assert _run(monkeypatch, tmp_path, client) == 0
+    assert len(client.writes) == 1 and client.writes[0][0] == "POST"
+
+
 def test_identical_retry_with_unusable_comment_id_refuses_without_write(monkeypatch, tmp_path):
     marker = swarm_dispatch.compose_lens_review_marker("arch", HEAD)
     client = _Client(comments=[{"id": None, "body": marker + "\n" + GOOD_BODY,

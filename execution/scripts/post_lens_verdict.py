@@ -96,9 +96,6 @@ DEFAULT_TOKEN_ENV = "ATELES_AGENT_PAT"
 MAX_BODY_BYTES = 256 * 1024
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_MARKER_LINE_RE = re.compile(
-    r"^<!--\s*review:(?P<lens>[a-z0-9_-]+)\s+commit=(?P<head>[0-9a-fA-F]{40})\s*-->$"
-)
 _LOOSE_BLOCKING_RE = re.compile(r"blocked|blocking|request[_ ]changes|changes[_ ]requested", re.I)
 
 
@@ -195,12 +192,12 @@ def compose_body(body_text: str, *, lens: str, head: str) -> str:
     lines = body_text.lstrip("\n").splitlines()
     rest = lines
     if lines:
-        m = _MARKER_LINE_RE.match(lines[0].strip())
+        m = lens_authors.verdict_marker(lines[0].strip())
         if m:
-            if m.group("lens") != lens or m.group("head").lower() != head:
+            if m.lens != lens or m.head != head:
                 raise Refusal(
-                    f"the body opens with a review marker for lens={m.group('lens')!r} "
-                    f"commit={m.group('head').lower()[:12]}, not lens={lens!r} commit={head[:12]}"
+                    f"the body opens with a review marker for lens={m.lens!r} "
+                    f"commit={m.head[:12]}, not lens={lens!r} commit={head[:12]}"
                 )
             rest = lines[1:]
     text = "\n".join(rest).strip("\n")
@@ -328,7 +325,7 @@ def _existing_for_head(comments: list[dict], *, login: str, marker: str) -> dict
     # pages. Only the final verdict can be retried without rewriting history.
     for comment in reversed(comments):
         first = (str(comment.get("body") or "").splitlines() or [""])[0]
-        if not swarm_dispatch._LENS_MARKER_RE.search(str(comment.get("body") or "")):
+        if lens_authors.verdict_marker(comment.get("body")) is None:
             continue
         if (first == marker and
                 str(((comment.get("user") or {}).get("login")) or "").casefold() == login.casefold()):

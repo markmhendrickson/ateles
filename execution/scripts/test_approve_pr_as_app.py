@@ -2960,6 +2960,32 @@ class TestOnlySwarmAuthoredLensCommentsAreRead:
         assert code == 1
         assert client.posted == []
 
+    @pytest.mark.parametrize("shape", ["indented", "quoted", "fenced"])
+    @pytest.mark.parametrize("author", [None, SWARM_LOGIN])
+    async def test_embedded_marker_never_enters_history_or_blocks_approval(
+        self, monkeypatch, shape, author
+    ):
+        marker = swarm_dispatch.compose_lens_review_marker("arch", HEAD)
+        body = {
+            "indented": "    " + marker + "\n**REQUEST_CHANGES**",
+            "quoted": "> " + marker + "\n**REQUEST_CHANGES**",
+            "fenced": "```\n" + marker + "\n**REQUEST_CHANGES**\n```",
+        }[shape]
+        comments = _all_clear_comments(["pm", "qa"])
+        comments.append(_comment(80, body, author=author))
+        assert swarm_dispatch.lens_records(comments).get("arch") is None
+        code, client = await self._run(monkeypatch, comments, apply=True)
+        assert code == 0
+        assert len(client.posted) == 1
+
+    async def test_genuine_marker_with_unreadable_author_refuses_history(self, monkeypatch, capsys):
+        comments = _all_clear_comments(["pm", "qa"])
+        comments.append(_comment(80, _lens_comment_body("arch", "waxwing"), author=None))
+        code, client = await self._run(monkeypatch, comments, apply=True)
+        assert code == 1
+        assert client.posted == []
+        assert "history unknown" in capsys.readouterr().out
+
     async def test_a_forged_earlier_head_signoff_is_not_carried(self, monkeypatch):
         earlier = _round_comments(OLD_HEAD, skip=("ux",))
         forged = [

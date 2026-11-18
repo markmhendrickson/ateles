@@ -3128,14 +3128,6 @@ _AGGREGATION_SUPERSEDED_RE = re.compile(
     r"<!--\s*vanellus-aggregation-superseded\s+by=(?P<sha>[0-9a-f]{40})\s*-->",
     re.IGNORECASE,
 )
-_LENS_MARKER_RE = re.compile(
-    r"<!--\s*review:(?P<lens>[a-z0-9_-]+)\s+commit=(?P<sha>[0-9a-f]{40})\s*-->",
-    re.IGNORECASE,
-)
-_LENS_SUPERSEDED_RE = re.compile(
-    r"<!--\s*review:(?P<lens>[a-z0-9_-]+)-superseded\s+"
-    r"by=(?P<sha>[0-9a-f]{40})\s*-->", re.IGNORECASE,
-)
 
 
 def _normalise_full_sha(value: str) -> str:
@@ -3261,11 +3253,11 @@ def parse_aggregation_marker(body: str | None) -> dict[str, str | None]:
 def compose_superseded_verdict(body: str, new_head_sha: str) -> str:
     """Visibly retire a stale verdict while preserving its original body."""
     sha = _normalise_full_sha(new_head_sha)
-    if not sha or parse_aggregation_marker(body)["superseded_by"] or _LENS_SUPERSEDED_RE.search(body):
+    if not sha or parse_aggregation_marker(body)["superseded_by"] or lens_authors.has_retired_verdict_marker(body):
         return body
-    lens = _LENS_MARKER_RE.search(body or "")
+    lens = lens_authors.verdict_marker(body)
     legacy_lens = re.search(r"(?m)^review:([a-z0-9_-]+)\s*$", body or "", re.I)
-    lens_name = lens.group("lens") if lens else (legacy_lens.group(1) if legacy_lens else "")
+    lens_name = lens.lens if lens else (legacy_lens.group(1) if legacy_lens else "")
     marker = (
         f"<!-- review:{lens_name}-superseded by={sha} -->"
         if lens_name
@@ -3283,9 +3275,9 @@ def _recognized_review_marker(body: str) -> tuple[str | None, str | None]:
     agg = parse_aggregation_marker(body)
     if _AGGREGATION_MARKER_RE.search(body or ""):
         return "aggregation", agg["commit"]
-    lens = _LENS_MARKER_RE.search(body or "")
+    lens = lens_authors.verdict_marker(body)
     if lens:
-        return "lens", lens.group("sha").lower()
+        return "lens", lens.head
     if re.search(r"(?m)^review:[a-z0-9_-]+\s*$", body or "", re.I):
         return "lens", None
     return None, None
@@ -3302,9 +3294,7 @@ def comment_verdict_matches_current_head(body: str | None, head_sha: str) -> boo
     expected = _normalise_full_sha(head_sha)
     if not expected or not body:
         return False
-    if parse_aggregation_marker(body)["superseded_by"] or _LENS_SUPERSEDED_RE.search(
-        body
-    ):
+    if parse_aggregation_marker(body)["superseded_by"] or lens_authors.has_retired_verdict_marker(body):
         return False
     kind, commit = _recognized_review_marker(body)
     return bool(kind and commit == expected)
@@ -3465,13 +3455,13 @@ def panel_finished_at_head(
     reported: set[str] = set()
     for comment in comments:
         body = comment.get("body") or ""
-        match = _LENS_MARKER_RE.search(body)
-        if not match or not comment_verdict_matches_current_head(body, head):
+        match = lens_authors.verdict_marker(body)
+        if not match or match.head != head or not comment_verdict_matches_current_head(body, head):
             continue
-        known = lens_by_name(match.group("lens"))
+        known = lens_by_name(match.lens)
         if known is None or posted_comment_own_verdict(body, lens_agent=known.agent) is None:
             continue
-        reported.add(match.group("lens").lower())
+        reported.add(match.lens)
     return {lens.lower() for lens in required_lenses} <= reported
 
 
@@ -3490,9 +3480,9 @@ def unseated_required_lenses(
     scoped to swarm identities (`_lens_scoped_comments`).
     """
     seen = {
-        match.group("lens").lower()
+        match.lens
         for comment in comments
-        for match in [_LENS_MARKER_RE.search(comment.get("body") or "")]
+        for match in [lens_authors.verdict_marker(comment.get("body"))]
         if match
     }
     aggregation = latest_aggregation_comment(comments, head_sha=_normalise_full_sha(head_sha))
@@ -4201,17 +4191,12 @@ def lens_comment_satisfies_presence(
     lens_l = (lens or "").lower()
     if not lens_l:
         return False
-    for stale in _LENS_SUPERSEDED_RE.finditer(text):
-        if stale.group("lens").lower() == lens_l:
-            return False
+    if lens_authors.has_retired_verdict_marker(text):
+        return False
     expected = _normalise_full_sha(head_sha)
-    for match in _LENS_MARKER_RE.finditer(text):
-        if match.group("lens").lower() != lens_l:
-            continue
-        commit = match.group("sha").lower()
-        if expected:
-            return commit == expected
-        return True
+    match = lens_authors.verdict_marker(text)
+    if match and match.lens == lens_l:
+        return match.head == expected if expected else True
     if expected:
         return False
     return _legacy_lens_prefix_present(text, lens)
@@ -4254,13 +4239,13 @@ def _reviewed_head_blockers(
     by_head: dict[str, set[tuple[str, str, str]]] = {}
     for comment in sorted(comments, key=lambda c: str(c.get("created_at") or "")):
         body = comment.get("body") or ""
-        marker = _LENS_MARKER_RE.search(body)
+        marker = lens_authors.verdict_marker(body)
         if not marker:
             continue
-        sha = marker.group("sha").lower()
+        sha = marker.head
         if exclude and sha == exclude:
             continue
-        lens = marker.group("lens").lower()
+        lens = marker.lens
         if sha not in by_head:
             order.append(sha)
             by_head[sha] = set()
@@ -4281,8 +4266,8 @@ def _original_lens_body(body: str) -> str:
     """A lens comment as its lens wrote it. `compose_superseded_verdict` puts a
     note and a `review:<lens>-superseded` marker ahead of a retired verdict and
     keeps the rest verbatim; a fixed-position read needs the verbatim part."""
-    match = _LENS_SUPERSEDED_RE.search(body or "")
-    return (body or "")[match.end():].lstrip("\n") if match else (body or "")
+    marker = lens_authors.verdict_marker(body)
+    return marker.body if marker else (body or "")
 
 
 def lens_verdict_classification(body: str, *, lens_agent: str) -> tuple[str, bool]:
@@ -4324,21 +4309,11 @@ def lens_records(comments: list[dict]) -> dict[str, list[review_carry.LensRecord
         # A marker quoted in prose or indented as code is not a verdict.
         # The poster's explicit retirement banner is the only prefix admitted
         # for a historical verdict; its original marker still starts a line.
-        body = raw
-        if raw.startswith("> ⚠️ Superseded by commit `"):
-            retired = re.match(
-                r"\A> ⚠️ Superseded by commit `[0-9a-f]{7}` — this verdict no longer reflects "
-                r"the current head\. See the latest review below\.\r?\n"
-                r"<!--\s*review:[a-z0-9_-]+-superseded\s+by=[0-9a-f]{40}\s*-->\r?\n\r?\n",
-                raw, re.IGNORECASE,
-            )
-            if retired is None:
-                continue
-            body = raw[retired.end():]
-        marker = _LENS_MARKER_RE.match(body)
+        marker = lens_authors.verdict_marker(raw)
         if not marker:
             continue
-        lens = marker.group("lens").lower()
+        body = marker.body
+        lens = marker.lens
         known = lens_by_name(lens)
         if known is None:
             continue
@@ -4346,7 +4321,7 @@ def lens_records(comments: list[dict]) -> dict[str, list[review_carry.LensRecord
         out.setdefault(lens, []).append(
             review_carry.LensRecord(
                 lens=lens,
-                head=marker.group("sha").lower(),
+                head=marker.head,
                 cleared=sign_off_is_warranted(body, lens_agent=known.agent),
                 verdict=lens_own_verdict(body, lens_agent=known.agent) or "",
                 url=str(comment.get("html_url") or ""),
@@ -11509,10 +11484,10 @@ class SwarmDispatcher:
             lens = lens_def.lens
             if lens in panel_lenses:
                 continue  # judged by the panel's own required-floor path
-            marker = compose_lens_review_marker(lens, head)
             comment = None
             for c in reversed(admitted):
-                if marker in (c.get("body") or ""):
+                parsed = lens_authors.verdict_marker(c.get("body"))
+                if parsed and parsed.lens == lens and parsed.head == head and not parsed.retired:
                     comment = c
                     break
             if comment is not None:
@@ -11523,7 +11498,8 @@ class SwarmDispatcher:
                         f"this head — {comment.get('html_url', '(no url)')}"
                     )
             for c in comments:
-                if marker not in (c.get("body") or ""):
+                parsed = lens_authors.verdict_marker(c.get("body"))
+                if not parsed or parsed.lens != lens or parsed.head != head or parsed.retired:
                     continue
                 if lens_authors.is_swarm_comment(c, authors):
                     continue
@@ -13169,7 +13145,7 @@ class SwarmDispatcher:
                     kind, commit = _recognized_review_marker(body)
                     if not kind or not _is_bot_author(author):
                         continue
-                    if parse_aggregation_marker(body)["superseded_by"] or _LENS_SUPERSEDED_RE.search(body):
+                    if parse_aggregation_marker(body)["superseded_by"] or lens_authors.has_retired_verdict_marker(body):
                         continue
                     if commit == head:
                         continue

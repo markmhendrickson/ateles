@@ -13,6 +13,7 @@ for _p in (str(_HERE), str(_HERE.parents[2])):
         sys.path.insert(0, _p)
 
 import review_rounds as rr  # noqa: E402
+import lens_authors  # noqa: E402
 import swarm_dispatch  # noqa: E402
 
 H1, H2, H3, H4 = (str(i) * 40 for i in range(1, 5))
@@ -46,6 +47,40 @@ def test_embedded_marker_does_not_enter_round_history(prefix):
     row = _verdict("pm", H1, n=1)
     row["body"] = prefix + row["body"]
     assert swarm_dispatch.lens_records([row]) == {}
+
+
+@pytest.mark.parametrize("spelling,recognized", [
+    ("first", True),
+    ("retired", True),
+    ("indented", False),
+    ("quoted", False),
+    ("fenced", False),
+    ("mid_prose", False),
+    ("uppercase", True),
+    ("extra_spaces", True),
+    ("crlf", True),
+])
+def test_author_guard_and_round_builder_agree_on_verdict_marker(spelling, recognized):
+    marker = swarm_dispatch.compose_lens_review_marker("pm", H1)
+    body = {
+        "first": marker + "\nbody",
+        "retired": swarm_dispatch.compose_superseded_verdict(marker + "\nbody", H2),
+        "indented": "    " + marker + "\nbody",
+        "quoted": "> " + marker + "\nbody",
+        "fenced": "```\n" + marker + "\n```",
+        "mid_prose": "See this marker: " + marker,
+        "uppercase": marker.upper() + "\nbody",
+        "extra_spaces": marker.replace("<!-- review:", "<!--   review:").replace(" commit=", "  commit=") + "\nbody",
+        "crlf": marker + "\r\nbody",
+    }[spelling]
+    row = {"id": 7, "body": body, "created_at": "2026-10-27T10:00:00Z"}
+    assert bool(lens_authors.verdict_marker(body)) is recognized
+    assert bool(swarm_dispatch.lens_records([row])) is recognized
+    if recognized:
+        with pytest.raises(ValueError, match="unresolved author"):
+            lens_authors.require_marked_author(row)
+    else:
+        lens_authors.require_marked_author(row)
 
 
 @pytest.mark.parametrize("verdict,expected", [

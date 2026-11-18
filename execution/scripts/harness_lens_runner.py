@@ -275,6 +275,7 @@ from lib.credential_templates import (  # noqa: E402
     placeholder_template_sandbox_regexes,
 )
 import harness_router  # noqa: E402
+import lens_authors  # noqa: E402
 import panel_check_gate  # noqa: E402
 from lib import github_app_token as _github_app_token  # noqa: E402
 from harness_router import headroom_resolution  # noqa: E402
@@ -2266,11 +2267,6 @@ def dry_run_report(
 # ── Posting gate -----------------------------------------------------------------
 
 
-_REVIEW_MARKER_RE = re.compile(
-    r"^<!-- review:(?P<lens>[a-z0-9_-]+) commit=(?P<head>[0-9a-f]{40}) -->$"
-)
-
-
 _ECHO_LINE_CAP = 300
 
 
@@ -2300,7 +2296,9 @@ def validate_verdict(
     weaker parallel check this script invents.
     """
     lines = verdict_text.splitlines()
-    marker = _REVIEW_MARKER_RE.fullmatch(lines[0]) if lines else None
+    marker = lens_authors.verdict_marker(verdict_text)
+    if marker and marker.retired:
+        marker = None
 
     def _echo(index: int) -> str:
         """Echo a leading line back into the report only when it is safe.
@@ -2324,10 +2322,10 @@ def validate_verdict(
     }
     observed = {
         "marker": pre_post["line1"],
-        "lens": marker.group("lens") if marker else None,
-        "head": marker.group("head") if marker else None,
+        "lens": marker.lens if marker else None,
+        "head": marker.head if marker else None,
     }
-    marker_count = sum(1 for line in lines if _REVIEW_MARKER_RE.fullmatch(line))
+    marker_count = sum(1 for line in lines if lens_authors.verdict_marker(line))
     expected = {"lens": expected_lens, "head": expected_head}
     artifact_binding = {"expected": expected, "observed": observed}
     if marker is None:
@@ -2656,7 +2654,9 @@ def verify_stash_ref_unchanged_after_dispatch(
 def _verdict_identity(verdict_text: str) -> tuple[str, str]:
     """Return the strict lens and attribution header for a verdict body."""
     lines = verdict_text.splitlines()
-    marker = _REVIEW_MARKER_RE.fullmatch(lines[0]) if lines else None
+    marker = lens_authors.verdict_marker(verdict_text)
+    if marker and marker.retired:
+        marker = None
     if len(lines) < 2 or marker is None:
         raise ValueError("verdict lacks a strict exact-head review marker")
     attribution = lines[1]
@@ -2666,7 +2666,7 @@ def _verdict_identity(verdict_text: str) -> tuple[str, str]:
         and attribution.endswith("**")
     ):
         raise ValueError("verdict lacks the canonical lens attribution header")
-    return marker.group("lens"), attribution
+    return marker.lens, attribution
 
 
 def _pr_comments(*, repo: str, pr: int) -> list[dict]:
@@ -2705,11 +2705,12 @@ def _matching_verdict_comments(
         if ((comment.get("user") or {}).get("login") or "") != "ateles-agent":
             continue
         lines = str(comment.get("body") or "").splitlines()
-        marker = _REVIEW_MARKER_RE.fullmatch(lines[0]) if lines else None
+        marker = lens_authors.verdict_marker(comment.get("body"))
         if (
             len(lines) >= 2
             and marker is not None
-            and marker.group("lens") == lens
+            and not marker.retired
+            and marker.lens == lens
             and lines[1] == attribution
         ):
             matches.append(comment)
@@ -2730,14 +2731,12 @@ def _one_verdict_comment(
     if not matches:
         return None
     latest = matches[-1]
-    verdicts = [row for row in comments if _REVIEW_MARKER_RE.fullmatch(
-        (str(row.get("body") or "").splitlines() or [""])[0]
-    )]
+    verdicts = [row for row in comments if lens_authors.verdict_marker(row.get("body"))]
     if not verdicts or verdicts[-1].get("id") != latest.get("id"):
         return None
-    old_marker = _REVIEW_MARKER_RE.fullmatch(str(latest.get("body") or "").splitlines()[0])
-    new_marker = _REVIEW_MARKER_RE.fullmatch(verdict_text.splitlines()[0])
-    if old_marker.group("head") != new_marker.group("head"):
+    old_marker = lens_authors.verdict_marker(latest.get("body"))
+    new_marker = lens_authors.verdict_marker(verdict_text)
+    if not old_marker or not new_marker or old_marker.head != new_marker.head:
         return None
     from review_rounds import verdict_class
     if (verdict_class(str(latest.get("body") or ""), lens) != verdict_class(verdict_text, lens)

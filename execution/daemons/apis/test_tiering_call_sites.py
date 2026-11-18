@@ -1433,8 +1433,8 @@ def _wire(monkeypatch, world, *, combined: bool, narrow: bool) -> tuple[SwarmDis
         async def post(self, url, json=None, headers=None):
             body = json["body"]
             w.posts.append(body)
-            marker = swarm_dispatch._LENS_MARKER_RE.search(body)
-            w.events.append(f"post:{marker.group('lens')}" if marker else "post:note")
+            marker = swarm_dispatch.lens_authors.verdict_marker(body)
+            w.events.append(f"post:{marker.lens}" if marker else "post:note")
 
             class _R:
                 def raise_for_status(s):
