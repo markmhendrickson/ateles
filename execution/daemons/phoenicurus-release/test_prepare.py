@@ -23,7 +23,6 @@ import prepare
 import verify_guard_live as live
 import json
 import shutil
-from release_guard_snapshot import snapshot_release_guards, changed_guard_location
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +55,7 @@ def _guard_checkout(root):
     ("change_config", "git config"), ("replace_git", ".git"),
 ))
 def test_prepare_guard_digest_detects_changes(tmp_path, change, location):
+    from release_guard_snapshot import snapshot_release_guards, changed_guard_location
     _guard_checkout(tmp_path)
     before = snapshot_release_guards(tmp_path)
     assert changed_guard_location(tmp_path, before) is None

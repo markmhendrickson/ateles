@@ -28,7 +28,6 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
         sys.path.insert(0, _p)
 
 import publish  # noqa: E402
-from release_guard_snapshot import snapshot_release_guards, changed_guard_location
 
 
 @pytest.fixture(autouse=True)
@@ -44,6 +43,7 @@ def prepared_guard_state(monkeypatch, tmp_path):
     ("config", "git config"), ("link", ".git"),
 ))
 def test_release_stops_before_any_step_when_guard_changes(monkeypatch, tmp_path, change, location):
+    from release_guard_snapshot import snapshot_release_guards, changed_guard_location
     root = tmp_path / "checkout"
     (root / ".git" / "hooks").mkdir(parents=True)
     (root / ".git" / "config").write_text("[core]\n")
@@ -70,6 +70,7 @@ def test_release_stops_before_any_step_when_guard_changes(monkeypatch, tmp_path,
 
 
 def test_matching_prepare_guard_allows_release_steps(monkeypatch, tmp_path):
+    from release_guard_snapshot import snapshot_release_guards, changed_guard_location
     root = tmp_path / "checkout"
     (root / ".git" / "hooks").mkdir(parents=True)
     (root / ".git" / "config").write_text("[core]\n")
