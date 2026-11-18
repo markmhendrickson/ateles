@@ -39,7 +39,10 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR), str(_SCRIPTS_DIR)):
 
 import harness_lens_runner as hlr  # noqa: E402
 import harness_router  # noqa: E402
+import model_tiering  # noqa: E402
+import review_rounds  # noqa: E402
 import skill_runner  # noqa: E402
+import swarm_dispatch  # noqa: E402
 from skill_runner import SkillResult  # noqa: E402
 from lib.daemon_runtime.agent_loader import AgentDefinition  # noqa: E402
 
@@ -2800,8 +2803,8 @@ def test_post_verdict_retries_transient_gh_failure(monkeypatch, tmp_path):
                         {
                             "id": 1,
                             "body": SIGNED_OFF_VERDICT,
-                            "html_url": "comment-url",
-                            "user": {"login": "ateles-agent"},
+                            "html_url": "https://github.com/o/r/pull/1#issuecomment-1",
+                            "user": {"login": "ateles-agent", "type": "User"},
                         }
                     ]
                 ]
@@ -2827,7 +2830,7 @@ def test_post_verdict_retries_transient_gh_failure(monkeypatch, tmp_path):
 
     assert (
         hlr.post_verdict(repo="o/r", pr=1, verdict_text=SIGNED_OFF_VERDICT)
-        == "comment-url"
+        == "https://github.com/o/r/pull/1#issuecomment-1"
     )
     assert len(post_calls) == 3
 
@@ -2849,7 +2852,7 @@ def test_post_verdict_does_not_duplicate_when_failed_call_already_landed(
                             "id": 1,
                             "body": SIGNED_OFF_VERDICT,
                             "html_url": "https://github.com/o/r/pull/1#issuecomment-1",
-                            "user": {"login": "ateles-agent"},
+                            "user": {"login": "ateles-agent", "type": "User"},
                         }
                     ]
                 ]
@@ -2894,9 +2897,7 @@ def test_post_verdict_persistent_failure_stays_loud_after_three_attempts(
 
 
 def test_post_verdict_edits_existing_lens_comment_in_place(monkeypatch, tmp_path):
-    old_body = SIGNED_OFF_VERDICT.replace(SAMPLE_HEAD, "b" * 40).replace(
-        "SIGNED_OFF", "REQUEST_CHANGES"
-    )
+    old_body = SIGNED_OFF_VERDICT
     current_body = old_body
     patch_calls = []
 
@@ -2911,7 +2912,7 @@ def test_post_verdict_edits_existing_lens_comment_in_place(monkeypatch, tmp_path
                         "id": 41,
                         "body": current_body,
                         "html_url": "https://github.com/o/r/pull/1#issuecomment-41",
-                        "user": {"login": "ateles-agent"},
+                        "user": {"login": "ateles-agent", "type": "User"},
                     }
                 ]
             ]
@@ -2933,30 +2934,159 @@ def test_post_verdict_edits_existing_lens_comment_in_place(monkeypatch, tmp_path
     assert len(patch_calls) == 1
 
 
-def test_post_verdict_refuses_ambiguous_prior_lens_comments(monkeypatch, tmp_path):
+@pytest.mark.parametrize("bad_id", [None, True, "41", 0, -1])
+def test_harness_poster_refuses_unusable_retry_id_before_write(monkeypatch, bad_id):
     writes = []
+
+    def _run(command, **kwargs):
+        if command[1] == "api" and command[2].startswith("repos/o/r/issues/1/comments?"):
+            row = {"id": bad_id, "body": SIGNED_OFF_VERDICT,
+                   "html_url": "https://github.com/o/r/pull/1#issuecomment-41",
+                   "user": {"login": "ateles-agent", "type": "User"}}
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps([[row]]), stderr="")
+        writes.append(command)
+        raise AssertionError("unusable id must not reach a write")
+
+    monkeypatch.setattr(hlr.subprocess, "run", _run)
+    with pytest.raises(RuntimeError, match="positive integer id"):
+        hlr.post_verdict(repo="o/r", pr=1, verdict_text=SIGNED_OFF_VERDICT)
+    assert writes == []
+
+
+def test_harness_poster_refuses_nonlocal_readback_url(monkeypatch):
+    comments = []
+    writes = []
+
+    def _run(command, **kwargs):
+        if command[1] == "api" and command[2].startswith("repos/o/r/issues/1/comments?"):
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps([comments]), stderr="")
+        writes.append(command)
+        comments.append({"id": 41, "body": SIGNED_OFF_VERDICT,
+                         "html_url": "https://github.com/o/r/pull/99#issuecomment-41",
+                         "user": {"login": "ateles-agent", "type": "User"}})
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(hlr.subprocess, "run", _run)
+    with pytest.raises(RuntimeError, match="matching id and PR-local URL"):
+        hlr.post_verdict(repo="o/r", pr=1, verdict_text=SIGNED_OFF_VERDICT)
+    assert len(writes) == 1
+
+
+@pytest.mark.parametrize("replacement", ["COMMENT", "SIGNED_OFF"])
+def test_harness_poster_preserves_blocking_round_then_edits_identical_retry(monkeypatch, replacement):
+    heads = ["1" * 40, "2" * 40, SAMPLE_HEAD]
+    comments = [{"id": index, "body": SIGNED_OFF_VERDICT.replace(SAMPLE_HEAD, head)
+                 .replace("SIGNED_OFF", "BLOCKED"),
+                 "created_at": f"2026-11-17T00:00:0{index}Z",
+                 "html_url": f"https://github.com/o/r/pull/1#issuecomment-{index}",
+                 "user": {"login": "ateles-agent", "type": "User"}}
+                for index, head in enumerate(heads, 1)]
+    replacement_body = SIGNED_OFF_VERDICT.replace("SIGNED_OFF", replacement)
+    writes = []
+
+    def _run(command, **kwargs):
+        if command[1] == "api" and command[2].startswith("repos/o/r/issues/1/comments?"):
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps([comments]), stderr="")
+        method = command[3]
+        writes.append(method)
+        if method == "POST":
+            comments.append({"id": 4, "body": json.loads(kwargs["input"])["body"],
+                             "created_at": "2026-11-17T00:00:04Z",
+                             "html_url": "https://github.com/o/r/pull/1#issuecomment-4",
+                             "user": {"login": "ateles-agent", "type": "User"}})
+        else:
+            assert method == "PATCH" and command[4].endswith("/issues/comments/4")
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(hlr.subprocess, "run", _run)
+    hlr.post_verdict(repo="o/r", pr=1, verdict_text=replacement_body)
+    assert writes == ["POST"] and comments[2]["body"].find("BLOCKED") >= 0
+    assert review_rounds.round_status(swarm_dispatch.lens_records(comments), "4" * 40).round_number == 4
+    hlr.post_verdict(repo="o/r", pr=1, verdict_text=replacement_body)
+    assert writes == ["POST", "PATCH"]
+
+
+def test_harness_comment_reader_refuses_malformed_history_row(monkeypatch):
+    def _run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps([[None]]), stderr="")
+
+    monkeypatch.setattr(hlr.subprocess, "run", _run)
+    with pytest.raises(ValueError, match="malformed comment"):
+        hlr._pr_comments(repo="o/r", pr=1)
+
+
+def test_harness_comment_reader_refuses_unresolved_marked_author(monkeypatch):
+    row = {"id": 41, "body": SIGNED_OFF_VERDICT, "user": {"login": "ateles-agent"}}
+
+    def _run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps([[row]]), stderr="")
+
+    monkeypatch.setattr(hlr.subprocess, "run", _run)
+    with pytest.raises(ValueError, match="comment 41.*history unknown"):
+        hlr._pr_comments(repo="o/r", pr=1)
+
+
+def test_harness_same_kind_changed_findings_are_not_an_identical_retry():
+    old = SIGNED_OFF_VERDICT.replace("SIGNED_OFF", "BLOCKED")
+    row = {"id": 41, "body": old, "user": {"login": "ateles-agent", "type": "User"}}
+    changed = old + "Additional finding.\n"
+    assert hlr._one_verdict_comment(repo="o/r", pr=1, lens="pm",
+                                     attribution=old.splitlines()[1], verdict_text=changed,
+                                     comments=[row]) is None
+
+
+@pytest.mark.parametrize("intervening", [False, True])
+def test_post_verdict_preserves_changed_or_intervened_history(monkeypatch, intervening):
+    old = SIGNED_OFF_VERDICT.replace("SIGNED_OFF", "REQUEST_CHANGES")
+    comments = [{"id": 41, "body": old, "html_url": "https://github.com/o/r/pull/1#issuecomment-41",
+                 "user": {"login": "ateles-agent", "type": "User"}}]
+    if intervening:
+        comments.append({"id": 42, "body": SIGNED_OFF_VERDICT.replace("review:pm", "review:qa"),
+                         "user": {"login": "ateles-agent", "type": "User"}})
+    writes = []
+
+    def _run(command, **kwargs):
+        if command[1] == "api" and command[2].startswith("repos/o/r/issues/1/comments?"):
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps([comments]), stderr="")
+        writes.append(command)
+        assert command[:4] == ["gh", "api", "-X", "POST"]
+        comments.append({"id": 43, "body": json.loads(kwargs["input"])["body"],
+                         "html_url": "https://github.com/o/r/pull/1#issuecomment-43",
+                         "user": {"login": "ateles-agent", "type": "User"}})
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(hlr.subprocess, "run", _run)
+    assert hlr.post_verdict(repo="o/r", pr=1, verdict_text=SIGNED_OFF_VERDICT).endswith("#issuecomment-43")
+    assert comments[0]["body"] == old and len(writes) == 1
+
+
+def test_post_verdict_preserves_prior_lens_comments(monkeypatch, tmp_path):
+    writes = []
+    comments = [{
+        "id": i, "body": SIGNED_OFF_VERDICT.replace(SAMPLE_HEAD, "b" * 40),
+        "html_url": f"https://github.com/o/r/pull/1#issuecomment-{i}",
+        "user": {"login": "ateles-agent", "type": "User"},
+    } for i in (1, 2)]
 
     def _run(command, **kwargs):
         if command[1] == "api" and command[2].startswith(
             "repos/o/r/issues/1/comments?"
         ):
-            comment = {
-                "body": SIGNED_OFF_VERDICT,
-                "html_url": "url",
-                "user": {"login": "ateles-agent"},
-            }
-            pages = [[{**comment, "id": 1}, {**comment, "id": 2}]]
+            pages = [comments]
             return subprocess.CompletedProcess(
                 command, 0, stdout=json.dumps(pages), stderr=""
             )
         writes.append(command)
-        raise AssertionError("ambiguous comments must prevent every write")
+        assert command[:4] == ["gh", "api", "-X", "POST"]
+        comments.append({"id": 3, "body": json.loads(kwargs["input"])["body"],
+                         "html_url": "https://github.com/o/r/pull/1#issuecomment-3",
+                         "user": {"login": "ateles-agent", "type": "User"}})
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
     monkeypatch.setattr(hlr.subprocess, "run", _run)
 
-    with pytest.raises(RuntimeError, match="ambiguous prior review:pm"):
-        hlr.post_verdict(repo="o/r", pr=1, verdict_text=SIGNED_OFF_VERDICT)
-    assert writes == []
+    assert hlr.post_verdict(repo="o/r", pr=1, verdict_text=SIGNED_OFF_VERDICT).endswith("#issuecomment-3")
+    assert len(writes) == 1 and len(comments) == 3
 
 
 def test_run_one_does_not_post_when_verdict_unreadable(
@@ -4088,6 +4218,7 @@ def test_run_one_passes_task_entity_id_to_dispatch_for_neotoma_monitoring(
         agent="pavo",
         task_entity_id="ent_898998f41372ce24369fb365",
     )
+    monkeypatch.delenv("ATELES_DISPATCH_SESSION_ID", raising=False)
 
     guarded = hlr.HarnessSandbox(
         provider="codex",
@@ -4149,6 +4280,9 @@ def test_run_one_passes_task_entity_id_to_dispatch_for_neotoma_monitoring(
     )
 
     assert seen["task_entity_id"] == "ent_898998f41372ce24369fb365"
+    assert seen["caller_kind"] == "daemon"
+    assert seen["caller"] == "harness_lens_runner"
+    assert seen["pr"] == "markmhendrickson/ateles#1234"
 
 
 def test_lens_target_task_entity_id_defaults_to_empty_string():
@@ -4787,3 +4921,56 @@ def test_cli_model_selector_contract_refuses_invalid_inputs_before_dispatch(
 @pytest.mark.parametrize("model", [None, "gpt-6-sol", "gpt-5.6-terra", "provider/custom-v1:latest"])
 def test_model_selector_contract_preserves_omission_and_valid_identifiers(model):
     assert hlr.validate_model_selector(model) == model
+
+
+def test_run_one_passes_the_repo_qualified_pr_to_dispatch(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+):
+    """Spend attribution (ent_e5259618cae6cafd4be120e0): the lens
+    route hands ``owner/repo#N`` to ``dispatch_role.dispatch``, which records it
+    as ``pr`` on the tier-ledger rows (test_dispatch_attribution covers that
+    leg)."""
+    _install_minimal_lens_worktree(monkeypatch, target)
+    inner = _delivery_denied_dispatch(target)
+    seen: list[dict] = []
+
+    async def _dispatch(role, task, **kwargs):
+        seen.append(kwargs)
+        return await inner(role, task, **kwargs)
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
+    monkeypatch.setattr(hlr, "current_pr_head", lambda **kwargs: SAMPLE_HEAD)
+
+    import asyncio
+
+    asyncio.run(hlr.run_one(
+        target, provider="codex", post=False, dry_run=False,
+        repo_worktree_name="ateles", scratch_root=tmp_path,
+        brief_path=brief_file, timeout=None,
+    ))
+    assert len(seen) == 1
+    assert seen[0]["pr"] == f"{target.repo}#{target.pr}"
+
+
+def test_main_without_session_id_records_daemon_ledger_row(
+    monkeypatch, tmp_path, brief_file
+):
+    ledger = tmp_path / "tier-ledger.jsonl"
+    monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(ledger))
+    monkeypatch.delenv(model_tiering.SESSION_ID_ENV, raising=False)
+    monkeypatch.setattr(model_tiering, "_PROCESS_CALLER", (None, None))
+
+    async def record_dispatch(*args, **kwargs):
+        model_tiering.record_dispatch(
+            skill="pavo", provider="codex", resolved=None, model=None
+        )
+        return {"ok": True}
+
+    monkeypatch.setattr(hlr, "run_one", record_dispatch)
+    assert hlr.main([
+        "--repo", "owner/repo", "--pr", "1", "--head", SAMPLE_HEAD,
+        "--lens", "pm", "--provider", "codex", "--brief", str(brief_file),
+    ]) == 0
+    row = json.loads(ledger.read_text().splitlines()[0])
+    assert row["caller_kind"] == "daemon"
+    assert row["caller"] == "harness_lens_runner"

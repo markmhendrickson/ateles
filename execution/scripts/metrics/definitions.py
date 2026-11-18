@@ -261,11 +261,11 @@ SPECS: list[dict[str, Any]] = [
           "writes_per_task", "down_good", ["automation"],
           baseline_status="capture",
           baseline_note="Not derivable today: needs principal attribution on writes (foundation work). Use S3p meanwhile."),
-    _spec("S4", "review_rounds_per_pr",
+    _spec("S4", "reviewed_heads_per_pr",
           "Distinct head commits that received a formal review, mean per reviewed merged PR, per week of merge.",
           "swarm_ops", "pull_request",
           {"read": "GitHub pull requests and reviews", "derive": "distinct review commit_ids per merged PR"},
-          "rounds", "down_good", ["review_process", "lens_change"],
+          "reviewed_heads", "down_good", ["review_process", "lens_change"],
           baseline_status="exists",
           baseline_note="Counts formal reviews only; lens verdicts posted as plain comments are not seen, so a "
                         "prediction about lens or review-process changes is scored on a metric blind to that work. "

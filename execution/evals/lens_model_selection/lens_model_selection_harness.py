@@ -295,7 +295,9 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
                                       command_wrapper=ready.command_wrapper,
                                       codex_outer_sandboxed=provider == "codex")
                         if entry == "dispatch":
-                            call = active_runner.dispatch_role.dispatch("pavo", task, **kwargs)
+                            call = active_runner.dispatch_role.dispatch(
+                                "pavo", task, caller_kind="interactive", **kwargs
+                            )
                         elif entry in {"run_skill", "run_once"}:
                             fn = skill_runner.run_skill if entry == "run_skill" else skill_runner._run_skill_once
                             call = fn("pavo", task, role="pavo", **kwargs)

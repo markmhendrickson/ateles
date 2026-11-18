@@ -37,9 +37,9 @@ with no model turn, for example::
 five-hour one).  Interactive Codex sessions record the same ``rate_limits`` on
 every ``token_count`` event in their rollout files, which is the same data.
 ``codex exec --json`` emits no rate-limit event, so the app-server request is
-the only turn-free source.  ``read_codex_rate_limits`` uses it; a reading that
-is absent, malformed, or has no weekly window is INCONCLUSIVE, never a verdict,
-and the adapter then falls through to the native request probe below.
+the only turn-free source. ``read_codex_rate_limits`` retains each valid window
+for alerts; a report with no valid windows falls through to the native request
+probe. The weekly gate refuses dispatch without a complete weekly reading.
 
 Cursor does not expose numeric plan windows.  Its adapter (and Codex's
 fallback) run the smallest provider-native request in an isolated temporary
@@ -89,14 +89,35 @@ class ProbeResult:
     reading_failure: str = ""
 
 
-def parse_rate_limit_windows(stdout: str) -> list[dict[str, object]]:
+def _bounded_number(raw: object, *, high: float) -> float | None:
+    if isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if math.isfinite(value) and 0 <= value <= high else None
+
+
+def _reset_iso(raw: object) -> str | None:
+    wall = _bounded_number(raw, high=4102444800)
+    if wall is None or wall < 946684800:
+        return None
+    return harness_router._iso_from_wall(wall)
+
+
+def parse_rate_limit_windows(
+    stdout: str, *, with_status: bool = False
+) -> list[dict[str, object]] | tuple[list[dict[str, object]], int]:
     """Windows from the LAST well-formed ``rate_limit_event`` in stream-json.
 
-    Returns ``[]`` when no event carries a usable window.  Every window is
+    Returns ``[]`` when no event carries a usable window. With status, returns
+    that window list and the unreadable-entry count in the latest event. Every window is
     validated here (finite utilization, integer reset) so a malformed report
     can never reach the snapshot; a fraction above 1 is capped at 100%.
     """
     windows: list[dict[str, object]] = []
+    unreadable = 0
     for line in stdout.splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -116,29 +137,28 @@ def parse_rate_limit_windows(stdout: str) -> list[dict[str, object]]:
             key = info.get("rateLimitType")
             raw = {key: info} if isinstance(key, str) else {}
         parsed: list[dict[str, object]] = []
+        malformed = 0
         for key, window in raw.items():
             if not isinstance(key, str) or not key.strip() or not isinstance(window, dict):
+                malformed += 1
                 continue
-            utilization, resets = window.get("utilization"), window.get("resetsAt")
-            if isinstance(utilization, bool) or isinstance(resets, bool):
+            fraction = _bounded_number(window.get("utilization"), high=10)
+            reset = _reset_iso(window.get("resetsAt"))
+            if fraction is None or reset is None:
+                malformed += 1
                 continue
-            try:
-                fraction = float(utilization)  # type: ignore[arg-type]
-                reset_wall = float(resets)  # type: ignore[arg-type]
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(fraction) or fraction < 0 or not math.isfinite(reset_wall):
-                continue
-            parsed.append(
-                {
-                    "name": WINDOW_NAMES.get(key, key.strip()),
-                    "used_percent": round(min(fraction, 1.0) * 100.0, 4),
-                    "resets_at": harness_router._iso_from_wall(reset_wall),
-                }
-            )
-        if parsed:
-            windows = parsed  # later events supersede earlier ones
-    return windows
+            item = harness_router.normalize_usage_window({
+                "name": WINDOW_NAMES.get(key, key.strip()),
+                "used_percent": round(min(fraction, 1.0) * 100.0, 4),
+                "resets_at": reset,
+            })
+            if item is None:
+                malformed += 1
+            else:
+                parsed.append(item)
+        windows = parsed  # the latest event supersedes earlier reports, even when empty
+        unreadable = malformed
+    return (windows, unreadable) if with_status else windows
 
 
 _TOKEN_LIKE = re.compile(r"[A-Za-z0-9_\-\.]{32,}")
@@ -267,11 +287,11 @@ def _codex_window_name(minutes: int) -> str:
 def parse_codex_rate_limits(result: object) -> tuple[list[dict[str, object]], str | None]:
     """Windows from an ``account/rateLimits/read`` result, and why not if none.
 
-    Returns ``(windows, None)`` for a usable reading, else ``([], reason)``.
+    Returns every usable window and an optional incomplete-reading reason.
     Every window is validated (finite non-negative percent, whole-minute
     duration, finite reset) so a malformed report cannot reach the snapshot; a
-    percent above 100 is capped.  A reading with no weekly-length window is
-    refused here, because the gate cannot pace without one.  An account the
+    percent above 100 is capped. The weekly gate separately refuses a reading
+    with no weekly-length window. An account the
     server says may not use Codex (``ordinaryUsageAllowed`` false) while its
     weekly window shows room is contradictory, so it is inconclusive too.
     """
@@ -286,40 +306,51 @@ def parse_codex_rate_limits(result: object) -> tuple[list[dict[str, object]], st
     if snapshot is None:
         return [], "no rateLimits snapshot"
     windows: list[dict[str, object]] = []
+    unreadable = 0
+    first_problem = ""
     for key in ("primary", "secondary"):
         raw = snapshot.get(key)
         if raw is None:
             continue
         if not isinstance(raw, dict):
-            return [], f"{key} window is not an object"
+            unreadable += 1
+            first_problem = first_problem or f"{key} window is not an object"
+            continue
         used, minutes, resets = (
             raw.get("usedPercent"), raw.get("windowDurationMins"), raw.get("resetsAt"),
         )
-        if any(isinstance(v, bool) for v in (used, minutes, resets)):
-            return [], f"{key} window carries a boolean where a number belongs"
-        try:
-            percent = float(used)  # type: ignore[arg-type]
-            length = int(minutes)  # type: ignore[arg-type]
-            reset_wall = float(resets)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return [], f"{key} window is missing a number (usedPercent/windowDurationMins/resetsAt)"
-        if not (math.isfinite(percent) and percent >= 0 and math.isfinite(reset_wall) and length > 0):
-            return [], f"{key} window has an out-of-range value"
-        windows.append(
-            {
-                "name": _codex_window_name(length),
-                "used_percent": round(min(percent, 100.0), 4),
-                "resets_at": harness_router._iso_from_wall(reset_wall),
-            }
-        )
+        percent = _bounded_number(used, high=1000)
+        duration = _bounded_number(minutes, high=525600)
+        reset = _reset_iso(resets)
+        if percent is None or duration is None or duration < 1 or not duration.is_integer() or reset is None:
+            unreadable += 1
+            if any(isinstance(v, bool) for v in (used, minutes, resets)):
+                reason = "boolean where a number belongs"
+            elif any(v is None or isinstance(v, str) and not v.strip() for v in (used, minutes, resets)) or isinstance(used, str) and _bounded_number(used, high=1e308) is None:
+                reason = "missing a number (usedPercent/windowDurationMins/resetsAt)"
+            else:
+                reason = "out-of-range value"
+            first_problem = first_problem or f"{key} window has {reason}"
+            continue
+        item = harness_router.normalize_usage_window({
+            "name": _codex_window_name(int(duration)),
+            "used_percent": round(min(percent, 100.0), 4),
+            "resets_at": reset,
+        })
+        if item is None:
+            unreadable += 1
+            first_problem = first_problem or f"{key} window has an out-of-range value"
+        else:
+            windows.append(item)
     if not windows:
-        return [], "no usage windows"
+        return [], (first_problem or "no usage windows")
     weekly = next((w for w in windows if w["name"] == "weekly_all"), None)
     if weekly is None:
-        return [], "no weekly-length window, so the weekly pace cannot be computed"
+        return windows, (f"{unreadable} unreadable provider windows" if unreadable
+                         else "no weekly-length window, so the weekly pace cannot be computed")
     if result.get("ordinaryUsageAllowed") is False and float(weekly["used_percent"]) < 100.0:  # type: ignore[arg-type]
-        return [], "server reports ordinary usage not allowed while the weekly window shows room"
-    return windows, None
+        return windows, "server reports ordinary usage not allowed while the weekly window shows room"
+    return windows, (f"{unreadable} unreadable provider windows" if unreadable else None)
 
 
 def read_codex_rate_limits(
@@ -404,7 +435,7 @@ def read_codex_rate_limits(
         text = " ".join(str((reply.get("error") or {}).get("message", "error")).split())
         return unknown(f"app-server refused the read: {_TOKEN_LIKE.sub('<masked>', text)[:160]}")
     windows, problem = parse_codex_rate_limits(reply.get("result"))
-    if problem is not None:
+    if not windows:
         return unknown(f"app-server reading unusable: {problem}")
     return ProbeResult(
         True,
@@ -412,6 +443,7 @@ def read_codex_rate_limits(
         tuple(windows),
         status="available",
         source=CODEX_RATE_LIMITS_SOURCE,
+        reading_failure=problem or "",
     )
 
 
@@ -440,20 +472,24 @@ def probe_claude(
             f"probe did not run: {type(exc).__name__}: {str(exc)[:120]}",
             source="claude_rate_limit_event",
         )
-    windows = parse_rate_limit_windows(proc.stdout or "")
+    windows, unreadable = parse_rate_limit_windows(proc.stdout or "", with_status=True)
     if not windows:
         return ProbeResult(
             False,
             f"probe exit {proc.returncode} returned no rate_limit_event windows; "
+            f"{unreadable} unreadable provider windows; "
             f"CLI said: {failure_excerpt(proc.stdout or '', proc.stderr or '')}",
             source="claude_rate_limit_event",
         )
     return ProbeResult(
         True,
-        "provider usage report succeeded",
+        (f"provider usage report incomplete: {unreadable} unreadable windows"
+         if unreadable else "provider usage report succeeded"),
         tuple(windows),
         status="available",
         source="claude_rate_limit_event",
+        reading_failure=(f"{unreadable} unreadable provider windows"
+                         if unreadable else ""),
     )
 
 
@@ -494,7 +530,7 @@ def probe_provider(
     """Run one provider adapter and return capacity evidence without writing it.
 
     Codex first tries its numeric plan windows (``read_codex_rate_limits``); a
-    reading that is inconclusive falls through to the native request probe, and
+    reading with no valid windows falls through to the native request probe, and
     if that is inconclusive too the result is ``unknown`` carrying both reasons.
     """
     if provider == "claude":
@@ -607,9 +643,10 @@ def refresh_usage_if_stale(
     env: Mapping[str, str],
     now_wall: float | None = None,
     force: bool = False,
+    alert_in_background: bool = True,
     run=subprocess.run,
 ) -> dict[str, str]:
-    """Refresh each gated provider's reading when it is older than the refresh age.
+    """Refresh each active provider's reading when it is older than the refresh age.
 
     Returns ``{provider: outcome}`` for the providers it looked at (``fresh``,
     ``refreshed``, or a failure detail).  Never raises: a failed refresh is
@@ -618,10 +655,10 @@ def refresh_usage_if_stale(
     """
     if os.environ.get("APIS_USAGE_PROBE", "on").strip().lower() in ("off", "0", "false", "no"):
         return {}
-    if not harness_router.usage_gate_enabled():
-        return {}
     outcomes: dict[str, str] = {}
-    for provider in harness_router.usage_gated_providers():
+    for provider in harness_router.configured_providers():
+        if provider not in PROBE_ADAPTERS:
+            continue
         if provider not in available:
             continue
         binary = available.get(provider)
@@ -647,7 +684,32 @@ def refresh_usage_if_stale(
         except Exception as exc:  # noqa: BLE001 - feeding must never break dispatch
             log.error(f"[apis] usage refresh for {provider} failed: {exc}")
             outcomes[provider] = f"error: {type(exc).__name__}"
+            continue
+        if outcomes[provider] == "refreshed":
+            _alert_on_new_reading(provider, background=alert_in_background)
     return outcomes
+
+
+def _alert_on_new_reading(provider: str, *, background: bool = True) -> None:
+    """Alert a 50%/75% crossing as soon as the reading that shows it is written.
+
+    Provider spend governance (ent_e5259618cae6cafd4be120e0): the dispatch path
+    also checks, but a crossing seen by a refresh no dispatch follows would
+    otherwise never be alerted. ``usage_alerts`` is imported here, not at
+    module top, so the probe keeps no import-time dependency on the notifier.
+    Never raises.
+    """
+    try:
+        import usage_alerts
+
+        if background:
+            usage_alerts.schedule_dispatch_check(provider)
+        else:
+            usage_alerts.check_after_usage_write(provider)
+    except Exception as exc:  # noqa: BLE001 - an alert never breaks a refresh
+        import sys
+        print(f"[apis] ERROR: usage threshold check after refresh failed: {exc}", file=sys.stderr)
+        log.error("[apis] usage threshold check after refresh failed: %s", exc)
 
 
 def _observed_age(provider: str, moment: float) -> float | None:
@@ -655,8 +717,13 @@ def _observed_age(provider: str, moment: float) -> float | None:
     if not isinstance(entry, dict):
         return None
     probe = entry.get("probe")
+    probe_observed = (
+        probe.get("observed_at")
+        if isinstance(probe, dict) and probe.get("status") in ("available", "exhausted")
+        else None
+    )
     observed = harness_router._wall_from_iso(
-        probe.get("observed_at") if isinstance(probe, dict) else entry.get("observed_at")
+        probe_observed or entry.get("observed_at")
     )
     return None if observed is None else moment - observed
 
@@ -685,15 +752,7 @@ def _refresh_provider(
 
     def is_fresh() -> bool:
         age = _observed_age(provider, moment)
-        gate = harness_router.usage_gate(provider, now_wall=moment)
-        # A reading that is young but malformed still needs replacing.
-        return (
-            not force
-            and age is not None
-            and 0 <= age <= threshold
-            and gate is not None
-            and gate.code in (harness_router.GATE_OK, harness_router.GATE_PACED)
-        )
+        return not force and age is not None and 0 <= age <= threshold
 
     def in_backoff() -> str | None:
         until = _backoff_until(provider)
@@ -771,6 +830,7 @@ def _refresh_provider(
                 probe_source=(
                     "provider_usage_report" if provider == "claude" else result.source
                 ),
+                probe_detail=result.reading_failure or None,
             )
             log.info(
                 f"[apis] {provider} usage refreshed: "

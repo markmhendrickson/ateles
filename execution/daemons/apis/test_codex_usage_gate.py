@@ -141,13 +141,10 @@ def test_a_plan_with_a_session_window_and_a_weekly_window_names_both() -> None:
     [
         (None, "not an object"),
         ({}, "no rateLimits"),
-        (_snapshot(10, minutes=300), "no weekly-length window"),
-        (_snapshot(10, minutes=1234), "no weekly-length window"),
         (_snapshot(True), "boolean"),
         (_snapshot("lots"), "missing a number"),
         (_snapshot(float("nan")), "out-of-range"),
         (_snapshot(-5), "out-of-range"),
-        (_snapshot(10, ordinaryUsageAllowed=False), "not allowed"),
     ],
 )
 def test_an_unusable_reading_is_inconclusive_with_a_reason(result, why) -> None:
@@ -155,9 +152,56 @@ def test_an_unusable_reading_is_inconclusive_with_a_reason(result, why) -> None:
     assert windows == [] and why in (problem or "")
 
 
+@pytest.mark.parametrize("minutes", [300, 1234])
+def test_a_nonweekly_reading_remains_available_to_alerts(minutes) -> None:
+    windows, problem = usage_probe.parse_codex_rate_limits(_snapshot(10, minutes=minutes))
+    assert len(windows) == 1
+    assert "no weekly-length window" in (problem or "")
+
+
+def test_conflicting_capacity_report_keeps_windows_but_refuses_the_gate(fake_codex) -> None:
+    result = _snapshot(9, ordinaryUsageAllowed=False)
+    windows, problem = usage_probe.parse_codex_rate_limits(result)
+    assert len(windows) == 1 and "not allowed" in (problem or "")
+    assert _refresh(fake_codex, result) == {"codex": "refreshed"}
+    gate = hr.usage_gate("codex", now_wall=NOW)
+    assert gate is not None and not gate.allowed and gate.code == hr.GATE_MALFORMED
+
+
+def test_incomplete_weekly_report_does_not_authorize_dispatch(fake_codex) -> None:
+    result = _snapshot(9)
+    result["rateLimitsByLimitId"]["codex"]["secondary"] = {
+        "usedPercent": "invalid", "windowDurationMins": 300, "resetsAt": RESET,
+    }
+    assert _refresh(fake_codex, result) == {"codex": "refreshed"}
+    assert hr.usage_windows("codex")[0]["name"] == "weekly_all"
+    gate = hr.usage_gate("codex", now_wall=NOW)
+    assert gate is not None and not gate.allowed and gate.code == hr.GATE_MALFORMED
+
+
+def test_duplicate_canonical_windows_do_not_authorize_dispatch(fake_codex) -> None:
+    result = _snapshot(9)
+    result["rateLimitsByLimitId"]["codex"]["secondary"] = {
+        "usedPercent": 8, "windowDurationMins": 10020, "resetsAt": RESET - 60,
+    }
+    assert _refresh(fake_codex, result) == {"codex": "refreshed"}
+    gate = hr.usage_gate("codex", now_wall=NOW)
+    assert gate is not None and not gate.allowed and gate.code == hr.GATE_MALFORMED
+
+
 def test_a_percent_above_100_is_capped_not_rejected() -> None:
     windows, _ = usage_probe.parse_codex_rate_limits(_snapshot(130))
     assert windows[0]["used_percent"] == 100.0
+
+
+def test_bad_secondary_reset_keeps_the_weekly_reading() -> None:
+    result = _snapshot(60)
+    result["rateLimitsByLimitId"]["codex"]["secondary"] = {
+        "usedPercent": 60, "windowDurationMins": 300, "resetsAt": 1e308,
+    }
+    windows, problem = usage_probe.parse_codex_rate_limits(result)
+    assert len(windows) == 1 and windows[0]["name"] == "weekly_all"
+    assert problem == "1 unreadable provider windows"
 
 
 # ── the subprocess boundary ─────────────────────────────────────────────────
@@ -249,9 +293,9 @@ def test_capacity_without_a_weekly_reading_does_not_authorize_dispatch(fake_code
 def test_a_reading_with_no_weekly_window_is_not_paced_on_the_wrong_one(fake_codex) -> None:
     native = _native_probe(0, '{"type":"result","result":"ok"}')
     outcome = _refresh(fake_codex, _snapshot(95, minutes=300), run=native)
-    assert outcome["codex"].startswith("probe failed: no weekly reading")
-    assert native.calls  # the numeric reading was inconclusive, so the probe ran
-    assert not hr.usage_windows("codex")  # and the five-hour window was not recorded
+    assert outcome["codex"] == "refreshed"
+    assert not native.calls
+    assert [w["name"] for w in hr.usage_windows("codex")] == ["five_hour"]
     assert not hr.usage_gate("codex", now_wall=NOW).allowed
 
 

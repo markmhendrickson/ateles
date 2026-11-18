@@ -154,6 +154,10 @@ class LensRecord:
     cleared: bool  # an explicit clear (sign_off_is_warranted), nothing else
     verdict: str = ""  # the lens's own verdict token, "" when unreadable
     url: str = ""
+    created_at: str = ""  # GitHub comment creation time, for round ordering
+    blocking: bool = False  # includes unreadable verdicts and [BLOCKING] findings
+    comment_id: object = None  # GitHub creation order when timestamps tie
+    source_order: int | None = None  # stable order from the fetched comment list
 
 
 def carry_candidate(
@@ -168,12 +172,18 @@ def carry_candidate(
     """
     if not records:
         return None
-    last = records[-1]
+    # A cap override never authorizes a carry whose latest verdict is unknown.
+    import review_rounds
+
+    ordered, order_known = review_rounds.order_lens_records(records)
+    if not order_known:
+        return None
+    last = ordered[-1]
     if last.head == current_head:
         return None
     # Every verdict at that head must be a clear: `last` itself, and any earlier
     # comment the lens wrote there (a block it later re-posted a clear over).
-    if any(r.head == last.head and not r.cleared for r in records):
+    if any(r.head == last.head and not r.cleared for r in ordered):
         return None
     return last
 

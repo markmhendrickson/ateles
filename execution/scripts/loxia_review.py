@@ -178,7 +178,9 @@ def call_review(prompt: str, *, role: str) -> str:
         sys.path.insert(0, str(daemon_dir))
     from skill_runner import run_review_prompt
 
-    result = asyncio.run(run_review_prompt(role=role, prompt=prompt))
+    result = asyncio.run(run_review_prompt(
+        role=role, prompt=prompt, pr=f"{REPO}#{PR_NUMBER}",
+    ))
     print(f"[{role}] provider={result.provider or 'none'}; attempts={','.join(result.attempted_providers) or 'none'}")
     if not result.ok or not result.stdout.strip():
         retry_at = getattr(result, "cooled_until", "")
@@ -232,19 +234,13 @@ def find_existing_review_comment(marker: str) -> int | None:
 
 
 def post_github_comment(body: str, marker: str | None = None) -> None:
-    """Upsert a review comment on the PR: when `marker` is supplied and a prior
-    comment carries it, update that comment in place; otherwise post fresh."""
+    """Post a fresh legacy review record; these comments have no head pin."""
     if not GITHUB_TOKEN or not PR_NUMBER or not REPO:
         print("[loxia] Cannot post comment — missing GITHUB_TOKEN/PR_NUMBER/REPO")
         return
 
-    existing_id = find_existing_review_comment(marker) if marker else None
-    if existing_id is not None:
-        url = f"{GITHUB_API_URL}/repos/{REPO}/issues/comments/{existing_id}"
-        method, action = "PATCH", "updated"
-    else:
-        url = f"{GITHUB_API_URL}/repos/{REPO}/issues/{PR_NUMBER}/comments"
-        method, action = "POST", "posted"
+    url = f"{GITHUB_API_URL}/repos/{REPO}/issues/{PR_NUMBER}/comments"
+    method, action = "POST", "posted"
 
     req = urllib.request.Request(
         url,
@@ -574,6 +570,16 @@ def run_reviewer(
 
 
 def main() -> None:
+    daemon_dir = Path(__file__).resolve().parents[1] / "daemons" / "apis"
+    if str(daemon_dir) not in sys.path:
+        sys.path.insert(0, str(daemon_dir))
+    import model_tiering
+
+    run_id = os.environ.get("GITHUB_RUN_ID", "unknown-run")
+    attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "1")
+    model_tiering.set_process_caller(
+        "daemon", f"loxia {REPO}#{PR_NUMBER} run {run_id}/{attempt}"
+    )
     if not PR_NUMBER:
         print("[loxia] LOXIA_PR_NUMBER not set — nothing to review", file=sys.stderr)
         sys.exit(1)

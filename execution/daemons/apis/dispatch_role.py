@@ -278,8 +278,18 @@ async def dispatch(
     runner: str | None = None,
     repository: str = "",
     expected_role_fingerprint: str | None = None,
+    caller: str | None = None,
+    caller_kind: str | None = None,
+    pr: object = None,
 ) -> SkillResult:
     """Dispatch one piece of work to a named role via the harness router.
+
+    ``caller`` / ``caller_kind`` / ``pr`` (provider spend attribution,
+    ent_e5259618cae6cafd4be120e0): forwarded to ``run_skill``, which records
+    them with ``task_entity_id`` on every tier-ledger row this dispatch writes.
+    Any left ``None`` falls back to the process's declared caller and then
+    ``ATELES_DISPATCH_SESSION_ID``; whatever is still unknown is recorded as
+    ``null``.
 
     ``runner`` / ``repository`` (ateles#1456): ``runner="fly"`` forces the
     run onto a Fly Machine holding only this job's credentials (refused, with
@@ -374,6 +384,9 @@ async def dispatch(
         escalation_signals=escalation_signals,
         model=model,
         expected_role_fingerprint=expected_role_fingerprint,
+        caller=caller,
+        caller_kind=caller_kind,
+        pr=pr,
     )
     if runner is not None:
         run_kwargs["runner"] = runner
@@ -853,6 +866,33 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--caller",
+        default=None,
+        help=(
+            "Who is launching this dispatch, recorded on its tier-ledger rows: "
+            "the interactive session id, or a daemon's name. Defaults to "
+            f"${model_tiering.SESSION_ID_ENV} when set; otherwise recorded as null."
+        ),
+    )
+    parser.add_argument(
+        "--caller-kind",
+        choices=list(model_tiering.CALLER_KINDS),
+        default=model_tiering.CALLER_KIND_INTERACTIVE,
+        help=(
+            "Kind of caller recorded on the tier-ledger rows (default "
+            "'interactive': this CLI is the interactive dispatch entrypoint; "
+            "a daemon shelling out to it passes 'daemon' with --caller)."
+        ),
+    )
+    parser.add_argument(
+        "--pr",
+        default=None,
+        help=(
+            "Pull request this dispatch serves (a number, or owner/repo#N), "
+            "recorded on its tier-ledger rows. Optional."
+        ),
+    )
+    parser.add_argument(
         "--github-delivery",
         action="store_true",
         help=(
@@ -1099,6 +1139,9 @@ def main(argv: list[str] | None = None) -> int:
                 regenerate_commands=args.regenerate_cmd,
                 runner=args.runner,
                 repository=args.repository,
+                caller=args.caller,
+                caller_kind=args.caller_kind,
+                pr=args.pr,
             )
         )
     except BaseException as exc:  # noqa: BLE001 — see above

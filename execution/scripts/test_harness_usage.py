@@ -45,6 +45,24 @@ def test_usage_command_makes_selection_use_live_headroom(capsys) -> None:
     assert harness_router.configured_headroom()["claude"] == pytest.approx(0.92)
 
 
+def test_show_keeps_valid_window_visible_from_incomplete_snapshot(capsys, tmp_path) -> None:
+    path = tmp_path / "usage.json"
+    reset = harness_router._iso_from_wall(time.time() + 86400)
+    path.write_text(json.dumps({"claude": {
+        "observed_at": harness_router._iso_from_wall(time.time()),
+        "windows": [
+            {"name": "five_hour", "used_percent": 80, "resets_at": reset},
+            {"name": "weekly_all", "used_percent": "invalid", "resets_at": reset},
+        ],
+    }}))
+    assert harness_usage.main(["show"]) == 0
+    shown = json.loads(capsys.readouterr().out)["claude"]
+    assert [window["name"] for window in shown["windows"]] == ["five_hour"]
+    assert shown["unreadable_windows"] == 1
+    assert shown["reading"]["state"] == harness_router.READING_UNKNOWN
+    assert shown["live"] is None
+
+
 def test_exhausted_command_holds_provider_out(capsys) -> None:
     until = harness_router._iso_from_wall(time.time() + 3 * 86400)
     assert harness_usage.main(["exhausted", "codex", "--until", until]) == 0
@@ -87,6 +105,30 @@ def test_tiers_command_on_a_missing_ledger_is_an_empty_report(capsys, monkeypatc
     monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(tmp_path / "absent.jsonl"))
     assert harness_usage.main(["tiers"]) == 0
     assert json.loads(capsys.readouterr().out)["total"] == 0
+
+
+@pytest.mark.parametrize("kind", ["invalid", "mixed"])
+def test_spend_and_tiers_cli_report_partial_ledger(capsys, monkeypatch, tmp_path, kind) -> None:
+    from datetime import datetime, timezone
+    import model_tiering
+
+    path = tmp_path / "ledger.jsonl"
+    monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(path))
+    good = {"ts": datetime.now(timezone.utc).isoformat(), "event": "usage",
+            "tier": "top", "provider": "codex", "total_tokens": 12}
+    lines = ["{broken"] if kind == "invalid" else [json.dumps(good), "{broken"]
+    path.write_text("\n".join(lines) + "\n")
+    for command in ("spend", "tiers"):
+        assert harness_usage.main([command]) == 0
+        report = json.loads(capsys.readouterr().out)
+        assert report["unreadable_rows"] == 1
+        assert report["attribution_available"] is (kind == "mixed")
+        if command == "spend":
+            assert report["rows"] == int(kind == "mixed")
+    assert model_tiering.main(["--summary", "--since-hours", "0"]) == 0
+    text = capsys.readouterr().out
+    assert ("attribution unavailable" in text) is (kind == "invalid")
+    assert ("totals are incomplete" in text) is (kind == "mixed")
 
 
 def test_show_surfaces_a_spent_session_window(capsys) -> None:

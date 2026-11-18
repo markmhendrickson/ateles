@@ -641,7 +641,7 @@ def _github(monkeypatch, files, *, scope=REAL_SCOPE, scope_status=200, scope_rai
                 content = base64.b64encode((scope or "").encode()).decode()
                 return _Resp(scope_status, {"type": "file", "encoding": "base64", "content": content})
             if url.endswith(f"/pulls/{PR_NUMBER}/files"):
-                return _Resp(200, [{"filename": f} for f in files])
+                return _Resp(200, [{"filename": f, "status": "modified"} for f in files])
             if url.endswith(f"/repos/{REPO}"):
                 return _Resp(200, {"default_branch": "main"})
             return _Resp(404, {})
@@ -752,11 +752,11 @@ def _lens_comment(lens, verdict="**SIGNED_OFF**"):
         f"{sd.attribution_header(agent, f'{lens} lens panelist')}\n{verdict}\n\nlooks fine"
     )
     return {"id": hash(lens) & 0xFFFF, "created_at": "2026-11-06T00:00:01Z",
-            "user": {"login": "ateles-agent"}, "body": reply}
+            "user": {"login": "ateles-agent", "type": "User"}, "body": reply}
 
 
 def _aggregation():
-    return {"id": 999, "created_at": "2026-11-06T00:00:09Z", "user": {"login": "ateles-agent"},
+    return {"id": 999, "created_at": "2026-11-06T00:00:09Z", "user": {"login": "ateles-agent", "type": "User"},
             "body": (f"<!-- vanellus-aggregation commit={HEAD} -->\n"
                      "**🤖 Vanellus — Ateles swarm, PR steward**\n**APPROVE**\n\nBlocking: 0")}
 
@@ -792,7 +792,7 @@ def test_the_missing_lens_sweep_reseats_a_required_lens_the_panel_never_had(monk
     d = _dispatcher()
     comments = [_lens_comment("pm"), _lens_comment("qa"), _aggregation()]
     pr = {"number": PR_NUMBER, "draft": False, "head": {"sha": HEAD, "ref": "f"},
-          "base": {"ref": "main"}, "title": "t", "user": {"login": "x"}}
+          "base": {"ref": "main"}, "title": "t", "user": {"login": "x", "type": "User"}}
 
     class _ListClient:
         def __init__(self, **k):
@@ -842,7 +842,7 @@ def test_apis_posted_verdicts_read_as_clear_in_the_approval_tool(lens, path):
         body = sd.verified_remote_comment(lens, agent, review, HEAD)
         assert body is not None
     comment = {"id": 1, "created_at": "2026-11-06T00:00:01Z",
-               "user": {"login": "ateles-agent"}, "body": body, "html_url": "u"}
+               "user": {"login": "ateles-agent", "type": "User"}, "body": body, "html_url": "u"}
     outcome = asyncio.run(tool.evaluate_lens(
         None, repo=REPO, pr=PR_NUMBER, head_sha=HEAD, comments=[comment],
         lens=lens, authors=frozenset({"ateles-agent"}),
@@ -859,7 +859,7 @@ def test_a_fallback_for_an_unreadable_reply_still_reads_as_no_verdict():
     import approve_pr_as_app as tool
 
     body = sd.compose_fallback_comment("arch", "waxwing", "Looks fine to me. **SIGNED_OFF**", HEAD)
-    comment = {"id": 1, "created_at": "x", "user": {"login": "ateles-agent"}, "body": body}
+    comment = {"id": 1, "created_at": "x", "user": {"login": "ateles-agent", "type": "User"}, "body": body}
     outcome = asyncio.run(tool.evaluate_lens(
         None, repo=REPO, pr=PR_NUMBER, head_sha=HEAD, comments=[comment],
         lens="arch", authors=frozenset({"ateles-agent"}),
@@ -911,7 +911,7 @@ def _scripted_client(files, *, scope=REAL_SCOPE, issue_comments=(), open_prs=())
                 content = base64.b64encode(scope.encode()).decode()
                 return _Resp(200, {"type": "file", "encoding": "base64", "content": content})
             if url.endswith(f"/pulls/{PR_NUMBER}/files"):
-                return _Resp(200, [{"filename": f} for f in files])
+                return _Resp(200, [{"filename": f, "status": "modified"} for f in files])
             if url.endswith(f"/issues/{PARENT}/comments"):
                 return _Resp(200, [{"body": b} for b in issue_comments])
             if url.endswith(f"/repos/{REPO}/pulls"):
@@ -1036,7 +1036,7 @@ def test_core_verdicts_without_legal_are_not_finished_and_recovery_seats_legal(
     # verdicts read as a finished panel and the sweep found nothing to re-run.
     comments = [_lens_comment(lens) for lens in sorted(FULL)]
     pr = {"number": PR_NUMBER, "draft": False, "head": {"sha": HEAD, "ref": "f"},
-          "base": {"ref": "main"}, "title": "t", "user": {"login": "x"}, "body": ""}
+          "base": {"ref": "main"}, "title": "t", "user": {"login": "x", "type": "User"}, "body": ""}
     _script_apis(monkeypatch, ["LICENSE"], open_prs=[pr])
     d = _dispatcher(panel_max=3)
     state = {"comments": comments}

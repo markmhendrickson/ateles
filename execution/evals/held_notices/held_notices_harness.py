@@ -34,8 +34,8 @@ _HOOK_MUTATIONS = {
         '({parts}) " + " ".join(_load_held_view().actionable_items()) + ". In your "',
     ),
     "hook_keys_on_total": (
-        'fingerprint = str(info["fingerprint"])',
-        'fingerprint = str(info["total"])',
+        'fingerprint = (str(info["fingerprint"]) + ":" +',
+        'fingerprint = (str(info["total"]) + ":" +',
     ),
 }
 
@@ -68,10 +68,10 @@ def _daemon(qdir: Path, armed: bool, silent: bool, now: float, mutation):
     if mutation in ("shared_queue", "shared_queue_no_budget"):
         # The old design: one queue, whoever drains it may email it.
         orig = n._queue_digest
-        n._queue_digest = lambda m, email_eligible=True: orig(m, True)
+        n._queue_digest = lambda m, email_eligible=True, *rest, **kw: orig(m, True, *rest, **kw)
     if mutation == "ignore_email_eligible":
         orig = n._queue_digest
-        n._queue_digest = lambda m, email_eligible=True: orig(m, True)
+        n._queue_digest = lambda m, email_eligible=True, *rest, **kw: orig(m, True, *rest, **kw)
     return n
 
 

@@ -78,6 +78,7 @@ from foundation import (  # noqa: E402
 )
 import local_provider  # noqa: E402
 import model_tiering  # noqa: E402
+import usage_alerts  # noqa: E402
 import fly_runner  # noqa: E402
 from harness_router import (  # noqa: E402
     FRONTIER_PROVIDERS,
@@ -1384,6 +1385,7 @@ def _write_harness_event(
     tool_name: str,
     success: str,
     agent_session_id: str = "",
+    dispatch_id: str = "",
     input_summary: str = "",
     output_summary: str = "",
     duration_ms: int | None = None,
@@ -1393,6 +1395,12 @@ def _write_harness_event(
 ) -> None:
     """
     Best-effort write of a harness_event entity to Neotoma.
+
+    The schema's identity is ``session_id`` + ``event_type`` + ``event_at``,
+    so every row carries all three. ``session_id`` is the agent session when
+    there is one, else ``dispatch:<dispatch_id>`` — the dispatch's own id
+    (``model_tiering.new_dispatch_id``), minted here when a caller passed none.
+    Without it, session-less dispatch events resolved to one shared entity.
 
     ``event_at`` is when the event happened. A caller that writes later than
     that (the paced audit queue) passes the time it captured; without one the
@@ -1433,8 +1441,8 @@ def _write_harness_event(
 
     event_at = event_at or datetime.now(timezone.utc).isoformat()
     # canonical_name_fields per schema: session_id, event_type, event_at.
-    session_key = agent_session_id or f"{role}:{task_entity_id}"
-    idempotency_key = f"harness-event-{session_key}-{event_type}-{event_at}"
+    session_id = agent_session_id or f"dispatch:{dispatch_id or model_tiering.new_dispatch_id()}"
+    idempotency_key = f"harness-event-{session_id}-{event_type}-{event_at}"
 
     entity: dict = {
         "entity_type": "harness_event",
@@ -1444,9 +1452,8 @@ def _write_harness_event(
         "agent_sub": agent_sub,
         "success": success,
         "task_entity_id": task_entity_id,
+        "session_id": session_id,
     }
-    if agent_session_id:
-        entity["session_id"] = agent_session_id
     if input_summary:
         entity["input_summary"] = input_summary[:500]
     if resolved_tier is not None:
@@ -1534,12 +1541,13 @@ def _write_harness_event(
                 snapshot = snapshot["snapshot"]
             expected = {
                 "task_entity_id": task_entity_id,
-                **({"session_id": agent_session_id} if agent_session_id else {}),
+                "session_id": session_id,
             }
             if any(snapshot.get(field) != value for field, value in expected.items()):
                 log.warning(
                     "[apis] harness_event readback mismatch "
-                    f"(entity_id={event_id}, task_entity_id={task_entity_id})"
+                    f"(entity_id={event_id}, task_entity_id={task_entity_id}, "
+                    f"session_id={session_id})"
                 )
             relationships_req = urllib.request.Request(
                 f"{base_url}/entities/{event_id}/relationships", method="GET",
@@ -1574,12 +1582,16 @@ async def _emit_harness_event(**fields) -> None:
     ``asyncio.to_thread`` call it replaces did. ``fields`` are captured now,
     and ``event_at`` is stamped now unless the caller already set it, so a
     queued row records the moment of the event, not the moment of its write
-    (``event_at`` is also part of the row's idempotency key).
+    (``event_at`` is also part of the row's idempotency key). A row with no
+    agent session gets its ``dispatch_id`` here too when the caller has none,
+    so the queued write and any retry of it keep one identity.
     """
     fields = {
         **fields,
         "event_at": fields.get("event_at") or datetime.now(timezone.utc).isoformat(),
     }
+    if not fields.get("agent_session_id") and not fields.get("dispatch_id"):
+        fields["dispatch_id"] = model_tiering.new_dispatch_id()
     await audit_queue.emit(
         lambda: asyncio.to_thread(_write_harness_event, **fields),
         label=(
@@ -3264,6 +3276,10 @@ async def _run_skill_once(
     """
     model = model_tiering.validate_model_selector(model)
     _role = (role or skill).lower()
+    # One id per dispatch attempt: it ties the tier ledger's start row to its
+    # spend row, and it is the harness_event session_id when the dispatch has
+    # no agent session, so each attempt's audit rows form their own record.
+    _ledger_dispatch_id = model_tiering.new_dispatch_id()
     # Whether the caller supplied a timeout is kept: a Fly job resolves its
     # own timeout once it is bound for Fly (APIS_FLY_DISPATCH_TIMEOUT), and a
     # local run, including a fallback from Fly, uses the shared one.
@@ -3396,6 +3412,7 @@ async def _run_skill_once(
                 await _emit_harness_event(
                     task_entity_id=task_entity_id,
                     agent_session_id=agent_session_id,
+                    dispatch_id=_ledger_dispatch_id,
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
@@ -3601,6 +3618,7 @@ async def _run_skill_once(
             await _emit_harness_event(
                 task_entity_id=task_entity_id,
                 agent_session_id=agent_session_id,
+                dispatch_id=_ledger_dispatch_id,
                 role=_role,
                 agent_sub=agent_def.aauth_sub,
                 event_type="subprocess",
@@ -3943,8 +3961,8 @@ async def _run_skill_once(
     # forgot to name an action class shows up here instead of hiding.
     # The id ties this start row to the spend row appended when the dispatch
     # ends (`record_dispatch_usage`), so attribution survives a provider failover
-    # that records one start row per provider tried.
-    _ledger_dispatch_id = model_tiering.new_dispatch_id()
+    # that records one start row per provider tried. The id is minted at the
+    # top of this function.
     log.info(
         f"[apis] {skill} via {provider}: "
         + model_tiering.record_dispatch(
@@ -3952,12 +3970,20 @@ async def _run_skill_once(
             model=resolved_model, dispatch_id=_ledger_dispatch_id,
         )
     )
+    # Alert reads, notifier configuration and transport I/O run independently
+    # of the provider launch. The worker retains the notifier's journal lock
+    # and dedupe handling across concurrent processes.
+    try:
+        usage_alerts.schedule_dispatch_check(provider, notifier=notifier)
+    except Exception as exc:  # noqa: BLE001
+        log.debug(f"[apis] usage threshold check raised (ignored): {exc}")
 
     # ── Stage 2: harness_event at dispatch start ───────────────────────────────
     try:
         await _emit_harness_event(
             task_entity_id=task_entity_id,
             agent_session_id=agent_session_id,
+            dispatch_id=_ledger_dispatch_id,
             role=_role,
             agent_sub=agent_def.aauth_sub,
             event_type="subprocess",
@@ -4144,6 +4170,7 @@ async def _run_skill_once(
                 codex_outer_sandboxed=codex_outer_sandboxed,
                 delivery=fly_delivery,
                 neotoma_tools_granted=bool(allowed_mcp_servers(agent_def.tools)),
+                neotoma_tool_grant=allowed_mcp_servers(agent_def.tools),
                 # A read-only check keeps the local contract but takes the
                 # read-class Fly token: the delivery contract would make
                 # build_job refuse it (no delivery plan) and send it home.
@@ -4392,6 +4419,7 @@ async def _run_skill_once(
                         await _emit_harness_event(
                             task_entity_id=task_entity_id,
                             agent_session_id=agent_session_id,
+                            dispatch_id=_ledger_dispatch_id,
                             role=_role,
                             agent_sub=agent_def.aauth_sub,
                             event_type="subprocess",
@@ -4472,6 +4500,7 @@ async def _run_skill_once(
                 await _emit_harness_event(
                     task_entity_id=task_entity_id,
                     agent_session_id=agent_session_id,
+                    dispatch_id=_ledger_dispatch_id,
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
@@ -4690,6 +4719,7 @@ async def _run_skill_once(
                 await _emit_harness_event(
                     task_entity_id=task_entity_id,
                     agent_session_id=agent_session_id,
+                    dispatch_id=_ledger_dispatch_id,
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
@@ -4733,6 +4763,7 @@ async def _run_skill_once(
                 await _emit_harness_event(
                     task_entity_id=task_entity_id,
                     agent_session_id=agent_session_id,
+                    dispatch_id=_ledger_dispatch_id,
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
@@ -4878,6 +4909,46 @@ def _local_fallback_refusal(provider: str, *, pinned: bool) -> str | None:
     return provider_exclusion_reason(provider, _provider_binaries())
 
 
+def _with_dispatch_attribution(func):
+    """Bind who launched a dispatch (and for which task/PR) around ``run_skill``.
+
+    Adds three optional keyword arguments to ``run_skill`` without touching its
+    body: ``caller`` (a daemon name or interactive session id), ``caller_kind``
+    (``daemon`` / ``interactive``) and ``pr``. With ``task_entity_id`` they are
+    resolved by ``model_tiering.resolve_attribution`` (explicit value, then the
+    process's declared caller, then ``ATELES_DISPATCH_SESSION_ID``) and bound
+    in a context variable for the whole dispatch, so every ledger row the
+    dispatch writes (``record_dispatch`` / ``record_dispatch_usage``, including
+    the one appended from a worker thread) carries them. Unknown fields are
+    written as ``null``. Resolution can never fail a dispatch.
+    """
+    import functools
+
+    @functools.wraps(func)
+    async def wrapper(*args, caller: str | None = None, caller_kind: str | None = None,
+                      pr: object = None, **kwargs):
+        token = None
+        try:
+            token = model_tiering.bind_attribution(
+                model_tiering.resolve_attribution(
+                    caller=caller,
+                    caller_kind=caller_kind,
+                    task_entity_id=kwargs.get("task_entity_id") or "",
+                    pr=pr,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — attribution is reporting only
+            log.warning(f"[apis] dispatch attribution unavailable (non-fatal): {exc}")
+        try:
+            return await func(*args, **kwargs)
+        finally:
+            if token is not None:
+                model_tiering.reset_attribution(token)
+
+    return wrapper
+
+
+@_with_dispatch_attribution
 async def run_skill(
     skill: str,
     prompt: str,
@@ -4913,6 +4984,10 @@ async def run_skill(
     exclude_providers: tuple[str, ...] = (),
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
+
+    Also accepts ``caller``, ``caller_kind`` and ``pr`` (keyword-only), added by
+    ``_with_dispatch_attribution``: who launched this dispatch and for which
+    pull request, recorded with ``task_entity_id`` on every tier-ledger row.
 
     ``agent_git_identity``: True for a fix round (a run that commits and
     pushes to an existing pull request). The child commits as the configured
@@ -5856,7 +5931,7 @@ async def _run_provider_attempts(
 
 
 async def run_review_prompt(
-    *, role: str, prompt: str, timeout: int = 180
+    *, role: str, prompt: str, timeout: int = 180, pr: str | None = None
 ) -> SkillResult:
     """Route an inference-only review without granting any publisher authority.
 
@@ -5904,6 +5979,19 @@ async def run_review_prompt(
     async def attempt(provider: str) -> SkillResult:
         binary = binaries[provider]
         model = model_tiering.validate_model_selector(models[provider].strip())
+        dispatch_id = model_tiering.new_dispatch_id()
+        log.info(
+            "[apis] %s via %s: %s",
+            role, provider,
+            model_tiering.record_dispatch(
+                skill=role, provider=provider, resolved=None, model=model,
+                dispatch_id=dispatch_id,
+            ),
+        )
+        try:
+            usage_alerts.schedule_dispatch_check(provider)
+        except Exception as exc:  # noqa: BLE001 — alerting cannot stop a review
+            log.debug("[apis] review usage alert check failed: %s", exc)
         with tempfile.TemporaryDirectory(prefix="ateles-review-") as workdir:
             if provider == "claude":
                 cmd = [
@@ -6004,6 +6092,15 @@ async def run_review_prompt(
                     error=f"{provider} launch failed: {exc}",
                     provider=provider,
                 )
+            model_tiering.record_dispatch_usage(
+                dispatch_id=dispatch_id, skill=role, provider=provider,
+                resolved=None, requested_model=model,
+                usage=parse_dispatch_usage(
+                    provider, result.stdout, requested_model=model,
+                    stderr=result.stderr,
+                ),
+                ok=result.ok,
+            )
             try:
                 await _emit_harness_event(
                     task_entity_id="",
@@ -6020,10 +6117,19 @@ async def run_review_prompt(
                 log.debug("[apis] review attempt attribution unavailable: %s", exc)
             return result
 
-    return await _run_provider_attempts(
-        role,
-        attempt,
-        binaries=binaries,
-        role=role,
-        retry_safe=True,
-    )
+    process_kind, process_name = model_tiering.process_caller()
+    token = model_tiering.bind_attribution(model_tiering.resolve_attribution(
+        caller=process_name or role,
+        caller_kind=process_kind or model_tiering.CALLER_KIND_DAEMON,
+        pr=pr,
+    ))
+    try:
+        return await _run_provider_attempts(
+            role,
+            attempt,
+            binaries=binaries,
+            role=role,
+            retry_safe=True,
+        )
+    finally:
+        model_tiering.reset_attribution(token)

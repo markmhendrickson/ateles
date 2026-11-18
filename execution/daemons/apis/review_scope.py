@@ -409,6 +409,30 @@ def file_list_problem(rows_seen: int, expected: object) -> str:
     return ""
 
 
+def file_row_paths(row: object) -> list[str]:
+    """Validate one GitHub file row and return every path it touches."""
+    if not isinstance(row, dict):
+        raise ValueError("file row is not an object")
+
+    def path(value: object, field: str) -> str:
+        if not isinstance(value, str) or not value or value != value.strip():
+            raise ValueError(f"file row has an invalid {field}")
+        return value
+
+    filename = path(row.get("filename"), "filename")
+    status = row.get("status")
+    if not isinstance(status, str) or status not in {
+        "added", "removed", "modified", "renamed", "copied", "changed", "unchanged"
+    }:
+        raise ValueError("file row has an invalid status")
+    previous = row.get("previous_filename")
+    if status in {"renamed", "copied"} and previous is None:
+        raise ValueError("renamed or copied file row has no previous_filename")
+    if previous is None:
+        return [filename]
+    return [filename, path(previous, "previous_filename")]
+
+
 def decide_path_panel(
     changed_files: Sequence[str],
     load: ScopeLoad,
@@ -490,14 +514,14 @@ async def fetch_pr_files(
             params={"per_page": 100, "page": page},
         )
         resp.raise_for_status()
-        rows = resp.json() or []
+        rows = resp.json()
+        if not isinstance(rows, list):
+            raise ValueError("PR files response is not a list")
         rows_seen += len(rows)
-        for f in rows:
-            name = f.get("filename", "")
-            out.append(name)
-            previous = f.get("previous_filename")
-            if isinstance(previous, str) and previous and previous not in out:
-                out.append(previous)
+        for row in rows:
+            for path in file_row_paths(row):
+                if path not in out:
+                    out.append(path)
         if len(rows) < 100:
             break
         page += 1

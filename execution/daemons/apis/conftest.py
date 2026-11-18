@@ -119,7 +119,9 @@ def _isolate_lens_comment_identities(monkeypatch):
         lens_authors, "_REAL_APP_BOT_LOGINS", lens_authors._app_bot_logins, raising=False
     )
     monkeypatch.setattr(lens_authors, "_app_bot_logins", lambda: (set(), False))
-    monkeypatch.setattr(lens_authors, "_login_for_token", lambda token: "")
+    # The synthetic write credential below belongs to this same synthetic
+    # account. A failed lookup would make the identity history partial.
+    monkeypatch.setattr(lens_authors, "_login_for_token", lambda token: "swarm-lens-account")
     lens_authors.clear_cache()
 
 
@@ -334,3 +336,25 @@ def _ownership_recheck_is_off(monkeypatch):
 
     monkeypatch.setattr(apis, "_OWNERSHIP_RECHECK_ENABLED", False)
     monkeypatch.setattr(apis, "_ownership_rechecks", {})
+
+
+@pytest.fixture(autouse=True)
+def _usage_alerts_never_build_a_networked_notifier(monkeypatch):
+    """Usage threshold alerts run on every dispatch and usage refresh. Their
+    default sending notifier is ``Notifier.from_neotoma`` (a rubric fetch);
+    a test that does not target alerts gets a plain, transport-less
+    ``Notifier()`` instead. Alert tests inject their own notifier."""
+    import usage_alerts
+    from lib.notify import Notifier
+
+    monkeypatch.setattr(usage_alerts, "_default_notifier_factory", Notifier)
+
+
+@pytest.fixture(autouse=True)
+def _usage_alert_backoff_starts_empty():
+    """The alert retry backoff is process-local; never carry it between tests."""
+    import usage_alerts
+
+    usage_alerts._retry_after.clear()
+    yield
+    usage_alerts._retry_after.clear()

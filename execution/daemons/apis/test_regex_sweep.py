@@ -533,11 +533,16 @@ SEEDS = {
     "swarm_dispatch._LEADING_REVIEW_MARKER_RE": [
         "<!-- review:pm commit=0123456789abcdef0123456789abcdef01234567 -->"
     ],
-    "swarm_dispatch._LENS_MARKER_RE": [
+    "lens_authors._HEAD_VERDICT_RE": [
         "<!-- review:pm commit=0123456789abcdef0123456789abcdef01234567 -->"
     ],
-    "swarm_dispatch._LENS_SUPERSEDED_RE": [
+    "lens_authors._ANY_RETIRED_VERDICT_RE": [
         "<!-- review:pm-superseded by=0123456789abcdef0123456789abcdef01234567 -->"
+    ],
+    "lens_authors._POSTER_RETIREMENT_RE": [
+        "> ⚠️ Superseded by commit `0123456` — this verdict no longer reflects "
+        "the current head. See the latest review below.\n"
+        "<!-- review:pm-superseded by=0123456789abcdef0123456789abcdef01234567 -->\n\n"
     ],
     "swarm_dispatch._AGGREGATION_MARKER_RE": [
         "<!-- vanellus-aggregation commit=0123456789abcdef0123456789abcdef01234567 -->"
@@ -902,7 +907,7 @@ def _entry_points():
         comment = {
             "id": 1,
             "body": body,
-            "user": {"login": OTHER_LOGIN},
+            "user": {"login": OTHER_LOGIN, "type": "Bot" if str(OTHER_LOGIN).endswith("[bot]") else "User"},
             "html_url": "https://github.com/o/r/pull/1#issuecomment-1",
         }
         return approve_pr_as_app.find_unadmitted_objections(

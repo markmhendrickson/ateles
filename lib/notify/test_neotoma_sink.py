@@ -36,6 +36,27 @@ def _read(prefix: str) -> list[dict]:
     return rows
 
 
+@pytest.mark.parametrize("kind", ["missing", "valid", "mixed", "invalid"])
+def test_sink_summary_reports_unreadable_rows_without_losing_valid_rows(tmp_path, kind):
+    from datetime import datetime
+
+    day = datetime.now().strftime("%Y%m%d")
+    path = tmp_path / f"shadow-{day}.jsonl"
+    valid = {"kind": "store", "title": "synthetic", "level": "warn",
+             "daemon": "apis"}
+    lines = ([] if kind == "missing" else
+             [json.dumps(valid)] if kind == "valid" else
+             [json.dumps(valid), "{broken"] if kind == "mixed" else ["{broken"])
+    if lines:
+        path.write_text("\n".join(lines) + "\n")
+    summary = sink.summarize(directory=tmp_path)
+    assert len(summary["rows"]) == int(kind in ("valid", "mixed"))
+    assert summary["unreadable_rows"] == int(kind in ("mixed", "invalid"))
+    text = sink._format_summary(summary)
+    assert ("incomplete:" in text) is (kind in ("mixed", "invalid"))
+    assert ("sink records unavailable" in text) is (kind == "invalid")
+
+
 class FakeHttp:
     """Fake transport; replays the old result for a repeated idempotency key."""
 
@@ -200,6 +221,97 @@ def test_clear_dedupe_resolves_the_stored_entity(on):
         ("resolved_at", corrections[1]["value"]),
     ]
     assert all(c["entity_id"] == "ent_fake1" for c in corrections)
+
+
+def test_new_usage_reset_clears_old_journal_key_and_resolves_sink(on, monkeypatch, tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    apis_dir = _REPO_ROOT / "execution" / "daemons" / "apis"
+    if str(apis_dir) not in sys.path:
+        sys.path.insert(0, str(apis_dir))
+    import usage_alerts
+
+    usage_file = tmp_path / "usage.json"
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(usage_file))
+    notifier = Notifier(rubric=NO_SILENCE)
+    monkeypatch.setattr(notifier, "_deliver", lambda *args, **kwargs: True)
+
+    def reading(reset):
+        usage_file.write_text(json.dumps({"codex": {"windows": [{
+            "name": "weekly_all", "used_percent": 60,
+            "resets_at": reset.isoformat(),
+        }]}}))
+
+    first_reset = datetime.now(timezone.utc) + timedelta(days=2)
+    reading(first_reset)
+    old_key = usage_alerts.check_usage_thresholds("codex", notifier=notifier)[0]
+    sink.flush()
+    assert notifier.is_dedupe_open(old_key)
+    assert len(on.stores()) == 1
+
+    reading(first_reset + timedelta(days=7))
+    new_key = usage_alerts.check_usage_thresholds(
+        "codex", notifier=notifier, now=first_reset + timedelta(seconds=1))[0]
+    sink.flush()
+    assert new_key != old_key
+    assert not notifier.is_dedupe_open(old_key)
+    assert notifier.is_dedupe_open(new_key)
+    assert [c["field"] for c in on.corrections()] == ["status", "resolved_at"]
+    assert on.corrections()[0]["entity_id"] == "ent_fake1"
+    assert on.corrections()[0]["value"] == "resolved"
+
+
+def test_reset_spelling_migrates_open_sink_alert_without_a_new_send(
+    on, monkeypatch, tmp_path
+):
+    from datetime import datetime, timedelta, timezone
+    import sys
+    apis_dir = Path(__file__).resolve().parents[2] / "execution" / "daemons" / "apis"
+    if str(apis_dir) not in sys.path:
+        sys.path.insert(0, str(apis_dir))
+    import usage_alerts
+
+    usage_file = tmp_path / "usage.json"
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(usage_file))
+    notifier = Notifier(rubric=NO_SILENCE)
+    sends = []
+
+    def transport(*args, **kwargs):
+        sends.append(args[0])
+        return True
+
+    monkeypatch.setattr(notifier, "_deliver", transport)
+    reset = datetime.now(timezone.utc) + timedelta(days=2)
+    old_spelling = reset.astimezone(timezone(timedelta(hours=1))).isoformat()
+    canonical = reset.isoformat(timespec="seconds")
+    old_key = f"{usage_alerts.DEDUPE_PREFIX}:codex:weekly_all:{old_spelling}:50"
+    assert notifier.send("usage crossed", Priority.WARN, handler="apis", dedupe_key=old_key)
+    sink.flush()
+    assert len(on.stores()) == 1
+
+    def reading(value):
+        usage_file.write_text(json.dumps({"codex": {"windows": [{
+            "name": "weekly_all", "used_percent": 60, "resets_at": value,
+        }]}}))
+
+    reading(canonical)
+    assert usage_alerts.check_usage_thresholds("codex", notifier=notifier) == []
+    new_key = usage_alerts.dedupe_key("codex", "weekly_all", canonical, 50)
+    assert notifier.is_dedupe_open(old_key)  # stale spelling stays suppressed
+    assert notifier.is_dedupe_open(new_key)
+    assert len(sends) == 1
+    sink.flush()
+    assert on.corrections() == []
+    assert len(on.stores()) == 1
+
+    reading((reset + timedelta(days=7)).isoformat())
+    assert len(usage_alerts.check_usage_thresholds(
+        "codex", notifier=notifier, now=reset + timedelta(seconds=1))) == 1
+    assert not notifier.is_dedupe_open(old_key)
+    sink.flush()
+    assert len(sends) == 2
+    assert on.corrections()[0]["entity_id"] == "ent_fake1"
+    assert on.corrections()[0]["value"] == "resolved"
 
 
 def test_clear_dedupe_after_a_restart_still_resolves(on):

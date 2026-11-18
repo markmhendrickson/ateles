@@ -351,3 +351,49 @@ def test_timed_pass_text_is_screened_like_the_first_pass(tmp_path, monkeypatch):
     assert "segments" not in result
     assert result["diarization"]["note"] == "speaker turns could not be attached"
     assert result["transcription_text"] == "Hello there. Hello there."
+
+
+_REPEAT_PHRASE = "same thing again"
+_REPEAT_DIAR = {"status": "ok", "method": "FluidAudio offline", "cli_build": None,
+                "compute_units": "cpu-only", "speaker_count": 2,
+                "segments": [{"start": 0, "end": 8, "speaker": "S1"},
+                             {"start": 8, "end": 9, "speaker": "S2"}]}
+
+
+def _repeat_segments():
+    return [{"start": float(i), "end": float(i + 1), "text": _REPEAT_PHRASE} for i in range(8)]
+
+
+def test_short_memo_attribution_keeps_every_repeated_segment():
+    """Short single-pass memos are not repeat-collapsed: all eight stay."""
+    turns = lf.attribute_segments(_repeat_segments(), _REPEAT_DIAR)
+    assert [t["text"] for t in turns] == [" ".join([_REPEAT_PHRASE] * 8)]
+    assert "[…]" not in turns[0]["text"]
+
+
+def test_short_multi_speaker_memo_transcript_keeps_all_eight_repeats(tmp_path):
+    audio = _mono_audio(tmp_path)
+    with patch.object(ta, "get_audio_channel_count", return_value=1), \
+         patch.object(ta, "get_audio_duration", return_value=9.0), \
+         patch.object(ta, "transcribe_local",
+                      return_value=_local_result(diarization=_REPEAT_DIAR,
+                                                 segments=_repeat_segments())):
+        result = ta.transcribe_audio_file(audio)
+    assert result["transcription_text"].count(_REPEAT_PHRASE) == 8
+    assert "[…]" not in result["transcription_text"]
+
+
+def test_long_chunked_memo_transcript_still_collapses_repeats(tmp_path):
+    audio = _mono_audio(tmp_path)
+    raw = {"chunks": [{"kind": "chunk", "index": 0, "start": 0.0, "end": 120.0,
+                       "status": "ok"}]}
+    with patch.object(ta, "get_audio_channel_count", return_value=1), \
+         patch.object(ta, "get_audio_duration", return_value=130.0), \
+         patch.object(ta, "transcribe_local",
+                      return_value=_local_result(diarization=_REPEAT_DIAR,
+                                                 segments=_repeat_segments(),
+                                                 raw_response=raw)):
+        result = ta.transcribe_audio_file(audio)
+    text = result["transcription_text"]
+    assert text.count(_REPEAT_PHRASE) == 2
+    assert "[…]" in text

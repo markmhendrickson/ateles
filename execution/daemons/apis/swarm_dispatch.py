@@ -108,6 +108,7 @@ import lens_receipts
 import model_tiering
 import panel_check_gate
 import review_carry
+import review_rounds
 import review_delta
 import review_scope
 import skill_runner
@@ -2635,9 +2636,13 @@ def lens_comment_authors_resolution() -> lens_authors.Resolution:
 
 
 def lens_comment_authors() -> frozenset[str]:
-    """`lens_comment_authors_resolution().authors`; empty means no comment is
-    read as a lens verdict."""
-    return lens_comment_authors_resolution().authors
+    """Admitted authors only when every configured source resolved.
+
+    Call `lens_comment_authors_resolution` where the reason for a failure is
+    needed. A partial set must never shrink historical verdicts silently.
+    """
+    resolution = lens_comment_authors_resolution()
+    return resolution.authors if resolution.complete else frozenset()
 
 
 def lens_explicit_objection(body: str, *, lens_agent: str) -> str | None:
@@ -3124,19 +3129,77 @@ _AGGREGATION_SUPERSEDED_RE = re.compile(
     r"<!--\s*vanellus-aggregation-superseded\s+by=(?P<sha>[0-9a-f]{40})\s*-->",
     re.IGNORECASE,
 )
-_LENS_MARKER_RE = re.compile(
-    r"<!--\s*review:(?P<lens>[a-z0-9_-]+)\s+commit=(?P<sha>[0-9a-f]{40})\s*-->",
-    re.IGNORECASE,
-)
-_LENS_SUPERSEDED_RE = re.compile(
-    r"<!--\s*review:(?P<lens>[a-z0-9_-]+)-superseded\s+"
-    r"by=(?P<sha>[0-9a-f]{40})\s*-->", re.IGNORECASE,
-)
 
 
 def _normalise_full_sha(value: str) -> str:
     sha = (value or "").strip().lower()
     return sha if _FULL_SHA_RE.fullmatch(sha) else ""
+
+
+# Check-run conclusions that make a head's CI "failing".
+_FAILING_CHECK_CONCLUSIONS = ("failure", "timed_out", "cancelled", "action_required")
+
+# Checks that read only the PR BODY, never the code: no push can fix them, and
+# editing the body re-runs them. A head whose only failures are these is not a
+# CI-fix round. Names are the check-run names GitHub reports (the job `name:`).
+PR_BODY_ONLY_CHECKS = frozenset({"design basis line"})
+
+# `_required_ci_state` value for a head whose only failing checks are in
+# PR_BODY_ONLY_CHECKS. Not "green" (merge still holds) and not "failing" (no
+# fix round is routed).
+CI_STATE_PR_BODY_ONLY = "failing_pr_body_only"
+
+
+_SUPERSEDING_CONCLUSIONS = frozenset(
+    {"success", "neutral", "skipped", *_FAILING_CHECK_CONCLUSIONS}
+)
+
+
+def _latest_check_runs(runs: list[dict]) -> list[dict]:
+    """Drop superseded re-runs of the PR-body checks only; keep every other run.
+
+    Editing the PR body re-runs a check that reads it (PR_BODY_ONLY_CHECKS) and
+    leaves the superseded run beside it on the commit. Only those checks are
+    collapsed to their newest run, keyed by name and app. Every other check run
+    is kept as it stands: two workflows can each carry a job of the same name
+    (this repository has two `pytest` jobs), and a check-run carries no workflow
+    identity here, so collapsing by name could hide one workflow's failure
+    behind the other's success.
+
+    Fail closed: a body-check run with no readable id is never superseded and
+    never supersedes, and when the newest run of a body check is not completed
+    with a known conclusion, every run of that check is kept.
+    """
+    groups: dict[tuple[str, str], list[dict]] = {}
+    kept: list[dict] = []
+
+    def _run_id(run: dict) -> int:
+        value = run.get("id")
+        if isinstance(value, bool):
+            return 0
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    for run in runs:
+        name = (run.get("name") or "").strip()
+        if name not in PR_BODY_ONLY_CHECKS or _run_id(run) <= 0:
+            kept.append(run)
+            continue
+        app = str((run.get("app") or {}).get("id") or "")
+        groups.setdefault((name, app), []).append(run)
+
+    for group in groups.values():
+        newest = max(group, key=_run_id)
+        if (
+            newest.get("status") == "completed"
+            and newest.get("conclusion") in _SUPERSEDING_CONCLUSIONS
+        ):
+            kept.append(newest)
+        else:
+            kept.extend(group)
+    return kept
 
 
 def _normalise_github_review_id(value: object) -> str:
@@ -3191,11 +3254,11 @@ def parse_aggregation_marker(body: str | None) -> dict[str, str | None]:
 def compose_superseded_verdict(body: str, new_head_sha: str) -> str:
     """Visibly retire a stale verdict while preserving its original body."""
     sha = _normalise_full_sha(new_head_sha)
-    if not sha or parse_aggregation_marker(body)["superseded_by"] or _LENS_SUPERSEDED_RE.search(body):
+    if not sha or parse_aggregation_marker(body)["superseded_by"] or lens_authors.has_retired_verdict_marker(body):
         return body
-    lens = _LENS_MARKER_RE.search(body or "")
+    lens = lens_authors.verdict_marker(body)
     legacy_lens = re.search(r"(?m)^review:([a-z0-9_-]+)\s*$", body or "", re.I)
-    lens_name = lens.group("lens") if lens else (legacy_lens.group(1) if legacy_lens else "")
+    lens_name = lens.lens if lens else (legacy_lens.group(1) if legacy_lens else "")
     marker = (
         f"<!-- review:{lens_name}-superseded by={sha} -->"
         if lens_name
@@ -3213,9 +3276,9 @@ def _recognized_review_marker(body: str) -> tuple[str | None, str | None]:
     agg = parse_aggregation_marker(body)
     if _AGGREGATION_MARKER_RE.search(body or ""):
         return "aggregation", agg["commit"]
-    lens = _LENS_MARKER_RE.search(body or "")
+    lens = lens_authors.verdict_marker(body)
     if lens:
-        return "lens", lens.group("sha").lower()
+        return "lens", lens.head
     if re.search(r"(?m)^review:[a-z0-9_-]+\s*$", body or "", re.I):
         return "lens", None
     return None, None
@@ -3232,9 +3295,7 @@ def comment_verdict_matches_current_head(body: str | None, head_sha: str) -> boo
     expected = _normalise_full_sha(head_sha)
     if not expected or not body:
         return False
-    if parse_aggregation_marker(body)["superseded_by"] or _LENS_SUPERSEDED_RE.search(
-        body
-    ):
+    if parse_aggregation_marker(body)["superseded_by"] or lens_authors.has_retired_verdict_marker(body):
         return False
     kind, commit = _recognized_review_marker(body)
     return bool(kind and commit == expected)
@@ -3275,15 +3336,13 @@ def latest_aggregation_comment(
     superseded by a later ``REQUEST_CHANGES`` would read as clear and the PR
     would merge on a withdrawn approval.
 
-    Selection is therefore client-side and never positional: collect every
-    marker-bearing comment, then take max ``created_at``, tie-breaking on max
-    ``id`` (monotonic per repo). Callers must page the full comment list before
-    calling — with >100 comments the newest aggregation can sit on a later page,
-    and sorting only what you fetched cannot find what was never returned.
+    Selection uses the fetched list's creation order. Callers must page the
+    full comment list before calling — with >100 comments the newest
+    aggregation can sit on a later page.
     """
     expected = _normalise_full_sha(head_sha)
     candidates = []
-    for comment in comments:
+    for comment in review_rounds.ordered_comments(comments):
         body = comment.get("body") or ""
         parsed = parse_aggregation_marker(body)
         if not _AGGREGATION_MARKER_RE.search(body) or parsed["superseded_by"]:
@@ -3294,10 +3353,7 @@ def latest_aggregation_comment(
         candidates.append(comment)
     if not candidates:
         return None
-    return max(
-        candidates,
-        key=lambda c: (str(c.get("created_at") or ""), int(c.get("id") or 0)),
-    )
+    return candidates[-1]
 
 
 _WRAPPER_MARKER_RE = re.compile(
@@ -3392,16 +3448,18 @@ def panel_finished_at_head(
         return True
     if not required_lenses:
         return False
-    reported: set[str] = set()
-    for comment in comments:
+    latest_by_lens: dict[str, dict] = {}
+    for comment in review_rounds.ordered_comments(comments):
         body = comment.get("body") or ""
-        match = _LENS_MARKER_RE.search(body)
-        if not match or not comment_verdict_matches_current_head(body, head):
+        match = lens_authors.verdict_marker(body)
+        if not match or match.head != head or not comment_verdict_matches_current_head(body, head):
             continue
-        known = lens_by_name(match.group("lens"))
-        if known is None or posted_comment_own_verdict(body, lens_agent=known.agent) is None:
-            continue
-        reported.add(match.group("lens").lower())
+        latest_by_lens[match.lens] = comment
+    reported = {
+        lens for lens, comment in latest_by_lens.items()
+        if (known := lens_by_name(lens)) is not None
+        and posted_comment_own_verdict(comment.get("body") or "", lens_agent=known.agent) is not None
+    }
     return {lens.lower() for lens in required_lenses} <= reported
 
 
@@ -3420,9 +3478,9 @@ def unseated_required_lenses(
     scoped to swarm identities (`_lens_scoped_comments`).
     """
     seen = {
-        match.group("lens").lower()
+        match.lens
         for comment in comments
-        for match in [_LENS_MARKER_RE.search(comment.get("body") or "")]
+        for match in [lens_authors.verdict_marker(comment.get("body"))]
         if match
     }
     aggregation = latest_aggregation_comment(comments, head_sha=_normalise_full_sha(head_sha))
@@ -4131,17 +4189,12 @@ def lens_comment_satisfies_presence(
     lens_l = (lens or "").lower()
     if not lens_l:
         return False
-    for stale in _LENS_SUPERSEDED_RE.finditer(text):
-        if stale.group("lens").lower() == lens_l:
-            return False
+    if lens_authors.has_retired_verdict_marker(text):
+        return False
     expected = _normalise_full_sha(head_sha)
-    for match in _LENS_MARKER_RE.finditer(text):
-        if match.group("lens").lower() != lens_l:
-            continue
-        commit = match.group("sha").lower()
-        if expected:
-            return commit == expected
-        return True
+    match = lens_authors.verdict_marker(text)
+    if match and match.lens == lens_l:
+        return match.head == expected if expected else True
     if expected:
         return False
     return _legacy_lens_prefix_present(text, lens)
@@ -4182,15 +4235,15 @@ def _reviewed_head_blockers(
     exclude = _normalise_full_sha(exclude_head)
     order: list[str] = []
     by_head: dict[str, set[tuple[str, str, str]]] = {}
-    for comment in sorted(comments, key=lambda c: c.get("created_at") or ""):
+    for comment in review_rounds.ordered_comments(comments):
         body = comment.get("body") or ""
-        marker = _LENS_MARKER_RE.search(body)
+        marker = lens_authors.verdict_marker(body)
         if not marker:
             continue
-        sha = marker.group("sha").lower()
+        sha = marker.head
         if exclude and sha == exclude:
             continue
-        lens = marker.group("lens").lower()
+        lens = marker.lens
         if sha not in by_head:
             order.append(sha)
             by_head[sha] = set()
@@ -4211,37 +4264,67 @@ def _original_lens_body(body: str) -> str:
     """A lens comment as its lens wrote it. `compose_superseded_verdict` puts a
     note and a `review:<lens>-superseded` marker ahead of a retired verdict and
     keeps the rest verbatim; a fixed-position read needs the verbatim part."""
-    match = _LENS_SUPERSEDED_RE.search(body or "")
-    return (body or "")[match.end():].lstrip("\n") if match else (body or "")
+    marker = lens_authors.verdict_marker(body)
+    return marker.body if marker else (body or "")
+
+
+def lens_verdict_classification(body: str, *, lens_agent: str) -> tuple[str, bool]:
+    """The counter's verdict kind and blocking state, also used by posters."""
+    verdict = lens_own_verdict(body, lens_agent=lens_agent)
+    cleared = sign_off_is_warranted(body, lens_agent=lens_agent)
+    blocking = (not cleared and verdict != "comment") or bool(
+        lens_explicit_objection(body, lens_agent=lens_agent)
+    )
+    if cleared:
+        kind = "signed_off"
+    elif verdict == "comment":
+        kind = "comment"
+    elif verdict is None:
+        kind = "unreadable"
+    else:
+        kind = "blocked"
+    return kind, blocking
 
 
 def lens_records(comments: list[dict]) -> dict[str, list[review_carry.LensRecord]]:
-    """Every lens verdict on the PR, per lens in comment order, at its own head.
+    """Every lens verdict comment on the PR, per lens in comment order.
+
+    Repeated lens/head pairs at different positions remain separate records;
+    only the round counter groups contiguous records for one head.
 
     The one reader both the panel dispatch and the approval gate use to decide
     what an earlier head's sign-off is: `sign_off_is_warranted` for `cleared`
     (an explicit clear, nothing else) and `lens_own_verdict` for the token. A
-    lens the registry does not know, or a comment with no head marker, yields
+    lens the registry does not know, or a comment whose head marker is not its
+    actual first line (after the poster's explicit retirement banner), yields
     no record: there is nothing to carry from it.
     """
     out: dict[str, list[review_carry.LensRecord]] = {}
-    for comment in sorted(comments, key=lambda c: c.get("created_at") or ""):
+    for source_order, comment in enumerate(review_rounds.ordered_comments(comments)):
         raw = comment.get("body") or ""
-        marker = _LENS_MARKER_RE.search(raw)
+        # A marker quoted in prose or indented as code is not a verdict.
+        # The poster's explicit retirement banner is the only prefix admitted
+        # for a historical verdict; its original marker still starts a line.
+        marker = lens_authors.verdict_marker(raw)
         if not marker:
             continue
-        lens = marker.group("lens").lower()
+        body = marker.body
+        lens = marker.lens
         known = lens_by_name(lens)
         if known is None:
             continue
-        body = _original_lens_body(raw)
+        _, blocking = lens_verdict_classification(body, lens_agent=known.agent)
         out.setdefault(lens, []).append(
             review_carry.LensRecord(
                 lens=lens,
-                head=marker.group("sha").lower(),
+                head=marker.head,
                 cleared=sign_off_is_warranted(body, lens_agent=known.agent),
                 verdict=lens_own_verdict(body, lens_agent=known.agent) or "",
                 url=str(comment.get("html_url") or ""),
+                created_at=str(comment.get("created_at") or ""),
+                comment_id=comment.get("id"),
+                source_order=source_order,
+                blocking=blocking,
             )
         )
     return out
@@ -10572,6 +10655,56 @@ class SwarmDispatcher:
                 f"could not record fix round {n}: {exc}"
             )
 
+    _PR_BODY_CHECK_MARKER = "<!-- apis-pr-body-check -->"
+
+    async def _note_pr_body_check_failure(self, trigger: SwarmTrigger) -> None:
+        """Post ONE comment saying the PR body needs fixing (best-effort).
+
+        Used instead of a CI-fix round when every failing check reads only the
+        PR body: a code push cannot fix it and it does not count against
+        max_fix_rounds. A marker comment already on the PR means the author was
+        told; later re-runs post nothing.
+        """
+        ref = f"{trigger.repository}#{trigger.number}"
+        list_url = (
+            f"https://api.github.com/repos/{trigger.repository}/issues/"
+            f"{trigger.number}/comments"
+        )
+        if not await self._require_github_write_credential(
+            trigger.repository, "PR-body check note", detail=ref,
+        ):
+            return
+        checks = ", ".join(f"`{name}`" for name in sorted(PR_BODY_ONLY_CHECKS))
+        body = (
+            f"{self._PR_BODY_CHECK_MARKER}\n"
+            f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
+            f"The only failing check ({checks}) reads the PR description, not "
+            "the code, so no fix round was started. Edit the PR body so it "
+            "carries the design basis on ONE line, in the form "
+            "`Design basis: no design applies -- <reason>` or a foundation doc "
+            "anchor. Editing the body re-runs the check; no push is needed."
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                headers = self._github_headers(trigger.repository)
+                resp = await client.get(
+                    list_url, params={"per_page": 100}, headers=headers
+                )
+                resp.raise_for_status()
+                if any(
+                    self._PR_BODY_CHECK_MARKER in (c.get("body") or "")
+                    for c in resp.json()
+                ):
+                    return
+                resp = await client.post(
+                    list_url, json={"body": body}, headers=headers
+                )
+                resp.raise_for_status()
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: could not post PR-body check note: {exc}"
+            )
+
     # ── fix rounds for Fly-delivered PRs ─────────────────────────────────────
     #
     # A PR that Fly delivered is corrected on Fly, never by a commit on this
@@ -11347,10 +11480,10 @@ class SwarmDispatcher:
             lens = lens_def.lens
             if lens in panel_lenses:
                 continue  # judged by the panel's own required-floor path
-            marker = compose_lens_review_marker(lens, head)
             comment = None
             for c in reversed(admitted):
-                if marker in (c.get("body") or ""):
+                parsed = lens_authors.verdict_marker(c.get("body"))
+                if parsed and parsed.lens == lens and parsed.head == head and not parsed.retired:
                     comment = c
                     break
             if comment is not None:
@@ -11361,7 +11494,8 @@ class SwarmDispatcher:
                         f"this head — {comment.get('html_url', '(no url)')}"
                     )
             for c in comments:
-                if marker not in (c.get("body") or ""):
+                parsed = lens_authors.verdict_marker(c.get("body"))
+                if not parsed or parsed.lens != lens or parsed.head != head or parsed.retired:
                     continue
                 if lens_authors.is_swarm_comment(c, authors):
                     continue
@@ -11459,6 +11593,10 @@ class SwarmDispatcher:
             # Route a red CI back for a fix, bounded like review findings.
             await self._route_ci_failure(trigger, parent)
             return
+        if ci == CI_STATE_PR_BODY_ONLY:
+            # A PR-body check: tell the author once; spend no fix round.
+            await self._note_pr_body_check_failure(trigger)
+            return
         if ci != "green":
             # pending / unknown — hold without paging; don't claim ready.
             log.info(
@@ -11551,7 +11689,9 @@ class SwarmDispatcher:
             )
             checks.raise_for_status()
             runs = checks.json().get("check_runs", [])
-            return head_sha, state, runs
+            # Judge the head on the newest run of each check only: a failed run
+            # superseded by a passing re-run of the same check is not a failure.
+            return head_sha, state, _latest_check_runs(runs)
 
     async def _failing_check_runs(
         self, trigger: SwarmTrigger
@@ -11565,15 +11705,9 @@ class SwarmDispatcher:
                 f"could not fetch check-runs for CI notify: {exc}"
             )
             return []
-        failing_conclusions = (
-            "failure",
-            "timed_out",
-            "cancelled",
-            "action_required",
-        )
         out: list[dict[str, str]] = []
         for run in runs:
-            if run.get("conclusion") not in failing_conclusions:
+            if run.get("conclusion") not in _FAILING_CHECK_CONCLUSIONS:
                 continue
             out.append(
                 {
@@ -11584,9 +11718,13 @@ class SwarmDispatcher:
         return out
 
     async def _required_ci_state(self, trigger: SwarmTrigger) -> str:
-        """Return "green" | "failing" | "pending" | "unknown" for the PR head.
+        """Return "green" | "failing" | CI_STATE_PR_BODY_ONLY | "pending" |
+        "unknown" for the PR head.
 
-        Gates on the combined commit status + check-runs for the PR's head SHA.
+        Gates on the combined commit status + check-runs for the PR's head SHA,
+        reading only the newest run of each check. CI_STATE_PR_BODY_ONLY means
+        every failing check reads the PR body (PR_BODY_ONLY_CHECKS): merge
+        still holds, but no CI-fix round is routed.
 
         ateles#350: the `pre_merge` boundary's on_check_failure posture governs
         what a check-fetch failure DOES beyond returning "unknown". "unknown"
@@ -11608,11 +11746,23 @@ class SwarmDispatcher:
             run_statuses = [r.get("status") for r in runs]
 
             failing_run = any(
-                c in ("failure", "timed_out", "cancelled", "action_required")
-                for c in run_conclusions
+                c in _FAILING_CHECK_CONCLUSIONS for c in run_conclusions
             )
             pending_run = any(s != "completed" for s in run_statuses)
+            failing_names = {
+                (r.get("name") or "").strip()
+                for r in runs
+                if r.get("conclusion") in _FAILING_CHECK_CONCLUSIONS
+            }
 
+            if (
+                state != "failure"
+                and failing_names
+                and failing_names <= PR_BODY_ONLY_CHECKS
+            ):
+                # Only PR-body checks fail: no code push fixes this, so it is
+                # not "failing" (which routes a CI-fix round).
+                return CI_STATE_PR_BODY_ONLY
             if state == "failure" or failing_run:
                 return "failing"
             if state == "pending" or pending_run:
@@ -12365,6 +12515,17 @@ class SwarmDispatcher:
             log.info(f"[{DAEMON_NAME}] {ref}: CI completed failing — routing to fix")
             await self._route_ci_failure(pr_trigger, parent)
             return True
+        if ci == CI_STATE_PR_BODY_ONLY:
+            if not await self._label_gate_allows(
+                pr_trigger, source="ci_status_pr_body_check"
+            ):
+                return True
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: only PR-body checks failing — "
+                "asking the author to edit the body; no fix round"
+            )
+            await self._note_pr_body_check_failure(pr_trigger)
+            return True
         # A review panel held back until this head's checks are green is
         # re-dispatched by the check completion that may have made them green.
         # `_handle_pr` re-reads the gate itself, so a head that is still not
@@ -12980,7 +13141,7 @@ class SwarmDispatcher:
                     kind, commit = _recognized_review_marker(body)
                     if not kind or not _is_bot_author(author):
                         continue
-                    if parse_aggregation_marker(body)["superseded_by"] or _LENS_SUPERSEDED_RE.search(body):
+                    if parse_aggregation_marker(body)["superseded_by"] or lens_authors.has_retired_verdict_marker(body):
                         continue
                     if commit == head:
                         continue

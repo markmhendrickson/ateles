@@ -117,6 +117,18 @@ def test_a_rename_reports_both_paths_so_a_moved_security_path_is_seen():
     assert {"docs/x.md", "docs/y.md", ".claude/hooks/x.md"} <= set(delta.files)
 
 
+@pytest.mark.parametrize("bad", [
+    _file("docs/y.md", _patch("+a"), status="renamed", previous_filename=None),
+    _file("docs/y.md", _patch("+a"), status="renamed", previous_filename=7),
+    _file(" docs/y.md", _patch("+a")),
+    _file("docs/y.md", _patch("+a"), status="weird"),
+])
+def test_malformed_compare_file_cannot_narrow_a_rereview(bad):
+    assert review_delta.compare_files({"files": [bad]}) is None
+    with pytest.raises(ValueError):
+        review_delta.interdiff([], [bad])
+
+
 def test_a_file_without_a_patch_is_never_under_measured():
     """A binary or oversized file has no patch: equal blobs are unchanged,
     anything else counts at its full size, never zero."""

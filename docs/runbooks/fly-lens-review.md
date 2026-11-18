@@ -14,7 +14,7 @@ Neotoma env file is `~/.config/neotoma/.env`). Never print or read that file.
 cd ~/ateles-rc-src
 # source the Neotoma env file here with set -a / set +a, then:
 .venv/bin/python execution/scripts/fly_lens_review.py \
-    --repo <owner/name> --pr <n> --lens <pm|arch|security|qa|ux|all> \
+    --repo <owner/name> --pr <n> --lens <pm|arch|security|qa|ux|legal|all> \
     --task-entity-id ent_<neotoma task> \
     [--extra-brief round2-notes.md] [--out-dir <dir>] [--post]
 ```
@@ -24,7 +24,12 @@ credential-read hook refuses an inline interpreter whose source mentions the
 env file.
 
 Lens to role: pm=pavo, arch=waxwing, security=falco, qa=phoenicurus,
-ux=accipiter. `all` runs them one after another.
+ux=accipiter, legal=buteo. `all` runs, one after another, the lenses the
+approval tool requires for the PR's current diff: the five bootstrap lenses
+(pm, arch, security, qa, ux), plus legal when the diff touches a legal path
+such as `package.json` (the same `review_panel.approval_floor` selection
+`approve_pr_as_app.py` uses). content/Corvus is never run. If the changed-file
+list cannot be read, `all` also runs legal.
 
 ## What it does
 
@@ -104,14 +109,17 @@ that rather than re-implementing it.
 
 ## Known limitations
 
-- Every job so far routed to the claude provider. `--provider claude` is
-  refused as not pinnable, codex is refused because the Fly runner cannot give
-  it Neotoma tools, and cursor has no headroom.
+- Claude and Codex can run on Fly with Neotoma MCP access through the loopback
+  signing proxy when the role has an admitted AAuth key and the required tool
+  grant. Codex receives the proxy URL through CLI MCP overrides; no static
+  bearer is supplied. A seated read-only review may run without Neotoma tools.
+  Cursor remains unavailable on Fly because its CLI cannot deny one MCP tool.
+  Provider headroom and role admission can still refuse an individual job.
 - Roughly a third of first runs ended with "no result recorded for run ..."
   (unknown outcome, 70 to 170 seconds); the one retry usually clears it.
-- Fly jobs cannot read Neotoma. Each lens uses the repository prompt mirror
-  `.claude/skills/<role>/SKILL.md`, so a lens prompt that exists only in
-  Neotoma is not seen until it is mirrored.
+- Seated Fly reviews without a role's Neotoma tool grant use the repository
+  prompt mirror `.claude/skills/<role>/SKILL.md`; changes present only in
+  Neotoma are not visible to those jobs until mirrored.
 - The Fly job holds a read-only GitHub token for `--repo`; it cannot comment or
   approve, which is why posting is a separate step.
 - It needs the Neotoma env pair in the environment and a Neotoma task id (the

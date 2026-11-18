@@ -270,11 +270,13 @@ for _p in (str(REPO_ROOT), str(_DAEMON_DIR)):
 
 # noqa: E402 — path bootstrap above must run first
 import dispatch_role  # noqa: E402
+import model_tiering  # noqa: E402
 from lib.credential_templates import (  # noqa: E402
     is_placeholder_template,
     placeholder_template_sandbox_regexes,
 )
 import harness_router  # noqa: E402
+import lens_authors  # noqa: E402
 import panel_check_gate  # noqa: E402
 from lib import github_app_token as _github_app_token  # noqa: E402
 from harness_router import headroom_resolution  # noqa: E402
@@ -2266,11 +2268,6 @@ def dry_run_report(
 # ── Posting gate -----------------------------------------------------------------
 
 
-_REVIEW_MARKER_RE = re.compile(
-    r"^<!-- review:(?P<lens>[a-z0-9_-]+) commit=(?P<head>[0-9a-f]{40}) -->$"
-)
-
-
 _ECHO_LINE_CAP = 300
 
 
@@ -2300,7 +2297,9 @@ def validate_verdict(
     weaker parallel check this script invents.
     """
     lines = verdict_text.splitlines()
-    marker = _REVIEW_MARKER_RE.fullmatch(lines[0]) if lines else None
+    marker = lens_authors.verdict_marker(verdict_text)
+    if marker and marker.retired:
+        marker = None
 
     def _echo(index: int) -> str:
         """Echo a leading line back into the report only when it is safe.
@@ -2324,10 +2323,10 @@ def validate_verdict(
     }
     observed = {
         "marker": pre_post["line1"],
-        "lens": marker.group("lens") if marker else None,
-        "head": marker.group("head") if marker else None,
+        "lens": marker.lens if marker else None,
+        "head": marker.head if marker else None,
     }
-    marker_count = sum(1 for line in lines if _REVIEW_MARKER_RE.fullmatch(line))
+    marker_count = sum(1 for line in lines if lens_authors.verdict_marker(line))
     expected = {"lens": expected_lens, "head": expected_head}
     artifact_binding = {"expected": expected, "observed": observed}
     if marker is None:
@@ -2656,7 +2655,9 @@ def verify_stash_ref_unchanged_after_dispatch(
 def _verdict_identity(verdict_text: str) -> tuple[str, str]:
     """Return the strict lens and attribution header for a verdict body."""
     lines = verdict_text.splitlines()
-    marker = _REVIEW_MARKER_RE.fullmatch(lines[0]) if lines else None
+    marker = lens_authors.verdict_marker(verdict_text)
+    if marker and marker.retired:
+        marker = None
     if len(lines) < 2 or marker is None:
         raise ValueError("verdict lacks a strict exact-head review marker")
     attribution = lines[1]
@@ -2666,7 +2667,7 @@ def _verdict_identity(verdict_text: str) -> tuple[str, str]:
         and attribution.endswith("**")
     ):
         raise ValueError("verdict lacks the canonical lens attribution header")
-    return marker.group("lens"), attribution
+    return marker.lens, attribution
 
 
 def _pr_comments(*, repo: str, pr: int) -> list[dict]:
@@ -2687,7 +2688,13 @@ def _pr_comments(*, repo: str, pr: int) -> list[dict]:
     pages = json.loads(result.stdout or "[]")
     if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
         raise ValueError("GitHub comment listing had an unexpected shape")
-    return [comment for page in pages for comment in page if isinstance(comment, dict)]
+    if any(not isinstance(comment, dict) for page in pages for comment in page):
+        raise ValueError("GitHub comment listing contained a malformed comment")
+    import lens_authors  # noqa: PLC0415 — shared approval reader
+    for page in pages:
+        for comment in page:
+            lens_authors.require_marked_author(comment)
+    return [comment for page in pages for comment in page]
 
 
 def _matching_verdict_comments(
@@ -2699,11 +2706,12 @@ def _matching_verdict_comments(
         if ((comment.get("user") or {}).get("login") or "") != "ateles-agent":
             continue
         lines = str(comment.get("body") or "").splitlines()
-        marker = _REVIEW_MARKER_RE.fullmatch(lines[0]) if lines else None
+        marker = lens_authors.verdict_marker(comment.get("body"))
         if (
             len(lines) >= 2
             and marker is not None
-            and marker.group("lens") == lens
+            and not marker.retired
+            and marker.lens == lens
             and lines[1] == attribution
         ):
             matches.append(comment)
@@ -2711,37 +2719,52 @@ def _matching_verdict_comments(
 
 
 def _one_verdict_comment(
-    *, repo: str, pr: int, lens: str, attribution: str
+    *, repo: str, pr: int, lens: str, attribution: str, verdict_text: str,
+    comments: list[dict] | None = None,
 ) -> dict | None:
+    if comments is None:
+        comments = _pr_comments(repo=repo, pr=pr)
     matches = _matching_verdict_comments(
-        comments=_pr_comments(repo=repo, pr=pr),
+        comments=comments,
         lens=lens,
         attribution=attribution,
     )
-    if len(matches) > 1:
-        ids = ", ".join(str(comment.get("id") or "<missing>") for comment in matches)
-        raise RuntimeError(
-            f"ambiguous prior review:{lens} comments by ateles-agent ({ids}); "
-            "refusing to choose one to edit"
-        )
-    return matches[0] if matches else None
+    if not matches:
+        return None
+    latest = matches[-1]
+    verdicts = [row for row in comments if lens_authors.verdict_marker(row.get("body"))]
+    if not verdicts or verdicts[-1].get("id") != latest.get("id"):
+        return None
+    old_marker = lens_authors.verdict_marker(latest.get("body"))
+    new_marker = lens_authors.verdict_marker(verdict_text)
+    if not old_marker or not new_marker or old_marker.head != new_marker.head:
+        return None
+    from review_rounds import verdict_class
+    if (verdict_class(str(latest.get("body") or ""), lens) != verdict_class(verdict_text, lens)
+            or latest.get("body") != verdict_text):
+        return None
+    return latest
 
 
 def post_verdict(*, repo: str, pr: int, verdict_text: str) -> str:
-    """Create or update the lens's one PR comment and return its URL.
+    """Post a new verdict or update an identical latest retry and return its URL.
 
     Never called unless ``validate_verdict(...).ok`` AND the caller passed
     ``--post``. Publication still validates the strict identity fields it needs
-    to honour the canonical edit-not-duplicate contract.
+    to preserve every changed conclusion in the review history.
     """
     lens, attribution = _verdict_identity(verdict_text)
     last_error: Exception | None = None
     for _attempt in range(1, _POST_VERDICT_ATTEMPTS + 1):
+        before = _pr_comments(repo=repo, pr=pr)
+        known_ids = {row.get("id") for row in before}
         existing = _one_verdict_comment(
             repo=repo,
             pr=pr,
             lens=lens,
             attribution=attribution,
+            verdict_text=verdict_text,
+            comments=before,
         )
         if existing is None:
             command = [
@@ -2756,9 +2779,9 @@ def post_verdict(*, repo: str, pr: int, verdict_text: str) -> str:
             run_kwargs: dict = {"input": json.dumps({"body": verdict_text})}
         else:
             comment_id = existing.get("id")
-            if not isinstance(comment_id, int):
+            if type(comment_id) is not int or comment_id <= 0:
                 raise RuntimeError(
-                    f"prior review:{lens} comment has no integer id; refusing to edit"
+                    f"prior review:{lens} comment has no positive integer id; refusing to edit"
                 )
             command = [
                 "gh",
@@ -2780,16 +2803,20 @@ def post_verdict(*, repo: str, pr: int, verdict_text: str) -> str:
             )
         except subprocess.CalledProcessError as exc:
             last_error = exc
-        landed = _one_verdict_comment(
-            repo=repo,
-            pr=pr,
-            lens=lens,
-            attribution=attribution,
-        )
-        if landed is not None and (landed.get("body") or "") == verdict_text:
+        landed = next((row for row in reversed(_matching_verdict_comments(
+            comments=_pr_comments(repo=repo, pr=pr), lens=lens, attribution=attribution,
+        )) if (row.get("body") or "") == verdict_text and (
+            row.get("id") == existing.get("id") if existing else row.get("id") not in known_ids
+        )), None)
+        if landed is not None:
+            landed_id = landed.get("id")
             url = str(landed.get("html_url") or "")
-            if not url:
-                raise RuntimeError(f"review:{lens} write read back without an html_url")
+            if (type(landed_id) is not int or landed_id <= 0
+                    or re.fullmatch(
+                        rf"https://github\.com/{re.escape(repo)}/pull/{pr}#issuecomment-{landed_id}",
+                        url,
+                    ) is None):
+                raise RuntimeError(f"review:{lens} write read back without a matching id and PR-local URL")
             return url
         if last_error is None:
             last_error = RuntimeError(
@@ -2979,6 +3006,11 @@ async def run_one(
                 cwd=str(worktree.path),
                 timeout=timeout,
                 task_entity_id=target.task_entity_id,
+                caller="harness_lens_runner",
+                caller_kind="daemon",
+                # Spend attribution (ent_e5259618cae6cafd4be120e0): the ledger
+                # row names the pull request this lens reviewed.
+                pr=f"{target.repo}#{target.pr}",
                 env_extra=sandbox.env_extra,
                 seated_reviewer=False,  # see module docstring: no MCP grant requested
                 command_wrapper=sandbox.command_wrapper,
@@ -3227,6 +3259,9 @@ async def run_compare(
 
 
 def main(argv: list[str] | None = None) -> int:
+    model_tiering.set_process_caller(
+        "daemon", "harness_lens_runner"
+    )
     parser = argparse.ArgumentParser(
         prog="harness_lens_runner",
         description=(
