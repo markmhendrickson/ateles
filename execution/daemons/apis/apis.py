@@ -121,6 +121,7 @@ import os
 import re
 import stat
 import sys
+import threading
 import time
 import traceback
 import weakref
@@ -329,6 +330,7 @@ from lib.daemon_runtime.artifact_contract import (  # noqa: E402
 )
 from lib.notify import Notifier, Priority  # noqa: E402
 from lib.activity import ActivityLogger  # noqa: E402
+from lib.daemon_runtime.neotoma_transient import RETRY_PAUSES_SECONDS  # noqa: E402
 
 # ── Activity-log channel (CyphorhinusBot observation feed) ──────────────────
 _activity = ActivityLogger(agent="apis")
@@ -353,6 +355,39 @@ _background_checkpoint_tasks: set[asyncio.Task[None]] = set()
 GATE_HOLD_PROOF_SECONDS = 60
 GATE_HOLD_PROOF_INTERVAL_SECONDS = 12
 GATE_HOLD_PROOF_MAX_READS = 5
+_gate_holds_in_flight: set[str] = set()
+_gate_holds_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _gate_hold_proving(task_id: str):
+    """Keep the recovery thread out until the gate finishes its hold write."""
+    with _gate_holds_lock:
+        _gate_holds_in_flight.add(task_id)
+    try:
+        yield
+    finally:
+        with _gate_holds_lock:
+            _gate_holds_in_flight.discard(task_id)
+
+
+def _gate_hold_is_in_flight(task_id: str) -> bool:
+    with _gate_holds_lock:
+        return task_id in _gate_holds_in_flight
+
+
+def _gate_hold_write_details(snapshot: dict, skill: str | None, action_type: str | None, decision: GateDecision) -> tuple[str, str, list[str] | None]:
+    """Use identical checkpoint content for a gate write and its recovery."""
+    title = str(snapshot.get("title") or "Held task")
+    summary = f"Gate hold for {skill or 'unassigned'}. Action: {action_type or 'unknown'}. {decision.reason}."
+    alternatives = (
+        ["Re-scope to a lower-blast action", "Provide missing inputs", "Decline"]
+        if decision.action == GateAction.CHECKPOINT_WITH_ALTERNATIVES else None
+    )
+    # The gate's trigger and scoring narrative are deliberately omitted: the
+    # recovery thread cannot reconstruct them, and a differing body changes
+    # both Neotoma's content-bound key and the title-derived entity identity.
+    return title, summary, alternatives
 
 
 async def _prove_gate_hold(
@@ -3549,95 +3584,102 @@ async def _dispatch_task(
                     entity_id, TaskStatus.ROUTED, "gate hold and checkpoint"):
                 job.failed(f"task {entity_id} changed before gate hold")
                 return
-            set_task_status(
-                entity_id,
-                TaskStatus.AWAITING_APPROVAL,
-                handler=DAEMON_NAME,
-                from_status=TaskStatus.ROUTED.value,
-                reason=decision.reason,
-                key_suffix=trigger,
-            )
-            task_record = await _prove_gate_hold(entity_id, decision.reason)
-            held_snapshot = _record_snapshot(task_record)
-            hold_proven = (
-                held_snapshot is not None
-                and normalize_status(held_snapshot.get("status"))
-                == TaskStatus.AWAITING_APPROVAL.value
-                and held_snapshot.get("blocked_reason") == decision.reason
-            )
-            tenant_id = str(fetch_entity_user_id(entity_id) or "").strip()
-            brief_id = None
-            if hold_proven and tenant_id and task_record is not None:
-                brief_id = write_checkpoint_brief(
-                    task_entity_id=entity_id,
-                    decision=decision,
-                    title=title,
-                    plan_summary=(
-                        f"Assigned to {skill}. Action: {action_type or 'unknown'}. "
-                        f"Trigger: {trigger}. {decision.reason}."
-                        + _scoring_summary(
-                            decision.confidence_source,
+            with _gate_hold_proving(entity_id):
+                set_task_status(
+                    entity_id,
+                    TaskStatus.AWAITING_APPROVAL,
+                    handler=DAEMON_NAME,
+                    from_status=TaskStatus.ROUTED.value,
+                    reason=decision.reason,
+                    key_suffix=trigger,
+                )
+                task_record = await _prove_gate_hold(entity_id, decision.reason)
+                held_snapshot = _record_snapshot(task_record)
+                hold_proven = (
+                    held_snapshot is not None
+                    and normalize_status(held_snapshot.get("status"))
+                    == TaskStatus.AWAITING_APPROVAL.value
+                    and held_snapshot.get("blocked_reason") == decision.reason
+                )
+                tenant_id = str(fetch_entity_user_id(entity_id) or "").strip()
+                brief_id = None
+                if hold_proven and tenant_id and task_record is not None:
+                    observation_id = (task_record.get("provenance") or {}).get("blocked_reason")
+                    # Older records may lack field provenance. The revision
+                    # digest is a stable fallback; the sweep refuses such a
+                    # hold, so it cannot create a competing identity.
+                    context = (
+                        f"hold-{observation_id}"
+                        if isinstance(observation_id, str) and observation_id
+                        else f"hold-revision-{entity_record_digest(task_record)}"
+                    )
+                    held_title, summary, alternatives = _gate_hold_write_details(
+                        held_snapshot, skill, action_type, decision
+                    )
+                    # The recovery path cannot recover an in-memory scoring
+                    # source. Keep the persisted checkpoint shape identical.
+                    checkpoint_decision = dataclasses.replace(decision, confidence_source="")
+                    brief_id = write_checkpoint_brief(
+                        task_entity_id=entity_id,
+                        decision=checkpoint_decision,
+                        title=held_title,
+                        plan_summary=summary,
+                        handler=DAEMON_NAME,
+                        user_id=tenant_id,
+                        action_type=action_type,
+                        idempotency_context=context,
+                        task_record=task_record,
+                        policy=policy,
+                        alternatives=alternatives,
+                    )
+                if not hold_proven or not tenant_id or not brief_id:
+                    log.error(
+                        f"[{DAEMON_NAME}] task {entity_id} was held but its "
+                        "authenticated checkpoint could not be proven — refusing "
+                        "execution"
+                    )
+                sweep_can_retry = (
+                    hold_proven and tenant_id and task_record is not None
+                    and isinstance((task_record.get("provenance") or {}).get("blocked_reason"), str)
+                    and bool((task_record.get("provenance") or {}).get("blocked_reason"))
+                    and (_confidence_is_explicit(held_snapshot or {})
+                         or decision.reason.startswith("not scored by a producer"))
+                )
+                notifier.send(
+                    "PLAN checkpoint for held task\n"
+                    f"  agent={skill} blast={decision.blast_radius.value} "
+                    f"conf={_shown_confidence(confidence, confidence_source)} — "
+                    f"{decision.reason}\n"
+                    + (
+                        _scoring_summary(
+                            confidence_source,
                             confidence,
                             confidence_rationale,
                             scoring_note,
                             confidence_capped_from,
-                        )
-                        + f" Confidence drivers: {_confidence_drivers_text(snapshot)}"
+                        ).strip()
+                        + "\n"
+                    ).lstrip("\n")
+                    + f"  drivers={_confidence_drivers_text(snapshot)}\n"
+                    + f"  task={entity_id} brief={brief_id or '(unpersisted)'}"
+                    + (
+                        ("\n  The periodic gate-hold sweep can retry this recent hold."
+                         if sweep_can_retry else
+                         "\n  Run reissue_held_checkpoints.py for holds the periodic sweep cannot reconstruct.")
+                        if not hold_proven or not brief_id else ""
                     ),
+                    priority=Priority.BLOCKER,
                     handler=DAEMON_NAME,
-                    user_id=tenant_id,
-                    action_type=action_type,
-                    task_record=task_record,
-                    policy=policy,
-                    alternatives=(
-                        [
-                            "Re-scope to a lower-blast action",
-                            "Provide missing inputs",
-                            "Decline",
-                        ]
-                        if decision.action == GateAction.CHECKPOINT_WITH_ALTERNATIVES
-                        else None
-                    ),
                 )
-            if not hold_proven or not tenant_id or not brief_id:
-                log.error(
-                    f"[{DAEMON_NAME}] task {entity_id} was held but its "
-                    "authenticated checkpoint could not be proven — refusing "
-                    "execution"
+                log.info(
+                    f"[{DAEMON_NAME}] HELD task {entity_id} for operator approval "
+                    f"(checkpoint_brief={brief_id})"
                 )
-            notifier.send(
-                "PLAN checkpoint for held task\n"
-                f"  agent={skill} blast={decision.blast_radius.value} "
-                f"conf={_shown_confidence(confidence, confidence_source)} — "
-                f"{decision.reason}\n"
-                + (
-                    _scoring_summary(
-                        confidence_source,
-                        confidence,
-                        confidence_rationale,
-                        scoring_note,
-                        confidence_capped_from,
-                    ).strip()
-                    + "\n"
-                ).lstrip("\n")
-                + f"  drivers={_confidence_drivers_text(snapshot)}\n"
-                + f"  task={entity_id} brief={brief_id or '(unpersisted)'}"
-                + (
-                    "\n  A retry sweep will raise the checkpoint when the hold is visible."
-                    if not hold_proven or not brief_id else ""
-                ),
-                priority=Priority.BLOCKER,
-                handler=DAEMON_NAME,
-            )
-            log.info(
-                f"[{DAEMON_NAME}] HELD task {entity_id} for operator approval "
-                f"(checkpoint_brief={brief_id})"
-            )
-            job.escalated(
-                f"task {entity_id} → {skill} held for operator "
-                f"(blast={decision.blast_radius.value}, conf={confidence:.2f})"
-            )
-            return
+                job.escalated(
+                    f"task {entity_id} → {skill} held for operator "
+                    f"(blast={decision.blast_radius.value}, conf={confidence:.2f})"
+                )
+                return
 
     log.info(
         f"[{DAEMON_NAME}] → {skill}: task={entity_id} trigger={trigger} "
@@ -5218,6 +5260,43 @@ def _newest_checkpoint_superseded(
     return ("not_retired", None)
 
 
+def _classify_checkpoints_for_hold(
+    checkpoints: list[dict], task_record: dict, *, hold_time: datetime | None = None
+) -> tuple[list[dict], list[dict], list[dict], bool]:
+    """Partition pending, answered and superseded briefs for a held task.
+
+    The explicit reissue path passes no hold time and retains its historical
+    semantics. Automatic recovery requires a brief to bind the current task
+    revision or to have been created since the hold. Unknown provenance denies
+    automatic recovery rather than treating an answer as absent.
+    """
+    pending: list[dict] = []
+    answered: list[dict] = []
+    superseded: list[dict] = []
+    unknown = False
+    revision = entity_record_digest(task_record) if hold_time is not None else None
+    for row in checkpoints:
+        status = str((_record_snapshot(row) or {}).get("status") or "").strip().lower()
+        if status == CHECKPOINT_AWAITING_OPERATOR:
+            pending.append(row)
+        elif status == CHECKPOINT_SUPERSEDED:
+            superseded.append(row)
+        else:
+            if hold_time is None:
+                answered.append(row)
+                continue
+            created_at = _checkpoint_created_at(row)
+            if created_at is not None and created_at >= hold_time:
+                answered.append(row)
+                continue
+            authority = read_authenticated_checkpoint_authorization(row["entity_id"], row)
+            if authority and authority.get("task_revision") == revision:
+                answered.append(row)
+            elif created_at is None:
+                unknown = True
+    return pending, answered, superseded, unknown
+
+
 def reissue_held_task_checkpoint(
     task_id: str, *, apply: bool, keep_retired: bool = False
 ) -> ReissueResult:
@@ -5581,37 +5660,54 @@ HELD_CHECKPOINT_SWEEP_INTERVAL_SECONDS = 600
 HELD_CHECKPOINT_SWEEP_WINDOW_DAYS = 7
 HELD_CHECKPOINT_SWEEP_PAGE_SIZE = 20
 HELD_CHECKPOINT_SWEEP_BUDGET_SECONDS = 45
+HELD_CHECKPOINT_SWEEP_SAFETY_MARGIN_SECONDS = 60
+HELD_CHECKPOINT_WRITE_RETRY_BUDGET_SECONDS = 15 * (len(RETRY_PAUSES_SECONDS) + 1) + sum(RETRY_PAUSES_SECONDS)
+HELD_CHECKPOINT_SWEEP_MIN_AGE_SECONDS = max(
+    120,
+    GATE_HOLD_PROOF_SECONDS + HELD_CHECKPOINT_WRITE_RETRY_BUDGET_SECONDS
+    + HELD_CHECKPOINT_SWEEP_SAFETY_MARGIN_SECONDS,
+)
 _held_checkpoint_sweep_offset = 0
 
 
-def _reconcile_missing_checkpoint(task_id: str, *, apply: bool) -> str:
+def _reconcile_missing_checkpoint(task_id: str, *, apply: bool, now: datetime | None = None) -> str:
     """Recover one gate hold only when its present lifecycle decision is provable."""
+    if _gate_hold_is_in_flight(task_id):
+        return "skipped_in_flight"
     first = fetch_task_record(task_id)
     snapshot = _record_snapshot(first)
     if snapshot is None:
         return "unreconstructable"
     if normalize_status(snapshot.get("status")) != TaskStatus.AWAITING_APPROVAL.value:
         return "skipped_by_reason"
+    # last_observation_at is at or after the hold observation. A later task
+    # update can only delay recovery, never make a fresh hold look old.
+    observed_at = first.get("last_observation_at")
+    if not isinstance(observed_at, str):
+        return "unreconstructable"
+    try:
+        hold_time = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    except ValueError:
+        return "unreconstructable"
+    if hold_time.tzinfo is None:
+        return "unreconstructable"
+    if ((now or datetime.now(timezone.utc)) - hold_time).total_seconds() < HELD_CHECKPOINT_SWEEP_MIN_AGE_SECONDS:
+        return "skipped_fresh"
     existing = checkpoints_for_task(task_id, strict=True)
     if existing is None or any(_malformed_checkpoint_row(row, task_id) for row in existing):
         return "unreconstructable"
-    pending = [
-        row for row in existing
-        if (_record_snapshot(row) or {}).get("status") == CHECKPOINT_AWAITING_OPERATOR
-    ]
+    pending, answered, _superseded, unknown_answer = _classify_checkpoints_for_hold(
+        existing, first, hold_time=hold_time.astimezone(timezone.utc)
+    )
+    if unknown_answer:
+        return "unreconstructable"
     if pending:
         return (
             "held_with_checkpoint"
             if any(_checkpoint_authority_state(row["entity_id"], first) == "current" for row in pending)
             else "unreconstructable"
         )
-    if any(
-        read_checkpoint_resolution(_record_snapshot(row) or {}) == "approved"
-        and not checkpoint_already_dispatched(_record_snapshot(row) or {})
-        for row in existing
-    ):
-        return "skipped_by_reason"
-    if _newest_checkpoint_superseded(existing)[0] != "not_retired":
+    if answered:
         return "skipped_by_reason"
     reason = snapshot.get("blocked_reason")
     observation_id = (first.get("provenance") or {}).get("blocked_reason")
@@ -5641,6 +5737,8 @@ def _reconcile_missing_checkpoint(task_id: str, *, apply: bool) -> str:
     if not apply:
         return "candidate"
 
+    if _gate_hold_is_in_flight(task_id):
+        return "skipped_in_flight"
     tenant_id = str(fetch_entity_user_id(task_id) or "").strip()
     if not tenant_id:
         return "unreconstructable"
@@ -5656,20 +5754,33 @@ def _reconcile_missing_checkpoint(task_id: str, *, apply: bool) -> str:
         or entity_record_digest(current) != entity_record_digest(first)
     ):
         return "skipped_by_reason"
+    if _gate_hold_is_in_flight(task_id):
+        return "skipped_in_flight"
+    # An answer may land while the task revision is being re-read. Never
+    # restore a resolved checkpoint from a stale listing.
+    refreshed = checkpoints_for_task(task_id, strict=True)
+    if refreshed is None or any(_malformed_checkpoint_row(row, task_id) for row in refreshed):
+        return "unreconstructable"
+    refreshed_pending, refreshed_answered, _, refreshed_unknown = _classify_checkpoints_for_hold(
+        refreshed, current, hold_time=hold_time.astimezone(timezone.utc)
+    )
+    if refreshed_pending or refreshed_answered or refreshed_unknown:
+        return "skipped_by_reason" if not refreshed_unknown else "unreconstructable"
+    held_title, summary, alternatives = _gate_hold_write_details(
+        current_snapshot, skill, action_type, decision
+    )
     brief_id = write_checkpoint_brief(
         task_entity_id=task_id,
         decision=decision,
-        title=str(current_snapshot.get("title") or "Held task"),
-        plan_summary=(
-            f"Recovered gate hold for {skill or 'unassigned'}. "
-            f"Action: {action_type or 'unknown'}. {reason}."
-        ),
+        title=held_title,
+        plan_summary=summary,
         handler=DAEMON_NAME,
         user_id=tenant_id,
         action_type=action_type,
         idempotency_context=f"hold-{observation_id}",
         task_record=current,
         policy=policy,
+        alternatives=alternatives,
     )
     if not brief_id:
         return "unreconstructable"
@@ -5695,7 +5806,8 @@ def sweep_missing_gate_checkpoints(
     """One bounded page of recent held tasks; return counts and next offset."""
     counts = {key: 0 for key in (
         "scanned", "held_with_checkpoint", "candidates", "raised",
-        "skipped_by_reason", "unreconstructable", "candidate",
+        "skipped_by_reason", "skipped_in_flight", "skipped_fresh",
+        "unreconstructable", "candidate",
     )}
     deadline = clock() + HELD_CHECKPOINT_SWEEP_BUDGET_SECONDS
     since = (now() - timedelta(days=HELD_CHECKPOINT_SWEEP_WINDOW_DAYS)).isoformat()
@@ -5730,7 +5842,7 @@ def sweep_missing_gate_checkpoints(
             counts["unreconstructable"] += 1
             continue
         try:
-            outcome = _reconcile_missing_checkpoint(task_id, apply=apply)
+            outcome = _reconcile_missing_checkpoint(task_id, apply=apply, now=now())
         except Exception as exc:  # noqa: BLE001 — one task cannot stop recovery
             log.warning("[%s] held-checkpoint sweep read failed for %s: %s", DAEMON_NAME, task_id, type(exc).__name__)
             outcome = "unreconstructable"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import sys
 from pathlib import Path
 
@@ -17,11 +18,12 @@ except ImportError:
 from lib.daemon_runtime.gating import BlastRadius, ExecutionPolicy, GateAction, GateDecision
 
 
-def task(status="awaiting_approval", reason="gate reason", observation="obs-hold"):
+def task(status="awaiting_approval", reason="gate reason", observation="obs-hold", observed_at="2026-01-01T00:00:00Z"):
     return {
         "entity_id": "ent_task",
         "entity_type": "task",
         "provenance": {"blocked_reason": observation},
+        "last_observation_at": observed_at,
         "snapshot": {"status": status, "blocked_reason": reason, "title": "Generic task", "confidence": 0.7},
     }
 
@@ -64,6 +66,46 @@ def test_missing_gate_checkpoint_is_raised_once_and_read_back(recovery):
     assert apis._reconcile_missing_checkpoint("ent_task", apply=True) == "held_with_checkpoint"
     assert state["writes"] == 1
     assert state["reads"] >= 3
+
+
+def test_fresh_hold_is_skipped_and_old_hold_is_raised(recovery):
+    state, _, _ = recovery
+    now = datetime(2026, 11, 18, tzinfo=timezone.utc)
+    state["task"] = task(observed_at=(now - timedelta(seconds=30)).isoformat())
+    assert apis._reconcile_missing_checkpoint("ent_task", apply=True, now=now) == "skipped_fresh"
+    assert state["writes"] == 0
+    state["task"] = task(observed_at=(now - timedelta(seconds=apis.HELD_CHECKPOINT_SWEEP_MIN_AGE_SECONDS + 1)).isoformat())
+    assert apis._reconcile_missing_checkpoint("ent_task", apply=True, now=now) == "raised"
+    assert state["writes"] == 1
+
+
+def test_sweep_age_floor_exceeds_proof_window():
+    assert apis.HELD_CHECKPOINT_SWEEP_MIN_AGE_SECONDS >= 120
+    assert (apis.HELD_CHECKPOINT_SWEEP_MIN_AGE_SECONDS - apis.GATE_HOLD_PROOF_SECONDS
+            >= apis.HELD_CHECKPOINT_WRITE_RETRY_BUDGET_SECONDS
+            + apis.HELD_CHECKPOINT_SWEEP_SAFETY_MARGIN_SECONDS)
+
+
+def test_in_flight_hold_is_counted_without_a_write(recovery, monkeypatch):
+    state, _, _ = recovery
+    monkeypatch.setattr(apis, "query_entities", lambda *a, **kw: {
+        "entities": [{"entity_id": "ent_task"}], "total": 1,
+    })
+    with apis._gate_hold_proving("ent_task"):
+        counts, _ = apis.sweep_missing_gate_checkpoints(apply=True)
+    assert counts["skipped_in_flight"] == 1
+    assert state["writes"] == 0
+
+
+def test_fresh_hold_is_counted_without_a_write(recovery, monkeypatch):
+    state, _, _ = recovery
+    state["task"] = task(observed_at=datetime.now(timezone.utc).isoformat())
+    monkeypatch.setattr(apis, "query_entities", lambda *a, **kw: {
+        "entities": [{"entity_id": "ent_task"}], "total": 1,
+    })
+    counts, _ = apis.sweep_missing_gate_checkpoints(apply=True)
+    assert counts["skipped_fresh"] == 1
+    assert state["writes"] == 0
 
 
 @pytest.mark.parametrize("status", ["cancelled", "declined", "done", "routed", "executing", "blocked", "failed"])
@@ -111,12 +153,44 @@ def test_unreadable_checkpoint_collection_denies(recovery, monkeypatch):
     assert state["writes"] == 0
 
 
-def test_approved_checkpoint_waiting_for_release_is_not_reopened(recovery):
+@pytest.mark.parametrize("status", [
+    "rejected", "approved_no_release", "approved",
+    "approved_requires_fresh_approval",
+])
+def test_answered_checkpoint_is_not_reopened(recovery, status):
     state, _, _ = recovery
     state["checkpoints"] = [{
         "entity_id": "ent_approved",
-        "snapshot": {"status": "approved", "task_entity_id": "ent_task"},
+        "created_at": "2026-01-01T00:01:00Z",
+        "snapshot": {"status": status, "task_entity_id": "ent_task",
+                     "resolved_dispatched": status == "approved"},
     }]
+    assert apis._reconcile_missing_checkpoint("ent_task", apply=True) == "skipped_by_reason"
+    assert state["writes"] == 0
+
+
+def test_superseded_checkpoint_allows_recovery(recovery):
+    state, _, _ = recovery
+    state["checkpoints"] = [{
+        "entity_id": "ent_retired", "created_at": "2026-01-01T00:01:00Z",
+        "snapshot": {"status": "superseded", "task_entity_id": "ent_task"},
+    }]
+    assert apis._reconcile_missing_checkpoint("ent_task", apply=False) == "candidate"
+
+
+def test_answer_landing_during_sweep_blocks_write(recovery, monkeypatch):
+    state, _, _ = recovery
+    reads = 0
+
+    def checkpoints(_id, *, strict):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            return []
+        return [{"entity_id": "ent_answer", "created_at": "2026-01-01T00:01:00Z",
+                 "snapshot": {"status": "rejected", "task_entity_id": "ent_task"}}]
+
+    monkeypatch.setattr(apis, "checkpoints_for_task", checkpoints)
     assert apis._reconcile_missing_checkpoint("ent_task", apply=True) == "skipped_by_reason"
     assert state["writes"] == 0
 
