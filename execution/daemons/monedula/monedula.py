@@ -167,7 +167,7 @@ def _get_notifier() -> Any:
 def _mark_notify_undeliverable(priority: str) -> None:
     global _notify_undeliverable
     if priority.lower() == "info":
-        return  # INFO is dropped by the Notifier by design; nothing was lost
+        return False  # INFO is dropped by the Notifier by design; nothing was lost
     _notify_undeliverable = True
 
 
@@ -176,7 +176,7 @@ def _notify(
     priority: str = "info",
     dedupe_key: str | None = None,
     email_eligible: bool = True,
-) -> None:
+) -> bool:
     """Send via lib/notify. A failure to deliver is logged at ERROR, never silent.
 
     ``dedupe_key``, when given, is forwarded to Notifier.send() so a
@@ -200,7 +200,7 @@ def _notify(
             "operator alert could not be delivered (no notifier available): "
             f"{_alert_ref(message)}"
         )
-        return
+        return False
     try:
         from lib.notify import Priority
 
@@ -213,7 +213,7 @@ def _notify(
                 "operator alert could not be delivered (notifier has no working "
                 f"transport): {_alert_ref(message)}"
             )
-            return
+            return False
         p = getattr(Priority, priority.upper(), Priority.INFO)
         was_open = False
         if dedupe_key:
@@ -240,12 +240,14 @@ def _notify(
                 "operator alert was not delivered by the notifier: "
                 f"{_alert_ref(message)}"
             )
+        return bool(delivered or was_open)
     except Exception as exc:
         _mark_notify_undeliverable(priority)
         log.error(
             f"operator alert could not be delivered ({type(exc).__name__}): "
             f"{_alert_ref(message)}"
         )
+        return False
 
 
 # The lowest priority the Notifier actually delivers is WARN: INFO is dropped
@@ -1955,6 +1957,10 @@ def main() -> bool:
                 ),
                 on_unauthenticated_reply=lambda msg, key: _notify_unauthenticated_reply(
                     msg, key, handler_names=handler_names, yesterday_str=yesterday_str
+                ),
+                on_missing_token_reply=lambda msg, key: _notify(
+                    msg, priority="blocker", dedupe_key=key,
+                    email_eligible=False,
                 ),
             )
         if consent.reason_code != REASON_NEEDS_SWARM_MAILBOX:

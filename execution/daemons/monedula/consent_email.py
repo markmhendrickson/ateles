@@ -3,6 +3,10 @@
 Owns pending-set fingerprinting, Design/UX reply grammar (attendance + marker
 bind), and fail-closed approve semantics. Does NOT invent a second Gmail send
 path — every outbound/inbound call goes through ``lib.approval.email_channel``.
+The shared reader removes quoted text for payment consent too. Monedula uses a
+different verdict grammar from Turdus: calendar obligations require ATTENDED,
+and multi-item replies bind each line to a payment marker; the Turdus
+`approve <version>`/PR predicate cannot represent those payment terms.
 
 State file (``.monedula_consent_email.json`` beside strandings state) stores
 only ``{fingerprint, generation, sent_at}`` — no addresses, bodies, or
@@ -26,9 +30,12 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+from lib.approval import email_channel
 from lib.approval.email_channel import (
     ReadRepliesOutcome,
     read_replies_with_status,
@@ -36,7 +43,7 @@ from lib.approval.email_channel import (
     swarm_mailbox_configured,
     swarm_mailbox_problems,
 )
-from lib.approval.tokens import parse_verdict, subject_marker, token_for
+from lib.approval.tokens import subject_marker, token_for
 
 import payment_journal
 
@@ -134,17 +141,33 @@ def match_key(item: PendingItem) -> str:
 def _load_mark(path: Path) -> dict:
     try:
         data = json.loads(path.read_text())
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        for field in ("notified_reply_ids", "held_reply_ids", "superseded_reply_ids"):
+            ids = data.get(field, [])
+            if not isinstance(ids, list) or any(not isinstance(mid, str) for mid in ids):
+                log.warning("consent reply-id state malformed; fresh request required")
+                return {}
+        return data
     except (OSError, ValueError):
         return {}
 
 
-def _save_mark(path: Path, fingerprint: str, sent_at: float, *, generation: int) -> None:
+def _save_mark(path: Path, fingerprint: str, sent_at: float, *, generation: int,
+               request_body: str | None = None,
+               notified_reply_ids: list[str] | None = None,
+               held_reply_ids: list[str] | None = None,
+               superseded_reply_ids: list[str] | None = None) -> None:
     payload: dict[str, Any] = {
         "fingerprint": fingerprint,
         "generation": int(generation),
         "sent_at": sent_at,
     }
+    if request_body is not None:
+        payload["request_body"] = request_body
+    payload["notified_reply_ids"] = notified_reply_ids or []
+    payload["held_reply_ids"] = held_reply_ids or []
+    payload["superseded_reply_ids"] = superseded_reply_ids or []
     path.write_text(json.dumps(payload, indent=2, sort_keys=True))
 
 
@@ -154,6 +177,20 @@ def _clear_mark(path: Path) -> None:
             path.unlink()
     except OSError as exc:
         log.warning(f"could not clear consent mark: {exc}")
+
+
+def _reply_predates_request(date: str, sent_at: float) -> bool:
+    """Use a reply date only when it is parseable and timezone-aware."""
+    if not date or not sent_at:
+        return False
+    try:
+        parsed = datetime.fromisoformat(date)
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(date)
+        except (TypeError, ValueError):
+            return False
+    return parsed.tzinfo is not None and parsed.timestamp() < sent_at
 
 
 def clear_consent_state(state_path: Path | None = None) -> None:
@@ -418,21 +455,18 @@ _MARKER_RE = re.compile(r"\[APPROVE-([0-9A-F]+)\]", re.IGNORECASE)
 
 def _operator_lines(text: str) -> list[str]:
     """Unquoted operator lines from a reply (subject + body)."""
-    up = text
-    body = up
-    for marker in ("\nOn ", "\nON ", "\n-----Original", "\n-----ORIGINAL", "\n________"):
-        idx = body.find(marker)
-        if idx > 0:
-            body = body[:idx]
-            break
+    from lib.approval.email_channel import _authored_plain_checked
+
+    body, safe = _authored_plain_checked(text)
+    if not safe:
+        return ["UNREADABLE OPERATOR REPLY"]
     lines: list[str] = []
-    for line in body.splitlines():
+    for index, line in enumerate(body.splitlines()):
         s = line.strip()
-        if not s or s.startswith(">"):
+        if not s:
             continue
-        if s.upper().startswith("RE:") or s.upper().startswith("[ATELES]"):
-            continue
-        if "JUST HIT REPLY" in s.upper() or "TO DECLINE" in s.upper():
+        if index == 0 and (s.upper().startswith("RE:") or
+                           s.upper().startswith("[ATELES]")):
             continue
         lines.append(s)
     return lines
@@ -448,7 +482,7 @@ def overlay_verdicts(
     texts: list[str],
     unrecognized_lines: list[str] | None = None,
 ) -> tuple[dict[str, HandlerState], bool]:
-    """Apply Design/UX verdict overlay on top of ``parse_verdict``.
+    """Apply the payment-specific, target-bound reply grammar.
 
     Returns (match_token → state, unrecognized_seen).
     SKIP is decisive per match token: once skipped, a later APPROVE/ATTENDED
@@ -462,6 +496,7 @@ def overlay_verdicts(
         match_key(i): "awaiting_approval" for i in items
     }
     decisions: dict[str, HandlerState] = {}
+    held_keys: set[str] = set()
     unrecognized = False
     multi = len(items) > 1
     by_token = {i.token.upper(): i for i in items}
@@ -469,6 +504,26 @@ def overlay_verdicts(
     def _flag(line: str) -> None:
         nonlocal unrecognized
         unrecognized = True
+        def mentions(value: str) -> bool:
+            return bool(value and re.search(
+                rf"(?<![A-Za-z0-9]){re.escape(value)}(?![A-Za-z0-9])",
+                line, re.IGNORECASE))
+
+        named = {
+            match_key(item) for item in items
+            if any(mentions(ref) for ref in (item.token, item.obligation,
+                                             item.match_id, item.label,
+                                             item.handler_name))
+        }
+        if named:
+            held_keys.update(named)
+        elif _MARKER_RE.search(line):
+            # An old request's marker does not name any obligation in this
+            # generation. It must not veto an unrelated new request.
+            if subject_tok in by_token:
+                held_keys.add(match_key(by_token[subject_tok]))
+        else:
+            held_keys.update(states)
         if unrecognized_lines is not None and line not in unrecognized_lines:
             unrecognized_lines.append(line)
 
@@ -489,7 +544,29 @@ def overlay_verdicts(
                 subject_tok = _line_marker_token(line)
                 break
 
-        for line in _operator_lines(text):
+        operator_lines = _operator_lines(text)
+        # A second instruction can withdraw or qualify the first. Reject the
+        # entire authored reply before recording any decision if any line falls
+        # outside the notification's finite reply grammar.
+        valid_lines = True
+        for line in operator_lines:
+            marker = _line_marker_token(line)
+            bound = marker or (None if multi else subject_tok)
+            expected = (rf"\[(?:APPROVE-{re.escape(bound)})\]" if bound else "")
+            verb = (line.split() or [""])[0].upper().rstrip(".!")
+            item = by_token.get(bound or "")
+            if (not bound or bound not in by_token or
+                    re.fullmatch(rf"(?:ATTENDED|APPROVE|YES|SKIP)(?:\s+{expected})?[.!]?",
+                                 line, re.IGNORECASE) is None or
+                    (multi and not marker) or
+                    (item is not None and
+                     ((verb == "ATTENDED" and not item.is_calendar) or
+                      (verb in {"APPROVE", "YES"} and item.is_calendar)))):
+                _flag(line)
+                valid_lines = False
+        if not valid_lines:
+            continue
+        for line in operator_lines:
             first = (line.split() or [""])[0].upper().rstrip(".!")
             line_tok = _line_marker_token(line)
             bound_tok = line_tok or (None if multi else subject_tok)
@@ -535,14 +612,7 @@ def overlay_verdicts(
                     # Calendar requires ATTENDED — bare APPROVE/YES holds.
                     _flag(line)
                     continue
-                # Use parse_verdict for non-calendar approve forms.
-                verdict = parse_verdict(text, item.token)
-                if verdict is True:
-                    _decide(item, "approved")
-                elif verdict is False:
-                    _decide(item, "skipped")
-                else:
-                    _flag(line)
+                _decide(item, "approved")
                 continue
 
             # Authenticated but unparseable content on a line that looks like
@@ -555,7 +625,8 @@ def overlay_verdicts(
                     _flag(line)
 
     for key, state in decisions.items():
-        states[key] = state
+        if key not in held_keys:
+            states[key] = state
     return states, unrecognized
 
 
@@ -566,6 +637,7 @@ def request_and_collect(
     state_path: Path | None = None,
     clear_failure_dedupe: Callable[[], None] | None = None,
     on_unauthenticated_reply: Callable[[str, str], None] | None = None,
+    on_missing_token_reply: Callable[[str, str], bool | None] | None = None,
 ) -> ConsentEmailResult:
     """Send-once consent email + statusful reply sweep for the pending set.
 
@@ -611,6 +683,10 @@ def request_and_collect(
     fp = pending_fingerprint(probe)
     mark = _load_mark(path)
     prior_fp = str(mark.get("fingerprint") or "")
+    older_reply_ids = set(mark.get("superseded_reply_ids") or [])
+    if prior_fp:
+        older_reply_ids.update(mark.get("held_reply_ids") or [])
+        older_reply_ids.update(mark.get("notified_reply_ids") or [])
 
     # The journal is the durable record of what was paid and the source of
     # request generations. Unreadable → hold everything (principles.md#5).
@@ -685,7 +761,20 @@ def request_and_collect(
             log.error("consent_request_send_failed — payments remain blocked; retry next tick")
             return _block_all(items, "consent_request_send_failed")
         # Ordering invariant: persist mark ONLY after send_request returns True.
-        _save_mark(path, fp, time.time(), generation=generation)
+        _save_mark(path, fp, time.time(), generation=generation, request_body=body,
+                   superseded_reply_ids=sorted(older_reply_ids))
+
+    current_mark = _load_mark(path)
+    superseded_ids = set(current_mark.get("superseded_reply_ids") or [])
+    sent_at = float(current_mark.get("sent_at") or 0)
+
+    def _exclude_superseded(mid: str, date: str, subject: str) -> bool:
+        # A current request code is stronger binding than mailbox timestamps,
+        # which can be inaccurate in synthetic or delayed mail. An old ID is
+        # independently proven by the earlier generation's persisted state.
+        has_current_code = any(token.casefold() in subject.casefold() for token in tokens)
+        return mid in superseded_ids or (
+            not has_current_code and _reply_predates_request(date, sent_at))
 
     tokens = [i.token for i in items]
     sender_rejected = {"n": 0}
@@ -699,11 +788,61 @@ def request_and_collect(
         unauthenticated["n"] += 1
         log.warning(REASON_REPLY_UNAUTHENTICATED)
 
+    # The persisted mark records the actual successful send, including a
+    # recovery preface. Older marks have no body and cannot prove extra quotes.
+    original_lines = (mark.get("request_body") if already_sent else body)
     outcome: ReadRepliesOutcome = read_replies_with_status(
         tokens,
         on_sender_rejected=_on_rejected,
         on_unauthenticated_operator_reply=_on_unauthenticated,
+        correction_queries=[f"[Ateles] Monedula consent {items[0].payment_date}"],
+        request_bodies=email_channel.sent_request_body,
+        exclude_reply=_exclude_superseded,
     )
+
+    notified_ids = set(mark.get("notified_reply_ids") or []) if already_sent else set()
+    held_ids = set(mark.get("held_reply_ids") or []) if already_sent else set()
+    unnotified_corrections = [reply for reply in outcome.correction_only_replies
+                              if reply.message_id not in notified_ids]
+    fresh_corrections = [reply for reply in outcome.correction_only_replies
+                         if reply.message_id not in held_ids]
+    correction_holds = bool(fresh_corrections)
+    if correction_holds:
+        held_ids.update(reply.message_id for reply in fresh_corrections)
+        held_ids.update(reply.message_id for reply in outcome.replies)
+        try:
+            _save_mark(path, fp, float(mark.get("sent_at") or time.time()),
+                       generation=generation, request_body=original_lines,
+                       notified_reply_ids=sorted(notified_ids),
+                       held_reply_ids=sorted(held_ids),
+                       superseded_reply_ids=sorted(superseded_ids))
+        except (OSError, TypeError, ValueError) as exc:
+            log.error(f"consent correction state unavailable — payments held: {exc}")
+            return _block_all(items, "consent_correction_state_unavailable")
+    if on_missing_token_reply is not None:
+        for reply in unnotified_corrections:
+            try:
+                delivered = on_missing_token_reply(
+                    f"monedula: payment consent for {items[0].payment_date} is held. "
+                    "Your email reply did not include a payment code. Reply to "
+                    "the current request and quote it so its code is present; "
+                    "no payment is approved until a reply carries it.",
+                    f"monedula:missing_token:{reply.message_id}",
+                )
+                if delivered is True:
+                    notified_ids.add(reply.message_id)
+            except Exception as exc:  # noqa: BLE001 — a failed notice cannot approve
+                log.warning(f"consent missing-token notice failed: {exc}")
+    if notified_ids or held_ids:
+        try:
+            _save_mark(path, fp, float(mark.get("sent_at") or time.time()),
+                       generation=generation, request_body=original_lines,
+                       notified_reply_ids=sorted(notified_ids),
+                       held_reply_ids=sorted(held_ids),
+                       superseded_reply_ids=sorted(superseded_ids))
+        except (OSError, TypeError, ValueError) as exc:
+            log.error(f"consent correction state unavailable — payments held: {exc}")
+            return _block_all(items, "consent_correction_state_unavailable")
 
     if outcome.kind in ("transport_error", "disabled"):
         log.error(
@@ -715,6 +854,36 @@ def request_and_collect(
             result.blocked.add(key)
         result.reason_code = "consent_reply_read_failed"
         result.channel_ok = False
+        if outcome.unreadable_replies:
+            # The old token remains held by the shared reader's complete-sweep
+            # rule. Issue a new journal generation for the same obligations;
+            # only the fresh token can authorize them on the next poll.
+            try:
+                new_generation = payment_journal.next_generation(jpath)
+            except payment_journal.JournalError as exc:
+                log.error(f"consent_reissue_failed — payments held: {exc}")
+                return result
+            fresh_items = build_pending_items(triggered, yesterday_str, new_generation)
+            subject, body = build_request_body(
+                fresh_items, superseded=True, settled=settled, unknown=unknown,
+            )
+            body = (
+                "A reply to the previous consent request could not be read. "
+                "No payment was made. That request remains held; replying to "
+                "it again will not approve a payment. This is a fresh consent "
+                "request with new codes. Only a reply to this new request "
+                "using its new codes can count.\n\n" + body
+            )
+            if send_request(subject, body):
+                old_reply_ids = {reply.message_id for reply in (
+                    *outcome.unreadable_replies, *outcome.replies,
+                    *outcome.correction_only_replies)}
+                _save_mark(path, fp, time.time(), generation=new_generation,
+                           request_body=body,
+                           superseded_reply_ids=sorted(superseded_ids | old_reply_ids))
+                result.send_count += 1
+            else:
+                log.error("consent_reissue_send_failed — payments held")
         return result
 
     # kind == ok
@@ -728,7 +897,19 @@ def request_and_collect(
             on_unauthenticated_reply,
         )
 
-    if not outcome.texts:
+    if correction_holds:
+        for item in items:
+            key = match_key(item)
+            result.states[key] = "blocked"
+            result.blocked.add(key)
+        result.reason_code = "consent_reply_missing_token"
+        return result
+
+    active_texts = [f"{reply.subject}\n{reply.body}" for reply in outcome.replies
+                    if reply.message_id not in held_ids]
+    if not outcome.replies and not held_ids:
+        active_texts = outcome.texts
+    if not active_texts:
         for item in items:
             key = match_key(item)
             result.states[key] = "awaiting_approval"
@@ -738,8 +919,11 @@ def request_and_collect(
 
     unrecognized_lines: list[str] = []
     states, unrecognized = overlay_verdicts(
-        items, outcome.texts, unrecognized_lines=unrecognized_lines
+        items, active_texts, unrecognized_lines=unrecognized_lines
     )
+    for item in items:
+        if states[item.token] == "approved" and payment_journal.token_consumed(journal, item.token):
+            states[item.token] = "blocked"
     result.states = states
     for key, state in states.items():
         if state == "approved":

@@ -8,6 +8,7 @@ safety rules that a payment/release must never be approved by accident.
 from __future__ import annotations
 
 import hashlib
+import re
 
 # Subject-line marker that carries the token, e.g. "[APPROVE-1A2B3C4D]".
 # The operator replies APPROVE / SKIP in the body; the token rides along in the
@@ -45,15 +46,11 @@ def parse_verdict(text: str, token: str) -> bool | None:
     """Return True (approve), False (skip), or None (no verdict) for a reply.
 
     Accepts a bare "APPROVE"/"SKIP"/"YES" (the token is matched separately, from
-    the quoted subject), the explicit "APPROVE <token>" / "APPROVE-<token>"
-    forms, and a line that simply STARTS with the verb followed by anything —
-    e.g. "approve v0.20.0" (the release-approval UX, where the operator names
-    the version). SKIP is decisive: if both a skip and an approve appear, the
-    result is SKIP, so an ambiguous reply never acts by accident.
+    the quoted subject), or the explicit target-bound forms. Any other authored
+    text makes the reply ambiguous and cannot approve.
 
-    The verb must be the FIRST word of the operator's own (unquoted) line — a
-    chatty "i approve this" mid-sentence is NOT a verdict, and the quoted
-    original is stripped first, so a quoted instruction never counts.
+    The verb must fill the operator's own (unquoted) instruction line; a
+    longer sentence is not a verdict. Quoted instructions never count.
 
     `text` should be the full reply text (subject + body); matching is
     case-insensitive, including the token.
@@ -72,24 +69,27 @@ def parse_verdict(text: str, token: str) -> bool | None:
             body = body[:idx]
             break
 
-    verdict: bool | None = None
+    lines: list[str] = []
     for line in body.splitlines():
-        s = line.strip().rstrip(".!")
+        s = line.strip()
         if s.startswith(">") or "JUST HIT REPLY" in s or "TO DECLINE" in s:
             continue
         # Ignore the subject line itself (it always contains "APPROVE-<token>").
         if s.startswith("RE:") or s.startswith("[ATELES]"):
             continue
-        # The first word of the operator's own line decides. SKIP-as-first-word
-        # is decisive (returns immediately); APPROVE/YES-as-first-word marks
-        # approve but keeps scanning in case a later line says SKIP. The
-        # first-word check covers the bare verb and the "VERB <anything>" form
-        # (e.g. "approve v0.20.0"); the explicit "VERB-<token>" (hyphen-joined,
-        # no space) form is matched separately since it is a single word.
-        parts = s.split()
-        first = parts[0] if parts else ""
-        if first == "SKIP" or s == f"SKIP-{tok}":
-            return False  # SKIP is decisive — never act on an ambiguous reply
-        if first in ("APPROVE", "YES") or s == f"APPROVE-{tok}":
-            verdict = True
-    return verdict
+        if s:
+            lines.append(s)
+    if not lines:
+        return None
+    target = re.escape(tok)
+    optional_v = rf"V?{re.escape(tok.lstrip('V'))}" if tok.startswith("V") else target
+    suffix = rf"(?:{target}|{optional_v})"
+    approve = rf"(?:APPROVE|YES)(?:\s+{suffix})?[.!]?|APPROVE-{target}[.!]?"
+    skip = rf"SKIP(?:\s+{suffix})?[.!]?|SKIP-{target}[.!]?"
+    if len(lines) != 1:
+        return False if any(re.fullmatch(skip, s) for s in lines) else None
+    if re.fullmatch(skip, lines[0]):
+        return False
+    if re.fullmatch(approve, lines[0]):
+        return True
+    return None

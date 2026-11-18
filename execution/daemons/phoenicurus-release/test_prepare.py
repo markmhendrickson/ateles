@@ -20,6 +20,12 @@ import pytest
 import prepare
 
 
+@pytest.fixture(autouse=True)
+def approval_addresses(monkeypatch):
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.com")
+
+
 @pytest.fixture
 def isolated_state(tmp_path, monkeypatch):
     """Point both lock files at a temp dir so tests never touch real state."""
@@ -85,19 +91,41 @@ def test_email_send_skips_when_operator_email_unset(monkeypatch):
         assert not which.called
 
 
+@pytest.mark.parametrize("missing", (
+    "OPERATOR_EMAIL", "ATELES_SWARM_EMAIL", "ATELES_SWARM_GWS_CONFIG_DIR"))
+def test_email_skip_log_names_missing_setting(monkeypatch, tmp_path, caplog, missing):
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setattr(prepare, "SWARM_EMAIL", "swarm@example.net")
+    monkeypatch.delenv(missing)
+    if missing == "OPERATOR_EMAIL":
+        monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "")
+    elif missing == "ATELES_SWARM_EMAIL":
+        monkeypatch.setattr(prepare, "SWARM_EMAIL", "")
+    assert prepare.email_send("Synthetic release", "notice") is False
+    assert missing in caplog.text
+    assert "op@example.com" not in caplog.text
+    assert "swarm@example.net" not in caplog.text
+
+
 def test_email_send_returns_false_when_gws_missing(monkeypatch):
     monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
     with patch("shutil.which", return_value=None):
         assert prepare.email_send("subj", "body") is False
 
 
-def test_email_send_builds_gws_command_with_from(monkeypatch):
+def test_email_send_builds_gws_command_with_from(monkeypatch, tmp_path):
     monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
     monkeypatch.setattr(prepare, "SWARM_EMAIL", "swarm@example.com")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", "/synthetic/ambient-gws")
     calls = {}
 
     def fake_run(cmd, **kw):
         calls["cmd"] = cmd
+        calls["env"] = kw["env"]
         return MagicMock(returncode=0, stdout="", stderr="")
 
     with patch("shutil.which", return_value="/usr/bin/gws"), \
@@ -112,6 +140,7 @@ def test_email_send_builds_gws_command_with_from(monkeypatch):
     body_arg = cmd[cmd.index("--body") + 1]
     assert "body text" in body_arg
     assert "--html" in cmd
+    assert calls["env"]["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == str(tmp_path)
 
 
 # ── _plain_to_html: markdown-ish daemon notices rendered for email ───────────
@@ -164,7 +193,7 @@ def test_plain_to_html_no_inline_styling():
     assert "style=" not in out
 
 
-def test_email_send_body_is_html_not_raw_markdown(monkeypatch):
+def test_email_send_body_is_html_not_raw_markdown(monkeypatch, tmp_path):
     # Effect-level check: a realistic daemon notice sent through email_send()
     # must arrive as converted HTML, not the raw markdown source. Asserting only
     # "the input string appears in --body" (as the pre-existing test does) would
@@ -173,6 +202,7 @@ def test_email_send_body_is_html_not_raw_markdown(monkeypatch):
     # recur. Ports the #338 sibling coverage onto this branch for panel re-run.
     monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
     monkeypatch.setattr(prepare, "SWARM_EMAIL", "")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
     calls = {}
 
     def fake_run(cmd, **kw):
