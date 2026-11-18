@@ -7,7 +7,7 @@ import unicodedata
 from dataclasses import dataclass
 
 REGISTER_HEADING = "## The register of open design decisions"
-NUMBER = re.compile(r"[0-9]+(?:[–-][0-9]+)?\Z")
+NUMBER = re.compile(r"(?:0|[1-9][0-9]*)(?:[–-](?:0|[1-9][0-9]*))?\Z")
 STATUS_LEAD = re.compile(r"\*\*([^*]+)\*\*")
 STATUSES = frozenset(
     {"ruled in part", "not a decision", "withdrawn", "reopened", "open", "ruled"}
@@ -79,7 +79,7 @@ def _row_error(kind: str, index: int, reason: str = "malformed") -> ValueError:
 def _row_number(number: str, index: int, kind: str) -> str:
     if not NUMBER.fullmatch(number):
         raise _row_error(kind, index)
-    return number
+    return number.replace("-", "–")
 
 
 def _invalid_indent(line: str) -> bool:

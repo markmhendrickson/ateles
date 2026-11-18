@@ -334,3 +334,17 @@ class TestGfmTableBlock(unittest.TestCase):
             except ValueError:
                 errors += 1
         self.assertEqual(parsed + errors, len(GFM_SHAPES))
+
+    def test_number_keys_reject_leading_zeros_and_normalize_range_dash(self):
+        base = register(**{"7": "**open**"})
+        for number in ("07", "5-07"):
+            with self.assertRaises(ValueError):
+                ds.parse_rows(base + f"| {number} | q | a | b | **open** |\n")
+            with self.assertRaises(ValueError):
+                reserve.numbers("decision", base + f"| {number} | q | a | b | **open** |\n")
+        for number in ("5-7", "5–7"):
+            text = register(**{number: "**open**"})
+            self.assertEqual(list(ds.parse_rows(text)), ["5–7"])
+            self.assertEqual(reserve.numbers("decision", text), [5, 6, 7])
+        with self.assertRaisesRegex(ValueError, "duplicate register row"):
+            decision_rows(register(**{"5-7": "**open**", "5–7": "**open**"}))
