@@ -1216,15 +1216,13 @@ def read_replies_with_status(
             if isinstance(original_request, SentRequest):
                 sent_request = original_request
                 original_request = sent_request.body
-            if isinstance(original_request, str):
+            if sent_request is not None and isinstance(original_request, str):
                 request_lines = {" ".join(line.split()).casefold() for line in
                                  original_request.splitlines()}
                 subject_text = " ".join(subject.split()).casefold()
                 known = tuple(line for line in known
                               if " ".join(line.split()).casefold() in request_lines or
                               (line.startswith("[APPROVE-") and line.casefold() in subject_text))
-            else:
-                known = ()
             body, plain_safe = _authored_plain_checked(
                 plain, sent_request=sent_request, known_quote_lines=known)
             def normalize(line: str) -> str:
