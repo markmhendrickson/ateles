@@ -148,6 +148,16 @@ def _check_base_url(base_url: str) -> str:
         fail(
             "base URL must be https (http is allowed only for localhost, 127.0.0.1, ::1)"
         )
+    path = parsed.path
+    if path and (
+        not path.startswith("/")
+        or path.startswith("//")
+        or "//" in path
+        or "\\" in path
+        or any(segment in {".", ".."} for segment in path.split("/"))
+        or re.search(r"%2[ef]|%5c", path, re.IGNORECASE)
+    ):
+        fail(BASE_URL_INPUT_ERROR)
     normalized = base_url.rstrip("/")
     # The link builder and the stored-markup verifier must agree before add
     # can write a card. Keep this check at the shared grammar boundary.
@@ -155,6 +165,16 @@ def _check_base_url(base_url: str) -> str:
     try:
         probe_href = _page_href(normalized, entity_id=probe_id, token="probe")
         if _page_href(normalized, href=probe_href) != probe_id:
+            fail(BASE_URL_INPUT_ERROR)
+        resolved = urllib.parse.urlsplit(
+            urllib.parse.urljoin(normalized + "/", probe_href)
+        )
+        base = urllib.parse.urlsplit(normalized)
+        if (resolved.scheme, resolved.hostname, resolved.port) != (
+            base.scheme,
+            base.hostname,
+            base.port,
+        ) or not resolved.path.startswith(base.path.rstrip("/") + "/"):
             fail(BASE_URL_INPUT_ERROR)
     except ValueError:
         fail(BASE_URL_INPUT_ERROR)
@@ -208,26 +228,36 @@ def _fetch_snapshot(base_url: str, token: str, entity_id: str) -> dict:
     if not isinstance(entity, dict):
         raise ValueError("unreadable snapshot")
     snapshot = entity
-    body = None
+    fields = {}
     while True:
-        if "html_body" in snapshot:
-            candidate = snapshot["html_body"]
-            if not isinstance(candidate, str) or (
-                body is not None and candidate != body
-            ):
+        for name in (
+            "entity_id",
+            "entity_type",
+            "html_body",
+            "truncated",
+            "entity_version",
+        ):
+            if name not in snapshot:
+                continue
+            value = snapshot[name]
+            valid = {
+                "entity_id": lambda v: isinstance(v, str) and v == entity_id,
+                "entity_type": lambda v: isinstance(v, str) and v == "rendered_page",
+                "html_body": lambda v: isinstance(v, str),
+                "truncated": lambda v: v is False,
+                "entity_version": lambda v: isinstance(v, str) and bool(v),
+            }[name](value)
+            if not valid or (name in fields and fields[name] != value):
                 raise ValueError("unreadable snapshot")
-            body = candidate
+            fields[name] = value
         if "snapshot" not in snapshot:
             break
         snapshot = snapshot["snapshot"]
         if not isinstance(snapshot, dict):
             raise ValueError("unreadable snapshot")
-    snapshot = dict(snapshot)
-    if "entity_type" in entity:
-        snapshot["entity_type"] = entity["entity_type"]
-    if "entity_version" in entity:
-        snapshot["entity_version"] = entity["entity_version"]
-    return snapshot
+    if "entity_type" not in fields:
+        raise ValueError("unreadable snapshot")
+    return fields
 
 
 def _decode_probe(value: str) -> str | None:
@@ -265,6 +295,9 @@ def _page_href(
             + urllib.parse.quote(token, safe="")
         )
 
+    if href.startswith("//") or "\\" in href:
+        return None
+
     authorities = {parsed.netloc}
     default_port = 443 if parsed.scheme == "https" else 80
     if parsed.port in (None, default_port):
@@ -293,8 +326,11 @@ def _page_href(
 # no duplicate attribute name, and match _page_href's shared URL grammar. It
 # and every open ancestor must lack style, download, hidden, inert, and
 # aria-hidden. It must not be inside template, noscript, script, style, iframe,
-# object, svg, or math; self-closing template counts as open. Any <base>
-# element makes the result INCONCLUSIVE. All other excluded links leave orphans.
+# object, svg, or math; self-closing template counts as open. INCONCLUSIVE
+# conditions: a <base> element; a snapshot malformed in any layer, including
+# conflicting identity or type metadata; markup whose end tags do not nest
+# cleanly; incomplete enumeration (truncated listing, repeated cursor, no
+# progress, page bound); an unreadable linked page. Other excluded links leave orphans.
 # False orphans are accepted; a false OK is a defect. The parser does not
 # percent-decode or recursively decode entities; HTMLParser decodes once.
 class _PageLinks(HTMLParser):
@@ -770,8 +806,12 @@ def _run() -> int:
             "It and its open ancestors must have no style, download, "
             "hidden, inert, or aria-hidden attribute, and it cannot be inside "
             "template, noscript, script, style, iframe, object, svg, or math. "
-            "Self-closing template stays open. Any base element makes the "
-            "result INCONCLUSIVE; other excluded links leave orphans. HTML "
+            "Self-closing template stays open. INCONCLUSIVE conditions: a "
+            "<base> element; a snapshot malformed in any layer, including "
+            "conflicting identity or type metadata; markup whose end tags "
+            "do not nest cleanly; incomplete enumeration (truncated listing, "
+            "repeated cursor, no progress, page bound); an unreadable linked "
+            "page. Other excluded links leave orphans. HTML "
             "entities decode once; percent escapes are not decoded. False "
             "orphans are accepted, but false OK is a defect."
         ),
