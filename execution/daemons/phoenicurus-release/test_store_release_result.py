@@ -22,6 +22,7 @@ import sys
 import urllib.error
 from datetime import date
 from pathlib import Path
+import pytest
 from unittest.mock import MagicMock
 
 _DAEMON_DIR = Path(__file__).resolve().parent
@@ -32,6 +33,84 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR), str(_REPO_ROOT / "lib" / "daemon_r
 
 import aauth_signer  # noqa: E402
 import store_release_result  # noqa: E402
+
+
+def test_pending_release_records_prepared_binding(monkeypatch, tmp_path):
+    monkeypatch.setattr(store_release_result, "__file__", str(tmp_path / "store_release_result.py"))
+    marker = tmp_path / ".phoenicurus_prepare_spawn_count"
+    marker.write_text(json.dumps({"head": "a" * 40,
+                                  "guard_snapshot": {"synthetic": "digest"},
+                                  "release_guards": {"v1.0.0": {
+                                      "version": "v1.0.0", "head": "b" * 40,
+                                      "guard_snapshot": {"older": "digest"}}}}))
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
+    rc = _run_main(
+        monkeypatch,
+        ["--version", "v1.1.0", "--status", "pending_approval",
+         "--prepared-head", "a" * 40],
+        signer=_non_stub_signer(),
+        urlopen=lambda *_a, **_k: _urlopen_response(
+            {"entities": [{"entity_id": "ent_test", "action": "created"}]}),
+    )
+    assert rc == 0
+    entries = json.loads(marker.read_text())["release_guards"]
+    assert entries["v1.1.0"] == {"version": "v1.1.0", "head": "a" * 40,
+                                 "guard_snapshot": {"synthetic": "digest"}}
+    assert entries["v1.0.0"]["head"] == "b" * 40
+
+
+
+def _pending_marker(tmp_path, monkeypatch):
+    monkeypatch.setattr(store_release_result, "__file__", str(tmp_path / "store_release_result.py"))
+    marker = tmp_path / ".phoenicurus_prepare_spawn_count"
+    marker.write_text(json.dumps({"head": "a" * 40, "guard_snapshot": {"synthetic": "digest"}}))
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
+    return marker
+
+
+def _store_pending(monkeypatch, version="v1.1.0", head="a" * 40):
+    return _run_main(
+        monkeypatch,
+        ["--version", version, "--status", "pending_approval", "--prepared-head", head],
+        signer=_non_stub_signer(),
+        urlopen=lambda *_a, **_k: _urlopen_response(
+            {"entities": [{"entity_id": "ent_test", "action": "created"}]}),
+    )
+
+
+def test_pending_release_retry_with_same_version_head_and_snapshot_succeeds(monkeypatch, tmp_path):
+    marker = _pending_marker(tmp_path, monkeypatch)
+    assert _store_pending(monkeypatch) == 0
+    first = json.loads(marker.read_text())["release_guards"]
+    assert _store_pending(monkeypatch) == 0
+    assert json.loads(marker.read_text())["release_guards"] == first
+    assert list(first) == ["v1.1.0"]
+
+
+def test_conflicting_guard_binding_for_the_same_version_is_refused(monkeypatch, tmp_path, capsys):
+    marker = _pending_marker(tmp_path, monkeypatch)
+    assert _store_pending(monkeypatch) == 0
+    state = json.loads(marker.read_text())
+    state["guard_snapshot"] = {"synthetic": "other-digest"}
+    marker.write_text(json.dumps(state))
+    assert _store_pending(monkeypatch) == 1
+    assert "different guard binding" in capsys.readouterr().err
+    assert json.loads(marker.read_text())["release_guards"]["v1.1.0"]["guard_snapshot"] == {"synthetic": "digest"}
+
+
+@pytest.mark.parametrize("status", ("approved", "publishing", "published", "failed", "anything"))
+def test_the_prepare_callable_recorder_cannot_write_approval_or_publication_states(
+        monkeypatch, tmp_path, capsys, status):
+    _pending_marker(tmp_path, monkeypatch)
+    calls = []
+    rc = _run_main(
+        monkeypatch, ["--version", "v1.1.0", "--status", status, "--prepared-head", "a" * 40],
+        signer=_non_stub_signer(),
+        urlopen=lambda *a, **k: calls.append(a) or _urlopen_response({"entities": []}),
+    )
+    assert rc == 1
+    assert calls == []
+    assert "refusing status" in capsys.readouterr().err
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

@@ -15,9 +15,20 @@ Run: pytest execution/daemons/phoenicurus-release/test_prepare.py -v
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 import prepare
+import verify_guard_live as live
+import json
+import shutil
+
+
+@pytest.fixture(autouse=True)
+def approval_addresses(monkeypatch):
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.com")
 
 
 @pytest.fixture
@@ -29,6 +40,116 @@ def isolated_state(tmp_path, monkeypatch):
 
 
 SHA = "a" * 40
+
+
+def _guard_checkout(root):
+    (root / ".git" / "hooks").mkdir(parents=True)
+    (root / ".git" / "config").write_text("[core]\n")
+    (root / ".git" / "hooks" / "pre-commit").write_text("guard")
+    (root / ".husky").mkdir()
+    (root / ".husky" / "pre-commit").write_text("guard")
+
+
+@pytest.mark.parametrize("change,location", (
+    ("modify_hook", "git hooks"), ("new_hook", "git hooks"),
+    ("change_config", "git config"), ("replace_git", ".git"),
+))
+def test_prepare_guard_digest_detects_changes(tmp_path, change, location):
+    from release_guard_snapshot import snapshot_release_guards, changed_guard_location
+    _guard_checkout(tmp_path)
+    before = snapshot_release_guards(tmp_path)
+    assert changed_guard_location(tmp_path, before) is None
+    if change == "modify_hook":
+        (tmp_path / ".git" / "hooks" / "pre-commit").write_text("changed")
+    elif change == "new_hook":
+        (tmp_path / ".git" / "hooks" / "post-commit").write_text("new")
+    elif change == "change_config":
+        (tmp_path / ".git" / "config").write_text("[core]\n hooksPath = elsewhere\n")
+    else:
+        (tmp_path / ".git").rename(tmp_path / "git-moved")
+        (tmp_path / ".git").symlink_to("git-moved")
+    assert changed_guard_location(tmp_path, before) == location
+
+
+def test_prepare_guard_digest_detects_a_hook_losing_its_executable_bit(tmp_path):
+    """Git skips a non-executable hook: the guard stops running with name and bytes unchanged."""
+    from release_guard_snapshot import snapshot_release_guards, changed_guard_location
+    _guard_checkout(tmp_path)
+    hook = tmp_path / ".git" / "hooks" / "pre-commit"
+    hook.chmod(0o755)
+    husky = tmp_path / ".husky" / "pre-commit"
+    husky.chmod(0o755)
+    before = snapshot_release_guards(tmp_path)
+    hook.chmod(0o644)
+    assert changed_guard_location(tmp_path, before) == "git hooks"
+    hook.chmod(0o755)
+    assert changed_guard_location(tmp_path, before) is None
+    husky.chmod(0o644)
+    assert changed_guard_location(tmp_path, before) == ".husky"
+
+
+def test_snapshot_is_persisted_before_prepare_child(monkeypatch, tmp_path):
+    _guard_checkout(tmp_path)
+    state = tmp_path / "prepare.json"
+    monkeypatch.setattr(prepare, "NEOTOMA_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(prepare, "SPAWN_COUNT_FILE", state)
+    monkeypatch.setattr(prepare, "SPAWN_PID_FILE", tmp_path / "pid")
+    monkeypatch.setattr(prepare, "AGENT_LOG", tmp_path / "agent.log")
+    monkeypatch.setattr(prepare, "_agent_env", lambda: {})
+    monkeypatch.setattr(prepare, "_agent_github_identity_ok", lambda _: True)
+    monkeypatch.setattr(prepare, "_agent_settings", lambda: "settings")
+    monkeypatch.setattr(prepare, "_build_agent_prompt", lambda *_: "prepare")
+    monkeypatch.setattr(prepare, "_head_sha", lambda: SHA)
+    monkeypatch.setattr(shutil, "which", lambda _: "/synthetic/claude")
+    monkeypatch.setattr(prepare.subprocess, "Popen", lambda *a, **k:
+                        type("Child", (), {"pid": 123})() if
+                        json.loads(state.read_text())["guard_snapshot"] else None)
+    assert prepare.spawn_prepare_agent("v1.0.0", 1, False, SHA)
+
+
+def test_later_prepare_preserves_release_guard_entries(monkeypatch, tmp_path):
+    state = tmp_path / "prepare.json"
+    earlier = {"version": "v1.0.0", "head": "a" * 40,
+               "guard_snapshot": {"synthetic": "digest"}}
+    state.write_text(json.dumps({"head": "a" * 40, "count": 1,
+                                 "release_guards": {"v1.0.0": earlier}}))
+    monkeypatch.setattr(prepare, "SPAWN_COUNT_FILE", state)
+    assert prepare._record_spawn("b" * 40) == 1
+    assert json.loads(state.read_text())["release_guards"]["v1.0.0"] == earlier
+
+
+def test_spawn_counter_does_not_overwrite_unreadable_guard_state(monkeypatch, tmp_path):
+    state = tmp_path / "prepare.json"
+    state.write_text("{partial")
+    monkeypatch.setattr(prepare, "SPAWN_COUNT_FILE", state)
+    assert prepare._record_spawn("b" * 40) == 1
+    assert state.read_text() == "{partial"
+
+
+@pytest.mark.parametrize("case,expected", (
+    ("refused", 0), ("declined", 2), ("absent", 2),
+    ("control_unseen", 2), ("hook_error", 2),
+))
+def test_live_binding_requires_hook_receipts(monkeypatch, tmp_path, capsys, case, expected):
+    monkeypatch.setattr(live, "_load_prepare", lambda: object())
+    monkeypatch.setattr(live.tempfile, "mkdtemp", lambda **_: str(tmp_path))
+    monkeypatch.setattr(live.subprocess, "run", lambda *a, **k: None)
+    counts = iter((1, 2, 2))
+    monkeypatch.setattr(live, "_count", lambda _repo: next(counts))
+
+    def ask(_prepare, _repo, command):
+        if "--no-verify" not in command:
+            return 0, [] if case == "control_unseen" else [{"decision": "allow"}]
+        if case == "refused":
+            return 0, [{"decision": "deny", "reason": "git commit --no-verify"}]
+        if case == "hook_error":
+            return 1, [{"decision": "deny", "reason": "internal guard error"}]
+        return 0, []
+
+    monkeypatch.setattr(live, "_ask", ask)
+    assert live.main() == expected
+    output = capsys.readouterr().out
+    assert ("PASS:" in output) == (case == "refused")
 
 
 def test_on_merge_terminal_run_stamps_sha(isolated_state):
@@ -79,25 +200,30 @@ from unittest.mock import patch, MagicMock  # noqa: E402
 
 def test_email_send_skips_when_operator_email_unset(monkeypatch):
     monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "")
+    monkeypatch.delenv("OPERATOR_EMAIL")
     # Must not even look for gws when there's no recipient.
     with patch("shutil.which") as which:
         assert prepare.email_send("subj", "body") is False
         assert not which.called
 
 
-def test_email_send_returns_false_when_gws_missing(monkeypatch):
+def test_email_send_returns_false_when_gws_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
     with patch("shutil.which", return_value=None):
         assert prepare.email_send("subj", "body") is False
 
 
-def test_email_send_builds_gws_command_with_from(monkeypatch):
+def test_email_send_builds_gws_command_with_from(monkeypatch, tmp_path):
     monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
     monkeypatch.setattr(prepare, "SWARM_EMAIL", "swarm@example.com")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", "/synthetic/ambient-gws")
     calls = {}
 
     def fake_run(cmd, **kw):
         calls["cmd"] = cmd
+        calls["env"] = kw["env"]
         return MagicMock(returncode=0, stdout="", stderr="")
 
     with patch("shutil.which", return_value="/usr/bin/gws"), \
@@ -112,6 +238,18 @@ def test_email_send_builds_gws_command_with_from(monkeypatch):
     body_arg = cmd[cmd.index("--body") + 1]
     assert "body text" in body_arg
     assert "--html" in cmd
+    assert calls["env"]["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == str(tmp_path)
+
+
+def test_failure_notice_skips_email_without_swarm_mailbox(monkeypatch, tmp_path):
+    monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", str(tmp_path))
+    with patch("shutil.which", return_value="/usr/bin/gws"), \
+         patch.object(prepare.subprocess, "run") as run, \
+         patch.object(prepare, "telegram_send"):
+        prepare.notify_operator("synthetic failure notice")
+    run.assert_not_called()
 
 
 # ── _plain_to_html: markdown-ish daemon notices rendered for email ───────────
@@ -164,7 +302,7 @@ def test_plain_to_html_no_inline_styling():
     assert "style=" not in out
 
 
-def test_email_send_body_is_html_not_raw_markdown(monkeypatch):
+def test_email_send_body_is_html_not_raw_markdown(monkeypatch, tmp_path):
     # Effect-level check: a realistic daemon notice sent through email_send()
     # must arrive as converted HTML, not the raw markdown source. Asserting only
     # "the input string appears in --body" (as the pre-existing test does) would
@@ -173,6 +311,7 @@ def test_email_send_body_is_html_not_raw_markdown(monkeypatch):
     # recur. Ports the #338 sibling coverage onto this branch for panel re-run.
     monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
     monkeypatch.setattr(prepare, "SWARM_EMAIL", "")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
     calls = {}
 
     def fake_run(cmd, **kw):
@@ -200,34 +339,43 @@ def test_email_send_body_is_html_not_raw_markdown(monkeypatch):
     assert "##" not in body_arg
 
 
-def test_email_send_fail_open_on_nonzero_rc(monkeypatch):
+def test_email_send_fail_open_on_nonzero_rc(monkeypatch, tmp_path):
     monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
     monkeypatch.setattr(prepare, "SWARM_EMAIL", "")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
     with patch("shutil.which", return_value="/usr/bin/gws"), \
          patch.object(prepare.subprocess, "run",
-                      return_value=MagicMock(returncode=1, stdout="", stderr="boom")):
+                      return_value=MagicMock(returncode=1, stdout="", stderr="boom")) as run:
         assert prepare.email_send("subj", "body") is False
+        run.assert_called_once()
 
 
-def test_email_send_fail_open_on_exception(monkeypatch):
+def test_email_send_fail_open_on_exception(monkeypatch, tmp_path):
     monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
     with patch("shutil.which", return_value="/usr/bin/gws"), \
-         patch.object(prepare.subprocess, "run", side_effect=OSError("no gws")):
+         patch.object(prepare.subprocess, "run", side_effect=OSError("no gws")) as run:
         assert prepare.email_send("subj", "body") is False
+        run.assert_called_once()
 
 
-def test_agent_prompt_includes_email_step_when_configured(monkeypatch):
+def test_agent_prompt_includes_email_step_when_configured(monkeypatch, tmp_path):
     monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
     monkeypatch.setattr(prepare, "SWARM_EMAIL", "swarm@example.com")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
     p = prepare._build_agent_prompt("v0.19.0", 3)
     assert "gws gmail +send" in p
     assert "op@example.com" in p
     assert "approve" in p.lower() and "skip" in p.lower()
+    email_step = p.split("11. Email the", 1)[-1].split("12. Send a Telegram", 1)[0]
+    assert "email replies cannot discard" in email_step
+    assert "Reply <code>approve &lt;TAG&gt;</code>" in email_step
+    assert "or <code>skip &lt;TAG&gt;</code> to discard" not in email_step
     # The swarm sender, when configured, is passed as --from.
     assert '--from "swarm@example.com"' in p
 
 
-def test_agent_prompt_carries_html_email_contract(monkeypatch):
+def test_agent_prompt_carries_html_email_contract(monkeypatch, tmp_path):
     """The prompt must instruct the agent to send HTML, not raw markdown.
 
     This is path-1 of ateles#336. The release notes are markdown; sent as a
@@ -238,6 +386,7 @@ def test_agent_prompt_carries_html_email_contract(monkeypatch):
     """
     monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
     monkeypatch.setattr(prepare, "SWARM_EMAIL", "")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
     p = prepare._build_agent_prompt("v0.20.0", 3)
 
     # (a) The flag itself must be named, and named in the sample command.
@@ -266,10 +415,11 @@ def test_agent_prompt_carries_html_email_contract(monkeypatch):
     # (e) The RC PR must be a real link, not a bare URL.
     assert "<a href>" in p
 
-    # (f) The machine-parsed approval token Turdus greps out of the reply.
-    #     It must survive as plain text, so it may not live only in an href.
+    # (f) The visible token enables mailbox discovery; the subject selects
+    #     the release. It must survive in the quoted plain text.
     assert "release-approve: <TAG>" in p
-    assert "NOT only inside an href" in p
+    assert "mailbox" in p and "subject" in p
+    assert "only inside an href" in p
 
 
 def _email_send_command(prompt: str) -> str:
@@ -288,6 +438,58 @@ def test_agent_prompt_notes_skip_when_email_unconfigured(monkeypatch):
     # No email step at all means no HTML contract to carry.
     assert "SEND AS HTML" not in p
     assert "--html" not in p
+
+
+def test_rc_email_absent_swarm_directory_uses_telegram_only(monkeypatch, tmp_path):
+    monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR", raising=False)
+    prompt = prepare._build_agent_prompt("v0.19.0", 3)
+    assert "gws gmail +send" not in prompt
+    assert "Do not run gws" in prompt
+    assert "Email approval unavailable; in Telegram send exactly `approve <TAG>`." in prompt
+    chosen = prepare._agent_env()["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"]
+    assert chosen != str(tmp_path) and os.listdir(chosen) == []
+
+
+@pytest.mark.parametrize("swarm,cfg", [
+    (None, True),
+    ("malformed", True),
+    ("op@example.com", True),
+    ("swarm@example.com", False),
+])
+def test_unreadable_mailbox_never_offers_or_sends_approval(
+    monkeypatch, tmp_path, swarm, cfg
+):
+    monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setattr(prepare, "SWARM_EMAIL", swarm or "")
+    if swarm is None:
+        monkeypatch.delenv("ATELES_SWARM_EMAIL")
+    else:
+        monkeypatch.setenv("ATELES_SWARM_EMAIL", swarm)
+    config_dir = tmp_path if cfg else tmp_path / "missing"
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(config_dir))
+
+    prompt = prepare._build_agent_prompt("v1.2.3", 1)
+    assert "gws gmail +send" not in prompt
+    assert "Email approval unavailable; in Telegram send exactly `approve <TAG>`." in prompt
+    assert "Do not run gws" in prompt
+    with patch("shutil.which", return_value="/synthetic/gws"), \
+         patch.object(prepare.subprocess, "run") as run:
+        assert prepare.email_send("Release v1.2.3 ready to approve", "notes") is False
+    run.assert_not_called()
+    chosen = prepare._agent_env()["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"]
+    assert chosen != str(config_dir) and os.listdir(chosen) == []
+
+
+def test_rc_email_send_failure_is_in_telegram_instructions(monkeypatch, tmp_path):
+    monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
+    prompt = prepare._build_agent_prompt("v0.19.0", 3)
+    assert prompt.index("gws gmail +send") < prompt.index("12. Send a Telegram")
+    assert ("Email approval unavailable because the RC email failed to\n"
+            "    send; in Telegram send exactly `approve <TAG>`.") in prompt
+    assert "Include the email-approval status sentence" in prompt
 
 
 def test_notify_operator_sends_both_channels(monkeypatch):
@@ -320,7 +522,7 @@ def test_notify_operator_email_failure_does_not_block_telegram(monkeypatch):
     assert "tg" in order  # Telegram fired first, regardless of email outcome
 
 
-# ── _agent_env: prefer Max OAuth over pay-per-token API key ──────────────────
+# ── _agent_env: allowlist + prefer Max OAuth over pay-per-token API key ──────
 #
 # The first live prepare run (2026-07-27) died on "Credit balance is too low":
 # the headless agent inherited both credentials and `claude --print` used the
@@ -351,3 +553,206 @@ def test_agent_env_does_not_mutate_daemon_env(monkeypatch):
     assert _os.environ.get("ANTHROPIC_API_KEY") == "sk-ant-xxx", (
         "the daemon's own env must be untouched — only the child copy is trimmed"
     )
+
+
+# ── Prepare agent must not skip git hooks (ent_13f7f83c89d6adcac957dd96) ─────
+#
+# The prepare agent used --no-verify on at least six release runs. The daemon
+# handed it the operator's storage selectors and arbitrary ambient variables,
+# which made release-worktree tests fail for environment reasons. The child now
+# starts from the shared runner allowlist, not a denylist.
+
+_PREPARE_CHILD_FORBIDDEN = (
+    "NEOTOMA_ENV",
+    "NEOTOMA_DATA_DIR",
+    "NEOTOMA_SQLITE_PATH",
+    "NEOTOMA_RAW_STORAGE_DIR",
+    "NEOTOMA_DB_BACKEND",
+    "NEOTOMA_DB_URL",
+    "NEOTOMA_EVENT_LOG_PATH",
+    "NEOTOMA_EVENT_LOG_DIR",
+    "NEOTOMA_LOGS_DIR",
+    "NEOTOMA_MCP_USE_LOCAL_PORT_FILE",
+    "NEOTOMA_BASE_URL",
+    "NEOTOMA_PROJECT_ROOT",
+    "NEOTOMA_REPO_ROOT",
+    "HUSKY",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_KEY_0",
+    "GIT_CONFIG_VALUE_0",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "OPENAI_API_KEY",
+    "TOTALLY_UNKNOWN_AMBIENT_VARIABLE",
+)
+
+
+@pytest.mark.parametrize("name", _PREPARE_CHILD_FORBIDDEN)
+def test_agent_env_drops_storage_git_and_unknown_ambient_names(monkeypatch, name):
+    monkeypatch.setenv(name, "canary")
+    env = prepare._agent_env()
+    assert name not in env
+    import os as _os
+    assert _os.environ.get(name) == "canary", "daemon env untouched"
+
+
+def test_agent_env_maps_swarm_gws_config(monkeypatch, tmp_path):
+    # The RC email must go out as the swarm mailbox: a configured swarm gws
+    # directory becomes the child's GOOGLE_WORKSPACE_CLI_CONFIG_DIR and wins
+    # over an already-set value, the same precedence email_channel uses.
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", "/synthetic/operator-gws")
+    env = prepare._agent_env()
+    assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == str(tmp_path)
+    assert "ATELES_SWARM_GWS_CONFIG_DIR" not in env
+    import os as _os
+    assert _os.environ["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == "/synthetic/operator-gws"
+
+    monkeypatch.delenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR")
+    env = prepare._agent_env()
+    assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == str(tmp_path)
+
+
+def test_agent_env_blocks_default_gws_login_when_swarm_dir_absent(monkeypatch, tmp_path):
+    # The mapping is the shared email_channel helper, called rather than copied.
+    from lib.approval import email_channel
+    assert prepare.gws_config_dir_env is email_channel.gws_config_dir_env
+    ambient = tmp_path / "operator-gws"
+    ambient.mkdir()
+    (ambient / "credentials.json").write_text("{}")
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", str(ambient))
+    for swarm in (None, "", str(tmp_path / "missing-swarm-dir")):
+        if swarm is None:
+            monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR", raising=False)
+        else:
+            monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", swarm)
+        chosen = prepare._agent_env()["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"]
+        # Never the ambient (operator) directory, never gws's default: an
+        # existing, empty directory, so gws has no login to send with.
+        assert chosen != str(ambient)
+        assert os.path.isdir(chosen) and os.listdir(chosen) == []
+
+
+def test_agent_env_keeps_only_needed_release_additions(monkeypatch):
+    monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("PATH", "/synthetic/bin")
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", "/synthetic/gws")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/synthetic/claude")
+    env = prepare._agent_env()
+    assert env["PATH"] == "/synthetic/bin"
+    assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] != "/synthetic/gws"
+    assert os.listdir(env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"]) == []
+    assert env["CLAUDE_CONFIG_DIR"] == "/synthetic/claude"
+
+
+def test_agent_settings_loads_the_bypass_guard():
+    import json as _json
+    settings = _json.loads(prepare._agent_settings())
+    (entry,) = settings["hooks"]["PreToolUse"]
+    assert entry["matcher"] == "Bash|Edit|Write|MultiEdit"
+    command = entry["hooks"][0]["command"]
+    assert str(prepare.HOOK_BYPASS_GUARD) in command
+    assert prepare.HOOK_BYPASS_GUARD.is_file()
+
+
+def test_agent_settings_guard_refuses_no_verify():
+    """The command the agent is given, run as the harness would run it."""
+    import json as _json
+    import shlex as _shlex
+    import subprocess as _sp
+    hook = _json.loads(prepare._agent_settings())["hooks"]["PreToolUse"][0]["hooks"][0]
+    payload = _json.dumps({"tool_name": "Bash",
+                           "tool_input": {"command": "git commit --no-verify -m x"}})
+    proc = _sp.run(_shlex.split(hook["command"]), input=payload,
+                   capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 2
+    assert _json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_agent_settings_guard_refuses_file_tool_config_write():
+    import json as _json
+    import shlex as _shlex
+    import subprocess as _sp
+    entry = _json.loads(prepare._agent_settings())["hooks"]["PreToolUse"][0]
+    assert set(entry["matcher"].split("|")) == {"Bash", "Edit", "Write", "MultiEdit"}
+    for tool in ("Edit", "Write", "MultiEdit"):
+        payload = _json.dumps({"tool_name": tool, "tool_input": {"file_path": ".git/config"}})
+        proc = _sp.run(_shlex.split(entry["hooks"][0]["command"]), input=payload,
+                       capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 2, (tool, proc.stdout, proc.stderr)
+
+
+def test_spawn_passes_settings_to_claude(monkeypatch, tmp_path):
+    import shutil as _shutil
+    from unittest.mock import patch as _patch
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/local/bin/claude")
+    monkeypatch.setattr(prepare, "AGENT_LOG", tmp_path / "agent.log")
+    monkeypatch.setattr(prepare, "SPAWN_COUNT_FILE", tmp_path / "spawns.json")
+    monkeypatch.setattr(prepare, "snapshot_release_guards", lambda _: {"git hooks": "digest"})
+    monkeypatch.setattr(prepare, "_head_sha", lambda: SHA)
+    monkeypatch.setattr(prepare, "_record_spawn_pid", lambda head, pid: None)
+    monkeypatch.setenv("NEOTOMA_ENV", "production")
+    monkeypatch.setattr(prepare, "_agent_github_identity_ok", lambda env: True)
+    with _patch.object(prepare.subprocess, "Popen") as mock_popen:
+        assert prepare.spawn_prepare_agent("v0.18.8", 4, dry_run=False) is True
+    argv = mock_popen.call_args[0][0]
+    i = argv.index("--settings")
+    assert argv[i + 1] == prepare._agent_settings()
+    assert "NEOTOMA_ENV" not in mock_popen.call_args[1]["env"]
+
+
+def test_spawn_refuses_without_guard(monkeypatch, tmp_path):
+    import shutil as _shutil
+    from unittest.mock import patch as _patch
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/local/bin/claude")
+    monkeypatch.setattr(prepare, "HOOK_BYPASS_GUARD", tmp_path / "missing.py")
+    with _patch.object(prepare, "notify_operator") as notify, \
+            _patch.object(prepare.subprocess, "Popen") as mock_popen:
+        assert prepare.spawn_prepare_agent("v0.18.8", 4, dry_run=False) is False
+    mock_popen.assert_not_called()
+    notify.assert_called_once()
+
+
+def test_agent_env_passes_the_swarm_github_token(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "x" * 40)
+    monkeypatch.setenv("GH_TOKEN", "y" * 40)
+    env = prepare._agent_env()
+    assert env["GITHUB_TOKEN"] == "x" * 40 and env["GH_TOKEN"] == "y" * 40
+
+
+def test_spawn_refuses_when_github_identity_is_wrong(monkeypatch, tmp_path):
+    """Red before: the agent spawned with whatever GitHub identity gh fell back to."""
+    import shutil as _shutil
+    from unittest.mock import patch as _patch
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/local/bin/claude")
+    monkeypatch.setattr(prepare, "AGENT_LOG", tmp_path / "agent.log")
+    failed = prepare.subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
+    with _patch.object(prepare.subprocess, "run", return_value=failed) as mock_run, \
+            _patch.object(prepare, "notify_operator") as notify, \
+            _patch.object(prepare.subprocess, "Popen") as mock_popen:
+        assert prepare.spawn_prepare_agent("v0.18.8", 4, dry_run=False) is False
+    mock_popen.assert_not_called()
+    notify.assert_called_once()
+    argv = mock_run.call_args[0][0]
+    assert argv[-2:] == ["--expect-login", prepare.RC_GITHUB_LOGIN]
+
+
+def test_github_identity_check_failing_to_run_counts_as_unverified(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("no such file")
+    monkeypatch.setattr(prepare.subprocess, "run", boom)
+    assert prepare._agent_github_identity_ok({}) is False
+
+
+def test_prompt_forbids_hook_bypass_and_names_skip_tests():
+    p = prepare._build_agent_prompt("v0.19.0", 3)
+    assert "--no-verify" in p and "Never skip git hooks" in p
+    assert 'SKIP_TESTS=1 SKIP_TESTS_REASON="<why>"' in p
+    # The guard is an allowlist; the brief names the plain-git shape it allows.
+    assert "plain `git` command" in p and "no wrapper such as `env`" in p

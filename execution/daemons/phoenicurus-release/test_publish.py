@@ -30,6 +30,196 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
 import publish  # noqa: E402
 
 
+def _bound_guards(snapshot):
+    return {"release_guards": {
+        version: {"version": version, "head": "a" * 40, "guard_snapshot": snapshot}
+        for version in ("v1.2.3", "v0.18.8", "v0.19.0", "v0.20.0")}}
+
+
+def test_release_guard_uses_its_own_prepared_entry(monkeypatch, tmp_path):
+    from release_guard_snapshot import snapshot_release_guards, changed_guard_location
+    root = tmp_path / "checkout"
+    (root / ".git" / "hooks").mkdir(parents=True)
+    (root / ".git" / "config").write_text("[core]\n")
+    before = snapshot_release_guards(root)
+    (root / ".git" / "hooks" / "pre-commit").write_text("changed")
+    after = snapshot_release_guards(root)
+    state = tmp_path / "prepare-state.json"
+    entries = _bound_guards(after)
+    entries["release_guards"]["v1.2.3"]["guard_snapshot"] = before
+    state.write_text(json.dumps(entries))
+    monkeypatch.setattr(publish, "PREPARE_STATE_FILE", state)
+    monkeypatch.setattr(publish, "NEOTOMA_REPO_ROOT", root)
+    monkeypatch.setattr(publish, "changed_guard_location", changed_guard_location)
+    notices = []
+    monkeypatch.setattr(publish, "telegram_send", notices.append)
+    with pytest.raises(publish.StepError, match="release guard changed"):
+        publish._verify_prepare_guard_snapshot("v1.2.3")
+    assert notices
+    publish._verify_prepare_guard_snapshot("v0.20.0")
+    (root / ".git" / "hooks" / "pre-commit").unlink()
+    publish._verify_prepare_guard_snapshot("v1.2.3")
+
+
+@pytest.mark.parametrize("entry", (None, {"version": "v1.2.3", "guard_snapshot": {}}))
+def test_release_guard_missing_binding_requires_reprepare(monkeypatch, tmp_path, entry):
+    state = tmp_path / "prepare-state.json"
+    state.write_text(json.dumps({"release_guards": {"v1.2.3": entry}}))
+    monkeypatch.setattr(publish, "PREPARE_STATE_FILE", state)
+    notices = []
+    monkeypatch.setattr(publish, "telegram_send", notices.append)
+    with pytest.raises(publish.StepError, match="re-prepare"):
+        publish._verify_prepare_guard_snapshot("v1.2.3")
+    assert notices and "re-prepare" in notices[0]
+
+
+def test_legacy_release_guard_state_requires_reprepare(monkeypatch, tmp_path):
+    state = tmp_path / "prepare-state.json"
+    state.write_text(json.dumps({"guard_snapshot": {"synthetic": "digest"}}))
+    monkeypatch.setattr(publish, "PREPARE_STATE_FILE", state)
+    notices = []
+    monkeypatch.setattr(publish, "telegram_send", notices.append)
+    with pytest.raises(publish.StepError, match="re-prepare"):
+        publish._verify_prepare_guard_snapshot("v1.2.3")
+    assert notices
+
+
+@pytest.fixture(autouse=True)
+def prepared_guard_state(monkeypatch, tmp_path):
+    state = tmp_path / "prepare-state.json"
+    state.write_text(json.dumps(_bound_guards({"synthetic": "digest"})))
+    monkeypatch.setattr(publish, "PREPARE_STATE_FILE", state)
+    monkeypatch.setattr(publish, "changed_guard_location", lambda *_: None)
+    monkeypatch.setattr(publish, "telegram_send", lambda *a: None)
+
+
+@pytest.mark.parametrize("change,location", (
+    ("hook", "git hooks"), ("new", "git hooks"),
+    ("config", "git config"), ("link", ".git"),
+))
+def test_release_stops_before_any_step_when_guard_changes(monkeypatch, tmp_path, change, location):
+    from release_guard_snapshot import snapshot_release_guards, changed_guard_location
+    root = tmp_path / "checkout"
+    (root / ".git" / "hooks").mkdir(parents=True)
+    (root / ".git" / "config").write_text("[core]\n")
+    (root / ".git" / "hooks" / "pre-commit").write_text("guard")
+    before = snapshot_release_guards(root)
+    state = tmp_path / "prepare-state.json"
+    state.write_text(json.dumps(_bound_guards(before)))
+    monkeypatch.setattr(publish, "PREPARE_STATE_FILE", state)
+    monkeypatch.setattr(publish, "NEOTOMA_REPO_ROOT", root)
+    monkeypatch.setattr(publish, "changed_guard_location", changed_guard_location)
+    if change == "hook":
+        (root / ".git" / "hooks" / "pre-commit").write_text("changed")
+    elif change == "new":
+        (root / ".git" / "hooks" / "post-commit").write_text("new")
+    elif change == "config":
+        (root / ".git" / "config").write_text("[core]\n hooksPath = elsewhere\n")
+    else:
+        (root / ".git").rename(root / "moved-git")
+        (root / ".git").symlink_to("moved-git")
+    monkeypatch.setattr(publish, "set_release_status", lambda *a, **k:
+                        pytest.fail("release state advanced past guard"))
+    with pytest.raises(publish.StepError, match=location):
+        publish.publish_release({"status": "approved"}, "v1.2.3", False, False)
+
+
+@pytest.mark.parametrize("resume_from", (None, "merge_rc_pr", "tag_and_push",
+                                           "npm_publish", "github_release",
+                                           "publish_github_release_draft"))
+def test_matching_prepare_guard_allows_release_steps(monkeypatch, tmp_path, resume_from):
+    from release_guard_snapshot import snapshot_release_guards, changed_guard_location
+    root = tmp_path / "checkout"
+    (root / ".git" / "hooks").mkdir(parents=True)
+    (root / ".git" / "config").write_text("[core]\n")
+    state = tmp_path / "prepare-state.json"
+    state.write_text(json.dumps(_bound_guards(snapshot_release_guards(root))))
+    monkeypatch.setattr(publish, "PREPARE_STATE_FILE", state)
+    monkeypatch.setattr(publish, "NEOTOMA_REPO_ROOT", root)
+    monkeypatch.setattr(publish, "changed_guard_location", changed_guard_location)
+    calls = []
+    for name in ("preflight", "merge_rc_pr", "preflight_post_merge", "tag_and_push",
+                 "npm_publish", "github_release", "deploy_sandbox",
+                 "publish_github_release_draft"):
+        monkeypatch.setattr(publish, name, lambda *a, _name=name, **k: calls.append(_name))
+    monkeypatch.setattr(publish, "post_release", lambda *a: "complete")
+    monkeypatch.setattr(publish, "set_release_status", lambda *a, **k: None)
+    monkeypatch.setattr(publish, "telegram_send", lambda *a: None)
+    publish.publish_release({"status": "approved"}, "v1.2.3", False, False,
+                            resume_from=resume_from)
+    assert calls[-1] == "publish_github_release_draft"
+    assert ("tag_and_push" in calls) == (resume_from in (None, "merge_rc_pr", "tag_and_push"))
+
+
+@pytest.mark.parametrize("resume_from", (None, "merge_rc_pr", "tag_and_push",
+                                           "npm_publish", "github_release",
+                                           "publish_github_release_draft"))
+def test_selected_checkout_guard_checked_before_release_effect(monkeypatch, tmp_path,
+                                                              resume_from):
+    from release_guard_snapshot import snapshot_release_guards, changed_guard_location
+    root = tmp_path / "checkout"
+    (root / ".git" / "hooks").mkdir(parents=True)
+    (root / ".git" / "config").write_text("[core]\n")
+    (root / ".husky").mkdir()
+    hook = root / ".husky" / "pre-commit"
+    hook.write_text("guard")
+    state = tmp_path / "prepare-state.json"
+    state.write_text(json.dumps(_bound_guards(snapshot_release_guards(root))))
+    monkeypatch.setattr(publish, "PREPARE_STATE_FILE", state)
+    monkeypatch.setattr(publish, "NEOTOMA_REPO_ROOT", root)
+    monkeypatch.setattr(publish, "changed_guard_location", changed_guard_location)
+    notices = []
+    monkeypatch.setattr(publish, "telegram_send", notices.append)
+    monkeypatch.setattr(publish, "set_release_status", lambda *a, **k: None)
+    calls = []
+    for name in ("preflight", "preflight_post_merge", "tag_and_push", "npm_publish",
+                 "github_release", "deploy_sandbox", "publish_github_release_draft"):
+        monkeypatch.setattr(publish, name, lambda *a, _name=name, **k: calls.append(_name))
+    monkeypatch.setattr(publish, "post_release", lambda *a: "complete")
+
+    def merge(*args, **kwargs):
+        calls.append("merge_rc_pr")
+        hook.write_text("changed")
+
+    monkeypatch.setattr(publish, "merge_rc_pr", merge)
+    if resume_from and resume_from not in ("merge_rc_pr",):
+        hook.write_text("changed")
+    with pytest.raises(publish.StepError, match=r"release guard changed at \.husky"):
+        publish.publish_release({"status": "approved"}, "v1.2.3", False, False,
+                                resume_from=resume_from)
+    assert not any(name in calls for name in
+                   ("tag_and_push", "npm_publish", "publish_github_release_draft"))
+    assert any(".husky" in notice for notice in notices)
+
+
+def test_guard_rechecked_between_tag_and_push(monkeypatch, tmp_path):
+    from release_guard_snapshot import snapshot_release_guards, changed_guard_location
+    root = tmp_path / "checkout"
+    (root / ".git" / "hooks").mkdir(parents=True)
+    (root / ".git" / "config").write_text("[core]\n")
+    (root / ".husky").mkdir()
+    hook = root / ".husky" / "pre-commit"
+    hook.write_text("guard")
+    state = tmp_path / "prepare-state.json"
+    state.write_text(json.dumps(_bound_guards(snapshot_release_guards(root))))
+    monkeypatch.setattr(publish, "PREPARE_STATE_FILE", state)
+    monkeypatch.setattr(publish, "NEOTOMA_REPO_ROOT", root)
+    monkeypatch.setattr(publish, "changed_guard_location", changed_guard_location)
+    monkeypatch.setattr(publish, "telegram_send", lambda *a: None)
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        if argv[:2] == ["git", "tag"]:
+            hook.write_text("changed")
+
+    monkeypatch.setattr(publish, "run", run)
+    with pytest.raises(publish.StepError, match=r"release guard changed at \.husky"):
+        publish.tag_and_push("v1.2.3", False)
+    assert any(argv[:2] == ["git", "tag"] for argv in calls)
+    assert not any(argv[:2] == ["git", "push"] for argv in calls)
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
