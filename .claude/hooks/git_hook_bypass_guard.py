@@ -996,8 +996,9 @@ def _matches_protected_path(normalized: str) -> bool:
 
 def _protected_path(path: str) -> bool:
     """Paths that can redirect or disable the prepare checkout's hooks."""
+    normalized = os.path.normpath("/" + path.lstrip("/")) if path.startswith("/") else path
     if re.search(r"^/(?:dev/(?:fd|stdin|stdout|stderr)(?:/|$)|"
-                 r"proc/(?:self|\d+)(?:/|$))", path):
+                 r"proc/(?:self|\d+)(?:/|$))", normalized):
         return True
     forms, unresolved = _path_forms(path)
     return any(_matches_protected_path(form) for form in forms) or (
@@ -1254,7 +1255,7 @@ def _download_destinations(base: str, args: list[str]) -> tuple[list[str], list[
 def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None:
     for op, target in cmd.redirects:
         if ">" in op and (target.expanded or target.write_glob
-                         or _protected_path(target.text)):
+                         or _tree_write_target(target.text)):
             return f"shell redirection writing protected hook or git config path {target.text}"
     if not words:
         return None
@@ -1290,8 +1291,8 @@ def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None
         ):
             if any(_tree_write_target(source) for source in sources):
                 return f"{base} linking an ancestor of protected hook or git config path"
-        if base == "ln" and any(_protected_path(source) for source in sources):
-            return "ln linking a protected hook or git config path"
+        if base in {"mv", "ln", "cp"} and any(_tree_write_target(source) for source in sources):
+            return f"{base} using a protected hook or git config source"
         if base == "cp" and any(arg in {"-l", "--link"} or
                                  (arg.startswith("-") and not arg.startswith("--")
                                   and "l" in arg[1:]) for arg in args):
@@ -1326,7 +1327,7 @@ def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None
                                   for arg in args):
             return "wget output settings cannot be inspected"
     for target in targets:
-        if _protected_path(target):
+        if _tree_write_target(target) or _protected_path(target):
             return f"{base} writing protected hook or git config path {target}"
     return None
 
@@ -1606,6 +1607,10 @@ def _nested_program_violation(cmd: SimpleCommand, rest: list[Word], depth: int) 
             return True, "eval body assembled by the shell"
         return True, _judge_program_body(" ".join(w.text for w in body), depth)
     starts = [0]
+    if base == "xargs":
+        # Its operand list comes from stdin or -a, outside this command's
+        # literal destination model. Release preparation has no need for it.
+        return "xargs destinations cannot be resolved literally"
     if base in _WRAPPERS:
         executable = _wrapped_executable(rest)
         if executable is None:
@@ -1776,14 +1781,10 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int =
         if (own_mentions and not nested_checked) or (any_expanded and whole_mentions_git and not nested_checked):
             return f"{base} wrapping git (run plain git instead)"
         return None
-    if base == "find" and any(w.text in ("-execdir", "-okdir") for w in rest):
+    if base == "find" and any(w.text in ("-delete", "-execdir", "-okdir") for w in rest):
         return "find directory-changing execution is not allowed during release preparation"
     if base == "find" and any(w.text in ("-exec", "-ok") for w in rest):
-        if any(w.expanded or w.braced or w.globbed or w.concatenated for w in rest[1:]):
-            return "find -exec executable name cannot be resolved literally"
-        if own_mentions and not nested_checked:
-            return "find -exec running git"
-        return None
+        return "find execution destinations cannot be resolved literally"
     is_shell = bool(_SHELLS.match(base))
     if is_shell or _INTERPRETERS.match(base) or base in _EVALUATORS:
         if own_mentions and not nested_checked:
@@ -2054,7 +2055,7 @@ def main() -> int:
             path = tool_input.get("file_path")
             if not isinstance(path, str):
                 return deny(guidance("file-write path is missing or malformed"))
-            if _protected_path(path):
+            if _tree_write_target(path) or _protected_path(path):
                 return deny(guidance(f"{tool} writing protected hook or git config path {path}"))
         except Exception:  # noqa: BLE001 — an unjudged file write denies
             return deny(guidance("internal guard error while judging file write"))

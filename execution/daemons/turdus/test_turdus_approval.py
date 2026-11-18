@@ -1854,3 +1854,85 @@ def test_tokenless_reply_holds_matching_approval_sweep(
     assert not any("no approval was recorded" in note for note in notices.sent)
     if authenticated:
         assert any("is held" in note for note in notices.sent)
+
+
+@pytest.mark.parametrize("kind", ("pr", "release"))
+def test_notified_tokenless_reply_does_not_hold_new_bound_reply(monkeypatch, tmp_path, kind):
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(turdus, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setattr(turdus, "_STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(turdus, "_poll_gmail_messages", lambda *_: [])
+    monkeypatch.setattr(turdus, "DRY_RUN", False)
+    monkeypatch.setattr(email_channel, "_gws", lambda: "/synthetic/gws")
+    subject = ("Re: Release v1.2.3 ready to approve" if kind == "release" else
+               "Re: [Ateles] PR o/r#7 is ready to merge")
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    approval = "approve v1.2.3" if kind == "release" else "approve"
+    sweep = {"number": 1}
+
+    def fake_gws(args, timeout=45):
+        if "+triage" in args:
+            query = args[args.index("--query") + 1]
+            if "in:sent" in query:
+                return {"complete": True, "messages": []}
+            mids = (["bound-old"] if "subject:" not in query else
+                    ["correction", "bound-old"])
+            if sweep["number"] == 2:
+                mids.append("bound-new")
+            return {"complete": True, "messages": [
+                {"id": mid, "subject": subject, "from": "op@example.com"}
+                for mid in mids]}
+        if "+read" in args:
+            mid = args[args.index("--id") + 1]
+            return {"body_text": (f"{approval}\n> {token}" if mid.startswith("bound")
+                                  else "hold")}
+        raise AssertionError(args)
+
+    monkeypatch.setattr(email_channel, "gws_json", fake_gws)
+    monkeypatch.setattr(email_channel, "_fetch_auth_results", lambda _: [_AUTH_PASS])
+    posts = []
+
+    async def post(*args):
+        posts.append(args)
+        return True
+
+    monkeypatch.setattr(turdus, "_post_email_approval", post)
+    monkeypatch.setattr(turdus, "_post_release_approval", post)
+    notices = _StubNotifier()
+    state = _run(turdus.poll_once(notices, {"last_message_id": None}))
+    assert not posts
+    sweep["number"] = 2
+    _run(turdus.poll_once(notices, state))
+    assert len(posts) == 1
+    assert len([note for note in notices.sent if "did not contain" in note]) == 1
+
+
+@pytest.mark.parametrize("kind", ("pr", "release"))
+def test_tokenless_skip_notifies_exact_discard_without_post(monkeypatch, tmp_path, kind):
+    monkeypatch.setattr(turdus, "_STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(turdus, "_poll_gmail_messages", lambda *_: [])
+    target = "v1.2.3" if kind == "release" else "o/r#7"
+    subject = (f"Re: Release {target} ready to approve" if kind == "release" else
+               f"Re: [Ateles] PR {target} is READY TO MERGE")
+    reply = email_channel.ApprovalReply("skip-1", subject, f"skip {target}")
+    outcome = email_channel.ReadRepliesOutcome(
+        kind="ok", texts=[], correction_only_replies=(reply,))
+    monkeypatch.setattr(email_channel, "read_replies_with_status", lambda *a, **k: outcome)
+    posts = []
+
+    async def post(*args):
+        posts.append(args)
+        return True
+
+    monkeypatch.setattr(turdus, "_post_email_approval", post)
+    monkeypatch.setattr(turdus, "_post_release_approval", post)
+    notices = _StubNotifier()
+    state = _run(turdus.poll_once(notices, {"last_message_id": None}))
+    _run(turdus.poll_once(notices, state))
+    assert not posts
+    assert len([note for note in notices.sent if "did not contain" in note]) == 1
+    if kind == "release":
+        assert f"`skip {target}`" in notices.sent[0]
+        assert "approve" not in notices.sent[0].split("To discard it,")[-1]

@@ -1156,7 +1156,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         if _RELEASE_READY_SUBJECT_MARKER.lower() in subject.lower():
             match = re.search(r"\bRelease\s+(v[0-9][\w.+-]*)", subject, re.IGNORECASE)
             target = match.group(1) if match else "this release"
-        elif _MERGE_READY_SUBJECT_MARKER in subject:
+        elif _MERGE_READY_SUBJECT_MARKER.lower() in subject.lower():
             match = re.search(r"\bPR\s+([A-Za-z0-9._-]+/[A-Za-z0-9._-]+#\d+)", subject)
             target = match.group(1) if match else "this PR"
         if target is None:
@@ -1179,6 +1179,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         _save_state(state)
     approval_count = 0
     correction_targets: set[str] = set()
+    unknown_correction = False
     if outcome.kind in ("ok", "transport_error"):
         for reply in outcome.correction_only_replies:
             mid = reply.message_id
@@ -1187,28 +1188,45 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
             if release:
                 match = re.search(r"\bRelease\s+(v[0-9][\w.+-]*)", subject, re.IGNORECASE)
                 target = match.group(1) if match else None
-            elif _MERGE_READY_SUBJECT_MARKER in subject:
+            elif _MERGE_READY_SUBJECT_MARKER.lower() in subject.lower():
                 match = re.search(r"\bPR\s+([A-Za-z0-9._-]+/[A-Za-z0-9._-]+#\d+)", subject)
                 target = match.group(1) if match else None
             else:
                 target = None
             if not target:
+                unknown_correction = True
                 continue
-            correction_targets.add(target.casefold())
+            # A successfully notified correction is handled. It must not keep
+            # holding a fresh, token-bound reply on a later sweep.
+            if mid not in correction_id_set and mid not in processed_id_set:
+                correction_targets.add(target.casefold())
             if mid in correction_id_set or mid in processed_id_set:
                 continue
             exact_form = f"approve {target}" if release else "approve"
+            authored = reply.body.strip()
+            skip_form = f"skip {target}"
+            is_skip = release and bool(re.fullmatch(
+                rf"skip\s+{re.escape(target)}[.!]?", authored, re.IGNORECASE))
+            if is_skip:
+                guidance = (f"To discard it, send exactly `{skip_form}` in Telegram. "
+                            "Email replies cannot discard it.")
+            elif release:
+                guidance = (f"In Telegram, send exactly `{exact_form}` to approve "
+                            f"or `{skip_form}` to discard.")
+            else:
+                guidance = f"To approve in Telegram, send exactly `{exact_form}`."
             delivered = notifier.send(
                 f"{DAEMON_NAME}: email approval for {target} is held. "
                 "This email reply did not contain the request's correlation token. "
                 "An email reply must quote the request so its token is present. "
-                f"To approve in Telegram, send exactly `{exact_form}`.",
+                + guidance,
                 priority=Priority.BLOCKER, handler=DAEMON_NAME,
                 email_eligible=False,
             )
             if delivered:
                 correction_id_set.add(mid)
                 correction_ids.append(mid)
+                _mark_handled(mid)
         # A partial read cannot approve anything; rejected metadata can still
         # be reported once, using only the subject for the target name.
         candidates = list(outcome.rejected_replies) + list(outcome.replies)
@@ -1220,6 +1238,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
                    "authenticated": reply.authenticated,
                    "correlation_target": reply.correlation_target,
                    "approval_allowed": (outcome.kind == "ok" and
+                                        not unknown_correction and
                                         reply.correlation_target is not None and
                                         reply.correlation_target.casefold()
                                         not in correction_targets),
@@ -1244,6 +1263,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
                     if delivered:
                         held_notice_set.add(reply.message_id)
                         held_notice_ids.append(reply.message_id)
+                        _mark_handled(reply.message_id)
                 if msg.get("correction_notified") and reply.message_id not in correction_id_set:
                     correction_id_set.add(reply.message_id)
                     correction_ids.append(reply.message_id)

@@ -51,6 +51,34 @@ def assert_allowed(command: str) -> None:
     assert proc.stdout.strip() == ""
 
 
+@pytest.mark.parametrize("command", (
+    "mv .git git-moved", "mv -T .git git-moved",
+    "ln -s git-moved .git", "ln -sfn git-moved .git",
+    "ln -sfT git-moved .git", "cp -R .git git-copy",
+    "find . -name config -exec tee {} ;",
+    "find . -name config -ok sed -i s/a/b/ {} ;",
+    "find . -name config -delete",
+    "xargs tee", "xargs -a paths cp source", "parallel tee",
+))
+def test_indirect_or_ancestor_writes_are_refused(command):
+    assert_refused(command)
+
+
+@pytest.mark.parametrize("path", (
+    "/dev//fd/3", "/dev/./fd/3", "//dev/fd/3",
+    "/dev/../dev/fd/3",
+))
+def test_normalized_device_writes_are_refused(path):
+    assert_refused(f"tee {path}")
+
+
+@pytest.mark.parametrize("command", (
+    "git status", "git diff --stat", "printf plain", "find src -name '*.py'",
+))
+def test_plain_release_commands_remain_allowed(command):
+    assert_allowed(command)
+
+
 @pytest.mark.parametrize("writer", (
     "cp -R source/. {target}", "cp -a source/. {target}",
     "rsync -a source/ {target}", "mv source {target}",

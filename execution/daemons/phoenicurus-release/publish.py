@@ -51,6 +51,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from release_guard_snapshot import changed_guard_location
+
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
 # User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
 NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
@@ -73,6 +75,7 @@ if _NEOTOMA_ENV_FILE.exists():
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent  # ateles repo root
+PREPARE_STATE_FILE = Path(__file__).parent / ".phoenicurus_prepare_spawn_count"
 LOG_DIR = Path.home() / "Library" / "Logs" / "ateles"
 LOG_FILE = LOG_DIR / "phoenicurus-release.log"
 
@@ -1004,6 +1007,15 @@ def publish_release(
     resume_from: str | None = None,
     email_approval: bool = False,
 ) -> None:
+    if not dry_run:
+        try:
+            state = json.loads(PREPARE_STATE_FILE.read_text())
+            expected = state.get("guard_snapshot") if isinstance(state, dict) else None
+            changed = changed_guard_location(NEOTOMA_REPO_ROOT, expected)
+        except (OSError, ValueError, TypeError) as exc:
+            raise StepError(f"prepare guard snapshot unreadable: {exc}") from exc
+        if changed:
+            raise StepError(f"release guard changed at {changed}; release stopped")
     f = _entity_fields(release)
     # The exact entity find_release resolved; every status write targets it.
     entity_id = str(release.get("entity_id") or "") or None

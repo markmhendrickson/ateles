@@ -34,7 +34,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
-from email.utils import parseaddr
+from email.utils import parseaddr, parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -49,6 +49,15 @@ class ApprovalReply:
     body: str = ""
     authenticated: bool = True
     correlation_target: str | None = None
+
+
+@dataclass(frozen=True)
+class SentRequest:
+    body: str
+    sender: str
+    recipient: str
+    subject: str
+    date: str
 
 
 @dataclass(frozen=True)
@@ -242,27 +251,51 @@ def _hiding_style(style: str) -> bool:
     return not _safe_style(style)[0]
 
 
-def _authored_plain_checked(text: str) -> tuple[str, bool]:
+def _same_mail_date(left: str, right: str) -> bool:
+    try:
+        return parsedate_to_datetime(left).timestamp() == parsedate_to_datetime(right).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _authored_plain_checked(text: str, sent_request: SentRequest | None = None,
+                            known_quote_lines: tuple[str, ...] = ()) -> tuple[str, bool]:
     """Keep every authored line; remove only structurally proven quotations."""
     lines: list[str] = []
     source = text.splitlines()
     saw_quote = False
     for index, line in enumerate(source):
         stripped = line.strip()
-        if _ATTRIBUTION.fullmatch(stripped) and all(
-                not tail.strip() or tail.lstrip().startswith(">")
-                for tail in source[index + 1:]):
-            return "\n".join(lines), True
+        if _ATTRIBUTION.fullmatch(stripped):
+            # Attribution text is sender-controlled. It cannot prove where the
+            # author's message ends, even if the remaining lines look quoted.
+            return "\n".join(lines), False
         if _FORWARD.fullmatch(stripped):
             headers = source[index + 1:index + 1 + len(_OUTLOOK_HEADERS)]
-            if (len(headers) == len(_OUTLOOK_HEADERS) and
-                    all(header.strip().casefold().startswith(name) and
-                        header.strip()[len(name):].strip()
-                        for header, name in zip(headers, _OUTLOOK_HEADERS))):
+            expected = ((sent_request.sender, sent_request.date,
+                         sent_request.recipient, sent_request.subject)
+                        if sent_request else ())
+            if len(headers) == len(_OUTLOOK_HEADERS) and expected and all(
+                header.strip().casefold().startswith(name) and
+                ( _same_mail_date(header.strip()[len(name):].strip(), value)
+                  if name == "sent:" else
+                  ( _parse_address(header.strip()[len(name):].strip()) == _parse_address(value)
+                    if name in {"from:", "to:"} else
+                    header.strip()[len(name):].strip().casefold() == value.casefold()))
+                for header, name, value in zip(headers, _OUTLOOK_HEADERS, expected)
+            ):
                 tail = source[index + 1 + len(_OUTLOOK_HEADERS):]
-                if all(not part.strip() or part.lstrip().startswith(">") for part in tail):
+                original = {" ".join(part.split()).casefold() for part in
+                            sent_request.body.splitlines() if part.strip()}
+                original.update(" ".join(part.split()).casefold() for part in known_quote_lines)
+                if tail and all(not part.strip() or (
+                    part.lstrip().startswith(">") and
+                    " ".join(part.lstrip()[1:].split()).casefold() in original
+                ) for part in tail):
                     return "\n".join(lines), True
-                return "\n".join(lines), False
+            return "\n".join(lines), False
+        if re.match(r"(?i)^(?:from|sent|to|subject|date|cc):\s*\S", stripped):
+            return "\n".join(lines), False
         if stripped.startswith(">"):
             saw_quote = True
             continue
@@ -344,6 +377,9 @@ class _AuthoredHTML(HTMLParser):
                  or (tag == "div" and (attrs_by_name.get("type") or "").lower() == "cite"))
         if ("gmail_attr" in classes or "moz-cite-prefix" in classes
                 or element_id in _QUOTE_IDS):
+            # A visual reply header is sender-controlled and is not part of
+            # the sent request's body. Do not infer a safe quote boundary.
+            self.unsafe = True
             self.terminal = True
             self.boundary_seen = True
         if tag in self._VOID:
@@ -914,18 +950,22 @@ def _complete_triage_rows(data: Any, max_msgs: int) -> tuple[list[dict] | None, 
     return rows, ""
 
 
-def sent_request_body(token: str, reply_subject: str, *, max_msgs: int = 40) -> str | None:
+def sent_request_body(token: str, reply_subject: str, *, max_msgs: int = 40) -> SentRequest | None:
     """Read the matching sent notice; missing or ambiguous evidence proves no quote."""
     # The target is in the reply subject, while the token is in the sent body.
     subject = re.sub(r"^\s*re:\s*", "", reply_subject, flags=re.IGNORECASE).strip()
-    if not subject or token not in {"release-approve:", "swarm-approve:"}:
+    payment_token = bool(re.fullmatch(r"[0-9A-F]{8}", token, re.IGNORECASE))
+    if not subject or (token not in {"release-approve:", "swarm-approve:"}
+                       and not payment_token):
         return None
-    target = (re.search(r"\bRelease\s+(v[0-9][\w.+-]*)", subject, re.IGNORECASE)
+    target = (None if payment_token else
+              re.search(r"\bRelease\s+(v[0-9][\w.+-]*)", subject, re.IGNORECASE)
               if token == "release-approve:" else
               re.search(r"\bPR\s+([A-Za-z0-9._-]+/[A-Za-z0-9._-]+#\d+)", subject))
-    if target is None:
+    if target is None and not payment_token:
         return None
-    query = f'in:sent "{token} {target.group(1)}"'
+    marker = f"[APPROVE-{token}]" if payment_token else f"{token} {target.group(1)}"
+    query = f'in:sent "{marker}"'
     data = gws_json(["gmail", "+triage", "--format", "json", "--max",
                      str(max_msgs), "--query", query])
     rows, _ = _complete_triage_rows(data, max_msgs)
@@ -945,9 +985,12 @@ def sent_request_body(token: str, reply_subject: str, *, max_msgs: int = 40) -> 
     if not isinstance(body, str):
         html = sent.get("body_html")
         body = _extract_authored_html(html)[0] if isinstance(html, str) else None
-    if not body or f"{token} {target.group(1)}".casefold() not in body.casefold():
+    if not body or marker.casefold() not in body.casefold():
         return None
-    return body
+    sender = str(sent.get("from") or candidates[0].get("from") or "")
+    recipient = str(sent.get("to") or "")
+    date = str(sent.get("date") or candidates[0].get("date") or "")
+    return SentRequest(body, sender, recipient, subject, date)
 
 
 def read_replies_with_status(
@@ -958,7 +1001,7 @@ def read_replies_with_status(
     on_unauthenticated_operator_reply: Callable[[], None] | None = None,
     require_enabled: bool = True,
     correction_queries: list[str] | None = None,
-    request_bodies: dict[str, str] | Callable[[str, str], str | None] | None = None,
+    request_bodies: dict[str, str | SentRequest] | Callable[[str, str], str | SentRequest | None] | None = None,
 ) -> ReadRepliesOutcome:
     """Statusful inbox sweep — distinguish empty-ok from transport failure.
 
@@ -1099,7 +1142,9 @@ def read_replies_with_status(
             plain_key = plain_keys[0] if plain_keys else None
             plain_present = plain_key is not None
             plain = body_data[plain_key] if plain_present else ""
-            body, plain_safe = _authored_plain_checked(plain)
+            # The sent request is the only acceptable proof for a mail-client
+            # attribution/header block. Missing metadata leaves it unreadable.
+            sent_request = None
             raw_html = body_data.get("body_html")
             # Preserve the target from the matched request token before quote
             # removal. The affirmative must still come from authored text.
@@ -1123,6 +1168,11 @@ def read_replies_with_status(
                     original_request = None
             else:
                 original_request = (request_bodies or {}).get(token)
+            if isinstance(original_request, SentRequest):
+                sent_request = original_request
+                original_request = sent_request.body
+            body, plain_safe = _authored_plain_checked(
+                plain, sent_request=sent_request, known_quote_lines=known)
             def normalize(line: str) -> str:
                 return " ".join(line.split()).casefold()
             originals = {normalize(line) for line in

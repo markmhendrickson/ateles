@@ -58,6 +58,7 @@ if str(_DAEMON_DIR) not in sys.path:
 from release_checkout_root import (  # noqa: E402
     default_neotoma_repo_root as _default_neotoma_repo_root,
 )
+from release_guard_snapshot import snapshot_release_guards  # noqa: E402
 
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
 # User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
@@ -331,7 +332,11 @@ def _spawn_count(head: str) -> int:
     if not head or not SPAWN_COUNT_FILE.exists():
         return 0
     try:
-        sha, _, n = SPAWN_COUNT_FILE.read_text().strip().partition(" ")
+        raw = SPAWN_COUNT_FILE.read_text().strip()
+        if raw.startswith("{"):
+            saved = json.loads(raw)
+            return int(saved["count"]) if saved["head"] == head else 0
+        sha, _, n = raw.partition(" ")
         return int(n) if sha == head else 0
     except (ValueError, OSError):
         return 0
@@ -393,7 +398,7 @@ def _record_spawn(head: str) -> int:
     n = _spawn_count(head) + 1
     if head:
         try:
-            SPAWN_COUNT_FILE.write_text(f"{head} {n}")
+            SPAWN_COUNT_FILE.write_text(json.dumps({"head": head, "count": n}))
         except OSError as exc:
             # Losing the counter must not block a release; worst case we retry
             # more than MAX_SPAWNS_PER_HEAD times, which is still better than
@@ -983,6 +988,9 @@ CRITICAL CONSTRAINTS — read carefully:
   irreversible publish step, STOP.
 - Work in an isolated git worktree off origin/main. Do NOT disturb the operator's
   main checkout or any unrelated uncommitted changes.
+- Use plain git commands and plain file edits with literal paths. Do not use
+  find, xargs, parallel, substitution, stdin, or generated destination lists
+  for writes; the guard refuses destinations it cannot judge literally.
 - Never skip git hooks: no `--no-verify`, no `git commit -n`, no `HUSKY=0`, no
   `core.hooksPath` override. Run git as a plain `git` command (`git -C <path>
   ...` is fine): no wrapper such as `env`, `xargs` or `timeout`, no alias, no
@@ -1236,6 +1244,21 @@ def spawn_prepare_agent(
             "🔴 Phoenicurus: the prepare agent's GitHub token does not resolve to "
             f"{RC_GITHUB_LOGIN} — not preparing the release."
         )
+        return False
+
+    # The spawn-count marker is already the prepare run's durable state. Add
+    # the independent guard receipt there before the detached child can edit.
+    try:
+        snapshot = snapshot_release_guards(NEOTOMA_REPO_ROOT)
+        raw = SPAWN_COUNT_FILE.read_text() if SPAWN_COUNT_FILE.exists() else ""
+        existing = json.loads(raw) if raw.lstrip().startswith("{") else {}
+        if not isinstance(existing, dict):
+            existing = {}
+        existing.update({"head": head or _head_sha(), "guard_snapshot": snapshot})
+        SPAWN_COUNT_FILE.write_text(json.dumps(existing, sort_keys=True))
+    except (OSError, ValueError, TypeError) as exc:
+        log.error(f"could not capture prepare guard snapshot: {exc}")
+        notify_operator("🔴 Phoenicurus: prepare guard snapshot unavailable; release preparation stopped.")
         return False
 
     try:

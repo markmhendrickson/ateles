@@ -2343,3 +2343,51 @@ def test_tokenless_payment_reply_holds_entire_request(
     if authenticated:
         assert len(result.blocked) == len(items)
         assert any("is held" in note for note in notices)
+
+
+@pytest.mark.parametrize("batch", (False, True))
+def test_new_bound_reply_can_follow_notified_tokenless_reply(monkeypatch, tmp_path, batch):
+    handlers = [_Handler("session", label="Example", amount=60)]
+    if batch:
+        handlers.append(_Handler("invoice", label="Invoice", amount=25, calendar=False))
+    triggered = [(handler, [{}]) for handler in handlers]
+    items = consent_email.build_pending_items(triggered, "2026-09-22")
+    _arm_email(monkeypatch)
+    monkeypatch.setattr(consent_email, "send_request", lambda *_: True)
+    sweep = {"number": 1}
+
+    def fake(args, timeout=45):
+        if "+triage" in args:
+            query = args[args.index("--query") + 1]
+            if "in:sent" in query:
+                return {"complete": True, "messages": []}
+            mids = (["old"] if "subject:" not in query else ["correction", "old"])
+            if sweep["number"] == 2:
+                mids.append("new")
+            return {"complete": True, "messages": [{
+                "id": mid, "subject": "RE: [Ateles] Monedula consent 2026-09-22",
+                "from": "op@example.com"} for mid in mids]}
+        if "+read" in args:
+            mid = args[args.index("--id") + 1]
+            if mid == "correction":
+                return {"body_text": "hold"}
+            return {"body_text": "\n".join(
+                f"{'ATTENDED' if item.is_calendar else 'APPROVE'} {subject_marker(item.token)}"
+                for item in items)}
+        raise AssertionError(args)
+
+    monkeypatch.setattr(_ec, "gws_json", fake)
+    monkeypatch.setattr(_ec, "_fetch_auth_results", lambda _: [_GOOGLE_PASS])
+    notices = []
+    path = tmp_path / "m.json"
+    first = consent_email.request_and_collect(
+        triggered, "2026-09-22", state_path=path,
+        on_missing_token_reply=lambda msg, key: notices.append(msg) or True)
+    assert first.approved == set()
+    assert len(first.blocked) == len(items)
+    sweep["number"] = 2
+    second = consent_email.request_and_collect(
+        triggered, "2026-09-22", state_path=path,
+        on_missing_token_reply=lambda msg, key: notices.append(msg) or True)
+    assert second.approved == {item.token for item in items}
+    assert len(notices) == 1

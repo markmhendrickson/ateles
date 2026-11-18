@@ -22,6 +22,14 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
 
 import publish  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def prepared_guard_state(monkeypatch, tmp_path):
+    state = tmp_path / "prepare-state.json"
+    state.write_text(json.dumps({"guard_snapshot": {"synthetic": "digest"}}))
+    monkeypatch.setattr(publish, "PREPARE_STATE_FILE", state)
+    monkeypatch.setattr(publish, "changed_guard_location", lambda *_: None)
+
 ENT = "ent_release_1"
 
 

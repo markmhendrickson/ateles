@@ -21,6 +21,9 @@ import pytest
 
 import prepare
 import verify_guard_live as live
+import json
+import shutil
+from release_guard_snapshot import snapshot_release_guards, changed_guard_location
 
 
 @pytest.fixture(autouse=True)
@@ -38,6 +41,53 @@ def isolated_state(tmp_path, monkeypatch):
 
 
 SHA = "a" * 40
+
+
+def _guard_checkout(root):
+    (root / ".git" / "hooks").mkdir(parents=True)
+    (root / ".git" / "config").write_text("[core]\n")
+    (root / ".git" / "hooks" / "pre-commit").write_text("guard")
+    (root / ".husky").mkdir()
+    (root / ".husky" / "pre-commit").write_text("guard")
+
+
+@pytest.mark.parametrize("change,location", (
+    ("modify_hook", "git hooks"), ("new_hook", "git hooks"),
+    ("change_config", "git config"), ("replace_git", ".git"),
+))
+def test_prepare_guard_digest_detects_changes(tmp_path, change, location):
+    _guard_checkout(tmp_path)
+    before = snapshot_release_guards(tmp_path)
+    assert changed_guard_location(tmp_path, before) is None
+    if change == "modify_hook":
+        (tmp_path / ".git" / "hooks" / "pre-commit").write_text("changed")
+    elif change == "new_hook":
+        (tmp_path / ".git" / "hooks" / "post-commit").write_text("new")
+    elif change == "change_config":
+        (tmp_path / ".git" / "config").write_text("[core]\n hooksPath = elsewhere\n")
+    else:
+        (tmp_path / ".git").rename(tmp_path / "git-moved")
+        (tmp_path / ".git").symlink_to("git-moved")
+    assert changed_guard_location(tmp_path, before) == location
+
+
+def test_snapshot_is_persisted_before_prepare_child(monkeypatch, tmp_path):
+    _guard_checkout(tmp_path)
+    state = tmp_path / "prepare.json"
+    monkeypatch.setattr(prepare, "NEOTOMA_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(prepare, "SPAWN_COUNT_FILE", state)
+    monkeypatch.setattr(prepare, "SPAWN_PID_FILE", tmp_path / "pid")
+    monkeypatch.setattr(prepare, "AGENT_LOG", tmp_path / "agent.log")
+    monkeypatch.setattr(prepare, "_agent_env", lambda: {})
+    monkeypatch.setattr(prepare, "_agent_github_identity_ok", lambda _: True)
+    monkeypatch.setattr(prepare, "_agent_settings", lambda: "settings")
+    monkeypatch.setattr(prepare, "_build_agent_prompt", lambda *_: "prepare")
+    monkeypatch.setattr(prepare, "_head_sha", lambda: SHA)
+    monkeypatch.setattr(shutil, "which", lambda _: "/synthetic/claude")
+    monkeypatch.setattr(prepare.subprocess, "Popen", lambda *a, **k:
+                        type("Child", (), {"pid": 123})() if
+                        json.loads(state.read_text())["guard_snapshot"] else None)
+    assert prepare.spawn_prepare_agent("v1.0.0", 1, False, SHA)
 
 
 @pytest.mark.parametrize("case,expected", (

@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+from lib.approval import email_channel
 from lib.approval.email_channel import (
     ReadRepliesOutcome,
     read_replies_with_status,
@@ -144,7 +145,9 @@ def _load_mark(path: Path) -> dict:
 
 
 def _save_mark(path: Path, fingerprint: str, sent_at: float, *, generation: int,
-               request_body: str | None = None) -> None:
+               request_body: str | None = None,
+               notified_reply_ids: list[str] | None = None,
+               held_reply_ids: list[str] | None = None) -> None:
     payload: dict[str, Any] = {
         "fingerprint": fingerprint,
         "generation": int(generation),
@@ -152,6 +155,8 @@ def _save_mark(path: Path, fingerprint: str, sent_at: float, *, generation: int,
     }
     if request_body is not None:
         payload["request_body"] = request_body
+    payload["notified_reply_ids"] = notified_reply_ids or []
+    payload["held_reply_ids"] = held_reply_ids or []
     path.write_text(json.dumps(payload, indent=2, sort_keys=True))
 
 
@@ -607,7 +612,7 @@ def request_and_collect(
     state_path: Path | None = None,
     clear_failure_dedupe: Callable[[], None] | None = None,
     on_unauthenticated_reply: Callable[[str, str], None] | None = None,
-    on_missing_token_reply: Callable[[str, str], None] | None = None,
+    on_missing_token_reply: Callable[[str, str], bool | None] | None = None,
 ) -> ConsentEmailResult:
     """Send-once consent email + statusful reply sweep for the pending set.
 
@@ -749,18 +754,23 @@ def request_and_collect(
         on_sender_rejected=_on_rejected,
         on_unauthenticated_operator_reply=_on_unauthenticated,
         correction_queries=[f"[Ateles] Monedula consent {items[0].payment_date}"],
-        request_bodies={token: original_lines for token in tokens}
+        request_bodies=(lambda token, subject:
+                        email_channel.sent_request_body(token, subject) or original_lines)
         if isinstance(original_lines, str) else {},
     )
 
-    correction_holds = bool(outcome.correction_only_replies)
+    notified_ids = set(mark.get("notified_reply_ids") or []) if already_sent else set()
+    held_ids = set(mark.get("held_reply_ids") or []) if already_sent else set()
+    fresh_corrections = [reply for reply in outcome.correction_only_replies
+                         if reply.message_id not in notified_ids]
+    correction_holds = bool(fresh_corrections)
     if on_missing_token_reply is not None:
         forms = "; ".join(
             f"`{'attended' if item.is_calendar else 'yes'} {item.handler_name}`"
             for item in items)
-        for reply in outcome.correction_only_replies:
+        for reply in fresh_corrections:
             try:
-                on_missing_token_reply(
+                delivered = on_missing_token_reply(
                     f"monedula: payment consent for {items[0].payment_date} is held. "
                     "Your email reply did not include a payment code. Reply to "
                     "the current request and quote it so its code is present. "
@@ -768,8 +778,17 @@ def request_and_collect(
                     "payment(s) you attended or approved.",
                     f"monedula:missing_token:{reply.message_id}",
                 )
+                if delivered is True:
+                    notified_ids.add(reply.message_id)
             except Exception as exc:  # noqa: BLE001 — a failed notice cannot approve
                 log.warning(f"consent missing-token notice failed: {exc}")
+    if correction_holds:
+        held_ids.update(reply.message_id for reply in outcome.replies)
+    if notified_ids or held_ids:
+        _save_mark(path, fp, float(mark.get("sent_at") or time.time()),
+                   generation=generation, request_body=original_lines,
+                   notified_reply_ids=sorted(notified_ids),
+                   held_reply_ids=sorted(held_ids))
 
     if outcome.kind in ("transport_error", "disabled"):
         log.error(
@@ -828,7 +847,11 @@ def request_and_collect(
         result.reason_code = "consent_reply_missing_token"
         return result
 
-    if not outcome.texts:
+    active_texts = [f"{reply.subject}\n{reply.body}" for reply in outcome.replies
+                    if reply.message_id not in held_ids]
+    if not outcome.replies and not held_ids:
+        active_texts = outcome.texts
+    if not active_texts:
         for item in items:
             key = match_key(item)
             result.states[key] = "awaiting_approval"
@@ -838,7 +861,7 @@ def request_and_collect(
 
     unrecognized_lines: list[str] = []
     states, unrecognized = overlay_verdicts(
-        items, outcome.texts, unrecognized_lines=unrecognized_lines
+        items, active_texts, unrecognized_lines=unrecognized_lines
     )
     result.states = states
     for key, state in states.items():

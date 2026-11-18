@@ -55,6 +55,11 @@ effective directory. Other shell directory changes are refused.
 The live binding check requires a hook-side refusal receipt for the guarded
 attempt and an allow receipt for the control command. A declined command or
 an absent hook is inconclusive even when no guarded commit lands.
+Preparation uses plain git commands and plain file edits with literal paths.
+The prepare state records a digest of the checkout's hook directories, Husky
+directory, Git configuration and Git-directory entry before the agent starts.
+Publishing compares that digest before any release step; a changed or unreadable
+location stops the release and raises a Telegram notice.
 
 The agent's cwd is the Neotoma checkout, so this repository's own
 `.claude/settings.json` does not reach it; `--settings` is the only way the
@@ -237,7 +242,8 @@ operator-authored reply must contain exactly one instruction line:
 `approve <version>` (case-insensitive; the `v` prefix is optional). A final
 period or exclamation mark is allowed. The version must match the release in
 the subject. Email `skip <version>` does not discard the candidate; Turdus
-responds with the Telegram discard instruction. The release email asks only
+responds with the exact Telegram `skip <version>` discard instruction, including
+when the email omitted the request token. The release email asks only
 for `approve <version>` by reply. The routing mirrors the swarm PR-approve flow:
 
 For a PR merge-ready email, the only instruction line is `APPROVE`, optionally

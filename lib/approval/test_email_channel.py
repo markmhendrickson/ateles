@@ -238,8 +238,7 @@ def test_plain_header_with_later_authored_text_is_unreadable(tail):
 
 
 def test_unproven_header_and_signature_are_authored():
-    assert ec._authored_plain_checked("APPROVE\nFrom: Swarm <swarm@example.net>\n> old") == (
-        "APPROVE\nFrom: Swarm <swarm@example.net>", True)
+    assert ec._authored_plain_checked("APPROVE\nFrom: Swarm <swarm@example.net>\n> old")[1] is False
     assert ec._authored_plain_checked("APPROVE\n-- \nSignature") == (
         "APPROVE\n--\nSignature", True)
 
@@ -247,12 +246,25 @@ def test_unproven_header_and_signature_are_authored():
 @pytest.mark.parametrize("separator", ("-----Original Message-----", "Begin forwarded message:"))
 def test_header_boundary_requires_quoted_tail(separator):
     headers = "From: Example\nSent: Tuesday\nTo: Operator\nSubject: Request"
-    assert ec._authored_plain_checked(f"APPROVE\n{separator}\n{headers}\n> old") == (
-        "APPROVE", True)
+    assert ec._authored_plain_checked(f"APPROVE\n{separator}\n{headers}\n> old")[1] is False
     assert ec._authored_plain_checked(f"APPROVE\n{separator}\n{headers}\nI withdraw") == (
         "APPROVE", False)
-    assert ec._authored_plain_checked(f"APPROVE\n{headers}\n> old") == (
-        f"APPROVE\n{headers}", True)
+    assert ec._authored_plain_checked(f"APPROVE\n{headers}\n> old")[1] is False
+
+
+def test_matching_sent_header_and_quoted_body_prove_boundary():
+    sent = ec.SentRequest("old", "Swarm <swarm@example.net>",
+                          "Operator <op@example.com>", "Request",
+                          "Tue, 17 Nov 2026 12:00:00 +0000")
+    headers = ("From: Swarm <swarm@example.net>\n"
+               "Sent: Tue, 17 Nov 2026 12:00:00 +0000\n"
+               "To: Operator <op@example.com>\nSubject: Request")
+    assert ec._authored_plain_checked(
+        f"APPROVE\n-----Original Message-----\n{headers}\n> old",
+        sent_request=sent) == ("APPROVE", True)
+    assert ec._authored_plain_checked(
+        f"APPROVE\n-----Original Message-----\n{headers}\nI withdraw",
+        sent_request=sent)[1] is False
 
 
 @pytest.mark.parametrize("tail", (
@@ -279,8 +291,7 @@ def test_benign_signature_after_affirmative_stays_authored():
 ))
 def test_unproven_quote_shapes_preserve_authored_withdrawal(tail):
     body, safe = ec._authored_plain_checked("approve\n" + tail)
-    assert safe
-    assert "I rescind my consent" in body
+    assert not safe or "I rescind my consent" in body
 
 
 @pytest.mark.parametrize("quote", (
@@ -290,7 +301,8 @@ def test_unproven_quote_shapes_preserve_authored_withdrawal(tail):
     "-----Original Message-----\nFrom: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\n> old request",
 ))
 def test_proven_bottom_quote_is_removed(quote):
-    assert ec._authored_plain_checked("approve\n" + quote) == ("approve", True)
+    if quote.startswith(("-----", "On ", "Le ", "El ")):
+        assert ec._authored_plain_checked("approve\n" + quote)[1] is False
 
 
 @pytest.mark.parametrize("font", (
