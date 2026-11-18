@@ -4248,7 +4248,7 @@ def _reviewed_head_blockers(
     exclude = _normalise_full_sha(exclude_head)
     order: list[str] = []
     by_head: dict[str, set[tuple[str, str, str]]] = {}
-    for comment in sorted(comments, key=lambda c: c.get("created_at") or ""):
+    for comment in sorted(comments, key=lambda c: str(c.get("created_at") or "")):
         body = comment.get("body") or ""
         marker = _LENS_MARKER_RE.search(body)
         if not marker:
@@ -4291,7 +4291,9 @@ def lens_records(comments: list[dict]) -> dict[str, list[review_carry.LensRecord
     no record: there is nothing to carry from it.
     """
     out: dict[str, list[review_carry.LensRecord]] = {}
-    for comment in sorted(comments, key=lambda c: c.get("created_at") or ""):
+    for source_order, comment in sorted(
+        enumerate(comments), key=lambda pair: str(pair[1].get("created_at") or "")
+    ):
         raw = comment.get("body") or ""
         marker = _LENS_MARKER_RE.search(raw)
         if not marker:
@@ -4308,6 +4310,13 @@ def lens_records(comments: list[dict]) -> dict[str, list[review_carry.LensRecord
                 cleared=sign_off_is_warranted(body, lens_agent=known.agent),
                 verdict=lens_own_verdict(body, lens_agent=known.agent) or "",
                 url=str(comment.get("html_url") or ""),
+                created_at=str(comment.get("created_at") or ""),
+                comment_id=comment.get("id"),
+                source_order=source_order,
+                blocking=(
+                    not sign_off_is_warranted(body, lens_agent=known.agent)
+                    and lens_own_verdict(body, lens_agent=known.agent) != "comment"
+                ) or bool(lens_explicit_objection(body, lens_agent=known.agent)),
             )
         )
     return out

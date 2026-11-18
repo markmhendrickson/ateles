@@ -139,11 +139,16 @@ conclusion always blocks. See `_unscheduled_non_required_reason`.
 
 Three-round cap (operator ruling 2026-10-27, `review_rounds`): a repair unit
 not merged after three build, review and correct rounds is split or cut in scope
-before another round runs. A round is a distinct head that received a lens
-verdict (the swarm's own verdict comments and their `commit=` markers). When the
-head being approved would be a fourth round or later, the tool prints "round cap
-reached: split or cut scope" and refuses, whatever the lenses said. There is no
-override: the unit is split or cut in scope and continues in a fresh PR.
+before another round runs. Contiguous verdicts on one head form a review
+episode; returning to an earlier head after another head forms another episode.
+An episode after a blocking or unreadable episode starts a round; one after an
+all-clear episode continues the round. Verdicts are ordered by UTC creation
+time, integer comment id, then source order. Missing or malformed timestamps,
+or timestamp ties without usable comment ids, refuse approval because the
+round order is unknown. The cap uses the whole PR history. A
+fourth round is refused unless the operator posted an unedited,
+PR-specific `/override-round-cap` comment with a reason of at least 20
+characters. The override lifts only this cap; every other gate still binds.
 
 Usage:
     python3 execution/scripts/approve_pr_as_app.py --repo <owner/name> --pr <n> \\
@@ -264,6 +269,7 @@ from swarm_dispatch import (  # noqa: E402
     lens_records,
     output_has_blocking_verdict,
     sign_off_is_warranted,
+    _OPERATOR_LOGIN,
 )
 
 # lens short-name -> owning agent, mirroring review_panel.LENSES. Imported by
@@ -2546,7 +2552,15 @@ async def run(
             lens_records(lens_authors.scope_lens_comments(comments, authors)),
             head_sha,
         )
+        override = review_rounds.operator_override(comments, _OPERATOR_LOGIN, repo, pr) if rounds.capped else None
         print(rounds.describe())
+        if override:
+            print(
+                f"round cap OVERRIDDEN by the operator ({override['html_url']})\n"
+                f"  author: {override['user']['login']}\n"
+                f"  posted: {override['created_at']}\n"
+                f"  literal text: {override['body']}"
+            )
         print()
 
         lens_outcomes: list[LensOutcome] = []
@@ -2633,7 +2647,7 @@ async def run(
             and no_non_required_blocks
             and not unadmitted
             and checks_green
-            and not rounds.refused
+            and (not rounds.refused or override is not None)
         )
 
         print(f"head_sha={head_sha}")
@@ -2646,7 +2660,9 @@ async def run(
         print(f"checks: {'GREEN' if checks_green else 'NOT GREEN'}")
         print(
             "round cap: "
-            + ("REACHED (split or cut scope)" if rounds.refused else "OK")
+            + (f"OVERRIDDEN by the operator ({override['html_url']})" if override
+               else "INDETERMINATE (refusing)" if rounds.indeterminate_head
+               else "REACHED (split or cut scope)" if rounds.refused else "OK")
         )
         print(f"overall: {'PASS' if overall_pass else 'FAIL'}")
 
@@ -2684,6 +2700,13 @@ async def run(
             print()
             print("refusing to approve: gate is not clear. Submitting nothing.")
             return 1
+
+        if override:
+            fresh_comments = await _fetch_issue_comments(client, repo, pr)
+            fresh_override = review_rounds.operator_override(fresh_comments, _OPERATOR_LOGIN, repo, pr)
+            if fresh_override != override:
+                print("refusing to approve: operator round-cap override changed or vanished. Submitting nothing.")
+                return 1
 
         try:
             reviews = await submit_approvals(
