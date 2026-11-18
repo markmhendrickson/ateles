@@ -41,6 +41,8 @@ def _load_proxy():
 
 neotoma_proxy = _load_proxy()
 
+STREAM_BODY = b'{"jsonrpc":"2.0","id":"stream","method":"tools/list"}'
+
 
 class _Upstream:
     """A fake Neotoma MCP endpoint that records every request it receives."""
@@ -67,7 +69,7 @@ class _Upstream:
 
             def do_POST(self):
                 body = self._record()
-                if body == b"stream":
+                if body == STREAM_BODY:
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
                     self.send_header("Transfer-Encoding", "chunked")
@@ -438,10 +440,12 @@ def test_post_forwards_exact_body_with_signature_and_strips_client_credentials(u
     assert sign_calls == [("POST", UPSTREAM_BASE + "/mcp", body, "application/json")]
     assert "127.0.0.1" not in sign_calls[0][1]
 
+PING_BODY = b'{"jsonrpc":"2.0","id":1,"method":"ping"}'
+
 
 def test_post_without_content_type_signs_and_sends_application_json(upstream, sign_calls, proxy_port):
     conn = _client(proxy_port)
-    conn.request("POST", "/mcp", body=b"{}", headers={"Content-Type": ""})
+    conn.request("POST", "/mcp", body=PING_BODY, headers={"Content-Type": ""})
     resp = conn.getresponse()
     resp.read()
     conn.close()
@@ -451,7 +455,7 @@ def test_post_without_content_type_signs_and_sends_application_json(upstream, si
 
 def test_response_streams_before_upstream_finishes(upstream, proxy_port):
     conn = _client(proxy_port)
-    conn.request("POST", "/mcp", body=b"stream", headers={"Content-Type": "application/json"})
+    conn.request("POST", "/mcp", body=STREAM_BODY, headers={"Content-Type": "application/json"})
     resp = conn.getresponse()
     assert resp.status == 200
     assert resp.getheader("Content-Type") == "text/event-stream"
@@ -681,7 +685,7 @@ def test_unreachable_upstream_gets_502():
     port = proxy.start()
     try:
         conn = _client(port)
-        conn.request("POST", "/mcp", body=b"{}")
+        conn.request("POST", "/mcp", body=PING_BODY)
         resp = conn.getresponse()
         resp.read()
         conn.close()
@@ -830,7 +834,7 @@ def test_only_the_allowed_peer_uid_is_forwarded(
     conn = _client(uid_checked_proxy_port)
     conn.connect()
     client_port = conn.sock.getsockname()[1]
-    conn.request("POST", "/mcp", body=b"{}", headers={"Content-Type": "application/json"})
+    conn.request("POST", "/mcp", body=PING_BODY, headers={"Content-Type": "application/json"})
     resp = conn.getresponse()
     resp.read()
     conn.close()
