@@ -73,6 +73,17 @@ def test_release_guard_missing_binding_requires_reprepare(monkeypatch, tmp_path,
     assert notices and "re-prepare" in notices[0]
 
 
+def test_legacy_release_guard_state_requires_reprepare(monkeypatch, tmp_path):
+    state = tmp_path / "prepare-state.json"
+    state.write_text(json.dumps({"guard_snapshot": {"synthetic": "digest"}}))
+    monkeypatch.setattr(publish, "PREPARE_STATE_FILE", state)
+    notices = []
+    monkeypatch.setattr(publish, "telegram_send", notices.append)
+    with pytest.raises(publish.StepError, match="re-prepare"):
+        publish._verify_prepare_guard_snapshot("v1.2.3")
+    assert notices
+
+
 @pytest.fixture(autouse=True)
 def prepared_guard_state(monkeypatch, tmp_path):
     state = tmp_path / "prepare-state.json"

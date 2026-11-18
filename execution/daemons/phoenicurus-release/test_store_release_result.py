@@ -34,6 +34,30 @@ import aauth_signer  # noqa: E402
 import store_release_result  # noqa: E402
 
 
+def test_pending_release_records_prepared_binding(monkeypatch, tmp_path):
+    monkeypatch.setattr(store_release_result, "__file__", str(tmp_path / "store_release_result.py"))
+    marker = tmp_path / ".phoenicurus_prepare_spawn_count"
+    marker.write_text(json.dumps({"head": "a" * 40,
+                                  "guard_snapshot": {"synthetic": "digest"},
+                                  "release_guards": {"v1.0.0": {
+                                      "version": "v1.0.0", "head": "b" * 40,
+                                      "guard_snapshot": {"older": "digest"}}}}))
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
+    rc = _run_main(
+        monkeypatch,
+        ["--version", "v1.1.0", "--status", "pending_approval",
+         "--prepared-head", "a" * 40],
+        signer=_non_stub_signer(),
+        urlopen=lambda *_a, **_k: _urlopen_response(
+            {"entities": [{"entity_id": "ent_test", "action": "created"}]}),
+    )
+    assert rc == 0
+    entries = json.loads(marker.read_text())["release_guards"]
+    assert entries["v1.1.0"] == {"version": "v1.1.0", "head": "a" * 40,
+                                 "guard_snapshot": {"synthetic": "digest"}}
+    assert entries["v1.0.0"]["head"] == "b" * 40
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 

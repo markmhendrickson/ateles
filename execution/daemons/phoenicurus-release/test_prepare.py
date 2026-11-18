@@ -90,6 +90,17 @@ def test_snapshot_is_persisted_before_prepare_child(monkeypatch, tmp_path):
     assert prepare.spawn_prepare_agent("v1.0.0", 1, False, SHA)
 
 
+def test_later_prepare_preserves_release_guard_entries(monkeypatch, tmp_path):
+    state = tmp_path / "prepare.json"
+    earlier = {"version": "v1.0.0", "head": "a" * 40,
+               "guard_snapshot": {"synthetic": "digest"}}
+    state.write_text(json.dumps({"head": "a" * 40, "count": 1,
+                                 "release_guards": {"v1.0.0": earlier}}))
+    monkeypatch.setattr(prepare, "SPAWN_COUNT_FILE", state)
+    assert prepare._record_spawn("b" * 40) == 1
+    assert json.loads(state.read_text())["release_guards"]["v1.0.0"] == earlier
+
+
 @pytest.mark.parametrize("case,expected", (
     ("refused", 0), ("declined", 2), ("absent", 2),
     ("control_unseen", 2), ("hook_error", 2),
