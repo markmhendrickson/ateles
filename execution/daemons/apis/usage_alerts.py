@@ -244,6 +244,13 @@ def check_usage_thresholds(
     try:
         current = now or datetime.now(timezone.utc)
         source = harness_router._usage_path()
+        if not source.exists():
+            _notice_unreadable_snapshot(
+                source, "source missing", current, notifier=notifier,
+                notifier_factory=notifier_factory,
+                journal_factory=journal_factory,
+            )
+            return []
         problem = harness_router.usage_snapshot_problem(source)
         if problem is not None:
             _notice_unreadable_snapshot(

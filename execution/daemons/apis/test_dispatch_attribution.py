@@ -1238,11 +1238,15 @@ def test_unreadable_usage_snapshot_has_one_held_notice(
     assert "harness_usage.py refresh" in run.stdout
 
 
-def test_missing_usage_snapshot_does_not_raise_notice(monkeypatch, tmp_path, ledger) -> None:
+def test_missing_usage_snapshot_is_held_and_visible(monkeypatch, tmp_path, ledger) -> None:
+    from lib.notify import held_view
+
     monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "missing.json"))
     spy = _SpyNotifier(silenced=True)
     assert usage_alerts.check_usage_thresholds("cursor", notifier=spy) == []
-    assert spy.sent == []
+    assert len(spy.sent) == 1
+    assert "Usage snapshot unreadable" in spy.sent[0][0]
+    assert held_view.summary(spy.inner._digest_path)["usage_snapshot_unreadable"] == 1
 
 
 @pytest.mark.parametrize("writer", [
