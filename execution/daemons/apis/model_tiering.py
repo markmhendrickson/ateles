@@ -61,6 +61,7 @@ import argparse
 import contextvars
 import json
 import logging
+import math
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -832,12 +833,14 @@ def normalize_pr(value: object) -> int | str | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return value if value > 0 else None
+        return value if 0 < value <= 999999999999 else None
     text = _clean(value)
     if text is None:
         return None
     digits = text.lstrip("#")
     if digits.isdigit():
+        if len(digits) > 12:
+            return None
         number = int(digits)
         return number if number > 0 else None
     return text
@@ -1142,7 +1145,8 @@ def usage_totals(
     parsed_rows, unreadable_rows = _read_ledger_rows()
 
     def _number(value: object) -> bool:
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and 0 <= value <= 1e15 and math.isfinite(value))
 
     for row in parsed_rows:
         when = _row_time(row)
@@ -1163,16 +1167,22 @@ def usage_totals(
             "cost": {"total_usd": None, "reported_rows": 0},
         })
         entry["dispatches"] += 1
+        malformed_number = False
         for name in USAGE_TOKEN_FIELDS:
             value = row.get(name)
             if _number(value):
                 field = entry["tokens"][name]
                 field["sum"] = (field["sum"] or 0) + int(value)
                 field["reported_rows"] += 1
+            elif value is not None:
+                malformed_number = True
         cost = row.get("total_cost_usd")
-        if _number(cost):
+        if _number(cost) and cost <= 1e9:
             entry["cost"]["total_usd"] = (entry["cost"]["total_usd"] or 0.0) + float(cost)
             entry["cost"]["reported_rows"] += 1
+        elif cost is not None:
+            malformed_number = True
+        unreadable_rows += int(malformed_number)
     return {"group_by": group_by, "rows": rows, "groups": groups,
             "unreadable_rows": unreadable_rows,
             "attribution_available": bool(parsed_rows) or unreadable_rows == 0}
@@ -1205,9 +1215,11 @@ def _ledger_lines() -> list[str]:
 def _row_time(row: dict) -> datetime | None:
     try:
         when = datetime.fromisoformat(str(row["ts"]))
-    except (ValueError, KeyError, TypeError):
+        when = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+        normalized = when.astimezone(timezone.utc)
+    except (ValueError, KeyError, TypeError, OverflowError):
         return None
-    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+    return normalized if 2000 <= normalized.year <= 2100 else None
 
 
 def _read_ledger_rows() -> tuple[list[dict], int]:
@@ -1288,7 +1300,8 @@ def attribution_summary(*, since_hours: float | None = None) -> dict:
         return tuple(_key_value(row, name) for name in SUMMARY_KEY_FIELDS)
 
     def _number(value: object) -> bool:
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and 0 <= value <= 1e15 and math.isfinite(value))
 
     rows, unreadable_rows = _read_ledger_rows()
     # Every start row's keys, whether or not it falls in the window, so a usage
@@ -1339,6 +1352,7 @@ def attribution_summary(*, since_hours: float | None = None) -> dict:
         row_model = _clean(row.get("model"))
         if row_model is not None and _clean(row.get("model_source")) == MODEL_REPORTED:
             entry["_reported"].add(row_model)
+        malformed_number = False
         for name in USAGE_TOKEN_FIELDS:
             value = row.get(name)
             field_entry = entry["tokens"][name]
@@ -1347,6 +1361,9 @@ def attribution_summary(*, since_hours: float | None = None) -> dict:
                 field_entry["reported_rows"] += 1
             else:
                 field_entry["null_rows"] += 1
+                if value is not None:
+                    malformed_number = True
+        unreadable_rows += int(malformed_number)
 
     for entry in groups.values():
         reported = sorted(entry.pop("_reported"))

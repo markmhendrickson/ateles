@@ -82,6 +82,7 @@ import json
 import logging
 import math
 import os
+import re
 import tempfile
 import time
 from collections.abc import Collection, Iterable, Mapping
@@ -156,7 +157,7 @@ def _iso_from_wall(wall: float) -> str:
 def _clamp(value: object) -> float | None:
     try:
         return min(1.0, max(0.0, float(value)))  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -473,7 +474,7 @@ def _percent(value: object) -> float | None:
         return None
     try:
         percent = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if not math.isfinite(percent) or percent < 0.0 or percent > 100.0:
         return None
@@ -503,6 +504,20 @@ def _window_problem(window: object) -> str | None:
         if reset is None or not now - 366 * 86400 <= reset <= now + 366 * 86400:
             return f"window {name!r} has an invalid or out-of-range resets_at"
     return None
+
+
+def normalize_usage_window(window: object) -> dict[str, object] | None:
+    """Validate one provider window before it can enter the shared snapshot."""
+    if _window_problem(window) is not None:
+        return None
+    assert isinstance(window, dict)
+    item: dict[str, object] = {
+        "name": window["name"].strip(),
+        "used_percent": float(window["used_percent"]),
+    }
+    if window.get("resets_at") is not None:
+        item["resets_at"] = window["resets_at"]
+    return item
 
 
 def _live_observed_at(provider: str) -> float | None:
@@ -784,20 +799,22 @@ def record_usage(
     if normalized not in PROVIDERS:
         raise ValueError(f"unsupported provider: {provider!r}")
     rendered = []
+    unreadable = 0
     for window in windows:
         problem = _window_problem(window)
         if problem is not None:
             log.warning("refusing malformed usage window: %s", problem)
-            raise ValueError(f"refusing to record a malformed usage window: {problem}")
-        item: dict[str, object] = {
-            "name": str(window["name"]).strip(),
-            "used_percent": float(window["used_percent"]),  # type: ignore[arg-type]
-        }
-        if window.get("resets_at") is not None:
-            item["resets_at"] = window["resets_at"]
+            unreadable += 1
+            continue
+        item = normalize_usage_window(window)
+        assert item is not None
         rendered.append(item)
     if not rendered:
         raise ValueError("refusing to record a usage observation with no windows")
+    if unreadable:
+        prior = re.fullmatch(r"(\d{1,9}) unreadable provider windows", probe_detail or "")
+        count = unreadable + (int(prior.group(1)) if prior else 0)
+        probe_detail = f"{count} unreadable provider windows"
     at = time.time() if observed_at is None else observed_at
     if not isinstance(at, (int, float)) or not math.isfinite(at) or not 946684800 <= at <= 4102444800:
         raise ValueError("refusing to record an out-of-range observation time")
@@ -806,7 +823,7 @@ def record_usage(
         "windows": rendered,
         "exhausted_until": None,
     }
-    if provider_probe:
+    if provider_probe or unreadable:
         entry["probe"] = {
             "status": "available",
             "observed_at": _iso_from_wall(at),

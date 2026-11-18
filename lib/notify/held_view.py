@@ -95,11 +95,20 @@ def usage_key(provider: str, window: str, reset: str, threshold: int) -> str:
     name = canonical_window_name(window)
     if name == "unavailable":
         raise ValueError("window name cannot be canonicalized")
+    if (not isinstance(provider, str) or not 0 < len(provider) <= 64
+            or not isinstance(reset, str) or len(reset) > 64
+            or not isinstance(threshold, int) or isinstance(threshold, bool)
+            or not 0 <= threshold <= 100):
+        raise ValueError("usage key component is out of range")
+    if reset != "no-reset" and _aware_instant(reset) is None:
+        raise ValueError("usage key reset is invalid")
     parts = (provider, name, reset, str(threshold))
     return f"{USAGE_KEY_PREFIX}:v2:" + ":".join(quote(part, safe="") for part in parts)
 
 
 def parse_usage_key(key: str, known_windows: tuple[str, ...] = ()) -> tuple[str, str, str, int] | None:
+    if not isinstance(key, str) or len(key) > 2048:
+        return None
     prefix = f"{USAGE_KEY_PREFIX}:"
     if not key.startswith(prefix):
         return None
@@ -138,9 +147,15 @@ def parse_usage_key(key: str, known_windows: tuple[str, ...] = ()) -> tuple[str,
             window = canonical_window_name(window)
             if window not in known:
                 return None
-    if not provider or not window or not raw_threshold.isdecimal():
+    if (not provider or len(provider) > 64 or not window or window == "unavailable"
+            or len(reset) > 64
+            or not raw_threshold.isascii() or not raw_threshold.isdecimal()
+            or len(raw_threshold) > 3):
         return None
-    return provider, window, reset, int(raw_threshold)
+    if body.startswith("v2:") and reset != "no-reset" and _aware_instant(reset) is None:
+        return None
+    threshold = int(raw_threshold)
+    return (provider, window, reset, threshold) if 0 <= threshold <= 100 else None
 # Shared with the usage-alert sender. A short margin allows its bounded join
 # and the receipt write to finish before a send is called interrupted.
 ALERT_SEND_TIMEOUT_SECONDS = 30.0
@@ -231,7 +246,13 @@ def _aware_instant(raw: object) -> datetime | None:
         value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except (ValueError, OverflowError):
         return None
-    return value.astimezone(timezone.utc) if value.tzinfo else None
+    if not value.tzinfo:
+        return None
+    try:
+        normalized = value.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
+        return None
+    return normalized if 2000 <= normalized.year <= 2100 else None
 
 
 def _valid_percent(raw: object) -> bool:
@@ -264,14 +285,13 @@ def recovery_window_ends(epoch: str) -> dict[str, dict[str, str]]:
         windows = entry.get("windows")
         if observed is None or observed > recovered or not isinstance(windows, list):
             continue
-        if any(not isinstance(window, dict) or
-               canonical_window_name(window.get("name")) == "unavailable" or
-               not _valid_percent(window.get("used_percent")) or
-               _aware_instant(window.get("resets_at")) is None
-               for window in windows):
-            continue  # a partial provider snapshot cannot prove a boundary
         conflicts: set[str] = set()
         for window in windows:
+            if (not isinstance(window, dict) or
+                    canonical_window_name(window.get("name")) == "unavailable" or
+                    not _valid_percent(window.get("used_percent")) or
+                    _aware_instant(window.get("resets_at")) is None):
+                continue
             name = canonical_window_name(window.get("name"))
             end = _aware_instant(window.get("resets_at"))
             if end is not None and end > recovered:

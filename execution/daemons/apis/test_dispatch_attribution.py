@@ -205,6 +205,21 @@ def test_old_rows_without_attribution_still_parse_in_every_reader(ledger) -> Non
     assert model_tiering.top_callers() == [(None, None, 2)]
 
 
+def test_bad_spend_number_is_counted_without_losing_other_rows(ledger) -> None:
+    _write_rows(ledger, [
+        {"event": "usage", "provider": "codex", "caller": "apis",
+         "input_tokens": 12, "total_cost_usd": 1.5},
+        {"event": "usage", "provider": "codex", "caller": "apis",
+         "input_tokens": 1e308, "total_cost_usd": 1e308},
+    ])
+    totals = model_tiering.usage_totals(group_by="provider")
+    assert totals["groups"]["codex"]["tokens"]["input_tokens"]["sum"] == 12
+    assert totals["groups"]["codex"]["cost"]["total_usd"] == 1.5
+    assert totals["unreadable_rows"] == 1
+    summary = model_tiering.attribution_summary()
+    assert summary["unreadable_rows"] == 1
+
+
 # ── the read-only summary ───────────────────────────────────────────────────
 
 
@@ -1477,6 +1492,130 @@ def test_provider_report_with_bad_sibling_labels_delivered_alert_incomplete(
     spy = _SpyNotifier()
     usage_alerts.check_usage_thresholds("claude", notifier=spy)
     messages = [item for item in spy.delivered if "Provider usage:" in item]
+    assert len(messages) == 1
+    assert "Usage reading incomplete: 1 provider windows unreadable" in messages[0]
+
+
+@pytest.mark.parametrize("bad_field", ["name", "reset"])
+def test_bad_probe_window_preserves_a_valid_crossing(
+    monkeypatch, tmp_path, ledger, bad_field
+) -> None:
+    import usage_probe
+
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    reset = (datetime.now(timezone.utc) + timedelta(days=2)).timestamp()
+    bad_name = "x" * 65 if bad_field == "name" else "five_hour"
+    bad_reset = reset if bad_field == "name" else 1e308
+    def report(include_valid: bool) -> str:
+        windows = {bad_name: {"utilization": 0.6, "resetsAt": bad_reset}}
+        if include_valid:
+            windows["seven_day"] = {"utilization": 0.6, "resetsAt": reset}
+        return json.dumps({"type": "rate_limit_event", "rate_limit_info": {
+            "unifiedWindows": windows,
+        }})
+
+    only_bad = usage_probe.parse_rate_limit_windows(report(False), with_status=True)
+    assert only_bad == ([], 1)
+    spy = _SpyNotifier()
+    assert usage_alerts.check_usage_thresholds("claude", notifier=spy) == []
+    windows, unreadable = usage_probe.parse_rate_limit_windows(report(True), with_status=True)
+    assert unreadable == 1 and len(windows) == 1
+    harness_router.record_usage("claude", windows, provider_probe=True,
+                                probe_detail=f"{unreadable} unreadable provider windows")
+    usage_alerts.check_usage_thresholds("claude", notifier=spy)
+    usage_alerts.check_usage_thresholds("claude", notifier=spy)
+    messages = [text for text in spy.delivered if "Provider usage:" in text]
+    assert len(messages) == 1
+    assert "Usage reading incomplete: 1 provider windows unreadable" in messages[0]
+
+
+def test_bad_codex_window_preserves_a_valid_crossing(monkeypatch, tmp_path, ledger) -> None:
+    import usage_probe
+
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    reset = (datetime.now(timezone.utc) + timedelta(days=2)).timestamp()
+    bad = {"usedPercent": 60, "windowDurationMins": 300, "resetsAt": 1e308}
+    def report(weekly: bool) -> dict:
+        return {"rateLimits": {
+            "primary": ({"usedPercent": 60, "windowDurationMins": 10080,
+                         "resetsAt": reset} if weekly else bad),
+            "secondary": bad if weekly else None,
+        }, "ordinaryUsageAllowed": True}
+
+    assert not usage_probe.parse_codex_rate_limits(report(False))[0]
+    spy = _SpyNotifier()
+    assert usage_alerts.check_usage_thresholds("codex", notifier=spy) == []
+    windows, problem = usage_probe.parse_codex_rate_limits(report(True))
+    assert problem == "1 unreadable provider windows"
+    harness_router.record_usage("codex", windows, provider_probe=True,
+                                probe_detail=problem)
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    messages = [text for text in spy.delivered if "Provider usage:" in text]
+    assert len(messages) == 1
+    assert "Usage reading incomplete: 1 provider windows unreadable" in messages[0]
+
+
+def test_bad_receipt_key_preserves_a_valid_crossing(monkeypatch, tmp_path, ledger) -> None:
+    from lib.notify import held_view
+
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    spy = _SpyNotifier()
+    bad_key = f"{held_view.USAGE_KEY_PREFIX}:v2:codex:weekly_all:no-reset:{'9' * 5000}"
+    _replace_journal_entry(spy.inner, bad_key, {
+        "state": "delivered", "handler": "apis",
+        "notified_at": datetime.now(timezone.utc).isoformat(),
+    })
+    assert held_view.parse_usage_key(bad_key) is None
+    assert usage_alerts.check_usage_thresholds("codex", notifier=spy) == []
+    harness_router.record_usage("codex", [_window(60)])
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    messages = [text for text in spy.delivered if "Provider usage:" in text]
+    assert len(messages) == 1
+    assert "Attribution incomplete: 1 usage receipt keys unreadable" in messages[0]
+
+
+def test_bad_probe_detail_preserves_a_valid_crossing(monkeypatch, tmp_path, ledger) -> None:
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    spy = _SpyNotifier()
+    assert usage_alerts.check_usage_thresholds("codex", notifier=spy) == []
+    harness_router.record_usage("codex", [_window(60)], provider_probe=True,
+                                probe_detail=f"{'9' * 5000} unreadable provider windows")
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    messages = [text for text in spy.delivered if "Provider usage:" in text]
+    assert len(messages) == 1
+    assert "Usage reading incomplete: 1 provider windows unreadable" in messages[0]
+
+
+def test_bad_stored_window_preserves_a_valid_crossing(monkeypatch, tmp_path, ledger) -> None:
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    _usage_file(monkeypatch, tmp_path, "codex", [
+        _window(60), {"name": "x" * 65, "used_percent": 60},
+    ])
+    spy = _SpyNotifier()
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    messages = [text for text in spy.delivered if "Provider usage:" in text]
+    assert len(messages) == 1
+    assert "Usage reading incomplete: 1 provider windows unreadable" in messages[0]
+
+
+def test_recorder_keeps_valid_window_when_a_sibling_is_bad(monkeypatch, tmp_path, ledger) -> None:
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    harness_router.record_usage("codex", [
+        {"name": "x" * 65, "used_percent": 60}, _window(60),
+    ])
+    spy = _SpyNotifier()
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    messages = [text for text in spy.delivered if "Provider usage:" in text]
     assert len(messages) == 1
     assert "Usage reading incomplete: 1 provider windows unreadable" in messages[0]
 

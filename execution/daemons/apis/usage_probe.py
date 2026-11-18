@@ -89,6 +89,23 @@ class ProbeResult:
     reading_failure: str = ""
 
 
+def _bounded_number(raw: object, *, high: float) -> float | None:
+    if isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if math.isfinite(value) and 0 <= value <= high else None
+
+
+def _reset_iso(raw: object) -> str | None:
+    wall = _bounded_number(raw, high=4102444800)
+    if wall is None or wall < 946684800:
+        return None
+    return harness_router._iso_from_wall(wall)
+
+
 def parse_rate_limit_windows(
     stdout: str, *, with_status: bool = False
 ) -> list[dict[str, object]] | tuple[list[dict[str, object]], int]:
@@ -125,26 +142,20 @@ def parse_rate_limit_windows(
             if not isinstance(key, str) or not key.strip() or not isinstance(window, dict):
                 malformed += 1
                 continue
-            utilization, resets = window.get("utilization"), window.get("resetsAt")
-            if isinstance(utilization, bool) or isinstance(resets, bool):
+            fraction = _bounded_number(window.get("utilization"), high=10)
+            reset = _reset_iso(window.get("resetsAt"))
+            if fraction is None or reset is None:
                 malformed += 1
                 continue
-            try:
-                fraction = float(utilization)  # type: ignore[arg-type]
-                reset_wall = float(resets)  # type: ignore[arg-type]
-            except (TypeError, ValueError):
+            item = harness_router.normalize_usage_window({
+                "name": WINDOW_NAMES.get(key, key.strip()),
+                "used_percent": round(min(fraction, 1.0) * 100.0, 4),
+                "resets_at": reset,
+            })
+            if item is None:
                 malformed += 1
-                continue
-            if not math.isfinite(fraction) or fraction < 0 or not math.isfinite(reset_wall):
-                malformed += 1
-                continue
-            parsed.append(
-                {
-                    "name": WINDOW_NAMES.get(key, key.strip()),
-                    "used_percent": round(min(fraction, 1.0) * 100.0, 4),
-                    "resets_at": harness_router._iso_from_wall(reset_wall),
-                }
-            )
+            else:
+                parsed.append(item)
         windows = parsed  # the latest event supersedes earlier reports, even when empty
         unreadable = malformed
     return (windows, unreadable) if with_status else windows
@@ -276,7 +287,8 @@ def _codex_window_name(minutes: int) -> str:
 def parse_codex_rate_limits(result: object) -> tuple[list[dict[str, object]], str | None]:
     """Windows from an ``account/rateLimits/read`` result, and why not if none.
 
-    Returns ``(windows, None)`` for a usable reading, else ``([], reason)``.
+    Returns usable windows and an optional incomplete-reading reason. With no
+    usable weekly window, returns ``([], reason)``.
     Every window is validated (finite non-negative percent, whole-minute
     duration, finite reset) so a malformed report cannot reach the snapshot; a
     percent above 100 is capped.  A reading with no weekly-length window is
@@ -295,40 +307,50 @@ def parse_codex_rate_limits(result: object) -> tuple[list[dict[str, object]], st
     if snapshot is None:
         return [], "no rateLimits snapshot"
     windows: list[dict[str, object]] = []
+    unreadable = 0
+    first_problem = ""
     for key in ("primary", "secondary"):
         raw = snapshot.get(key)
         if raw is None:
             continue
         if not isinstance(raw, dict):
-            return [], f"{key} window is not an object"
+            unreadable += 1
+            first_problem = first_problem or f"{key} window is not an object"
+            continue
         used, minutes, resets = (
             raw.get("usedPercent"), raw.get("windowDurationMins"), raw.get("resetsAt"),
         )
-        if any(isinstance(v, bool) for v in (used, minutes, resets)):
-            return [], f"{key} window carries a boolean where a number belongs"
-        try:
-            percent = float(used)  # type: ignore[arg-type]
-            length = int(minutes)  # type: ignore[arg-type]
-            reset_wall = float(resets)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return [], f"{key} window is missing a number (usedPercent/windowDurationMins/resetsAt)"
-        if not (math.isfinite(percent) and percent >= 0 and math.isfinite(reset_wall) and length > 0):
-            return [], f"{key} window has an out-of-range value"
-        windows.append(
-            {
-                "name": _codex_window_name(length),
-                "used_percent": round(min(percent, 100.0), 4),
-                "resets_at": harness_router._iso_from_wall(reset_wall),
-            }
-        )
+        percent = _bounded_number(used, high=1000)
+        duration = _bounded_number(minutes, high=525600)
+        reset = _reset_iso(resets)
+        if percent is None or duration is None or duration < 1 or not duration.is_integer() or reset is None:
+            unreadable += 1
+            if any(isinstance(v, bool) for v in (used, minutes, resets)):
+                reason = "boolean where a number belongs"
+            elif any(v is None or isinstance(v, str) and not v.strip() for v in (used, minutes, resets)) or isinstance(used, str) and _bounded_number(used, high=1e308) is None:
+                reason = "missing a number (usedPercent/windowDurationMins/resetsAt)"
+            else:
+                reason = "out-of-range value"
+            first_problem = first_problem or f"{key} window has {reason}"
+            continue
+        item = harness_router.normalize_usage_window({
+            "name": _codex_window_name(int(duration)),
+            "used_percent": round(min(percent, 100.0), 4),
+            "resets_at": reset,
+        })
+        if item is None:
+            unreadable += 1
+            first_problem = first_problem or f"{key} window has an out-of-range value"
+        else:
+            windows.append(item)
     if not windows:
-        return [], "no usage windows"
+        return [], (first_problem or "no usage windows")
     weekly = next((w for w in windows if w["name"] == "weekly_all"), None)
     if weekly is None:
         return [], "no weekly-length window, so the weekly pace cannot be computed"
     if result.get("ordinaryUsageAllowed") is False and float(weekly["used_percent"]) < 100.0:  # type: ignore[arg-type]
         return [], "server reports ordinary usage not allowed while the weekly window shows room"
-    return windows, None
+    return windows, (f"{unreadable} unreadable provider windows" if unreadable else None)
 
 
 def read_codex_rate_limits(
@@ -413,7 +435,7 @@ def read_codex_rate_limits(
         text = " ".join(str((reply.get("error") or {}).get("message", "error")).split())
         return unknown(f"app-server refused the read: {_TOKEN_LIKE.sub('<masked>', text)[:160]}")
     windows, problem = parse_codex_rate_limits(reply.get("result"))
-    if problem is not None:
+    if not windows:
         return unknown(f"app-server reading unusable: {problem}")
     return ProbeResult(
         True,
@@ -421,6 +443,7 @@ def read_codex_rate_limits(
         tuple(windows),
         status="available",
         source=CODEX_RATE_LIMITS_SOURCE,
+        reading_failure=problem or "",
     )
 
 

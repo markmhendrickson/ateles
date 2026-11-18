@@ -160,6 +160,16 @@ def test_a_percent_above_100_is_capped_not_rejected() -> None:
     assert windows[0]["used_percent"] == 100.0
 
 
+def test_bad_secondary_reset_keeps_the_weekly_reading() -> None:
+    result = _snapshot(60)
+    result["rateLimitsByLimitId"]["codex"]["secondary"] = {
+        "usedPercent": 60, "windowDurationMins": 300, "resetsAt": 1e308,
+    }
+    windows, problem = usage_probe.parse_codex_rate_limits(result)
+    assert len(windows) == 1 and windows[0]["name"] == "weekly_all"
+    assert problem == "1 unreadable provider windows"
+
+
 # ── the subprocess boundary ─────────────────────────────────────────────────
 
 

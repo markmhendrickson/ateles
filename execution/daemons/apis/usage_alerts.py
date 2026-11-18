@@ -4,7 +4,7 @@ Provider spend governance, task ent_e5259618cae6cafd4be120e0. On 2026-11-15 a
 provider's monthly allowance burned in about seven hours with no warning. This
 module warns while there is still room: when a usage window recorded in
 ``harness-usage.json`` (written by ``execution/scripts/harness_usage.py
-refresh``, read through ``harness_router.usage_windows``) first reaches 50%
+refresh``, with each window validated before alerting) first reaches 50%
 used, and again at 75%, one alert per threshold per window goes to the
 operator through the existing notifier (``lib.notify.Notifier``).
 
@@ -167,6 +167,7 @@ def build_message(
     attribution_unavailable: bool = False,
     unreadable_rows: int = 0,
     unreadable_windows: int = 0,
+    unreadable_keys: int = 0,
     observed_at: datetime | None = None,
     reading_fresh: bool = True,
 ) -> str:
@@ -193,6 +194,8 @@ def build_message(
         f"{caller_text}."
         + (f" Usage reading incomplete: {unreadable_windows} provider windows unreadable."
            if unreadable_windows else "")
+        + (f" Attribution incomplete: {unreadable_keys} usage receipt keys unreadable."
+           if unreadable_keys else "")
     )
 
 
@@ -257,8 +260,7 @@ def check_usage_thresholds(
                 notifier_factory=notifier_factory,
                 journal_factory=journal_factory,
             )
-            if harness_router.usage_snapshot_problem(source, provider=provider) is not None:
-                return []
+            # A malformed window cannot erase a valid sibling's crossing.
         try:
             reading = harness_router.usage_reading(provider, now_wall=current.timestamp())
         except (ValueError, OverflowError, OSError) as exc:
@@ -271,12 +273,24 @@ def check_usage_thresholds(
                 observed_at = datetime.fromtimestamp(reading.observed_at, timezone.utc)
             except (ValueError, OverflowError, OSError):
                 pass
-        windows = harness_router.usage_windows(provider)
-        entry = harness_router._read_usage_object().get(provider, {})
+        entry = harness_router._read_json_object(source).get(provider, {})
         probe = entry.get("probe") if isinstance(entry, dict) else None
         detail = probe.get("detail") if isinstance(probe, dict) else None
         incomplete_match = re.fullmatch(r"(\d+) unreadable provider windows", detail) if isinstance(detail, str) else None
-        unreadable_windows = int(incomplete_match.group(1)) if incomplete_match else 0
+        digits = incomplete_match.group(1) if incomplete_match else ""
+        unreadable_windows = int(digits) if 0 < len(digits) <= 9 else (1 if digits else 0)
+        raw_windows = entry.get("windows") if isinstance(entry, dict) else None
+        if not isinstance(raw_windows, list):
+            return []
+        windows = []
+        for raw_window in raw_windows:
+            valid = harness_router.normalize_usage_window(raw_window)
+            if valid is None:
+                unreadable_windows += 1
+            else:
+                windows.append(valid)
+        if harness_router._usage_entry_problem({**entry, "windows": windows}):
+            return []
         for window in windows:
             name = _canonical_window_name(window.get("name"))
             used = _percent(window.get("used_percent"))
@@ -334,11 +348,13 @@ def check_usage_thresholds(
                     if not held:
                         return
                     try:
+                        unreadable_keys = 0
                         for old_key in probe.dedupe_keys_with_prefix(f"{DEDUPE_PREFIX}:"):
                             parsed = held_view.parse_usage_key(
                                 old_key, (name, raw_name) if isinstance(raw_name, str) else (name,)
                             )
                             if parsed is None:
+                                unreadable_keys += 1
                                 continue
                             old_provider, old_name, old_reset, threshold = parsed
                             if old_provider != provider or old_name != name:
@@ -385,6 +401,7 @@ def check_usage_thresholds(
                             attribution_unavailable=attribution_unavailable,
                             unreadable_rows=unreadable_rows,
                             unreadable_windows=unreadable_windows,
+                            unreadable_keys=unreadable_keys,
                             observed_at=observed_at, reading_fresh=reading_fresh,
                         )
                         from lib.notify import Priority
