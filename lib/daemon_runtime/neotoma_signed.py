@@ -74,6 +74,7 @@ import asyncio
 import json
 import concurrent.futures
 import logging
+import math
 import multiprocessing
 import os
 import random
@@ -613,7 +614,11 @@ _RETRYABLE_STATUSES = frozenset({502, 503})
 
 
 def response_error_code(data: object) -> "str | None":
-    """The error code a Neotoma error body names, in any of its shapes; None if none."""
+    """Read the canonical Neotoma error envelope's code, or None if malformed.
+
+    See Neotoma ``docs/subsystems/errors.md``: standard errors use
+    ``error.error_code``; store resolution errors use ``error.code``.
+    """
     if isinstance(data, (str, bytes)):
         try:
             data = json.loads(data) if data else None
@@ -622,38 +627,33 @@ def response_error_code(data: object) -> "str | None":
     if not isinstance(data, Mapping):
         return None
     error = data.get("error")
-    candidates = (
-        data.get("error_code"),
-        data.get("code"),
-        error.get("code") if isinstance(error, Mapping) else error,
-    )
-    for value in candidates:
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
+    if not isinstance(error, Mapping):
+        return None
+    value = error.get("error_code")
+    if value is None and isinstance(error.get("issues"), list):
+        value = error.get("code")  # the documented store-resolution envelope
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _retry_after_seconds(value: object) -> "float | None":
     """A ``Retry-After`` value in seconds (delta-seconds form only); None if unusable."""
-    if isinstance(value, bool) or value is None:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         return None
     try:
         seconds = float(str(value).strip())
-    except ValueError:
+    except (TypeError, ValueError):
         return None  # an HTTP-date is not honoured; the normal backoff applies
-    return seconds if seconds >= 0 and seconds == seconds and seconds != float("inf") else None
+    return seconds if math.isfinite(seconds) and 0 <= seconds <= 3600 else None
 
 
 def _body_retry_after(data: object) -> "float | None":
-    """A retry time the error body states (``retry_after`` seconds), when the
-    transport does not surface the header (the signing helper returns no headers)."""
+    """Read ``error.details.retry_after_seconds`` from Neotoma's standard
+    envelope (``docs/subsystems/errors.md``), when the helper has no headers."""
     if not isinstance(data, Mapping):
         return None
     error = data.get("error")
-    for src in (data, error if isinstance(error, Mapping) else None):
-        if isinstance(src, Mapping) and "retry_after" in src:
-            return _retry_after_seconds(src.get("retry_after"))
-    return None
+    details = error.get("details") if isinstance(error, Mapping) else None
+    return _retry_after_seconds(details.get("retry_after_seconds")) if isinstance(details, Mapping) else None
 
 
 def _has_idempotency_key(body: object) -> bool:
@@ -693,7 +693,8 @@ class SignedRetryPolicy:
     def begin(self, method: str, body: object, *, deadline: "float | None" = None,
               clock: Any = None, rng: Any = None, label: str = "") -> "_SignedRetry":
         return _SignedRetry(self, self.repeatable(method, body), deadline,
-                            clock or time.monotonic, rng, label)
+                            clock or time.monotonic, rng, label,
+                            str(method or "").upper() != "GET")
 
 
 DEFAULT_SIGNED_RETRY_POLICY = SignedRetryPolicy()
@@ -702,13 +703,14 @@ DEFAULT_SIGNED_RETRY_POLICY = SignedRetryPolicy()
 class _SignedRetry:
     """One logical request's retry state under a :class:`SignedRetryPolicy`."""
 
-    def __init__(self, policy, repeatable, deadline, clock, rng, label):
+    def __init__(self, policy, repeatable, deadline, clock, rng, label, repeatable_write):
         self.policy = policy
         self.repeatable = repeatable
         self.deadline = deadline
         self.clock = clock
         self.rng = rng or random.random
         self.label = label
+        self.repeatable_write = repeatable_write
         self.started = clock()
         self.attempt = 1
         self.auth_retries = 0
@@ -744,12 +746,18 @@ class _SignedRetry:
             return None
         self.attempt += 1
         log.warning(
-            "signed request%s: HTTP %s code=%s; retrying as attempt %d/%d in %.2fs "
-            "with the same idempotency key",
+            "signed request%s: HTTP %s code=%s; retrying as attempt %d/%d in %.2fs%s",
             f" {self.label}" if self.label else "", status, error_code or "-",
             self.attempt, self.policy.max_attempts, delay,
+            " with the same idempotency key" if self.repeatable_write else "",
         )
         return delay
+
+    def can_start(self) -> bool:
+        """Recheck the bound after sleeping; a clock may advance during sleep."""
+        now = self.clock()
+        return (now <= self.started + self.policy.total_bound_s
+                and (self.deadline is None or now < self.deadline))
 
 
 def signed_request_with_retry(

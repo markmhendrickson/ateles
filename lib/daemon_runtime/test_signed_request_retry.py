@@ -108,11 +108,11 @@ def _store_body(key: "str | None" = "idem-1") -> dict:
 def _admission(retry_after: "str | None" = None) -> httpx.Response:
     headers = {"retry-after": retry_after} if retry_after is not None else {}
     return httpx.Response(503, headers=headers,
-                          json={"error": {"code": "ADMISSION_UNAVAILABLE", "message": "busy"}})
+                          json={"error": {"error_code": "ADMISSION_UNAVAILABLE", "message": "busy"}})
 
 
 def _auth_required() -> httpx.Response:
-    return httpx.Response(401, json={"error": {"code": "AUTH_REQUIRED", "message": "Missing Bearer token"}})
+    return httpx.Response(401, json={"error": {"error_code": "AUTH_REQUIRED", "message": "Missing Bearer token"}})
 
 
 # ── NeotomaWriter (the shared write client) ─────────────────────────────────
@@ -193,7 +193,7 @@ def test_write_without_idempotency_key_is_never_retried(tmp_path, http):
 
 @pytest.mark.parametrize("status", [400, 403])
 def test_other_4xx_are_not_retried(tmp_path, http, status):
-    rec = http(httpx.Response(status, json={"error": {"code": "AUTH_REQUIRED"}}))
+    rec = http(httpx.Response(status, json={"error": {"error_code": "AUTH_REQUIRED"}}))
     w, slept = _writer(tmp_path)
     with pytest.raises(ns.NeotomaWriteError):
         w.post("store", _store_body())
@@ -253,7 +253,8 @@ class _Clock:
 
 
 _BODY = {"field": "f", "value": "v", "idempotency_key": "idem-2"}
-_ADMISSION_BODY = {"error": {"code": "ADMISSION_UNAVAILABLE"}, "retry_after": 1}
+_ADMISSION_BODY = {"error": {"error_code": "ADMISSION_UNAVAILABLE",
+                             "details": {"retry_after_seconds": 1}}}
 
 
 def _call(clock, **kwargs):
@@ -281,7 +282,7 @@ def test_wrapper_retries_a_proxy_html_503(monkeypatch):
 
 
 def test_wrapper_auth_required_once_then_returns_second_401(monkeypatch):
-    refusal = {"error": {"code": "AUTH_REQUIRED", "message": "Missing Bearer token"}}
+    refusal = {"error": {"error_code": "AUTH_REQUIRED", "message": "Missing Bearer token"}}
     fake = _FakeSigned(monkeypatch, [(401, refusal), (401, refusal), (200, {})])
     assert _call(_Clock()) == (401, refusal)
     assert len(fake.calls) == 2
@@ -301,14 +302,25 @@ def test_wrapper_retries_a_get_without_a_body(monkeypatch):
     assert result == (200, {"x": 1}) and len(fake.calls) == 2
 
 
+def test_get_retry_log_does_not_claim_an_idempotency_key(monkeypatch, caplog):
+    _FakeSigned(monkeypatch, [(502, {}), (200, {})])
+    clock = _Clock()
+    with caplog.at_level("WARNING", logger="daemon_runtime.neotoma_signed"):
+        ns.signed_request_with_retry("GET", f"{BASE}/entities/ent_1", agent_name="pavo",
+                                     clock=clock, sleep=clock.sleep)
+    assert any("retrying" in r.message for r in caplog.records)
+    assert all("idempotency key" not in r.message for r in caplog.records)
+
+
 @pytest.mark.parametrize("status", [400, 403])
 def test_wrapper_does_not_retry_other_4xx(monkeypatch, status):
-    fake = _FakeSigned(monkeypatch, [(status, {"error": {"code": "AUTH_REQUIRED"}}), (200, {})])
+    fake = _FakeSigned(monkeypatch, [(status, {"error": {"error_code": "AUTH_REQUIRED"}}), (200, {})])
     assert _call(_Clock())[0] == status and len(fake.calls) == 1
 
 
 def test_wrapper_starts_no_retry_after_the_deadline(monkeypatch):
-    fake = _FakeSigned(monkeypatch, [(503, {"error": {"code": "ADMISSION_UNAVAILABLE"}, "retry_after": 5}),
+    fake = _FakeSigned(monkeypatch, [(503, {"error": {"error_code": "ADMISSION_UNAVAILABLE",
+                                              "details": {"retry_after_seconds": 5}}}),
                                      (200, {})])
     clock = _Clock()
     assert _call(clock, deadline=clock.now + 2)[0] == 503
@@ -333,11 +345,12 @@ def test_wrapper_uses_the_callers_pin(monkeypatch):
     assert caught.value.code == "identity_changed"
 
 
-def test_response_error_code_reads_every_envelope_shape():
-    assert ns.response_error_code({"error": {"code": "A"}}) == "A"
-    assert ns.response_error_code({"error_code": "B"}) == "B"
-    assert ns.response_error_code({"code": "C"}) == "C"
-    assert ns.response_error_code({"error": "D"}) == "D"
-    assert ns.response_error_code('{"error": {"code": "E"}}') == "E"
+def test_response_error_code_reads_only_documented_envelopes():
+    assert ns.response_error_code({"error": {"error_code": "A"}}) == "A"
+    assert ns.response_error_code({"error": {"code": "B", "issues": []}}) == "B"
+    assert ns.response_error_code({"error_code": "C"}) is None
+    assert ns.response_error_code({"code": "D"}) is None
+    assert ns.response_error_code({"error": "E"}) is None
+    assert ns.response_error_code('{"error": {"error_code": "F"}}') == "F"
     assert ns.response_error_code("<html>") is None
     assert ns.response_error_code({}) is None
