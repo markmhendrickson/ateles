@@ -4213,7 +4213,7 @@ class TestThisRepoScopeThroughTheApprovalTool:
         [
             "docs/foundation/work_model.md",
             "docs/foundation/conformance.md",
-            "docs/foundation/decision_state.md",
+            "docs/foundation/vocabulary.md",
         ],
     )
     async def test_foundation_text_needs_all_five(self, monkeypatch, path):

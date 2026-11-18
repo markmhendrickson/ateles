@@ -65,11 +65,13 @@ jobs:
     name: foundation corpus checkers
     runs-on: ubuntu-latest
     steps:
-      # Full history, and origin/main fetched as a ref. The decision-state
-      # projection reads the register at origin/main and compares the rulings
-      # on the current remote branches against it, so a shallow single-branch
-      # checkout leaves it nothing to project and the step skips — a check that
-      # never runs is the defect it was written to catch (`principles.md` §1).
+      # Full history, and origin/main fetched as a ref. The register-number
+      # reservation check reads the base copy of the register and of
+      # revisions.md at origin/main (`git show origin/main:<path>`) to see which
+      # numbers a change adds, and the decision-state render reads the register
+      # as checked out. A shallow single-branch checkout leaves the reservation
+      # check no base to compare against, and a check that never runs is the
+      # defect it was written to catch (`principles.md` §1).
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
