@@ -422,6 +422,27 @@ def test_a_failed_cli_delivers_nothing(world):
     assert json.loads(record["probe_report"])["delivery_stop"]["stop_commit_count"] == 1
 
 
+def test_the_commit_count_runs_as_the_agent_with_the_exports_home(world, monkeypatch):
+    # A root-run git refuses a repository owned by another user ("dubious ownership"),
+    # which would make the count always read unknown in production; a non-root test run
+    # cannot reproduce that refusal, so pin the identity and the environment instead.
+    seen = {}
+    real = rd._run
+
+    def spy(args, *, env, ident=None, stdin=None):
+        if "rev-list" in args and "--count" in args:
+            seen.update(ident=ident, home=env.get("HOME"))
+        return real(args, env=env, ident=ident, stdin=stdin)
+
+    agent_ident = (os.getuid(), os.getgid())  # the same user: allowed without privileges
+    monkeypatch.setattr(rd, "_run", spy)
+    monkeypatch.setattr(run_job, "child_identity", lambda _name: agent_ident)
+    rc, record = _run(_job(world["tmp"]), _agent(world, rc=1))
+    assert seen.get("ident") == agent_ident, "the count must run as the agent user"
+    assert seen["home"].endswith("export")  # the export directory's home, as export_agent_work uses
+    # (the count itself is not asserted: dropping privileges needs root, which a test run lacks)
+
+
 def test_a_failed_clone_never_runs_the_cli(world, monkeypatch):
     monkeypatch.setattr(rd, "GITHUB_REMOTE", f"file://{world['tmp']}/missing.git")
     rc, record = _run(_job(world["tmp"]),

@@ -1541,7 +1541,7 @@ def _run_delivering_job(job: Job, delivery: DeliveryRun, runner, argv: list[str]
     with rd.bounded_by(deadline - RECORD_RESERVE_SECONDS):
         try:
             delivery.stop_commit_count = rd.count_new_commits(
-                delivery.work, spec.branch, delivery.base)
+                delivery.work, spec.branch, delivery.base, ident)
         except Exception:  # noqa: BLE001 — untrusted checkout; unknown is safe
             pass
     _deliver(job, delivery, rc, timed_out, ident, deadline)

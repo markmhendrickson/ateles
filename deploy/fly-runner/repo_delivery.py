@@ -605,13 +605,19 @@ def export_agent_work(work: Work, *, branch: str, base: str,
     return True
 
 
-def count_new_commits(work: Work, branch: str, base: str) -> int | str:
-    """A bounded numeric count from the checkout, or unknown if unreadable."""
+def count_new_commits(work: Work, branch: str, base: str,
+                      ident: tuple[int, int] | None = None) -> int | str:
+    """A bounded numeric count from the checkout, or unknown if unreadable.
+
+    The checkout belongs to the agent user, so git runs AS the agent, with the same
+    environment ``export_agent_work`` uses: run as root it would refuse the repository
+    ("dubious ownership") and the count would always read unknown."""
     if not base or not isinstance(branch, str) or not isinstance(base, str):
         return "unknown"
     env = git_env(work.home, allow="file")
+    env["HOME"] = str(work.export)
     done = _run(["-C", str(work.checkout), "rev-list", "--count", f"{base}..refs/heads/{branch}"],
-                env=env)
+                env=env, ident=ident)
     if isinstance(done, str) or done.returncode != 0:
         return "unknown"
     raw = done.stdout.strip()
