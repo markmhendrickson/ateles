@@ -139,7 +139,14 @@ def match_key(item: PendingItem) -> str:
 def _load_mark(path: Path) -> dict:
     try:
         data = json.loads(path.read_text())
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        for field in ("notified_reply_ids", "held_reply_ids"):
+            ids = data.get(field, [])
+            if not isinstance(ids, list) or any(not isinstance(mid, str) for mid in ids):
+                log.warning("consent reply-id state malformed; fresh request required")
+                return {}
+        return data
     except (OSError, ValueError):
         return {}
 

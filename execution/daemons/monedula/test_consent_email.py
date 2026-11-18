@@ -806,6 +806,33 @@ def _arm_email(monkeypatch):
                         lambda token, subject: sent.get("request"))
 
 
+@pytest.mark.parametrize("field,value", (
+    ("held_reply_ids", "reply-1"),
+    ("notified_reply_ids", ["reply-1", 3]),
+))
+def test_malformed_consumed_reply_ids_reissue_fresh_consent(
+        monkeypatch, tmp_path, field, value):
+    handler = _Handler("session", label="Synthetic", amount=60)
+    triggered = [(handler, [{}])]
+    _arm_email(monkeypatch)
+    monkeypatch.setattr(_ec, "gws_json", lambda args, timeout=45:
+                        {"complete": True, "messages": []})
+    path = tmp_path / "consent.json"
+    first = consent_email.request_and_collect(triggered, "2026-09-22", state_path=path)
+    old_token = first.pending_items[0].token
+    mark = json.loads(path.read_text())
+    mark[field] = value
+    path.write_text(json.dumps(mark))
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        old_token, auth_by_id={"old": [_GOOGLE_PASS]},
+        body_by_id={"old": f"ATTENDED {subject_marker(old_token)}"}))
+
+    second = consent_email.request_and_collect(triggered, "2026-09-22", state_path=path)
+    assert second.generation == first.generation + 1
+    assert second.pending_items[0].token != old_token
+    assert second.approved == set()
+
+
 @pytest.mark.parametrize("proof", ("absent", "ambiguous", "unreadable", "present"))
 def test_payment_sent_request_proof_controls_consent(monkeypatch, tmp_path, proof):
     handler = _Handler("session", label="Synthetic", amount=60)
