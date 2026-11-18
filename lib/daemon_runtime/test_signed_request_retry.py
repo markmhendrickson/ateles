@@ -230,6 +230,35 @@ def test_shadow_fallback_refused_after_total_deadline(tmp_path, http, monkeypatc
     assert len(rec.requests) == 1
 
 
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_writer_each_attempt_uses_remaining_total_time(tmp_path, http, monkeypatch, async_mode):
+    clock = _Clock()
+    seen_limits = []
+
+    def consumes_limit(request):
+        limit = request.extensions["timeout"]["read"]
+        seen_limits.append(limit)
+        clock.now += limit
+        return _admission()
+
+    rec = http(consumes_limit, consumes_limit, consumes_limit)
+    policy = ns.SignedRetryPolicy(total_bound_s=20)
+    w, _ = _writer(tmp_path, policy)
+    monkeypatch.setattr(w, "_begin_retry", lambda path, body: policy.begin("POST", body, clock=clock, rng=lambda: 1))
+    w._sleep = clock.sleep
+
+    async def asleep(delay):
+        clock.sleep(delay)
+
+    w._asleep = asleep
+    with pytest.raises(ns.NeotomaWriteError) as caught:
+        asyncio.run(w.apost("store", _store_body())) if async_mode else w.post("store", _store_body())
+    assert caught.value.status == 503
+    assert len(rec.requests) == 2
+    assert seen_limits == [15, 4.5]
+    assert clock.now - 100 <= policy.total_bound_s
+
+
 def test_write_without_idempotency_key_is_never_retried(tmp_path, http):
     rec = http(_admission())
     w, slept = _writer(tmp_path)
@@ -287,7 +316,8 @@ class _FakeSigned:
         pin = kwargs.get("principal_pin")
         principal = self.principals.pop(0) if self.principals else ("pavo@ateles-swarm", "tp-a")
         self.calls.append({"method": method, "body": json.dumps(body, sort_keys=True),
-                           "signature": f"sig-{len(self.calls) + 1}", "pin": pin, **kwargs})
+                           "signature": f"sig-{len(self.calls) + 1}", "pin": pin,
+                           "timeout": timeout, **kwargs})
         if pin is not None and not pin.admit(principal):
             raise ns.SignedRequestError("signing principal changed", "identity_changed")
         answer = self.answers.pop(0)
@@ -417,6 +447,22 @@ def test_wrapper_starts_no_retry_after_the_deadline(monkeypatch):
     clock = _Clock()
     assert _call(clock, deadline=clock.now + 2)[0] == 503
     assert len(fake.calls) == 1 and clock.slept == []
+
+
+def test_wrapper_each_attempt_uses_remaining_total_time(monkeypatch):
+    clock = _Clock()
+    limits = []
+
+    def consuming_request(*args, timeout, **kwargs):
+        limits.append(timeout)
+        clock.now += timeout
+        return 503, _ADMISSION_BODY
+
+    monkeypatch.setattr(ns, "signed_request", consuming_request)
+    policy = ns.SignedRetryPolicy(total_bound_s=20)
+    assert _call(clock, timeout=15, policy=policy, rng=lambda: 1) == (503, _ADMISSION_BODY)
+    assert limits == [15, 4]
+    assert clock.now - 100 <= policy.total_bound_s
 
 
 def test_wrapper_expired_initial_deadline_sends_nothing(monkeypatch):

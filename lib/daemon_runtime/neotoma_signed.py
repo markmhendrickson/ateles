@@ -718,6 +718,18 @@ class _SignedRetry:
         self.attempt = 1
         self.auth_retries = 0
 
+    MIN_USEFUL_S = 0.01
+
+    def remaining(self) -> float:
+        limit = self.started + self.policy.total_bound_s
+        if self.deadline is not None:
+            limit = min(limit, self.deadline)
+        return max(0.0, limit - self.clock())
+
+    def attempt_timeout(self, limit: float) -> float | None:
+        remaining = self.remaining()
+        return min(limit, remaining) if remaining >= self.MIN_USEFUL_S else None
+
     def reserve_fallback(self) -> bool:
         """A bearer fallback spends the same attempt and time budget."""
         if not self.repeatable or self.attempt >= self.policy.max_attempts or not self.can_start():
@@ -750,9 +762,9 @@ class _SignedRetry:
         if stated is not None:
             delay = min(max(stated, 0.0), self.policy.retry_after_cap_s)
         start_at = self.clock() + delay
-        if start_at > self.started + self.policy.total_bound_s:
+        if start_at + self.MIN_USEFUL_S > self.started + self.policy.total_bound_s:
             return None
-        if self.deadline is not None and start_at >= self.deadline:
+        if self.deadline is not None and start_at + self.MIN_USEFUL_S > self.deadline:
             return None
         self.attempt += 1
         log.warning(
@@ -765,9 +777,7 @@ class _SignedRetry:
 
     def can_start(self) -> bool:
         """Recheck the bound after sleeping; a clock may advance during sleep."""
-        now = self.clock()
-        return (now <= self.started + self.policy.total_bound_s
-                and (self.deadline is None or now < self.deadline))
+        return self.remaining() >= self.MIN_USEFUL_S
 
 
 def signed_request_with_retry(
@@ -809,17 +819,19 @@ def signed_request_with_retry(
     last_answer: tuple[int, dict] | None = None
     last_error: SignedRequestError | None = None
     while True:
-        if retry.attempt == 1 and deadline is not None and clock() >= deadline:
+        attempt_timeout = retry.attempt_timeout(timeout)
+        if attempt_timeout is None and retry.attempt == 1:
             raise SignedRequestError("attempt deadline passed", "expired")
-        if retry.attempt > 1 and not retry.can_start():
+        if attempt_timeout is None:
             if last_error is not None:
                 raise last_error
             assert last_answer is not None
             return last_answer
         try:
             status, data = signed_request(
-                method, url, copy.deepcopy(fixed_body), agent_name=agent_name, timeout=timeout, sub=sub,
-                deadline=deadline, cancelled=cancelled, clock=clock, principal_pin=pin,
+                method, url, copy.deepcopy(fixed_body), agent_name=agent_name, timeout=attempt_timeout, sub=sub,
+                deadline=min(retry.started + policy.total_bound_s, deadline if deadline is not None else float("inf")),
+                cancelled=cancelled, clock=clock, principal_pin=pin,
             )
         except SignedRequestError as exc:
             # A proxy's 502/503 is usually an HTML page: the helper reports it as
@@ -1572,7 +1584,11 @@ class NeotomaWriter:
             attempt = self._first_attempt(path, body, entity_types, referenced)
             retry = self._begin_retry(path, body)
             while True:
-                resp = await client.post(attempt.url, headers=attempt.headers, content=attempt.content)
+                attempt_timeout = retry.attempt_timeout(self.timeout)
+                if attempt_timeout is None:
+                    raise SignedWriteError("signed request time budget expired")
+                resp = await client.post(attempt.url, headers=attempt.headers, content=attempt.content,
+                                         timeout=attempt_timeout)
                 delay = self._retry_delay(retry, attempt, resp)
                 if delay is not None:
                     await self._asleep(delay)
@@ -1655,7 +1671,11 @@ class NeotomaWriter:
             attempt = self._first_attempt(path, body, entity_types, referenced)
             retry = self._begin_retry(path, body)
             while True:
-                resp = client.post(attempt.url, headers=attempt.headers, content=attempt.content)
+                attempt_timeout = retry.attempt_timeout(self.timeout)
+                if attempt_timeout is None:
+                    raise SignedWriteError("signed request time budget expired")
+                resp = client.post(attempt.url, headers=attempt.headers, content=attempt.content,
+                                   timeout=attempt_timeout)
                 delay = self._retry_delay(retry, attempt, resp)
                 if delay is not None:
                     self._sleep(delay)
