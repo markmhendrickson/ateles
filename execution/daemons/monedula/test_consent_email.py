@@ -276,10 +276,14 @@ def test_new_pending_handler_in_set_causes_resend(monkeypatch, tmp_path):
         lambda *a, **k: ReadRepliesOutcome(kind="ok", texts=[]),
     )
     consent_email.request_and_collect([(h1, [{}])], "2026-09-22", state_path=state)
+    mark = json.loads(state.read_text())
+    mark["held_reply_ids"] = ["older-held"]
+    state.write_text(json.dumps(mark))
     consent_email.request_and_collect(
         [(h1, [{}]), (h2, [{}])], "2026-09-22", state_path=state
     )
     assert len(sends) == 2
+    assert json.loads(state.read_text())["superseded_reply_ids"] == ["older-held"]
 
 
 def test_empty_triggered_clears_consent_mark_and_failure_dedupe(monkeypatch, tmp_path):
@@ -1471,7 +1475,8 @@ def test_unreadable_payment_reply_gets_fresh_request_and_no_payment(monkeypatch,
     assert "Only a reply to this new request" in sent[1][1]
 
 
-def test_unreadable_reply_holds_old_sweep_and_fresh_token_can_approve(monkeypatch, tmp_path):
+@pytest.mark.parametrize("proof", ("recorded_id", "reply_date"))
+def test_unreadable_reply_holds_old_sweep_and_fresh_token_can_approve(monkeypatch, tmp_path, proof):
     h = _Handler("therapy", label="Example", amount=60)
     triggered = [(h, [{}])]
     old = consent_email.build_pending_items(triggered, "2026-09-22", 1)[0]
@@ -1484,10 +1489,16 @@ def test_unreadable_reply_holds_old_sweep_and_fresh_token_can_approve(monkeypatc
     def fake_gws(args, timeout=45):
         if "+triage" in args:
             query = args[args.index("--query") + 1]
-            mids = ["old-unreadable", "old-valid"] if old.token in query else ["fresh-valid"]
+            mids = (["old-unreadable", "old-valid"] if old.token in query else
+                    ["fresh-valid"] if fresh.token in query else
+                    ["old-unreadable", "old-valid", "fresh-valid"])
+            if len(sends) < 2:
+                mids = [mid for mid in mids if mid != "fresh-valid"]
             return {"complete": True, "messages": [
                 {"id": mid, "subject": f"RE: [ATELES] {subject_marker(old.token if mid.startswith('old') else fresh.token)}",
-                 "from": "Op <op@example.com>"} for mid in mids]}
+                 "from": "Op <op@example.com>",
+                 "date": "2020-01-01T00:00:00+00:00" if mid.startswith("old") and len(sends) > 1 else ""}
+                for mid in mids]}
         if "+read" in args:
             mid = args[args.index("--id") + 1]
             if mid == "old-unreadable":
@@ -1503,15 +1514,66 @@ def test_unreadable_reply_holds_old_sweep_and_fresh_token_can_approve(monkeypatc
     assert first.approved == set()
     assert h.execute_calls == []
     assert len(sends) == 2
+
+    # The subject-wide correction query keeps finding both generations. The
+    # current reply must still be accepted and the old body never reread.
     assert "request remains held" in sends[1][1]
     assert "Only a reply to this new request" in sends[1][1]
     assert subject_marker(fresh.token) in sends[1][0]
+
+    if proof == "reply_date":
+        path = tmp_path / "m.json"
+        mark = json.loads(path.read_text())
+        mark["superseded_reply_ids"] = []
+        path.write_text(json.dumps(mark))
 
     second = consent_email.request_and_collect(triggered, "2026-09-22",
                                                 state_path=tmp_path / "m.json")
     assert second.approved == {fresh.token}
     assert old.token not in second.approved
     assert len(sends) == 2
+    if proof == "recorded_id":
+        assert "old-unreadable" in json.loads((tmp_path / "m.json").read_text())["superseded_reply_ids"]
+
+    payment_journal.record_intent(consent_email.journal_path(tmp_path / "m.json"),
+                                  fresh.obligation, fresh.token, generation=2)
+    third = consent_email.request_and_collect(triggered, "2026-09-22",
+                                               state_path=tmp_path / "m.json")
+    assert len(sends) == 2
+    assert third.approved == set()
+
+
+def test_unreadable_current_reply_still_holds_with_older_reply_excluded(monkeypatch, tmp_path):
+    h = _Handler("session", label="Synthetic", amount=60)
+    triggered = [(h, [{}])]
+    old = consent_email.build_pending_items(triggered, "2026-09-22", 1)[0]
+    fresh = consent_email.build_pending_items(triggered, "2026-09-22", 2)[0]
+    _arm_email(monkeypatch)
+    sent = []
+    monkeypatch.setattr(consent_email, "send_request", lambda *a: sent.append(a) or True)
+    monkeypatch.setattr(_ec, "_fetch_auth_results", lambda _mid: [_GOOGLE_PASS])
+
+    def fake_gws(args, timeout=45):
+        if "+triage" in args:
+            query = args[args.index("--query") + 1]
+            mids = (["old"] if old.token in query else
+                    ["current"] if fresh.token in query else
+                    ["old", "current"])
+            return {"complete": True, "messages": [
+                {"id": mid, "subject": f"RE: [ATELES] {subject_marker(old.token if mid == 'old' else fresh.token)}",
+                 "from": "Op <op@example.com>"} for mid in mids if mid == "old" or len(sent) > 1]}
+        if "+read" in args:
+            return {"body_text": "ATTENDED", "body_html": "<p>SKIP</p>"}
+        raise AssertionError(args)
+
+    monkeypatch.setattr(_ec, "gws_json", fake_gws)
+    first = consent_email.request_and_collect(triggered, "2026-09-22",
+                                               state_path=tmp_path / "m.json")
+    assert first.approved == set() and len(sent) == 2
+    second = consent_email.request_and_collect(triggered, "2026-09-22",
+                                                state_path=tmp_path / "m.json")
+    assert second.approved == set()
+    assert second.reason_code == "consent_reply_read_failed"
 
 
 @pytest.mark.parametrize("format", ("plain", "html"))
@@ -2448,7 +2510,7 @@ def test_full_sent_payment_request_quote_approves(monkeypatch, tmp_path, recover
             active = item.token in query or (recovered and calls["n"] > 0 and
                                              "[Ateles] Monedula consent" in query)
             return {"complete": True, "messages": [{
-                "id": "reply", "subject": f"RE: {sent[-1][0]}",
+                    "id": f"reply-{len(sent)}", "subject": f"RE: {sent[-1][0]}",
                 "from": "Op <op@example.com>"}] if active else []}
         if "+read" in args:
             if recovered and calls["n"] == 0:

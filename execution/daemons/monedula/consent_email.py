@@ -30,6 +30,8 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Literal
 
@@ -141,7 +143,7 @@ def _load_mark(path: Path) -> dict:
         data = json.loads(path.read_text())
         if not isinstance(data, dict):
             return {}
-        for field in ("notified_reply_ids", "held_reply_ids"):
+        for field in ("notified_reply_ids", "held_reply_ids", "superseded_reply_ids"):
             ids = data.get(field, [])
             if not isinstance(ids, list) or any(not isinstance(mid, str) for mid in ids):
                 log.warning("consent reply-id state malformed; fresh request required")
@@ -154,7 +156,8 @@ def _load_mark(path: Path) -> dict:
 def _save_mark(path: Path, fingerprint: str, sent_at: float, *, generation: int,
                request_body: str | None = None,
                notified_reply_ids: list[str] | None = None,
-               held_reply_ids: list[str] | None = None) -> None:
+               held_reply_ids: list[str] | None = None,
+               superseded_reply_ids: list[str] | None = None) -> None:
     payload: dict[str, Any] = {
         "fingerprint": fingerprint,
         "generation": int(generation),
@@ -164,6 +167,7 @@ def _save_mark(path: Path, fingerprint: str, sent_at: float, *, generation: int,
         payload["request_body"] = request_body
     payload["notified_reply_ids"] = notified_reply_ids or []
     payload["held_reply_ids"] = held_reply_ids or []
+    payload["superseded_reply_ids"] = superseded_reply_ids or []
     path.write_text(json.dumps(payload, indent=2, sort_keys=True))
 
 
@@ -173,6 +177,20 @@ def _clear_mark(path: Path) -> None:
             path.unlink()
     except OSError as exc:
         log.warning(f"could not clear consent mark: {exc}")
+
+
+def _reply_predates_request(date: str, sent_at: float) -> bool:
+    """Use a reply date only when it is parseable and timezone-aware."""
+    if not date or not sent_at:
+        return False
+    try:
+        parsed = datetime.fromisoformat(date)
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(date)
+        except (TypeError, ValueError):
+            return False
+    return parsed.tzinfo is not None and parsed.timestamp() < sent_at
 
 
 def clear_consent_state(state_path: Path | None = None) -> None:
@@ -665,6 +683,10 @@ def request_and_collect(
     fp = pending_fingerprint(probe)
     mark = _load_mark(path)
     prior_fp = str(mark.get("fingerprint") or "")
+    older_reply_ids = set(mark.get("superseded_reply_ids") or [])
+    if prior_fp:
+        older_reply_ids.update(mark.get("held_reply_ids") or [])
+        older_reply_ids.update(mark.get("notified_reply_ids") or [])
 
     # The journal is the durable record of what was paid and the source of
     # request generations. Unreadable → hold everything (principles.md#5).
@@ -739,7 +761,20 @@ def request_and_collect(
             log.error("consent_request_send_failed — payments remain blocked; retry next tick")
             return _block_all(items, "consent_request_send_failed")
         # Ordering invariant: persist mark ONLY after send_request returns True.
-        _save_mark(path, fp, time.time(), generation=generation, request_body=body)
+        _save_mark(path, fp, time.time(), generation=generation, request_body=body,
+                   superseded_reply_ids=sorted(older_reply_ids))
+
+    current_mark = _load_mark(path)
+    superseded_ids = set(current_mark.get("superseded_reply_ids") or [])
+    sent_at = float(current_mark.get("sent_at") or 0)
+
+    def _exclude_superseded(mid: str, date: str, subject: str) -> bool:
+        # A current request code is stronger binding than mailbox timestamps,
+        # which can be inaccurate in synthetic or delayed mail. An old ID is
+        # independently proven by the earlier generation's persisted state.
+        has_current_code = any(token.casefold() in subject.casefold() for token in tokens)
+        return mid in superseded_ids or (
+            not has_current_code and _reply_predates_request(date, sent_at))
 
     tokens = [i.token for i in items]
     sender_rejected = {"n": 0}
@@ -762,6 +797,7 @@ def request_and_collect(
         on_unauthenticated_operator_reply=_on_unauthenticated,
         correction_queries=[f"[Ateles] Monedula consent {items[0].payment_date}"],
         request_bodies=email_channel.sent_request_body,
+        exclude_reply=_exclude_superseded,
     )
 
     notified_ids = set(mark.get("notified_reply_ids") or []) if already_sent else set()
@@ -778,7 +814,8 @@ def request_and_collect(
             _save_mark(path, fp, float(mark.get("sent_at") or time.time()),
                        generation=generation, request_body=original_lines,
                        notified_reply_ids=sorted(notified_ids),
-                       held_reply_ids=sorted(held_ids))
+                       held_reply_ids=sorted(held_ids),
+                       superseded_reply_ids=sorted(superseded_ids))
         except (OSError, TypeError, ValueError) as exc:
             log.error(f"consent correction state unavailable — payments held: {exc}")
             return _block_all(items, "consent_correction_state_unavailable")
@@ -801,7 +838,8 @@ def request_and_collect(
             _save_mark(path, fp, float(mark.get("sent_at") or time.time()),
                        generation=generation, request_body=original_lines,
                        notified_reply_ids=sorted(notified_ids),
-                       held_reply_ids=sorted(held_ids))
+                       held_reply_ids=sorted(held_ids),
+                       superseded_reply_ids=sorted(superseded_ids))
         except (OSError, TypeError, ValueError) as exc:
             log.error(f"consent correction state unavailable — payments held: {exc}")
             return _block_all(items, "consent_correction_state_unavailable")
@@ -837,8 +875,12 @@ def request_and_collect(
                 "using its new codes can count.\n\n" + body
             )
             if send_request(subject, body):
+                old_reply_ids = {reply.message_id for reply in (
+                    *outcome.unreadable_replies, *outcome.replies,
+                    *outcome.correction_only_replies)}
                 _save_mark(path, fp, time.time(), generation=new_generation,
-                           request_body=body)
+                           request_body=body,
+                           superseded_reply_ids=sorted(superseded_ids | old_reply_ids))
                 result.send_count += 1
             else:
                 log.error("consent_reissue_send_failed — payments held")
@@ -879,6 +921,9 @@ def request_and_collect(
     states, unrecognized = overlay_verdicts(
         items, active_texts, unrecognized_lines=unrecognized_lines
     )
+    for item in items:
+        if states[item.token] == "approved" and payment_journal.token_consumed(journal, item.token):
+            states[item.token] = "blocked"
     result.states = states
     for key, state in states.items():
         if state == "approved":

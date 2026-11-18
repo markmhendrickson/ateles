@@ -1050,6 +1050,7 @@ def read_replies_with_status(
     require_enabled: bool = True,
     correction_queries: list[str] | None = None,
     request_bodies: dict[str, str | SentRequest] | Callable[[str, str], str | SentRequest | None] | None = None,
+    exclude_reply: Callable[[str, str, str], bool] | None = None,
 ) -> ReadRepliesOutcome:
     """Statusful inbox sweep — distinguish empty-ok from transport failure.
 
@@ -1120,6 +1121,12 @@ def read_replies_with_status(
             if not mid or mid in seen_ids or not subject.upper().startswith("RE:"):
                 continue
             if correction_query and token.casefold() not in subject.casefold():
+                continue
+            # A caller may discard a reply only with independent proof that it
+            # belongs to an earlier request. Apply this before any body read,
+            # including the subject-wide correction search.
+            if exclude_reply is not None and exclude_reply(mid, m.get("date", ""), subject):
+                seen_ids.add(mid)
                 continue
             # AUTHORIZATION, not merely authentication. The triage query is a
             # full-text mailbox search for the token, so ANY message carrying
