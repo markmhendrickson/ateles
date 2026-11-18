@@ -68,19 +68,52 @@ def test_two_claimants_get_distinct_numbers(clones: tuple[Path, Path, Path]) -> 
     assert "refs/reservations/decision/42" in refs
 
 
-def test_same_ref_has_one_winner_and_loser_reserves_next(clones: tuple[Path, Path, Path]) -> None:
+def _load_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("reserve_register_number_under_test", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_same_number_has_exactly_one_winner_even_from_the_same_base(clones: tuple[Path, Path, Path]) -> None:
+    """Both claimants start from the same origin/main commit and claim the same number one after the other.
+
+    Pushing that shared commit to the ref twice would report success twice ("up-to-date"); a
+    distinct object per claim makes the second claimant lose deterministically.
+    """
+    _, first, second = clones
+    module = _load_module()
+    base = git(first, "rev-parse", "origin/main")
+    previous = Path.cwd()
+    try:
+        import os
+
+        os.chdir(first)
+        won_first, _ = module.claim("decision", "origin", 41, base)
+        os.chdir(second)
+        git(second, "fetch", "origin")
+        won_second, _ = module.claim("decision", "origin", 41, base)
+    finally:
+        os.chdir(previous)
+    assert won_first is True
+    assert won_second is False
+    assert git(first, "ls-remote", "origin", "refs/reservations/decision/41").count("\n") == 0
+    # the loser then takes the next number
+    assert run(second, "reserve", "decision").stdout.strip() == "42"
+
+
+def test_pushing_the_shared_base_twice_is_not_a_second_claim(clones: tuple[Path, Path, Path]) -> None:
+    """Documents why the claim object must be unique: the same commit pushed twice reports success twice."""
     _, first, second = clones
     sha = git(first, "rev-parse", "HEAD")
-    ref = "refs/reservations/decision/41"
+    ref = "refs/reservations/decision/99"
     argv = ["git", "push", f"--force-with-lease={ref}:", "origin", f"{sha}:{ref}"]
-    left = subprocess.Popen(argv, cwd=first, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    right = subprocess.Popen(argv, cwd=second, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    left.communicate(timeout=15)
-    right.communicate(timeout=15)
-    assert sorted([left.returncode, right.returncode])[0] == 0
-    assert sum(code == 0 for code in (left.returncode, right.returncode)) == 1
-    loser = first if left.returncode else second
-    assert run(loser, "reserve", "decision").stdout.strip() == "42"
+    assert command(first, *argv).returncode == 0
+    git(second, "fetch", "origin")
+    assert command(second, *argv).returncode == 0
 
 
 def test_next_accounts_for_register_and_refs(clones: tuple[Path, Path, Path]) -> None:

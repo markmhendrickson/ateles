@@ -10,9 +10,11 @@ Git identity and store. Reservations are permanent; abandoned numbers are gaps.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
+import uuid
 
 KINDS = {"decision": "docs/foundation/conformance.md", "revision": "docs/foundation/revisions.md"}
 REF_ROOT = "refs/reservations"
@@ -68,20 +70,48 @@ def next_number(kind: str, remote: str) -> tuple[int, str]:
     return max(occupied) + 1, sha
 
 
+def claim_object(kind: str, number: int, base: str) -> str:
+    """A commit that is unique to this claim.
+
+    Pushing the SAME object to an existing ref is "Everything up-to-date" and
+    exits 0, so two claimants that pushed the shared origin/main commit would
+    both believe they hold the number. A distinct object per claim makes the
+    server-side create-only lease refuse the second claimant (verified against
+    github.com: a different commit to an existing reservation ref is rejected
+    with "stale info", the same commit is not).
+    """
+    tree = git("rev-parse", f"{base}^{{tree}}").strip()
+    message = f"register reservation {kind} {number} {uuid.uuid4().hex}\n"
+    env = {**os.environ, "GIT_AUTHOR_NAME": "register-reservation", "GIT_AUTHOR_EMAIL": "reservation@invalid",
+           "GIT_COMMITTER_NAME": "register-reservation", "GIT_COMMITTER_EMAIL": "reservation@invalid"}
+    result = subprocess.run(["git", "commit-tree", tree, "-p", base], input=message, env=env,
+                            capture_output=True, text=True, check=False)
+    if result.returncode:
+        raise RuntimeError(f"git commit-tree failed: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def claim(kind: str, remote: str, number: int, base: str) -> tuple[bool, str]:
+    """One create-only attempt on a number. True only when THIS claimant created the ref."""
+    ref = f"{REF_ROOT}/{kind}/{number}"
+    obj = claim_object(kind, number, base)
+    result = subprocess.run(
+        ["git", "push", f"--force-with-lease={ref}:", remote, f"{obj}:{ref}"],
+        capture_output=True, text=True, check=False,
+    )
+    return result.returncode == 0, result.stderr.strip()
+
+
 def reserve(kind: str, remote: str, attempts: int = MAX_ATTEMPTS) -> int:
     for _ in range(attempts):
         candidate, sha = next_number(kind, remote)
-        ref = f"{REF_ROOT}/{kind}/{candidate}"
-        result = subprocess.run(
-            ["git", "push", f"--force-with-lease={ref}:", remote, f"{sha}:{ref}"],
-            capture_output=True, text=True, check=False,
-        )
-        if result.returncode == 0:
+        won, stderr = claim(kind, remote, candidate, sha)
+        if won:
             return candidate
         # A rejected lease is expected under contention. Fail closed if origin
         # remains unreadable or the failed push did not create this ref.
         if candidate not in reservations(kind, remote):
-            raise RuntimeError(f"reservation push failed: {result.stderr.strip()}")
+            raise RuntimeError(f"reservation push failed: {stderr}")
     raise RuntimeError(f"reservation contention exceeded {attempts} attempts")
 
 
