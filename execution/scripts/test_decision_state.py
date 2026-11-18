@@ -738,6 +738,37 @@ class TestRenderCleanly(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertIn("malformed register row", err)
 
+    def _run_mode(self, text: str, *flags: str) -> tuple[int, str]:
+        import contextlib
+        import io
+
+        self.register.write_text(text)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ds.main([*flags, "--source", "worktree"])
+        return code, out.getvalue() + err.getvalue()
+
+    def test_every_output_mode_rejects_a_malformed_register(self):
+        """One validated row reader for every mode: no mode may omit a malformed row and exit 0."""
+        for bad_row in (
+            "| 999 | question | `x#q` | \u2014 | plain open |",       # no bold status
+            "| **999** | question | `x#q` | \u2014 | **ruled** |",    # bold number
+            "| `999` | question | `x#q` | \u2014 | **ruled** |",      # backticked number
+        ):
+            for flags in (("--check",), ("--json",), ("--stdout",)):
+                with self.subTest(row=bad_row, mode=flags[0]):
+                    text = register(**{"1": "**open**"}) + "\n" + bad_row + "\n"
+                    code, output = self._run_mode(text, *flags)
+                    self.assertEqual(code, 1, output[:200])
+                    self.assertIn("malformed register row", output)
+
+    def test_a_well_formed_register_still_renders_in_every_mode(self):
+        text = register(**{"1": "**open**", "2": "**ruled**"})
+        for flags in (("--check",), ("--json",), ("--stdout",)):
+            with self.subTest(mode=flags[0]):
+                code, output = self._run_mode(text, *flags)
+                self.assertEqual(code, 0, output[:200])
+
     def test_status_spelling_is_exact(self):
         for bad in ("**Open**", "**open **", "**RULED**", "**ruled **"):
             with self.subTest(status=bad):

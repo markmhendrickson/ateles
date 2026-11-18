@@ -184,7 +184,7 @@ def validate_register(text: str) -> None:
         # indented or not - is a row the projection must either read or reject. Markdown
         # renders an indented or pipe-less row as part of the table, so skipping it here would
         # omit it from the projection silently.
-        if not re.match(r"^\s*\|?\s*\d+(?:\s*[\u2013-]\s*\d+)?\s*\|", line):
+        if not re.match(r"^\s*\|?\s*[*_`]*\s*\d+(?:\s*[\u2013-]\s*\d+)?[*_`]*\s*\|", line):
             continue  # header, separator, prose
         match = ROW_RE.match(line)
         if not match:
@@ -304,7 +304,7 @@ def same_subject(a: tuple[str, str], b: tuple[str, str]) -> bool:
     return False
 
 
-def register_at(ref: str) -> dict[str, dict[str, str]] | None:
+def register_at(ref: str, strict: bool = False) -> dict[str, dict[str, str]] | None:
     """The register table as it stands at `ref`, or None if it has no copy.
 
     ``ref == WORKTREE_SOURCE`` reads the file straight off the checked-out
@@ -322,11 +322,15 @@ def register_at(ref: str) -> dict[str, dict[str, str]] | None:
         out = path.read_text(encoding="utf-8", errors="replace")
         if not out.strip():
             return None
+        if strict:
+            validate_register(out)
         rows = parse_rows(out)
         return rows or None
     code, out = run(["git", "show", f"{ref}:{FOUNDATION_DIR}/{REGISTER_DOC}"])
     if code != 0 or not out.strip():
         return None
+    if strict:
+        validate_register(out)
     rows = parse_rows(out)
     return rows or None
 
@@ -487,7 +491,9 @@ def collect_main(source: str = MAIN_REF) -> list[Row]:
     second ref to exist at all, so it is not knowable from this function --
     see ``collect_branches``.
     """
-    main_rows = register_at(source)
+    # The single source is read STRICTLY in every output mode (--check, --json, --stdout, the
+    # written file): a malformed row is an error here, never a silent omission.
+    main_rows = register_at(source, strict=True)
     if main_rows is None:
         where = (
             "the checked-out working tree"
@@ -1000,7 +1006,10 @@ def main(argv: list[str] | None = None) -> int:
         rendered = render(rows)
         if args.check and (not rendered.startswith("<!-- GENERATED") or "| # | Subject |" not in rendered):
             raise ValueError("projection output is incomplete")
-    except (OSError, ValueError, SystemExit) as exc:
+    except (OSError, ValueError) as exc:
+        print(f"decision state: cannot render register: {exc}", file=sys.stderr)
+        return 1
+    except SystemExit as exc:
         if not args.check:
             raise
         print(f"decision state: cannot render register: {exc}", file=sys.stderr)

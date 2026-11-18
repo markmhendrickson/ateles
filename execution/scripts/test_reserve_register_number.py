@@ -241,3 +241,15 @@ def test_an_indented_table_row_still_needs_a_reservation(clones: tuple[Path, Pat
     assert "revision 18 has no reservation" in missing.stderr
     assert run(first, "reserve", "revision").stdout.strip() == "18"
     assert run(first, "check", "revision").returncode == 0
+
+
+def test_a_bold_or_backticked_number_cell_still_needs_a_reservation(clones: tuple[Path, Path, Path]) -> None:
+    _, first, _ = clones
+    register = first / "docs" / "foundation" / "conformance.md"
+    register.write_text(register.read_text() + "| **41** | q | `d#a` | \u2014 | **ruled** |\n")
+    missing = run(first, "check", "decision")
+    assert missing.returncode == 1
+    assert "decision 41 has no reservation" in missing.stderr
+    revisions = first / "docs" / "foundation" / "revisions.md"
+    revisions.write_text(revisions.read_text() + "| `18` | pass | backticked |\n")
+    assert "revision 18 has no reservation" in run(first, "check", "revision").stderr
