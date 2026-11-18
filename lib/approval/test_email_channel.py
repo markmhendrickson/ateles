@@ -295,6 +295,32 @@ def test_gmail_attribution_wrapped_line_and_sender_check():
                                       sent_request=sent)[1] is False
 
 
+def test_gmail_attribution_rejects_other_request_marker(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(ec, "_gws", lambda: "/synthetic/gws")
+    monkeypatch.setattr(ec, "_fetch_auth_results", lambda _mid: [
+        "mx.google.com; dmarc=pass header.from=example.com"])
+    sent = ec.SentRequest("Approve [APPROVE-AAAABBBB]",
+                          "Swarm <swarm@example.net>", "Op <op@example.com>",
+                          "Request", "Tue, 17 Nov 2026 12:00:00 +0000")
+    def fake(args, timeout=45):
+        if "+triage" in args:
+            return {"complete": True, "messages": [
+                {"id": "m1", "subject": "Re: Request [APPROVE-AAAABBBB]",
+                 "from": "Op <op@example.com>"}]} if "AAAABBBB" in args[-1] else \
+                   {"complete": True, "messages": []}
+        return {"body_text": "APPROVE\nOn Tue, 17 Nov 2026 12:00:00 +0000, "
+                "Swarm <swarm@example.net> wrote:\n> [APPROVE-CCCCDDDD]"}
+    monkeypatch.setattr(ec, "gws_json", fake)
+    outcome = ec.read_replies_with_status(
+        ["AAAABBBB", "CCCCDDDD"], request_bodies={"AAAABBBB": sent},
+        require_enabled=False)
+    assert outcome.kind == "transport_error"
+    assert outcome.detail == "reply_quote_boundary_unknown"
+
+
 @pytest.mark.parametrize("tail", (
     "I withdraw approval", "One\nTwo\nThree\nFour\nFive",
     "This line is deliberately more than eighty characters long and makes the signature boundary unsafe.",

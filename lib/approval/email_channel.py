@@ -1204,8 +1204,8 @@ def read_replies_with_status(
                 (("release-approve", correlation_target),
                  ("swarm-approve", correlation_target)) if target
             )
-            known += tuple(f"[APPROVE-{candidate}]" for candidate in tokens
-                           if re.fullmatch(r"[0-9A-F]{8}", candidate, re.IGNORECASE))
+            if re.fullmatch(r"[0-9A-F]{8}", token, re.IGNORECASE):
+                known += (f"[APPROVE-{token}]",)
             if callable(request_bodies):
                 try:
                     original_request = request_bodies(token, subject)
@@ -1216,6 +1216,15 @@ def read_replies_with_status(
             if isinstance(original_request, SentRequest):
                 sent_request = original_request
                 original_request = sent_request.body
+            if isinstance(original_request, str):
+                request_lines = {" ".join(line.split()).casefold() for line in
+                                 original_request.splitlines()}
+                subject_text = " ".join(subject.split()).casefold()
+                known = tuple(line for line in known
+                              if " ".join(line.split()).casefold() in request_lines or
+                              (line.startswith("[APPROVE-") and line.casefold() in subject_text))
+            else:
+                known = ()
             body, plain_safe = _authored_plain_checked(
                 plain, sent_request=sent_request, known_quote_lines=known)
             def normalize(line: str) -> str:

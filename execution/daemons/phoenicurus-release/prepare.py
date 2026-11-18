@@ -404,7 +404,7 @@ def _record_spawn(head: str) -> int:
                 state = {}
             state.update({"head": head, "count": n})
             SPAWN_COUNT_FILE.write_text(json.dumps(state, sort_keys=True))
-        except OSError as exc:
+        except (OSError, ValueError, TypeError) as exc:
             # Losing the counter must not block a release; worst case we retry
             # more than MAX_SPAWNS_PER_HEAD times, which is still better than
             # never retrying at all.

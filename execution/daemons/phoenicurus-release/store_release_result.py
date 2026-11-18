@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -87,7 +88,8 @@ def main() -> int:
     if args.status == "pending_approval":
         try:
             state = json.loads(state_path.read_text())
-            if (not args.prepared_head or not isinstance(state, dict) or
+            if (not re.fullmatch(r"[0-9a-f]{40}", args.prepared_head) or
+                    not isinstance(state, dict) or
                     state.get("head") != args.prepared_head or
                     not isinstance(state.get("guard_snapshot"), dict)):
                 raise ValueError("prepare head or guard snapshot does not match")

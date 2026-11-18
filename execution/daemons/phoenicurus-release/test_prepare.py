@@ -101,6 +101,14 @@ def test_later_prepare_preserves_release_guard_entries(monkeypatch, tmp_path):
     assert json.loads(state.read_text())["release_guards"]["v1.0.0"] == earlier
 
 
+def test_spawn_counter_does_not_overwrite_unreadable_guard_state(monkeypatch, tmp_path):
+    state = tmp_path / "prepare.json"
+    state.write_text("{partial")
+    monkeypatch.setattr(prepare, "SPAWN_COUNT_FILE", state)
+    assert prepare._record_spawn("b" * 40) == 1
+    assert state.read_text() == "{partial"
+
+
 @pytest.mark.parametrize("case,expected", (
     ("refused", 0), ("declined", 2), ("absent", 2),
     ("control_unseen", 2), ("hook_error", 2),
