@@ -52,6 +52,7 @@ import hashlib
 import math
 import os
 import re
+import sys
 import tempfile
 import threading
 import time
@@ -59,8 +60,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import harness_router
 import model_tiering
+from lib.notify import held_view
 
 log = logging.getLogger("apis.usage_alerts")
 
@@ -232,7 +238,6 @@ def check_usage_thresholds(
     and the sending notifier is built by ``notifier_factory`` (default
     ``Notifier.from_neotoma``) only once a threshold is pending. Never raises.
     """
-    from lib.notify import held_view
 
     delivered_keys: list[str] = []
     journal = None

@@ -2116,9 +2116,10 @@ def test_infinite_window_start_is_rejected(tmp_path, monkeypatch):
     _hold(_daemon(tmp_path, email=True, silent=True), 8)
     n = _daemon(tmp_path, email=True, silent=False)
     n.flush_digest()
-    assert len(runs.cmds) == 5
+    assert runs.cmds == []
     _daemon(tmp_path, email=True, silent=False, now=1_000_100.0).flush_digest()
-    assert len(runs.cmds) == 5  # and the new window holds
+    assert runs.cmds == []
+    assert len(_file(tmp_path, "digest-email.json")) == 8
 
 
 def test_budget_write_is_atomic_and_private(tmp_path, monkeypatch):
