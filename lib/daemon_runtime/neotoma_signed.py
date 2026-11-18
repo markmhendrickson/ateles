@@ -718,6 +718,13 @@ class _SignedRetry:
         self.attempt = 1
         self.auth_retries = 0
 
+    def reserve_fallback(self) -> bool:
+        """A bearer fallback spends the same attempt and time budget."""
+        if not self.repeatable or self.attempt >= self.policy.max_attempts or not self.can_start():
+            return False
+        self.attempt += 1
+        return True
+
     def next_delay(self, status: "int | None", error_code: "str | None",
                    retry_after: "float | None" = None) -> "float | None":
         """The delay before the next attempt, or None when the answer stands.
@@ -1573,6 +1580,9 @@ class NeotomaWriter:
                         self._expired_retry(attempt, resp)
                     attempt = self._resigned(attempt)
                     continue
+                if attempt.signed and attempt.fallback_allowed and _refuses_signed_identity(resp.status_code, resp.text):
+                    if not retry.reserve_fallback():
+                        self._expired_retry(attempt, resp)
                 nxt = self._after_response(attempt, resp.status_code, resp.text)
                 if isinstance(nxt, WriteResult):
                     return nxt
@@ -1653,6 +1663,9 @@ class NeotomaWriter:
                         self._expired_retry(attempt, resp)
                     attempt = self._resigned(attempt)
                     continue
+                if attempt.signed and attempt.fallback_allowed and _refuses_signed_identity(resp.status_code, resp.text):
+                    if not retry.reserve_fallback():
+                        self._expired_retry(attempt, resp)
                 nxt = self._after_response(attempt, resp.status_code, resp.text)
                 if isinstance(nxt, WriteResult):
                     return nxt

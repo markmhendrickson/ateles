@@ -65,7 +65,8 @@ class _Scripted:
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
-        return self.responses.pop(0) if self.responses else _ok(request)
+        answer = self.responses.pop(0) if self.responses else _ok(request)
+        return answer(request) if callable(answer) else answer
 
 
 @pytest.fixture
@@ -200,12 +201,51 @@ def test_shadow_auth_required_retry_then_bearer_fallback_preserves_keyed_body(tm
     assert len(slept) == 1
 
 
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_shadow_fallback_spends_the_third_attempt(tmp_path, http, async_mode):
+    rec = http(_admission(), _admission(), _auth_required())
+    w, _ = _writer(tmp_path, mode=ns.SigningMode.SHADOW)
+    with pytest.raises(ns.SignedWriteError) as caught:
+        asyncio.run(w.apost("store", _store_body())) if async_mode else w.post("store", _store_body())
+    assert caught.value.status == 401
+    assert len(rec.requests) == 3
+    assert all("signature" in r.headers and "authorization" not in r.headers for r in rec.requests)
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_shadow_fallback_refused_after_total_deadline(tmp_path, http, monkeypatch, async_mode):
+    clock = _Clock()
+
+    def late_401(_request):
+        clock.now += 21
+        return _auth_required()
+
+    rec = http(late_401)
+    policy = ns.SignedRetryPolicy(total_bound_s=20)
+    w, _ = _writer(tmp_path, policy, mode=ns.SigningMode.SHADOW)
+    monkeypatch.setattr(w, "_begin_retry", lambda path, body: policy.begin("POST", body, clock=clock))
+    with pytest.raises(ns.SignedWriteError) as caught:
+        asyncio.run(w.apost("store", _store_body())) if async_mode else w.post("store", _store_body())
+    assert caught.value.status == 401
+    assert len(rec.requests) == 1
+
+
 def test_write_without_idempotency_key_is_never_retried(tmp_path, http):
     rec = http(_admission())
     w, slept = _writer(tmp_path)
     with pytest.raises(ns.NeotomaWriteError):
         w.post("store", _store_body(key=None))
     assert len(rec.requests) == 1 and slept == []
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_unkeyed_shadow_refusal_does_not_send_bearer(tmp_path, http, async_mode):
+    rec = http(_auth_required())
+    w, _ = _writer(tmp_path, mode=ns.SigningMode.SHADOW)
+    with pytest.raises(ns.SignedWriteError) as caught:
+        asyncio.run(w.apost("store", _store_body(None))) if async_mode else w.post("store", _store_body(None))
+    assert caught.value.status == 401
+    assert len(rec.requests) == 1 and "authorization" not in rec.requests[0].headers
 
 
 @pytest.mark.parametrize("status", [400, 403])
