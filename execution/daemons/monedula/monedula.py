@@ -102,6 +102,50 @@ def _payment_journal_alert_key(detail: str) -> str:
     )
 
 
+def _payment_terms_current(item: Any, label: str) -> bool:
+    """Require the live handler to match the obligation shown for consent."""
+    from consent_email import obligation_key
+
+    current = obligation_key(item.handler, item.payment_date, item.match_id)
+    if current == item.obligation:
+        return True
+    log.warning(
+        f"consent_terms_changed {label} — approval does not cover the "
+        "current payment terms; holding and re-requesting."
+    )
+    _notify(
+        f"monedula: approval no longer covers {item.handler_name} "
+        f"session {item.payment_date} [{str(item.obligation)[:12]}]: "
+        "the payee, amount, or currency changed after you approved it. Nothing "
+        "was paid; a fresh request is raised on the current terms.",
+        priority="blocker",
+        dedupe_key=f"monedula:payment_terms_changed:{item.obligation}",
+        email_eligible=True,
+    )
+    return False
+
+
+def _payment_preflight_safe(handler: Any, match: Any, label: str) -> bool:
+    """Run the handler's live safety preflight before recording intent."""
+    preflight = getattr(handler, "preflight", None)
+    if not callable(preflight):
+        return True
+    try:
+        preflight(match)
+    except Exception as exc:
+        log.error(f"payment_preflight_failed {label}: {exc}")
+        _notify(
+            f"monedula: payment held for {handler.name} — preflight "
+            "failed (see the daemon log). No transfer was attempted; "
+            "fix the payee and it retries.",
+            priority="blocker",
+            dedupe_key=f"monedula:preflight:{handler.name}",
+            email_eligible=True,
+        )
+        return False
+    return True
+
+
 def _get_notifier() -> Any:
     """Return the Notifier, building it now if a prior attempt failed."""
     global _notifier
@@ -1974,44 +2018,16 @@ def main() -> bool:
                 continue
             handler = item.handler
             match = item.match
-            # Execute-time term check: the obligation the live handler would
-            # pay must be exactly the one the operator approved.
-            current = obligation_key(handler, item.payment_date, item.match_id)
-            if current != item.obligation:
-                log.warning(
-                    f"consent_terms_changed {label} — approval does not cover the "
-                    "current payee/amount; holding and re-requesting."
-                )
+            # The live terms must still be the ones shown for consent.
+            if not _payment_terms_current(item, label):
                 terms_changed.add(key)
-                _notify(
-                    f"monedula: approval no longer covers {item.handler_name} "
-                    f"session {item.payment_date} [{str(item.obligation)[:12]}]: "
-                    "the payee or amount changed after you approved it. Nothing "
-                    "was paid; a fresh request is raised on the current terms.",
-                    priority="blocker",
-                    dedupe_key=f"monedula:payment_terms_changed:{item.obligation}",
-                    email_eligible=True,
-                )
                 continue
             # Preflight BEFORE intent: a payee that cannot be paid safely
             # (inactive/unknown recipient, unresolved payee) fails closed
             # without poisoning the journal, and is retried once fixed.
-            preflight = getattr(handler, "preflight", None)
-            if callable(preflight):
-                try:
-                    preflight(match)
-                except Exception as exc:
-                    log.error(f"payment_preflight_failed {label}: {exc}")
-                    _notify(
-                        f"monedula: payment held for {handler.name} — preflight "
-                        "failed (see the daemon log). No transfer was attempted; "
-                        "fix the payee and it retries.",
-                        priority="blocker",
-                        dedupe_key=f"monedula:preflight:{handler.name}",
-                        email_eligible=True,
-                    )
-                    held_preflight.append(label)
-                    continue
+            if not _payment_preflight_safe(handler, match, label):
+                held_preflight.append(label)
+                continue
             try:
                 payment_journal.record_intent(
                     jpath, item.obligation, key, generation=item.generation
@@ -2248,6 +2264,8 @@ def main() -> bool:
     # Execute approved payments
     all_results = []
     unknown: list[str] = list(held_unknown)
+    terms_changed = False
+    preflight_held = False
     for handler, matches in triggered:
         if handler.name not in approved:
             log.info(f"Skipping {handler.name} (not approved).")
@@ -2269,6 +2287,12 @@ def main() -> bool:
                 log.error(f"payment_outcome_unknown {label} — holding, not retrying.")
                 unknown.append(label)
                 _notify_unknown_outcome(unknown, yesterday_str)
+                continue
+            if not _payment_terms_current(item, label):
+                terms_changed = True
+                continue
+            if not _payment_preflight_safe(handler, match, label):
+                preflight_held = True
                 continue
             token = f"telegram:{obligation}"
             try:
@@ -2301,12 +2325,18 @@ def main() -> bool:
                 # Keep summary generic — no amounts, IBANs, or memos.
                 _job.finished(f"{handler.name} payment executed")
 
-    if calendar_fetch_ok and not profile_load_degraded and not _has_pending_sessions():
+    if (
+        not terms_changed
+        and not preflight_held
+        and calendar_fetch_ok
+        and not profile_load_degraded
+        and not _has_pending_sessions()
+    ):
         _mark_ran_today()
 
     # Send confirmation
     if not all_results:
-        if unknown:
+        if unknown or terms_changed or preflight_held:
             return False
         telegram_send(f"⚠️ Monedula: no payments executed for {yesterday_str}.")
         return not strandings
@@ -2324,7 +2354,7 @@ def main() -> bool:
     log.info("Sending confirmation to Telegram...")
     telegram_send(confirmation_msg)
     log.info("Monedula run complete.")
-    return not strandings and not unknown
+    return not strandings and not unknown and not terms_changed and not preflight_held
 
 
 def _alert_ref(message: str) -> str:

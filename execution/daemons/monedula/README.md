@@ -301,7 +301,7 @@ chmod +x install.sh
 | `payment_approval_not_accepted` | A record exists but does not permit payment: not written by the configured approver, approved with no answer, answer does not name the session (a bare yes does not approve), or it does not match the payment. The alert names the reason and the record's short key; fix the SAME record (correct `operator_answer` as the resolver) |
 | `invalid_wise_recipient_id` | A profile's `wise_recipient_id` is not a positive integer (Neotoma profile or env `<PREFIX>_WISE_RECIPIENT_ID`). Stranded alert; payments for it are held until it is fixed |
 | `payment_outcome` (alert key `monedula:payment_outcome:<obligation>`) | After an approved payment ran: a warning-level notice for `sent` (the lowest priority the Notifier delivers); blocker for `manual_required`, failed or unreported, saying it was NOT paid and will not be retried. Pay by hand from the payment profile, then reconcile |
-| `payment_terms_changed` | The payee or amount changed after approval, so the approval no longer applies; nothing paid; a fresh request is raised |
+| `payment_terms_changed` | The payee, amount, or currency changed after approval on either consent route, so the approval no longer applies; nothing paid; a fresh request is raised |
 | `payment_profiles_stranded` | Fix the named payment_profile config; Notifier key `monedula:stranded:<fp>` |
 
 Consent-channel-failure alert key: `monedula:consent_channel_failed`

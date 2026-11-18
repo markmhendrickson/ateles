@@ -692,6 +692,106 @@ def test_partial_approval_executes_only_the_named_handler(
     ), "a partial approval must still confirm what was paid"
 
 
+# ── Telegram consent is bound to the terms used at execution ─────────────────
+
+
+@pytest.mark.parametrize("change", ["amount", "payee", "currency"])
+def test_telegram_changed_terms_hold_without_intent_and_reissue(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str], change: str
+) -> None:
+    handler, polls, resolutions, _ = _journal_failure_observers(monkeypatch)
+    handler.profile.wise_recipient_name = "synthetic-recipient-a"
+    notices: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        monedula, "_notify", lambda message, **kwargs: notices.append((message, kwargs))
+    )
+
+    def change_during_poll(*args, **kwargs):
+        polls.append(1)
+        if len(polls) == 1:
+            if change == "amount":
+                handler.profile.amount_eur += 1
+            elif change == "payee":
+                handler.profile.wise_recipient_name = "synthetic-recipient-b"
+            else:
+                monkeypatch.setattr(consent_email, "CURRENCY", "TEST")
+            return monedula.TelegramPollResult(kind="reply", text="attended therapy")
+        return monedula.TelegramPollResult(kind="timeout")
+
+    monkeypatch.setattr(monedula, "telegram_poll_approval", change_during_poll)
+    assert monedula.main() is False
+    assert not handler.execute_calls and not resolutions
+    assert payment_journal.load(consent_email.journal_path())["obligations"] == {}
+    changed = [
+        (message, kwargs)
+        for message, kwargs in notices
+        if "payment_terms_changed" in kwargs.get("dedupe_key", "")
+    ]
+    assert len(changed) == 1
+    assert "Nothing was paid" in changed[0][0]
+    assert changed[0][1]["priority"] == "blocker"
+    assert changed[0][1]["dedupe_key"].startswith("monedula:payment_terms_changed:")
+    assert monedula.main() is False
+    assert len(sent_messages) == 2, "a new preview must be sent on the next tick"
+
+
+def test_telegram_unchanged_terms_execute_once(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
+) -> None:
+    handler, polls, _, _ = _journal_failure_observers(monkeypatch)
+    monkeypatch.setattr(
+        monedula, "telegram_poll_approval", lambda *a, **k: _attended_therapy(polls)
+    )
+    assert monedula.main() is True
+    assert len(handler.execute_calls) == 1
+    assert len(payment_journal.load(consent_email.journal_path())["obligations"]) == 1
+    monedula.main()
+    assert len(handler.execute_calls) == 1
+
+
+def test_telegram_reply_after_terms_change_back_executes(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
+) -> None:
+    handler, polls, _, _ = _journal_failure_observers(monkeypatch)
+    original = handler.profile.amount_eur
+
+    def change_back_during_poll(*args, **kwargs):
+        handler.profile.amount_eur = original + 1
+        handler.profile.amount_eur = original
+        return _attended_therapy(polls)
+
+    monkeypatch.setattr(monedula, "telegram_poll_approval", change_back_during_poll)
+    assert monedula.main() is True
+    assert len(handler.execute_calls) == 1
+
+
+def test_telegram_preflight_failure_holds_without_intent(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
+) -> None:
+    handler, polls, _, _ = _journal_failure_observers(monkeypatch)
+    calls = []
+
+    def reject(match):
+        calls.append(match)
+        raise ValueError("synthetic preflight refusal")
+
+    handler.preflight = reject
+    notices = []
+    monkeypatch.setattr(
+        monedula, "_notify", lambda message, **kwargs: notices.append((message, kwargs))
+    )
+    monkeypatch.setattr(
+        monedula, "telegram_poll_approval", lambda *a, **k: _attended_therapy(polls)
+    )
+    assert monedula.main() is False
+    assert len(calls) == 1 and not handler.execute_calls
+    assert payment_journal.load(consent_email.journal_path())["obligations"] == {}
+    assert any(
+        kwargs.get("dedupe_key") == "monedula:preflight:therapy"
+        for _, kwargs in notices
+    )
+
+
 # ── Telegram journal failures hold payments at every read/write ───────────────
 
 
