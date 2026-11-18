@@ -108,6 +108,13 @@ BASE_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", re.ASCII)
 _OID_RE = re.compile(rb"[0-9a-f]{40}")
 
 MAX_ORIGIN_BYTES = 300 * 1024 * 1024
+# A conservative 2 GB decimal rootfs is 1907 MiB. At this ceiling,
+# 3 * 512 MiB (bare origin, checkout Git objects, checkout files) plus
+# 2 * 50 MiB (export and private import bundles) = 1636 MiB, leaving
+# 271 MiB for the runner and transient work. This is a planning bound:
+# a checkout with unusually high decompression can still exhaust disk and
+# fail the job safely.
+ABSOLUTE_ORIGIN_CEILING_BYTES = 512 * 1024 * 1024
 MAX_BUNDLE_BYTES = 50 * 1024 * 1024
 MAX_BLOB_BYTES = 10 * 1024 * 1024
 MAX_COMMITS = 50
@@ -464,6 +471,11 @@ def clone_origin(work: Work, *, url: str, base_branch: str, token: str,
                  expected_head: str = "") -> str:  # fmt: skip
     """Fetch the base branch (depth 1) into a fresh root-owned ``origin.git``
     and return its commit. The token reaches only the fetching process."""
+    # A cap that is not a positive integer, or that exceeds the absolute
+    # ceiling, is not honoured at all: it falls to the default, never upward
+    # (the same rule Apis applies when it chooses the cap).
+    if type(max_bytes) is not int or not 0 < max_bytes <= ABSOLUTE_ORIGIN_CEILING_BYTES:
+        max_bytes = MAX_ORIGIN_BYTES
     _check_work(work)
     if expected_head:
         if not isinstance(expected_head, str) or not _OID_RE.fullmatch(expected_head.encode("ascii", "replace")):
@@ -572,10 +584,47 @@ def export_agent_work(work: Work, *, branch: str, base: str,
                 EXPORT_FAILED, "reading the assigned branch")  # fmt: skip
     if head == base:
         return False
+    # A fetched branch based on an ancestor outside the depth-1 clone is not
+    # an extension of the admitted head. Bundling ^base in that case walks the
+    # fetched branch's other ancestry and can include its entire old tree.
+    # Refuse before making a large bundle; the importer requires this same
+    # ancestry and cannot safely push a divergent head.
+    ancestor = _run([*checkout, "merge-base", "--is-ancestor", base, head], env=env, ident=ident)
+    if isinstance(ancestor, str) or ancestor.returncode != 0:
+        raise RepoWorkError(EXPORT_FAILED, "the branch does not descend from the admitted base")
+    # A branch that descends from the base can still merge in unrelated history,
+    # which `^base` would bundle whole. The importer refuses any merge commit, so
+    # refuse the same shape here, before a bundle is built.
+    merges = _git([*checkout, "rev-list", "--min-parents=2", f"{base}..refs/heads/{branch}"],
+                  env=env, ident=ident, category=EXPORT_FAILED, reason="looking for merges")
+    if merges.strip():
+        raise RepoWorkError(EXPORT_FAILED, "the branch contains a merge commit")
     _git([*checkout, "bundle", "create", "-q", str(work.export / BUNDLE_NAME),
           f"refs/heads/{branch}", f"^{base}"], env=env, ident=ident, category=EXPORT_FAILED,
          reason="bundling the agent's work")  # fmt: skip
     return True
+
+
+def count_new_commits(work: Work, branch: str, base: str,
+                      ident: tuple[int, int] | None = None) -> int | str:
+    """A bounded numeric count from the checkout, or unknown if unreadable.
+
+    The checkout belongs to the agent user, so git runs AS the agent, with the same
+    environment ``export_agent_work`` uses: run as root it would refuse the repository
+    ("dubious ownership") and the count would always read unknown."""
+    if not base or not isinstance(branch, str) or not isinstance(base, str):
+        return "unknown"
+    env = git_env(work.home, allow="file")
+    env["HOME"] = str(work.export)
+    done = _run(["-C", str(work.checkout), "rev-list", "--count", f"{base}..refs/heads/{branch}"],
+                env=env, ident=ident)
+    if isinstance(done, str) or done.returncode != 0:
+        return "unknown"
+    raw = done.stdout.strip()
+    if not raw.isdigit() or len(raw) > 5:
+        return "unknown"
+    count = int(raw)
+    return count if count <= 10000 else "unknown"
 
 
 def _open_export(work: Work) -> int:

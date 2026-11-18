@@ -145,6 +145,49 @@ def test_a_clone_larger_than_the_cap_is_refused(tmp_path, world):
                         allow="file", max_bytes=10)
 
 
+def test_origin_cap_boundary_and_absolute_ceiling(tmp_path, world, monkeypatch):
+    assert (3 * rd.ABSOLUTE_ORIGIN_CEILING_BYTES + 2 * rd.MAX_BUNDLE_BYTES
+            < 2_000_000_000)
+    size = rd._size(world["work"].origin)
+    for name, cap, expected in (("equal", size, True), ("over", size - 1, False),
+                                ("ceiling", rd.ABSOLUTE_ORIGIN_CEILING_BYTES + 1, False)):
+        work = rd.prepare_work(tmp_path / name, run_id=name)
+        if name == "ceiling":
+            monkeypatch.setattr(rd, "_size", lambda _path: rd.ABSOLUTE_ORIGIN_CEILING_BYTES + 1)
+        if expected:
+            rd.clone_origin(work, url=f"file://{world['remote']}", base_branch="main",
+                            token=TOKEN, allow="file", max_bytes=cap)
+        else:
+            with pytest.raises(rd.RepoWorkError, match="clone_refused: the clone is larger"):
+                rd.clone_origin(work, url=f"file://{world['remote']}", base_branch="main",
+                                token=TOKEN, allow="file", max_bytes=cap)
+
+
+def test_a_cap_above_the_ceiling_falls_to_the_default_not_up_to_the_ceiling(tmp_path, world, monkeypatch):
+    # A clone of 400 MiB is between the 300 MiB default and the 512 MiB
+    # ceiling: clamping an oversized cap to the ceiling would accept it, the
+    # fall-to-default rule refuses it, and a cap exactly at the ceiling accepts it.
+    four_hundred = 400 * 1024 * 1024
+    assert rd.MAX_ORIGIN_BYTES < four_hundred < rd.ABSOLUTE_ORIGIN_CEILING_BYTES
+    monkeypatch.setattr(rd, "_size", lambda _path: four_hundred)
+    over = rd.prepare_work(tmp_path / "over", run_id="over")
+    with pytest.raises(rd.RepoWorkError, match="clone_refused: the clone is larger"):
+        rd.clone_origin(over, url=f"file://{world['remote']}", base_branch="main", token=TOKEN,
+                        allow="file", max_bytes=rd.ABSOLUTE_ORIGIN_CEILING_BYTES + 1)
+    at = rd.prepare_work(tmp_path / "at", run_id="at")
+    rd.clone_origin(at, url=f"file://{world['remote']}", base_branch="main", token=TOKEN,
+                    allow="file", max_bytes=rd.ABSOLUTE_ORIGIN_CEILING_BYTES)
+
+
+@pytest.mark.parametrize("cap", [0, -1, True, "999999999"])
+def test_invalid_runner_origin_caps_use_default(tmp_path, world, monkeypatch, cap):
+    monkeypatch.setattr(rd, "_size", lambda _path: rd.MAX_ORIGIN_BYTES + 1)
+    work = rd.prepare_work(tmp_path / "invalid", run_id="invalid")
+    with pytest.raises(rd.RepoWorkError, match="clone_refused: the clone is larger"):
+        rd.clone_origin(work, url=f"file://{world['remote']}", base_branch="main",
+                        token=TOKEN, allow="file", max_bytes=cap)
+
+
 def test_a_failed_clone_names_no_credential(tmp_path, world):
     work = rd.prepare_work(tmp_path / "other-root", run_id="r3")
     with pytest.raises(rd.RepoWorkError) as exc:
@@ -297,6 +340,38 @@ def test_a_branch_rewritten_onto_older_history_is_refused(world):
     refused(world, "could not be imported|does not descend")
 
 
+def test_export_refuses_fetched_branch_with_parent_outside_shallow_base(world):
+    src, co = world["src"], world["work"].checkout
+    git(src, "checkout", "-q", "-b", "old-parent-pr", world["old"], home=world["home"])
+    (src / "side.txt").write_text("side\n")
+    git(src, "add", ".", home=world["home"])
+    git(src, "commit", "-qm", "side", home=world["home"])
+    git(src, "push", "-q", str(world["remote"]), "old-parent-pr", home=world["home"])
+    git(co, "fetch", "-q", f"file://{world['remote']}", "old-parent-pr", home=world["home"])
+    git(co, "reset", "-q", "--hard", "FETCH_HEAD", home=world["home"])
+    with pytest.raises(rd.RepoWorkError, match="does not descend from the admitted base"):
+        rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None)
+    assert not (world["work"].export / rd.BUNDLE_NAME).exists()
+
+
+def test_export_refuses_a_descendant_that_merges_unrelated_history_before_bundling(world):
+    co = world["work"].checkout
+    git(co, "checkout", "-q", "--orphan", "side-history", home=world["home"])
+    git(co, "rm", "-rqf", ".", home=world["home"])
+    (co / "unrelated.txt").write_text("unrelated history\n")
+    git(co, "add", ".", home=world["home"])
+    git(co, "commit", "-qm", "unrelated root", home=world["home"])
+    git(co, "checkout", "-q", BRANCH, home=world["home"])
+    git(co, "merge", "-q", "--allow-unrelated-histories", "--no-ff", "-m", "merge side", "side-history",
+        home=world["home"])
+    # The merge descends from the admitted base, so the ancestry refusal passes;
+    # the merge refusal must stop it before any bundle exists.
+    with pytest.raises(rd.RepoWorkError, match="the branch contains a merge commit") as exc:
+        rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None)
+    assert exc.value.category == rd.EXPORT_FAILED
+    assert not (world["work"].export / rd.BUNDLE_NAME).exists()
+
+
 def test_a_full_history_bundle_that_skips_the_base_is_refused(world):
     src = world["src"]
     git(src, "checkout", "-q", "-b", BRANCH, world["old"], home=world["home"])
@@ -320,7 +395,9 @@ def test_a_merge_commit_is_refused(world):
     git(co, "checkout", "-q", BRANCH, home=world["home"])
     agent_commit(world, name="main.txt")
     git(co, "merge", "-q", "--no-ff", "-m", "merge", "side", home=world["home"])
-    rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None)
+    # Export now refuses a merge before bundling; the importer's own refusal must still
+    # hold for a bundle the agent made itself, so plant one.
+    plant_bundle(world, f"refs/heads/{BRANCH}", f"^{world['base']}")
     refused(world, "merge commit")
 
 

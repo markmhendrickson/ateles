@@ -1931,4 +1931,7 @@ def fly_delivery_summary(result, key: str = "") -> str:
             + fly_delivery_facts(key or "not reported", status, result.fly_delivery_branch,
                                  result.remote_run_id, result.fly_delivery_commit))
     out = f"{head}\n{text}."
+    out += (f"\nStop: elapsed_ms={result.fly_stop_elapsed_ms}; "
+            f"cli={result.fly_cli_exit_state}; commits={result.fly_stop_commit_count}; "
+            f"last_tool={result.fly_last_tool_class}.")
     return out + "\n" + fly_delivery_recovery(key, existing_pr=bool(existing)) if key else out

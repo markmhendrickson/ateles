@@ -531,6 +531,19 @@ DELIVERY_SPEC_KEYS = ("branch", "base_branch", "author_name", "author_email")
 DELIVERY_RESULT_FIELDS = ("delivery_status", "delivery_reason", "delivery_branch",
                           "delivery_commit", "pr_number", "pr_url")  # fmt: skip
 
+# Chosen by Apis from the admitted repository, never from task or prompt text.
+DEFAULT_ORIGIN_CAP_BYTES = 300 * 1024 * 1024
+REPOSITORY_ORIGIN_CAPS = {"markmhendrickson/markmhendrickson": 512 * 1024 * 1024}
+
+
+def origin_cap_for_repository(repository: str) -> int:
+    value = (REPOSITORY_ORIGIN_CAPS[repository] if repository in REPOSITORY_ORIGIN_CAPS
+             else DEFAULT_ORIGIN_CAP_BYTES)
+    if type(value) is not int or not 0 < value <= 512 * 1024 * 1024:
+        log.warning("[fly] invalid origin cap for repository %s; using default", repository)
+        return DEFAULT_ORIGIN_CAP_BYTES
+    return value
+
 
 def runner_classes() -> frozenset[str]:
     """The dispatch classes (``action_class`` values) opted onto Fly: those
@@ -1956,6 +1969,23 @@ def delivery_result_from_record(record: dict) -> dict:
     for name in ("delivery_reason", "delivery_branch", "delivery_commit", "pr_url"):
         value = record.get(name)
         out[name] = value if isinstance(value, str) else ""
+    stop = {}
+    if isinstance(record.get("probe_report"), str):
+        try:
+            parsed = json.loads(record["probe_report"])
+            candidate = parsed.get("delivery_stop") if isinstance(parsed, dict) else None
+            stop = candidate if isinstance(candidate, dict) else {}
+        except (ValueError, TypeError):
+            pass
+    elapsed = record["stop_elapsed_ms"] if "stop_elapsed_ms" in record else stop.get("stop_elapsed_ms")
+    out["stop_elapsed_ms"] = elapsed if type(elapsed) is int and 0 <= elapsed <= 86400000 else "unknown"
+    state = record["cli_exit_state"] if "cli_exit_state" in record else stop.get("cli_exit_state")
+    out["cli_exit_state"] = state if isinstance(state, str) and (state in {"timed_out", "killed", "exited_zero", "unknown"}
+                              or re.fullmatch(r"exited_nonzero:(?:[1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])", state)) else "unknown"
+    count = record["stop_commit_count"] if "stop_commit_count" in record else stop.get("stop_commit_count")
+    out["stop_commit_count"] = count if type(count) is int and 0 <= count <= 10000 else "unknown"
+    tool = record["last_tool_class"] if "last_tool_class" in record else stop.get("last_tool_class")
+    out["last_tool_class"] = tool if isinstance(tool, str) and tool in {"read", "edit", "shell", "network", "unknown"} else "unknown"
     number = record.get("pr_number")
     out["pr_number"] = number if isinstance(number, int) and not isinstance(number, bool) \
         and number > 0 else None  # fmt: skip
@@ -2673,6 +2703,7 @@ def job_files(job: FlyJob, config: FlyConfig) -> list[dict]:
         "provider": job.provider,
         "repository": job.repository,
         "timeout_seconds": job.timeout,
+        "origin_cap_bytes": origin_cap_for_repository(job.repository),
         "credential_names": sorted(job.secrets),
         "child_credential_names": list(job.child_credential_names),
         "neotoma_token_name": job.neotoma_token_name,

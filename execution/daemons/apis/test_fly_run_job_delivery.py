@@ -131,7 +131,8 @@ def _pr(number):
             "head": {"ref": BRANCH, "repo": {"full_name": REPO}}, "base": {"ref": "main"}}
 
 
-def _job(tmp_path, *, delivery=DELIVERY, secrets=None, argv=None, stdin=None, timeout=600):
+def _job(tmp_path, *, delivery=DELIVERY, secrets=None, argv=None, stdin=None, timeout=600,
+         origin_cap_bytes=None):
     job_dir = tmp_path / "job"
     (job_dir / "secrets").mkdir(parents=True)
     secrets = {"LANIUS_NEOTOMA_TOKEN": ROLE_TOKEN, run_job.DELIVERY_TOKEN_NAME: TOKEN} \
@@ -143,6 +144,8 @@ def _job(tmp_path, *, delivery=DELIVERY, secrets=None, argv=None, stdin=None, ti
             "probe_env_names": [], "probe_paths": [], "child_user": ""}
     if delivery is not None:
         spec["delivery"] = delivery
+    if origin_cap_bytes is not None:
+        spec["origin_cap_bytes"] = origin_cap_bytes
     (job_dir / "job.json").write_text(json.dumps(spec))
     if argv is None:
         argv = ["codex", "exec", "--cd", run_job.WORKSPACE_PLACEHOLDER, "-"] if delivery \
@@ -324,6 +327,8 @@ def test_a_deadline_too_short_for_any_cli_refuses_without_cloning(world, monkeyp
     _assert_cleanup(world, absent=True)
     assert world["api"]["calls"] == []
     assert _remote_ref(world) is None
+    # No CLI was started, so its exit state is unknown, never "timed_out".
+    assert record["cli_exit_state"] == "unknown"
 
 
 def test_a_slow_clone_shrinks_the_cli_budget(world, monkeypatch):
@@ -410,6 +415,32 @@ def test_a_failed_cli_delivers_nothing(world):
     rc, record = _run(_job(world["tmp"]), _agent(world, rc=1))
     assert rc == 1 and record["delivery_status"] == "not_delivered"
     assert _remote_ref(world) is None and world["api"]["calls"] == []
+    assert record["cli_exit_state"] == "exited_nonzero:1"
+    assert record["stop_commit_count"] == 1
+    assert type(record["stop_elapsed_ms"]) is int and record["stop_elapsed_ms"] >= 0
+    assert record["last_tool_class"] == "unknown"
+    assert json.loads(record["probe_report"])["delivery_stop"]["stop_commit_count"] == 1
+
+
+def test_the_commit_count_runs_as_the_agent_with_the_exports_home(world, monkeypatch):
+    # A root-run git refuses a repository owned by another user ("dubious ownership"),
+    # which would make the count always read unknown in production; a non-root test run
+    # cannot reproduce that refusal, so pin the identity and the environment instead.
+    seen = {}
+    real = rd._run
+
+    def spy(args, *, env, ident=None, stdin=None):
+        if "rev-list" in args and "--count" in args:
+            seen.update(ident=ident, home=env.get("HOME"))
+        return real(args, env=env, ident=ident, stdin=stdin)
+
+    agent_ident = (os.getuid(), os.getgid())  # the same user: allowed without privileges
+    monkeypatch.setattr(rd, "_run", spy)
+    monkeypatch.setattr(run_job, "child_identity", lambda _name: agent_ident)
+    rc, record = _run(_job(world["tmp"]), _agent(world, rc=1))
+    assert seen.get("ident") == agent_ident, "the count must run as the agent user"
+    assert seen["home"].endswith("export")  # the export directory's home, as export_agent_work uses
+    # (the count itself is not asserted: dropping privileges needs root, which a test run lacks)
 
 
 def test_a_failed_clone_never_runs_the_cli(world, monkeypatch):
@@ -419,7 +450,72 @@ def test_a_failed_clone_never_runs_the_cli(world, monkeypatch):
     assert rc == run_job.EXIT_DELIVERY_FAILED
     assert record["delivery_status"] == "clone_failed"
     assert record["delivery_reason"].startswith("clone_failed: ")
+    assert record["cli_exit_state"] == "unknown"
+    assert record["stop_commit_count"] == "unknown"
     _no_secret_anywhere(record, world)
+
+
+@pytest.mark.parametrize("code,timed_out,state", [(124, True, "timed_out"),
+                                                   (-9, False, "killed"),
+                                                   (7, False, "exited_nonzero:7")])
+def test_failed_cli_exit_state_has_only_fixed_values(world, code, timed_out, state):
+    def runner(argv, env, stdin, timeout, cwd, ident=None, collect_by=None):
+        return code, b"agent text stays out of diagnostic", b"", timed_out
+    _, record = _run(_job(world["tmp"]), runner)
+    assert record["cli_exit_state"] == state
+    assert record["stop_commit_count"] == 0
+    assert "agent text" not in json.dumps({k: record[k] for k in (
+        "stop_elapsed_ms", "cli_exit_state", "stop_commit_count", "last_tool_class")})
+
+
+def test_a_cli_that_cannot_be_started_is_unknown_not_an_exit(world):
+    # The real run_cli, with an executable that does not exist: it returns its
+    # start-failure code, which must not be presented as the CLI's own exit.
+    def runner(argv, env, stdin, timeout, cwd, ident=None, collect_by=None):
+        return run_job.run_cli(["definitely-not-an-installed-cli", *argv[1:]], env, stdin, timeout,
+                               cwd, ident, collect_by)
+    _, record = _run(_job(world["tmp"]), runner)
+    assert record["delivery_status"] == "not_delivered"
+    assert record["cli_exit_state"] == "unknown"
+    assert "exited_nonzero" not in json.dumps(record["probe_report"])
+
+
+def test_a_real_cli_exit_127_is_still_reported_as_an_exit(world):
+    def runner(argv, env, stdin, timeout, cwd, ident=None, collect_by=None):
+        return 127, b"", b"the agent's own message", False
+    _, record = _run(_job(world["tmp"]), runner)
+    assert record["cli_exit_state"] == "exited_nonzero:127"
+
+
+def test_no_time_for_the_cli_after_the_clone_is_unknown_not_timed_out(world, monkeypatch):
+    monkeypatch.setattr(run_job, "DELIVERY_RESERVE_SECONDS", 10_000.0)
+    rc, record = _run(_job(world["tmp"]), lambda *a, **k: pytest.fail("the CLI must not run"))
+    assert record["delivery_status"] == "no_time"
+    assert record["cli_exit_state"] == "unknown"
+
+
+@pytest.mark.parametrize("cap", [512 * 1024 * 1024 + 1, 513 * 1024 * 1024, 2**40, 0, -1, True, False,
+                                 "536870912", 536870912.0, None])
+def test_an_untrusted_job_origin_cap_never_raises_the_cap_above_the_default(world, monkeypatch, cap):
+    # Apis is the only source of a cap above the default, through the job it writes (its own
+    # table decides; the runner never reads the table). Whatever else the job file carries
+    # (an oversized, zero, negative, boolean, string, float or null value) can only fall to
+    # the 300 MiB default: a clone of 400 MiB, between the default and the ceiling, is refused.
+    four_hundred = 400 * 1024 * 1024
+    assert rd.MAX_ORIGIN_BYTES < four_hundred < rd.ABSOLUTE_ORIGIN_CEILING_BYTES
+    monkeypatch.setattr(rd, "_size", lambda _path: four_hundred)
+    rc, record = _run(_job(world["tmp"], origin_cap_bytes=cap),
+                      lambda *a, **k: pytest.fail("the CLI must not run after a refused clone"))
+    assert record["delivery_status"] == "clone_failed"
+    assert record["delivery_reason"] == "clone_refused: the clone is larger than the accepted size"
+
+
+def test_the_cap_apis_chose_is_honoured_up_to_the_ceiling(world, monkeypatch):
+    four_hundred = 400 * 1024 * 1024
+    monkeypatch.setattr(rd, "_size", lambda _path: four_hundred)
+    rc, record = _run(_job(world["tmp"], origin_cap_bytes=rd.ABSOLUTE_ORIGIN_CEILING_BYTES),
+                      _agent(world))
+    assert record["delivery_status"] == "opened"
 
 
 def test_a_rejected_push_never_forces_and_opens_no_pull_request(world):
