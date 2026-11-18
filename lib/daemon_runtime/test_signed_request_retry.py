@@ -215,10 +215,11 @@ def test_shadow_fallback_spends_the_third_attempt(tmp_path, http, async_mode):
 @pytest.mark.parametrize("async_mode", [False, True])
 def test_shadow_fallback_refused_after_total_deadline(tmp_path, http, monkeypatch, async_mode):
     clock = _Clock()
+    bad = "late\nInjected: value"
 
     def late_401(_request):
         clock.now += 21
-        return _auth_required()
+        return httpx.Response(401, json={"error": {"error_code": "AUTH_REQUIRED", "message": bad}})
 
     rec = http(late_401)
     policy = ns.SignedRetryPolicy(total_bound_s=20)
@@ -227,6 +228,7 @@ def test_shadow_fallback_refused_after_total_deadline(tmp_path, http, monkeypatc
     with pytest.raises(ns.SignedWriteError) as caught:
         asyncio.run(w.apost("store", _store_body())) if async_mode else w.post("store", _store_body())
     assert caught.value.status == 401
+    assert "invalid_code" in str(caught.value) and bad not in str(caught.value)
     assert len(rec.requests) == 1
 
 
@@ -463,6 +465,50 @@ def test_wrapper_each_attempt_uses_remaining_total_time(monkeypatch):
     assert _call(clock, timeout=15, policy=policy, rng=lambda: 1) == (503, _ADMISSION_BODY)
     assert limits == [15, 4]
     assert clock.now - 100 <= policy.total_bound_s
+
+
+@pytest.mark.parametrize("bad", ["A\nHeader:evil", "A\rHeader:evil", "A\x1b[31m", "A" * 65, "A\u2028B"])
+def test_response_controlled_code_and_message_are_safe_in_logs_and_errors(tmp_path, http, caplog, bad):
+    response = httpx.Response(503, json={"error": {"error_code": bad, "message": bad}})
+    http(response, response, response)
+    w, _ = _writer(tmp_path)
+    with caplog.at_level("WARNING", logger="daemon_runtime.neotoma_signed"):
+        with pytest.raises(ns.NeotomaWriteError) as caught:
+            w.post("store", _store_body())
+    assert "invalid_code" in str(caught.value)
+    assert bad not in str(caught.value)
+    retry_lines = [r.getMessage() for r in caplog.records if "retrying" in r.getMessage()]
+    assert retry_lines and all("code=invalid_code" in line and "\n" not in line and "\r" not in line for line in retry_lines)
+
+
+def test_wrapper_response_code_is_safe_in_retry_log(monkeypatch, caplog):
+    bad = "BAD\nInjected: value"
+    _FakeSigned(monkeypatch, [(503, {"error": {"error_code": bad}}), (200, {})])
+    with caplog.at_level("WARNING", logger="daemon_runtime.neotoma_signed"):
+        assert _call(_Clock()) == (200, {})
+    lines = [r.getMessage() for r in caplog.records if "retrying" in r.getMessage()]
+    assert len(lines) == 1 and "code=invalid_code" in lines[0]
+    assert "\n" not in lines[0]
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_shadow_refusal_detail_is_safe_in_fallback_log(tmp_path, http, caplog, async_mode):
+    bad = "denied\nAuthorization:Bearer secret"
+    http(httpx.Response(401, json={"error": {"error_code": "OTHER", "message": bad}}))
+    w, _ = _writer(tmp_path, mode=ns.SigningMode.SHADOW)
+    with caplog.at_level("ERROR", logger="daemon_runtime.neotoma_signed"):
+        result = asyncio.run(w.apost("store", _store_body())) if async_mode else w.post("store", _store_body())
+    assert result.signed is False
+    assert any("invalid_code" in r.getMessage() for r in caplog.records)
+    assert all(bad not in r.getMessage() and "\n" not in r.getMessage() for r in caplog.records)
+
+
+def test_readback_error_detail_is_safe():
+    bad = "failed\rInjected: value"
+    response = httpx.Response(503, json={"error": {"message": bad}})
+    with pytest.raises(ns.NeotomaWriteError) as caught:
+        ns._observations_from(response.status_code, response.text)
+    assert "invalid_code" in str(caught.value) and bad not in str(caught.value)
 
 
 def test_wrapper_expired_initial_deadline_sends_nothing(monkeypatch):

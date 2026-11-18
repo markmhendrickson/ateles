@@ -614,6 +614,23 @@ def signed_request(
 ADMISSION_UNAVAILABLE = "ADMISSION_UNAVAILABLE"
 AUTH_REQUIRED = "AUTH_REQUIRED"
 _RETRYABLE_STATUSES = frozenset({502, 503})
+_SAFE_SERVER_VALUE = re.compile(r"[A-Za-z0-9_.:-]{1,64}\Z", re.ASCII)
+
+
+def _safe_server_value(value: object) -> str:
+    """Keep response-controlled diagnostics to one short printable token."""
+    return value if isinstance(value, str) and _SAFE_SERVER_VALUE.fullmatch(value) else "invalid_code"
+
+
+def _safe_server_detail(text: str) -> str:
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return _safe_server_value(text)
+    error = data.get("error") if isinstance(data, Mapping) else None
+    if not isinstance(error, Mapping):
+        return "invalid_code"
+    return _safe_server_value(error.get("message") or response_error_code(data))
 
 
 def response_error_code(data: object) -> "str | None":
@@ -769,7 +786,7 @@ class _SignedRetry:
         self.attempt += 1
         log.warning(
             "signed request%s: HTTP %s code=%s; retrying as attempt %d/%d in %.2fs%s",
-            f" {self.label}" if self.label else "", status, error_code or "-",
+            f" {self.label}" if self.label else "", status, _safe_server_value(error_code) if error_code else "-",
             self.attempt, self.policy.max_attempts, delay,
             " with the same idempotency key" if self.repeatable_write else "",
         )
@@ -1522,7 +1539,7 @@ class NeotomaWriter:
         error_type = (SignedWriteError if _refuses_signed_identity(resp.status_code, resp.text)
                       else NeotomaWriteError)
         raise error_type(
-            f"/{attempt.path} -> HTTP {resp.status_code}: {resp.text[:300]}",
+            f"/{attempt.path} -> HTTP {resp.status_code}: {_safe_server_detail(resp.text)}",
             status=resp.status_code,
         )
 
@@ -1541,11 +1558,11 @@ class NeotomaWriter:
             return self._fall_back_or_raise(
                 attempt.path, attempt.body, attempt.governance,
                 allowed=attempt.fallback_allowed,
-                reason=f"server refused the signed write (HTTP {status}: {text[:200]})",
+                reason=f"server refused the signed write (HTTP {status}: {_safe_server_detail(text)})",
             )
         if status >= 400:
             raise NeotomaWriteError(
-                f"/{attempt.path} -> HTTP {status}: {text[:300]}", status=status
+                f"/{attempt.path} -> HTTP {status}: {_safe_server_detail(text)}", status=status
             )
         try:
             data = json.loads(text) if text else {}
@@ -1889,7 +1906,7 @@ def _precheck(result: WriteResult) -> "AttributionCheck | None":
 
 def _observations_from(status: int, text: str) -> list[dict]:
     if status >= 400:
-        raise NeotomaWriteError(f"observations read-back -> HTTP {status}: {text[:200]}", status=status)
+        raise NeotomaWriteError(f"observations read-back -> HTTP {status}: {_safe_server_detail(text)}", status=status)
     try:
         data = json.loads(text) if text else {}
     except ValueError:
