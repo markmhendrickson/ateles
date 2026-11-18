@@ -65,7 +65,10 @@ def _dispatcher(monkeypatch, pages=None):
 
 def _comment(author=AUTHOR, lens="qa"):
     return {
-        "user": {"login": author},
+        "id": 1,
+        "created_at": "2026-10-14T10:00:00Z",
+        "html_url": "https://github.com/owner/repo/pull/87#issuecomment-1",
+        "user": {"login": author, "type": "Bot" if str(author).endswith("[bot]") else "User"},
         "body": f"<!-- review:{lens} commit={HEAD} -->\n**APPROVE**",
     }
 

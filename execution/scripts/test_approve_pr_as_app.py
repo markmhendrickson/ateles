@@ -23,8 +23,9 @@ import base64
 import json
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -37,7 +38,9 @@ for _p in (str(_REPO_ROOT), str(_SCRIPTS), str(_DAEMON_DIR)):
         sys.path.insert(0, _p)
 
 import approve_pr_as_app as target  # noqa: E402
+_ORIGINAL_OPERATOR_PROFILE_LOGIN = getattr(target, "_operator_profile_login", None)
 import lens_authors  # noqa: E402
+import post_lens_verdict  # noqa: E402
 import swarm_dispatch  # noqa: E402
 from review_panel import LENSES, select_panel  # noqa: E402
 
@@ -93,16 +96,22 @@ def _lens_comment_identities(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(lens_authors, "_app_bot_logins", lambda: (set(), False))
     lens_authors.clear_cache()
+    async def _profile(_client):
+        return swarm_dispatch._OPERATOR_LOGIN, ""
+    monkeypatch.setattr(target, "_operator_profile_login", _profile, raising=False)
 
 
 def _comment(id_: int, body: str, *, author: str | None = SWARM_LOGIN) -> dict:
+    timestamp = (datetime(2026, 11, 17, tzinfo=timezone.utc) + timedelta(seconds=id_)).isoformat()
     row = {
         "id": id_,
         "body": body,
         "html_url": f"https://github.com/{REPO}/pull/{PR}#issuecomment-{id_}",
+        "created_at": timestamp,
+        "updated_at": timestamp,
     }
     if author is not None:
-        row["user"] = {"login": author}
+        row["user"] = {"login": author, "type": "User"}
     return row
 
 
@@ -135,14 +144,20 @@ class _FakeClient:
         *,
         comments: list[dict],
         check_runs: list[dict],
+        comments_after_first_get: list[dict] | None = None,
+        comments_after_second_get: list[dict] | None = None,
+        check_runs_after_first_pr_get: list[dict] | None = None,
         combined_state: str = "success",
         legacy_status_total_count: int = 1,
         changed_files: list[str] | None = None,
         parent_issue_comments: list[dict] | None = None,
+        parent_issue_comments_after_first_get: list[dict] | None = None,
         pr_author: str = AUTHOR,
         pr_state: str = "open",
         pr_merged_at: str | None = None,
         pr_head_after_first_get: str | None = None,
+        pr_head_after_second_get: str | None = None,
+        pr_body_after_second_get: str | None = None,
         review_readback: dict | None = None,
         protection_rsc: dict | None = None,
         branch_payload: dict | int | None = None,
@@ -156,11 +171,13 @@ class _FakeClient:
         workflow_runs: "list[dict] | None" = None,
         actions_status: int = 200,
         default_branch: "str | None" = BASE_REF,
+        repo_owner: "dict | list | None" = None,
         checks_total: "int | None" = None,
         checks_page_status: "dict[int, int] | None" = None,
         pr_mergeable: "bool | None" = True,
         pr_mergeable_state: "str | None" = "clean",
         mergeability_after_first_get: "tuple[bool | None, str | None] | None" = None,
+        profile_response: dict | None = None,
     ):
         # GitHub's mergeability as served on the PR, and (optionally) what it
         # turns into from the second `pulls/{n}` GET on (the pre-submit re-fetch).
@@ -173,6 +190,8 @@ class _FakeClient:
         self.workflow_runs = workflow_runs or []
         self.actions_status = actions_status
         self.default_branch = default_branch
+        self.repo_owner = repo_owner if repo_owner is not None else {"login": swarm_dispatch._OPERATOR_LOGIN, "type": "User"}
+        self.profile_response = profile_response
         self.checks_total = checks_total
         self.checks_page_status = checks_page_status or {}
         self.check_pages: list[int] = []
@@ -188,15 +207,23 @@ class _FakeClient:
         self.scope_by_ref = scope_by_ref or {}
         self.scope_refs: list[str] = []
         self.comments = comments
+        self.comments_after_first_get = comments_after_first_get
+        self.comments_after_second_get = comments_after_second_get
+        self.check_runs_after_first_pr_get = check_runs_after_first_pr_get
+        self.comment_get_count = 0
         self.check_runs = check_runs
         self.combined_state = combined_state
         self.legacy_status_total_count = legacy_status_total_count
         self.changed_files = changed_files if changed_files is not None else NEUTRAL_FILES
         self.parent_issue_comments = parent_issue_comments or []
+        self.parent_issue_comments_after_first_get = parent_issue_comments_after_first_get
+        self.parent_issue_get_count = 0
         self.pr_author = pr_author
         self.pr_state = pr_state
         self.pr_merged_at = pr_merged_at
         self.pr_head_after_first_get = pr_head_after_first_get
+        self.pr_head_after_second_get = pr_head_after_second_get
+        self.pr_body_after_second_get = pr_body_after_second_get
         self.review_readback = review_readback
         # Branch-protection / scheduling surfaces (operator ruling
         # 2026-09-25, "not run (no runner)"). Defaults mirror the live repo:
@@ -233,16 +260,24 @@ class _FakeClient:
 
     def _pr_payload(self) -> dict:
         self.pr_get_count += 1
+        if self.pr_get_count > 1 and self.check_runs_after_first_pr_get is not None:
+            self.check_runs = self.check_runs_after_first_pr_get
         head = HEAD
         if self.pr_get_count > 1 and self.pr_head_after_first_get is not None:
             head = self.pr_head_after_first_get
+        if self.pr_get_count > 2 and self.pr_head_after_second_get is not None:
+            head = self.pr_head_after_second_get
         base = BASE_REF
         if self.pr_get_count > 1 and self.base_ref_after_first_get is not None:
             base = self.base_ref_after_first_get
         payload = {
             "head": {"sha": head},
             "number": PR,
-            "body": f"Closes #{PARENT_ISSUE}",
+            "body": (
+                self.pr_body_after_second_get
+                if self.pr_get_count > 2 and self.pr_body_after_second_get is not None
+                else f"Closes #{PARENT_ISSUE}"
+            ),
             "user": {"login": self.pr_author},
             "state": self.pr_state,
             "merged_at": self.pr_merged_at,
@@ -265,7 +300,7 @@ class _FakeClient:
         if url == f"{target.GITHUB_API}/repos/{REPO}":
             if self.default_branch is None:
                 return _FakeResponse({"message": "Not Found"}, status_code=404)
-            return _FakeResponse({"default_branch": self.default_branch})
+            return _FakeResponse({"default_branch": self.default_branch, "owner": self.repo_owner})
         if url.endswith("/actions/runs"):
             if self.actions_status >= 400:
                 return _FakeResponse({"message": "error"}, status_code=self.actions_status)
@@ -321,11 +356,21 @@ class _FakeClient:
             )
             return _FakeResponse(rows[(page - 1) * 100 : page * 100])
         if url.endswith(f"/issues/{PR}/comments"):
+            self.comment_get_count += 1
             page = (params or {}).get("page", 1)
-            return _FakeResponse(self.comments if page == 1 else [])
+            comments = self.comments
+            if self.comment_get_count > 1 and self.comments_after_first_get is not None:
+                comments = self.comments_after_first_get
+            if self.comment_get_count > 2 and self.comments_after_second_get is not None:
+                comments = self.comments_after_second_get
+            return _FakeResponse(comments if page == 1 else [])
         if url.endswith(f"/issues/{PARENT_ISSUE}/comments"):
+            self.parent_issue_get_count += 1
             page = (params or {}).get("page", 1)
-            return _FakeResponse(self.parent_issue_comments if page == 1 else [])
+            rows = self.parent_issue_comments
+            if self.parent_issue_get_count > 1 and self.parent_issue_comments_after_first_get is not None:
+                rows = self.parent_issue_comments_after_first_get
+            return _FakeResponse(rows if page == 1 else [])
         if url.endswith("/status"):
             return _FakeResponse(
                 {"state": self.combined_state, "total_count": self.legacy_status_total_count}
@@ -353,6 +398,10 @@ class _FakeClient:
         raise AssertionError(f"unexpected GET {url}")
 
     async def post(self, url, json=None, headers=None):
+        if url.endswith("/entities/query"):
+            assert json == {"entity_type": "operator_profile", "include_snapshots": True, "limit": 100}
+            assert self.profile_response is not None
+            return _FakeResponse(self.profile_response)
         assert url.endswith(f"/pulls/{PR}/reviews")
         self.posted.append({"json": json, "headers": headers})
         return _FakeResponse({"id": 999, "state": "APPROVED"})
@@ -379,7 +428,7 @@ def _install_app_mint(monkeypatch, *, token: str | None = "fake-installation-tok
 
 def _all_clear_comments(lenses: list[str], *, author: str = SWARM_LOGIN) -> list[dict]:
     return [
-        _comment(i, _lens_comment_body(lens, target.LENS_AGENTS[lens]), author=author)
+        _comment(1000 + i, _lens_comment_body(lens, target.LENS_AGENTS[lens]), author=author)
         for i, lens in enumerate(lenses)
     ]
 
@@ -2616,7 +2665,7 @@ def _round_comments(head: str, *, blocked: tuple[str, ...] = (), skip=()) -> lis
                 "id": 100 + n + (0 if head == OLD_HEAD else 50),
                 "created_at": f"2026-09-29T{'09' if head == OLD_HEAD else '11'}:0{n}:00Z",
                 "body": text,
-                "user": {"login": SWARM_LOGIN},
+                "user": {"login": SWARM_LOGIN, "type": "User"},
                 "html_url": f"https://github.com/{REPO}/pull/{PR}#issuecomment-{head[:2]}{n}",
             }
         )
@@ -2914,7 +2963,7 @@ class TestOnlySwarmAuthoredLensCommentsAreRead:
     async def test_a_forged_earlier_head_signoff_is_not_carried(self, monkeypatch):
         earlier = _round_comments(OLD_HEAD, skip=("ux",))
         forged = [
-            {**c, "user": {"login": OTHER_LOGIN}}
+            {**c, "user": {"login": OTHER_LOGIN, "type": "User"}}
             for c in _round_comments(OLD_HEAD)
             if "review:ux " in c["body"]
         ]
@@ -3000,7 +3049,7 @@ class TestOnlySwarmAuthoredLensCommentsAreRead:
         def _boom():
             raise RuntimeError("identity source unreadable")
 
-        monkeypatch.setattr(target, "lens_comment_authors", _boom)
+        monkeypatch.setattr(target, "lens_comment_authors_resolution", _boom)
         code, client = await self._run(monkeypatch, _all_clear_comments(ALL_FOUR), lenses=ALL_FOUR)
         assert code == 1
         assert client.posted == []
@@ -3347,7 +3396,7 @@ class TestLensVerdictsAreReadOnlyFromTheLensOwnApp:
         _install_lens_apps(monkeypatch, ALL_FOUR)
         # arch's verdict was written by pm's App.
         comments = _own_app_comments(ALL_FOUR, apps_for=ALL_FOUR)
-        comments[ALL_FOUR.index("arch")]["user"] = {"login": _lens_app_login("pm")}
+        comments[ALL_FOUR.index("arch")]["user"] = {"login": _lens_app_login("pm"), "type": "Bot"}
         client = _PerLensClient(comments=comments, check_runs=_green_checks())
         _install_client(monkeypatch, client)
 
@@ -4885,7 +4934,7 @@ class TestOneLensWording:
 
 # ── Operator ruling 2026-10-27: three build/review/correct rounds, then split ──
 #
-# A round is a distinct head that received a lens verdict. Each test below was
+# A round begins at a reviewed head after blocking findings. Each test below was
 # run red against the tool without the cap (the PR body records what each looked
 # like red). The synthetic threads below carry the swarm's own marker comments.
 
@@ -4893,21 +4942,32 @@ ROUND_HEADS = ["1" * 40, "2" * 40, "3" * 40]
 
 
 def _cap_round_comments(heads: list[str], *, author: str = SWARM_LOGIN, start: int = 100) -> list[dict]:
-    """Every lens in ALL_FOUR posting a SIGNED_OFF verdict at each of *heads*."""
+    """Every head receives a blocking pm verdict, then the other lenses clear."""
     out: list[dict] = []
     for h, head in enumerate(heads):
         for i, lens in enumerate(ALL_FOUR):
-            body = _lens_comment_body(lens, target.LENS_AGENTS[lens], head=head)
+            body = _lens_comment_body(lens, target.LENS_AGENTS[lens], head=head,
+                                      verdict="REQUEST_CHANGES" if lens == "pm" else "SIGNED_OFF")
             out.append(_comment(start + h * 10 + i, body, author=author))
     return out
 
 
 @pytest.mark.asyncio
 class TestRoundCap:
-    async def _run(self, monkeypatch, comments, *, apply=True, **kw):
-        client = _FakeClient(comments=comments, check_runs=_green_checks())
+    async def _run(self, monkeypatch, comments, *, apply=True, comments_after_first_get=None,
+                   comments_after_second_get=None, check_runs_after_first_pr_get=None,
+                   profile_response=None, **kw):
+        client = _FakeClient(comments=comments, check_runs=_green_checks(),
+                             comments_after_first_get=comments_after_first_get,
+                             comments_after_second_get=comments_after_second_get,
+                             check_runs_after_first_pr_get=check_runs_after_first_pr_get,
+                             profile_response=profile_response)
         _install_client(monkeypatch, client)
         _install_app_mint(monkeypatch)
+        if profile_response is not None:
+            monkeypatch.setenv("NEOTOMA_BASE_URL", "https://records.example")
+            monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-bearer")
+            monkeypatch.setattr(target, "_operator_profile_login", _ORIGINAL_OPERATOR_PROFILE_LOGIN)
         code = await target.run(REPO, PR, ALL_FOUR, apply=apply, **kw)
         return code, client
 
@@ -4935,7 +4995,16 @@ class TestRoundCap:
     async def test_a_fourth_head_with_no_verdict_yet_already_says_so(self, monkeypatch, capsys):
         code, client = await self._run(monkeypatch, _cap_round_comments(ROUND_HEADS), apply=False)
         assert code == 1
-        assert "round cap reached: split or cut scope" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "round cap reached: split or cut scope" in out
+        assert "candidate" in out and "awaiting lens verdicts" in out
+
+    async def test_empty_history_reports_awaiting_lens_verdicts(self, monkeypatch, capsys):
+        code, client = await self._run(monkeypatch, [], apply=True)
+        assert code == 1 and client.posted == []
+        out = capsys.readouterr().out
+        assert "candidate" in out and "awaiting lens verdicts" in out
+        assert "all clear" not in out
 
     @pytest.mark.parametrize("earlier", [4, 6])
     async def test_a_fifth_or_later_round_is_refused_too(self, monkeypatch, earlier):
@@ -4963,12 +5032,692 @@ class TestRoundCap:
         code, client = await self._run(monkeypatch, comments)
         assert code == 0 and len(client.posted) == 1
 
-    async def test_the_cap_is_per_head_not_per_comment(self, monkeypatch):
-        # Many comments on the same two earlier heads are still two rounds.
+    async def test_the_cap_is_per_blocking_head_not_per_comment(self, monkeypatch):
+        # Many comments on the same two blocking heads are still two rounds.
         comments = _cap_round_comments(ROUND_HEADS[:1]) * 1 + _cap_round_comments(ROUND_HEADS[:1], start=500)
         comments += _cap_round_comments(ROUND_HEADS[1:2], start=600) + _all_clear_comments(ALL_FOUR)
         code, client = await self._run(monkeypatch, comments)
         assert code == 0
+
+    async def test_sites_private_replay_many_clear_reviewed_heads_stay_round_two(self, monkeypatch, capsys):
+        heads = [f"{i:040x}" for i in range(1, 21)]
+        comments = _cap_round_comments(heads[:1])
+        for i, head in enumerate(heads[1:], 1):
+            for j, lens in enumerate(ALL_FOUR):
+                comments.append(_comment(200 + i * 10 + j,
+                    _lens_comment_body(lens, target.LENS_AGENTS[lens], head=head)))
+        comments += _all_clear_comments(ALL_FOUR)
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 0 and len(client.posted) == 1
+        assert "round 2 of 3" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("bad_time", [
+        "", None, "   ", "not ISO", "2026-11-17T00:00:00", "2026-02-30T00:00:00Z", 123,
+    ])
+    async def test_missing_or_unparseable_timestamp_fails_closed(self, monkeypatch, capsys, bad_time):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        comments[-1]["created_at"] = bad_time
+        code, client = await self._run(monkeypatch, comments)
+        out = capsys.readouterr().out
+        assert code == 1 and client.posted == []
+        assert f"round order indeterminate: a verdict timestamp is missing or malformed for {HEAD}" in out
+
+    async def test_absent_timestamp_on_current_head_fails_closed(self, monkeypatch, capsys):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        comments[-1].pop("created_at")
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 1 and client.posted == []
+        assert "round order indeterminate" in capsys.readouterr().out
+
+    async def test_unparseable_timestamp_on_earlier_head_fails_closed(self, monkeypatch, capsys):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        comments[0]["created_at"] = "broken"
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 1 and client.posted == []
+        assert f"for {ROUND_HEADS[0]}" in capsys.readouterr().out
+
+    async def test_returning_to_earlier_clear_head_counts_whole_history(self, monkeypatch, capsys):
+        comments = _cap_round_comments(ROUND_HEADS[:1], start=100)
+        for i, lens in enumerate(ALL_FOUR):
+            comments.append(_comment(110 + i, _lens_comment_body(lens, target.LENS_AGENTS[lens])))
+        comments += _cap_round_comments(ROUND_HEADS[1:], start=120)
+        code, client = await self._run(monkeypatch, comments)
+        out = capsys.readouterr().out
+        assert code == 1 and client.posted == []
+        assert "round 4 of 3 across the whole verdict history" in out
+        assert all(head[:7] in out for head in (*ROUND_HEADS, HEAD))
+
+    async def test_all_clear_history_return_to_earlier_head_is_not_refused(self, monkeypatch):
+        comments = _all_clear_comments(ALL_FOUR)
+        for i, head in enumerate(ROUND_HEADS):
+            comments.append(_comment(1100 + i, _lens_comment_body("pm", target.LENS_AGENTS["pm"], head=head)))
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 0 and len(client.posted) == 1
+
+    async def test_revisited_blocking_head_refuses_after_four_rounds(self, monkeypatch, capsys):
+        h1, h2, h3 = ROUND_HEADS
+        sequence = [(h1, "REQUEST_CHANGES"), (h2, "SIGNED_OFF"),
+                    (h1, "REQUEST_CHANGES"), (h3, "REQUEST_CHANGES")]
+        comments = [
+            _comment(100 + i, _lens_comment_body("pm", target.LENS_AGENTS["pm"],
+                                                 head=head, verdict=verdict))
+            for i, (head, verdict) in enumerate(sequence)
+        ] + _all_clear_comments(ALL_FOUR)
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 1 and client.posted == []
+        assert "round 5 of 3" in capsys.readouterr().out
+
+    async def test_equal_timestamp_missing_comment_id_refuses_even_with_clear_current_head(
+        self, monkeypatch, capsys
+    ):
+        first = _comment(100, _lens_comment_body("pm", target.LENS_AGENTS["pm"],
+                                                  head="f" * 40, verdict="REQUEST_CHANGES"))
+        second = _comment(101, _lens_comment_body("pm", target.LENS_AGENTS["pm"],
+                                                   head="0" * 40, verdict="SIGNED_OFF"))
+        second["created_at"] = first["created_at"]
+        second["id"] = "not-an-integer"
+        code, client = await self._run(monkeypatch, [first, second] + _all_clear_comments(ALL_FOUR))
+        assert code == 1 and client.posted == []
+        assert "round order indeterminate" in capsys.readouterr().out
+
+    async def test_poster_preserves_changed_verdict_and_approval_refuses_fourth_round(
+        self, monkeypatch, capsys
+    ):
+        class GitHubComments:
+            def __init__(self):
+                self.head = ROUND_HEADS[0]
+                self.comments = []
+                self.methods = []
+
+            def get(self, url, headers=None, params=None):
+                if url.endswith(f"/pulls/{PR}"):
+                    return _FakeResponse({"state": "open", "merged_at": None, "head": {"sha": self.head}})
+                if url.endswith(f"/issues/{PR}/comments"):
+                    return _FakeResponse(self.comments if (params or {}).get("page", 1) == 1 else [])
+                if "/issues/comments/" in url:
+                    return _FakeResponse(next(row for row in self.comments if str(row["id"]) == url.rsplit("/", 1)[1]))
+                raise AssertionError(url)
+
+            def post(self, url, headers=None, json=None):
+                self.methods.append("POST")
+                row = _comment(100 + len(self.comments), json["body"])
+                self.comments.append(row)
+                return _FakeResponse(row, 201)
+
+            def patch(self, url, headers=None, json=None):
+                self.methods.append("PATCH")
+                row = next(row for row in self.comments if str(row["id"]) == url.rsplit("/", 1)[1])
+                row["body"] = json["body"]
+                return _FakeResponse(row)
+
+        github = GitHubComments()
+        identity = post_lens_verdict.Identity("synthetic-token", SWARM_LOGIN, "test")
+        sequence = [
+            (ROUND_HEADS[0], "BLOCKED"),
+            (ROUND_HEADS[0], "SIGNED_OFF"),
+            (ROUND_HEADS[1], "BLOCKED"),
+            (ROUND_HEADS[2], "BLOCKED"),
+            (HEAD, "SIGNED_OFF"),
+        ]
+        for index, (head, verdict) in enumerate(sequence):
+            github.head = head
+            body = f"**🤖 Pavo — Ateles swarm, pm review**\n**{verdict}**\n"
+            post_lens_verdict.post_verdict(
+                github, repo=REPO, pr=PR, lens="pm", body_text=body,
+                expected_head=head, identity=identity,
+            )
+            if index == 0:
+                post_lens_verdict.post_verdict(
+                    github, repo=REPO, pr=PR, lens="pm", body_text=body,
+                    expected_head=head, identity=identity,
+                )
+        assert github.methods == ["POST", "PATCH", "POST", "POST", "POST", "POST"]
+        assert len(github.comments) == 5
+        records = swarm_dispatch.lens_records(github.comments)
+        assert [record.head for record in records["pm"]] == [head for head, _ in sequence]
+        comments = github.comments + _all_clear_comments(ALL_FOUR)
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 1 and client.posted == []
+        assert "round 4 of 3" in capsys.readouterr().out
+
+
+def _operator_override(id_=1200, *, author=None, reason="The review has exceeded the cap for a documented reason.",
+                       edited=False, other_pr=False, bot=False):
+    author = author or swarm_dispatch._OPERATOR_LOGIN
+    row = _comment(id_, f"/override-round-cap\n{reason}", author=author)
+    row["user"]["type"] = "Bot" if bot else "User"
+    row["author_association"] = "MEMBER" if author != swarm_dispatch._OPERATOR_LOGIN else "OWNER"
+    if edited:
+        row["updated_at"] = "2026-11-18T10:00:00+00:00"
+    if other_pr:
+        row["html_url"] = f"https://github.com/{REPO}/pull/99#issuecomment-{id_}"
+    return row
+
+
+@pytest.mark.asyncio
+class TestRoundCapOverride:
+    _run = TestRoundCap._run
+
+    @pytest.mark.parametrize("prefix", [
+        " ", "\t", "    ", "> ", "```\n", "- ", "\n", "\u200b", "\ufeff", "/OVERRIDE-ROUND-CAP\n",
+    ])
+    async def test_override_command_requires_literal_first_line(self, monkeypatch, prefix):
+        override = _operator_override()
+        if prefix == "/OVERRIDE-ROUND-CAP\n":
+            override["body"] = override["body"].replace("/override-round-cap", "/OVERRIDE-ROUND-CAP", 1)
+        else:
+            override["body"] = prefix + override["body"]
+        code, client = await self._run(
+            monkeypatch, _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override]
+        )
+        assert code == 1 and client.posted == []
+
+    async def test_override_command_allows_trailing_space_and_crlf(self, monkeypatch):
+        override = _operator_override()
+        override["body"] = override["body"].replace("/override-round-cap\n", "/override-round-cap  \r\n")
+        code, client = await self._run(
+            monkeypatch, _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override]
+        )
+        assert code == 0 and len(client.posted) == 1
+
+    @pytest.mark.parametrize("field,value", [
+        ("id", "absent"), ("id", None), ("id", "1200"), ("id", True),
+        ("id", 0), ("id", -1), ("id", 1201),
+        ("html_url", f"https://github.com/{REPO}/pull/{PR}#issuecomment-abc"),
+    ])
+    async def test_override_requires_matching_positive_integer_id(self, monkeypatch, field, value):
+        override = _operator_override()
+        if value == "absent":
+            override.pop(field)
+        else:
+            override[field] = value
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override]
+        code, client = await self._run(monkeypatch, comments, apply=True)
+        assert code == 1 and client.posted == []
+
+    @pytest.mark.parametrize("field", [
+        "user", "login", "type", "body", "author_association",
+        "created_at", "updated_at", "html_url",
+    ])
+    async def test_override_requires_every_read_field_present(self, monkeypatch, field):
+        override = _operator_override()
+        (override["user"] if field in {"login", "type"} else override).pop(field)
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override]
+        code, client = await self._run(monkeypatch, comments, apply=True)
+        assert code == 1 and client.posted == []
+
+    @pytest.mark.parametrize("field,value", [
+        ("author_association", None), ("author_association", ""),
+        ("author_association", 1), ("html_url", 123),
+        ("body", []), ("user", []),
+    ])
+    async def test_override_requires_read_fields_typed(self, monkeypatch, field, value):
+        override = _operator_override()
+        override[field] = value
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override]
+        code, client = await self._run(monkeypatch, comments, apply=True)
+        assert code == 1 and client.posted == []
+
+    @pytest.mark.parametrize("metadata,profiles,works", [
+        ({}, 1, False), ({"total": 2}, 1, False),
+        ({"has_more": True}, 1, False), ({"has_more": 0}, 1, False),
+        ({"total": 1, "next_cursor": "another-page"}, 1, False),
+        ({"total": 1, "offset": 1}, 1, False),
+        ({"total": 2}, 2, False),
+        ({"total": 0}, 0, False), ({"total": 1}, 1, True),
+        ({"has_more": False}, 1, True),
+    ])
+    async def test_profile_completeness_and_cardinality_gate_override(
+        self, monkeypatch, metadata, profiles, works
+    ):
+        profile = {"snapshot": {"profile_key": "default",
+                                "github_login": swarm_dispatch._OPERATOR_LOGIN}}
+        response = {"entities": [dict(profile) for _ in range(profiles)], **metadata}
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        code, client = await self._run(monkeypatch, comments + [_operator_override()],
+                                       apply=True, profile_response=response)
+        assert code == (0 if works else 1)
+        assert len(client.posted) == (1 if works else 0)
+
+    async def test_fresh_override_with_missing_id_refuses_before_submit(self, monkeypatch):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        original = _operator_override()
+        fresh = {key: value for key, value in original.items() if key != "id"}
+        code, client = await self._run(monkeypatch, comments + [original],
+                                       comments_after_first_get=comments + [fresh], apply=True)
+        assert code == 1 and client.posted == [] and client.comment_get_count >= 2
+
+    async def test_new_verdict_before_submit_invalidates_earlier_gate_read(self, monkeypatch):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        original = _operator_override()
+        new_block = _comment(1300, _lens_comment_body(
+            "pm", target.LENS_AGENTS["pm"], verdict="BLOCKED"))
+        code, client = await self._run(monkeypatch, comments + [original],
+                                       comments_after_first_get=comments + [original, new_block],
+                                       apply=True)
+        assert code == 1 and client.posted == [] and client.comment_get_count >= 2
+    async def test_partial_comment_row_cannot_disappear_from_approval_history(self):
+        client = _FakeClient(comments=[None], check_runs=_green_checks())
+        with pytest.raises(ValueError, match="partial or malformed"):
+            await target._fetch_issue_comments(client, REPO, PR)
+        assert client.posted == []
+
+    async def test_comment_listing_reads_every_page_and_refuses_malformed_later_page(self):
+        first = [_comment(i + 1, "ordinary comment") for i in range(100)]
+        final = _comment(101, "ordinary comment")
+
+        class PagedComments:
+            def __init__(self, last):
+                self.last = last
+                self.pages = []
+
+            async def get(self, url, headers=None, params=None):
+                page = params["page"]
+                self.pages.append(page)
+                return _FakeResponse(first if page == 1 else [self.last])
+
+        complete = PagedComments(final)
+        assert len(await target._fetch_issue_comments(complete, REPO, PR)) == 101
+        assert complete.pages == [1, 2]
+        malformed = PagedComments(None)
+        with pytest.raises(ValueError, match="partial or malformed"):
+            await target._fetch_issue_comments(malformed, REPO, PR)
+        assert malformed.pages == [1, 2]
+
+    @pytest.mark.parametrize("user", [
+        "absent", None, "synthetic-author", {"type": "User"},
+        {"login": "", "type": "User"}, {"login": 123, "type": "User"},
+        {"login": SWARM_LOGIN}, {"login": SWARM_LOGIN, "type": 7},
+        {"login": f" {SWARM_LOGIN}", "type": "User"},
+    ])
+    async def test_marked_comment_with_unresolved_author_refuses_approval(
+        self, monkeypatch, capsys, user
+    ):
+        row = _comment(40, _lens_comment_body("pm", target.LENS_AGENTS["pm"], head=ROUND_HEADS[0]))
+        if user == "absent":
+            row.pop("user")
+        else:
+            row["user"] = user
+        code, client = await self._run(monkeypatch, [row] + _all_clear_comments(ALL_FOUR))
+        assert code == 1 and client.posted == []
+        assert "lens verdict comment 40 has unresolved author; history unknown" in capsys.readouterr().out
+
+    async def test_unmarked_comment_with_unresolved_author_is_ignored(self, monkeypatch):
+        row = _comment(40, "ordinary outside comment")
+        row.pop("user")
+        code, client = await self._run(monkeypatch, [row] + _all_clear_comments(ALL_FOUR))
+        assert code == 0 and len(client.posted) == 1
+
+    @pytest.mark.parametrize("prefix", ["    ", "> ", "quoted marker:\n"])
+    async def test_embedded_marker_cannot_clear_required_lens(self, monkeypatch, prefix):
+        comments = _all_clear_comments(ALL_FOUR)
+        comments[0]["body"] = prefix + comments[0]["body"]
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 1 and client.posted == []
+
+    async def test_operator_comment_overrides_only_cap_and_reports_evidence(self, monkeypatch, capsys):
+        override = _operator_override()
+        code, client = await self._run(monkeypatch,
+            _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override])
+        out = capsys.readouterr().out
+        assert code == 0 and len(client.posted) == 1
+        assert "round 4 of 3" in out
+        assert f"OVERRIDDEN by the operator ({override['html_url']})" in out
+        assert override["body"] in out and override["created_at"] in out
+        assert swarm_dispatch._OPERATOR_LOGIN in out
+
+    async def test_another_human_repository_owner_cannot_override(self, monkeypatch, capsys):
+        owner = "different-human-owner"
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        client = _FakeClient(comments=comments + [_operator_override(author=owner)],
+                             check_runs=_green_checks(), repo_owner={"login": owner, "type": "User"})
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        assert await target.run(REPO, PR, ALL_FOUR, apply=True) == 1
+        assert client.posted == []
+        assert "differs from the operator_profile" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("snapshot,expected", [
+        ({"profile_key": "default", "github_login": "synthetic-owner"}, "synthetic-owner"),
+        ({"profile_key": "default"}, ""),
+    ])
+    async def test_profile_reader_requires_declared_login(self, monkeypatch, snapshot, expected):
+        assert _ORIGINAL_OPERATOR_PROFILE_LOGIN is not None
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://records.example")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-bearer")
+        class ProfileClient:
+            async def post(self, url, headers=None, json=None):
+                assert url == "https://records.example/entities/query"
+                assert json == {"entity_type": "operator_profile", "include_snapshots": True, "limit": 100}
+                return _FakeResponse({"entities": [{"snapshot": snapshot}], "total": 1})
+        login, error = await _ORIGINAL_OPERATOR_PROFILE_LOGIN(ProfileClient())
+        assert login == expected
+        assert bool(error) == (not expected)
+
+    async def test_malformed_profile_row_cannot_be_ignored_beside_default(self, monkeypatch):
+        assert _ORIGINAL_OPERATOR_PROFILE_LOGIN is not None
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://records.example")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-bearer")
+
+        class ProfileClient:
+            async def post(self, url, headers=None, json=None):
+                return _FakeResponse({"entities": [
+                    {"snapshot": {"profile_key": "default", "github_login": "synthetic-owner"}},
+                    {"snapshot": None},
+                ], "total": 2})
+
+        login, error = await _ORIGINAL_OPERATOR_PROFILE_LOGIN(ProfileClient())
+        assert login == "" and "partial or malformed" in error
+
+    @pytest.mark.parametrize("metadata", [{"has_more": "true"}, {"total": 2}, {"total": True}])
+    async def test_partial_or_malformed_profile_listing_disables_override(self, monkeypatch, metadata):
+        assert _ORIGINAL_OPERATOR_PROFILE_LOGIN is not None
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://records.example")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-bearer")
+
+        class ProfileClient:
+            async def post(self, url, headers=None, json=None):
+                return _FakeResponse({"entities": [
+                    {"snapshot": {"profile_key": "default", "github_login": "synthetic-owner"}}
+                ], **metadata})
+
+        login, error = await _ORIGINAL_OPERATOR_PROFILE_LOGIN(ProfileClient())
+        assert login == "" and "partial or malformed" in error
+
+    @pytest.mark.parametrize("login,error", [
+        ("", "default operator_profile lacks a valid github_login field"),
+        ("", "default operator_profile could not be read"),
+    ])
+    async def test_missing_or_unreadable_operator_login_refuses(self, monkeypatch, capsys, login, error):
+        async def _profile(_client):
+            return login, error
+        monkeypatch.setattr(target, "_operator_profile_login", _profile)
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        code, client = await self._run(monkeypatch, comments + [_operator_override()])
+        assert code == 1 and client.posted == []
+        assert error in capsys.readouterr().out
+
+    @pytest.mark.parametrize("override", [
+        _operator_override(author=OTHER_LOGIN),
+        _operator_override(author="other-org-member"),
+        _operator_override(bot=True),
+        _operator_override(edited=True),
+        _operator_override(reason=""),
+        _operator_override(reason="too short"),
+        _operator_override(other_pr=True),
+    ])
+    async def test_invalid_override_refused(self, monkeypatch, override):
+        code, client = await self._run(monkeypatch,
+            _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override])
+        assert code == 1 and client.posted == []
+
+    @pytest.mark.parametrize("field,value,equal_timestamps", [
+        ("created_at", "malformed", True), ("updated_at", "malformed", True),
+        ("created_at", "2026-02-30T10:00:00Z", True),
+        ("created_at", "2026-11-17T10:00:00", True),
+        ("created_at", "2099-01-01T00:00:00Z", True),
+        ("created_at", None, False), ("updated_at", None, False),
+        ("updated_at", "2026-11-17T10:00:00Z", False),
+        ("html_url", f"https://github.com/{REPO}/pull/{PR}#issuecomment-", False),
+        ("html_url", f"https://github.com/{REPO}/pull/{PR}#issuecomment-abc", False),
+        ("html_url", f"https://github.com/{REPO}/pull/99#issuecomment-1200", False),
+        ("html_url", f"https://github.com/other/repo/pull/{PR}#issuecomment-1200", False),
+        ("html_url", f"https://github.com/{REPO}/issues/{PR}#issuecomment-1200", False),
+        ("html_url", f"https://github.com/{REPO}/pull/{PR}#issuecomment-1201", False),
+    ])
+    async def test_malformed_authorization_metadata_refuses(self, monkeypatch, field, value, equal_timestamps):
+        override = _operator_override()
+        override[field] = value
+        if equal_timestamps:
+            override["created_at"] = override["updated_at"] = value
+        code, client = await self._run(monkeypatch,
+            _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override])
+        assert code == 1 and client.posted == []
+
+    @pytest.mark.parametrize("field,value", [
+        ("body", None), ("body", ["/override-round-cap"]),
+        ("user", None), ("user", "synthetic-owner"),
+        ("author_association", 1),
+        ("id", "malformed"),
+    ])
+    async def test_malformed_override_fields_refuse(self, monkeypatch, field, value):
+        override = _operator_override()
+        override[field] = value
+        code, client = await self._run(monkeypatch,
+            _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override])
+        assert code == 1 and client.posted == []
+
+    @pytest.mark.parametrize("field,value", [
+        ("type", None), ("type", "Organization"),
+        ("login", swarm_dispatch._OPERATOR_LOGIN.swapcase()), ("login", None),
+        ("html_url", None), ("created_at", None), ("updated_at", None),
+    ])
+    async def test_override_missing_or_wrong_identity_and_evidence_refused(self, monkeypatch, field, value):
+        override = _operator_override()
+        if field in {"type", "login"}:
+            override["user"][field] = value
+        else:
+            override[field] = value
+        code, client = await self._run(monkeypatch,
+            _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override])
+        assert code == 1 and client.posted == []
+
+    @pytest.mark.parametrize("field", ["type", "html_url", "created_at", "updated_at"])
+    async def test_override_missing_required_field_refused(self, monkeypatch, field):
+        override = _operator_override()
+        (override["user"] if field == "type" else override).pop(field)
+        code, client = await self._run(monkeypatch,
+            _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override])
+        assert code == 1 and client.posted == []
+
+    async def test_valid_override_lifts_indeterminate_order_only(self, monkeypatch, capsys):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        comments[0]["created_at"] = None
+        comments.append(_operator_override())
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 0 and len(client.posted) == 1
+        assert "round order indeterminate" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("fresh_override", [None, "edited"])
+    async def test_override_changed_or_vanished_at_fresh_read_refuses(
+        self, monkeypatch, capsys, fresh_override
+    ):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        original = _operator_override()
+        fresh = [] if fresh_override is None else [{**original, "updated_at": "2026-11-18T10:00:00Z"}]
+        code, client = await self._run(monkeypatch, comments + [original],
+                                        comments_after_first_get=comments + fresh)
+        assert code == 1 and client.posted == [] and client.comment_get_count >= 2
+        assert "override changed or vanished" in capsys.readouterr().out
+
+    async def test_override_still_present_at_fresh_read_proceeds(self, monkeypatch):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        original = _operator_override()
+        code, client = await self._run(monkeypatch, comments + [original],
+                                        comments_after_first_get=comments + [{**original}])
+        assert code == 0 and len(client.posted) == 1 and client.comment_get_count >= 2
+
+    @pytest.mark.parametrize("change", ["deleted", "edited", "replaced"])
+    async def test_override_changed_at_approval_boundary_refuses(self, monkeypatch, capsys, change):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        original = _operator_override()
+        late = {
+            "deleted": [],
+            "edited": [{**original, "body": original["body"] + " edited"}],
+            "replaced": [_operator_override(id_=1201)],
+        }[change]
+        code, client = await self._run(
+            monkeypatch, comments + [original],
+            comments_after_first_get=comments + [{**original}],
+            comments_after_second_get=comments + late,
+        )
+        assert code == 1 and client.posted == [] and client.comment_get_count >= 3
+        assert "override changed or vanished" in capsys.readouterr().out
+
+    async def test_override_still_valid_at_approval_boundary_posts_once(self, monkeypatch):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        original = _operator_override()
+        code, client = await self._run(
+            monkeypatch, comments + [original],
+            comments_after_first_get=comments + [{**original}],
+            comments_after_second_get=comments + [{**original}],
+        )
+        assert code == 0 and len(client.posted) == 1 and client.comment_get_count >= 3
+
+    async def test_check_changed_at_approval_boundary_refuses(self, monkeypatch, capsys):
+        comments = _all_clear_comments(ALL_FOUR)
+        red = [{"name": "ateles-tests", "status": "completed", "conclusion": "failure"}]
+        code, client = await self._run(
+            monkeypatch, comments, check_runs_after_first_pr_get=red
+        )
+        assert code == 1 and client.posted == []
+        assert "checks changed before approval submission" in capsys.readouterr().out
+
+    async def test_head_changed_at_approval_boundary_refuses(self, monkeypatch, capsys):
+        client = _FakeClient(
+            comments=_all_clear_comments(ALL_FOUR), check_runs=_green_checks(),
+            pr_head_after_second_get=OLD_HEAD,
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        assert await target.run(REPO, PR, ALL_FOUR, apply=True) == 1
+        assert client.posted == [] and client.pr_get_count >= 3
+        assert "PR state changed before approval submission" in capsys.readouterr().out
+
+    async def test_new_lens_comment_at_approval_boundary_refuses(self, monkeypatch, capsys):
+        comments = _all_clear_comments(ALL_FOUR)
+        late_block = _comment(
+            1300, _lens_comment_body("pm", target.LENS_AGENTS["pm"], verdict="BLOCKED")
+        )
+        code, client = await self._run(
+            monkeypatch, comments, comments_after_first_get=comments + [late_block]
+        )
+        assert code == 1 and client.posted == [] and client.comment_get_count >= 2
+        assert "PR comment history changed before approval submission" in capsys.readouterr().out
+
+    async def test_pr_body_changed_at_approval_boundary_refuses(self, monkeypatch, capsys):
+        client = _FakeClient(
+            comments=_all_clear_comments(ALL_FOUR), check_runs=_green_checks(),
+            pr_body_after_second_get="Closes #99",
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        assert await target.run(REPO, PR, ALL_FOUR, apply=True) == 1
+        assert client.posted == []
+        assert "PR body changed before approval submission" in capsys.readouterr().out
+
+    async def test_new_required_lens_at_approval_boundary_refuses(self, monkeypatch, capsys):
+        expectation = {
+            "id": 1,
+            "body": f"**{swarm_dispatch.EXPECTATION_MARKER} (arch)** — what waxwing will verify: contract review.",
+        }
+        client = _FakeClient(
+            comments=_all_clear_comments(["pm", "qa"]), check_runs=_green_checks(),
+            parent_issue_comments_after_first_get=[expectation],
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        code = await target.run(REPO, PR, [], apply=True)
+        assert client.parent_issue_get_count >= 2
+        assert code == 1 and client.posted == []
+        assert "required lenses changed before approval submission" in capsys.readouterr().out
+
+    async def test_malformed_fresh_override_history_refuses_before_submit(self, monkeypatch):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        original = _operator_override()
+        code, client = await self._run(monkeypatch, comments + [original],
+                                        comments_after_first_get=comments + [original, None])
+        assert code == 1 and client.posted == [] and client.comment_get_count >= 2
+
+    async def test_flag_and_environment_cannot_grant_override(self, monkeypatch):
+        monkeypatch.setenv("ATELES_OVERRIDE_ROUND_CAP", "1")
+        code, client = await self._run(monkeypatch,
+            _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR))
+        assert code == 1 and client.posted == []
+        with pytest.raises(TypeError):
+            await target.run(REPO, PR, ALL_FOUR, apply=False, override_round_cap=True)
+
+    async def test_environment_cannot_redefine_repository_owner(self, monkeypatch):
+        monkeypatch.setenv("APIS_OPERATOR_LOGIN", OTHER_LOGIN)
+        # Model the value captured when the approval module was imported.
+        monkeypatch.setattr(target, "_OPERATOR_LOGIN", OTHER_LOGIN, raising=False)
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        code, client = await self._run(monkeypatch, comments + [_operator_override(author=OTHER_LOGIN)])
+        assert code == 1 and client.posted == []
+
+    async def test_organization_owner_has_no_override(self, monkeypatch, capsys):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        client = _FakeClient(comments=comments + [_operator_override()], check_runs=_green_checks(),
+                             repo_owner={"login": swarm_dispatch._OPERATOR_LOGIN, "type": "Organization"})
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        assert await target.run(REPO, PR, ALL_FOUR, apply=True) == 1
+        assert client.posted == [] and "organization-owned" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("owner", [{}, []])
+    async def test_unreadable_owner_has_no_override(self, monkeypatch, capsys, owner):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        client = _FakeClient(comments=comments + [_operator_override()], check_runs=_green_checks(),
+                             repo_owner=owner)
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        assert await target.run(REPO, PR, ALL_FOUR, apply=True) == 1
+        assert client.posted == [] and "override unavailable" in capsys.readouterr().out
+
+    async def test_override_does_not_lift_blocking_lens(self, monkeypatch):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        comments += [_operator_override(), _comment(1100,
+            _lens_comment_body("pm", target.LENS_AGENTS["pm"], verdict="BLOCKED"))]
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 1 and client.posted == []
+
+
+@pytest.mark.asyncio
+class TestPartialLensIdentityHistory:
+    _run = TestRoundCap._run
+
+    async def test_unresolved_historical_lens_refuses_clear_current_head(self, monkeypatch, capsys):
+        comments = (_cap_round_comments(ROUND_HEADS, author="unresolved-lens-account")
+                    + _all_clear_comments(ALL_FOUR))
+        monkeypatch.setattr(target, "lens_comment_authors", lambda: SWARM_AUTHORS, raising=False)
+        monkeypatch.setattr(
+            target, "lens_comment_authors_resolution",
+            lambda: lens_authors.Resolution(SWARM_AUTHORS, ("the account behind PAVO_AGENT_PAT",)),
+            raising=False,
+        )
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 1 and client.posted == []
+        assert "round order indeterminate: lens identity unresolved for pm" in capsys.readouterr().out
+
+    async def test_complete_resolution_preserves_existing_clear_path(self, monkeypatch):
+        monkeypatch.setattr(
+            target, "lens_comment_authors_resolution",
+            lambda: lens_authors.Resolution(SWARM_AUTHORS),
+            raising=False,
+        )
+        code, client = await self._run(monkeypatch, _all_clear_comments(ALL_FOUR))
+        assert code == 0 and len(client.posted) == 1
+
+    async def test_valid_owner_override_can_lift_unknown_history(self, monkeypatch):
+        comments = _all_clear_comments(ALL_FOUR)
+        comments[0]["created_at"] = None
+        code, client = await self._run(monkeypatch, comments + [_operator_override()])
+        assert code == 0 and len(client.posted) == 1
+
+    @pytest.mark.parametrize("partial", [False, True])
+    async def test_valid_override_cannot_lift_unresolved_identity(self, monkeypatch, capsys, partial):
+        monkeypatch.setattr(
+            target, "lens_comment_authors_resolution",
+            lambda: SimpleNamespace(
+                authors=SWARM_AUTHORS,
+                failed=("the account behind PAVO_AGENT_PAT",),
+                complete=partial,
+                partial=partial,
+            ),
+        )
+        code, client = await self._run(monkeypatch, _all_clear_comments(ALL_FOUR) + [_operator_override()])
+        assert code == 1 and client.posted == []
+        assert "lens identity unresolved for pm" in capsys.readouterr().out
 
 
 # ── Approval tool fails closed on an unreadable review scope (ateles#1674) ──
@@ -5379,9 +6128,9 @@ class TestRateLimitOnTheUrllibPaths:
 
         def _resolve():
             lens_authors._note_rate_limit("GitHub rate limit hit (core): resets 2027-01-15.")
-            return frozenset()
+            return lens_authors.Resolution(frozenset())
 
-        monkeypatch.setattr(target, "lens_comment_authors", _resolve)
+        monkeypatch.setattr(target, "lens_comment_authors_resolution", _resolve)
         try:
             with pytest.raises(target.GitHubRateLimited) as ei:
                 await target.run(REPO, PR, ALL_FOUR, apply=True)

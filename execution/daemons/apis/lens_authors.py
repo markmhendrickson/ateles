@@ -10,9 +10,8 @@ before it parses anything.
 
 Design basis: docs/foundation/principles.md#5-fail-closed-on-the-field-that-carries-the-safety-meaning
 The field that carries the safety meaning here is the comment's author. A
-comment with no readable author, an author outside the set, or a set that
-cannot be established at all is NOT a lens verdict: the lens then has no
-verdict, which every consumer already treats as "not cleared".
+marked comment with an incomplete author makes approval history unknown;
+an author outside the set is not admitted as a lens verdict.
 
 Where the identities come from (never a login typed into this repo, so a fork
 supplies its own accounts):
@@ -600,7 +599,18 @@ def comment_author(comment: dict) -> str:
     user = comment.get("user") if isinstance(comment, dict) else None
     if not isinstance(user, dict):
         return ""
-    return _norm(user.get("login"))
+    login = user.get("login")
+    author_type = user.get("type")
+    if (not isinstance(login, str) or not _LOGIN_RE.fullmatch(login.casefold())
+            or author_type not in {"User", "Bot"}):
+        return ""
+    return _norm(login)
+
+
+def require_marked_author(comment: dict) -> None:
+    """Refuse marked history whose author cannot be established."""
+    if claimed_lenses(comment.get("body")) and not comment_author(comment):
+        raise ValueError(f"lens verdict comment {comment.get('id')!r} has unresolved author; history unknown")
 
 
 def is_swarm_comment(comment: dict, authors: frozenset[str] | set[str]) -> bool:
@@ -632,10 +642,12 @@ def scope_lens_comments(
 ) -> list[dict]:
     """`comments` without any lens-shaped comment a swarm identity did not write.
 
-    A comment that is not lens-shaped is returned untouched: this narrows what
-    a lens reader can see, nothing else. With no `authors` every lens-shaped
-    comment is dropped.
+    A comment that is not lens-shaped is returned untouched. A marked comment
+    with an unreadable author refuses the history before scoping. With no
+    `authors` every otherwise valid lens-shaped comment is dropped.
     """
+    for comment in comments:
+        require_marked_author(comment)
     return [
         c
         for c in comments
@@ -647,6 +659,8 @@ def ignored_lens_comments(
     comments: list[dict], authors: frozenset[str] | set[str]
 ) -> list[dict]:
     """The lens-shaped comments `scope_lens_comments` drops (for reporting)."""
+    for comment in comments:
+        require_marked_author(comment)
     return [
         c
         for c in comments

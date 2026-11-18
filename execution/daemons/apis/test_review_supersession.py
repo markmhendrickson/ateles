@@ -19,7 +19,7 @@ def _comment(body: str, *, cid: int = 1, login: str = "github-actions[bot]") -> 
         "id": cid,
         "body": body,
         "created_at": f"2026-09-14T00:00:{cid:02d}Z",
-        "user": {"login": login},
+        "user": {"login": login, "type": "Bot" if str(login).endswith("[bot]") else "User"},
     }
 
 
@@ -159,7 +159,7 @@ def test_gateway_populates_head_sha_and_missing_is_safe():
             "number": 7,
             "title": "t",
             "body": "",
-            "user": {"login": "a"},
+            "user": {"login": "a", "type": "User"},
             "html_url": "u",
             "labels": [],
             "head": {"ref": "x", "sha": HEAD_B},
@@ -177,7 +177,7 @@ def test_gateway_populates_head_sha_and_missing_is_safe():
     review_payload = {
         **base,
         "action": "submitted",
-        "review": {"state": "approved", "user": {"login": "person"}},
+        "review": {"state": "approved", "user": {"login": "person", "type": "User"}},
     }
     assert (
         gg.parse_github_event("pull_request_review", review_payload).head_sha == HEAD_B
@@ -351,25 +351,25 @@ async def test_supersession_patches_only_bot_verdicts_and_dismisses_stale_block(
             "id": 10,
             "state": "CHANGES_REQUESTED",
             "commit_id": HEAD_A,
-            "user": {"login": "github-actions[bot]"},
+            "user": {"login": "github-actions[bot]", "type": "Bot"},
         },
         {
             "id": 11,
             "state": "APPROVED",
             "commit_id": HEAD_A,
-            "user": {"login": "github-actions[bot]"},
+            "user": {"login": "github-actions[bot]", "type": "Bot"},
         },
         {
             "id": 12,
             "state": "CHANGES_REQUESTED",
             "commit_id": HEAD_A,
-            "user": {"login": "person"},
+            "user": {"login": "person", "type": "User"},
         },
         {
             "id": 13,
             "state": "DISMISSED",
             "commit_id": HEAD_A,
-            "user": {"login": "github-actions[bot]"},
+            "user": {"login": "github-actions[bot]", "type": "Bot"},
         },
     ]
     patched, dismissed = [], []
@@ -427,7 +427,7 @@ async def test_supersession_continues_after_patch_and_dismiss_failures(monkeypat
             "id": 10,
             "state": "CHANGES_REQUESTED",
             "commit_id": HEAD_A,
-            "user": {"login": "github-actions[bot]"},
+            "user": {"login": "github-actions[bot]", "type": "Bot"},
         },
     ]
     patched = []
@@ -524,7 +524,7 @@ async def test_periodic_sweep_paginates_and_supersedes_page_two_stale_verdict(
                 "id": 77,
                 "state": "CHANGES_REQUESTED",
                 "commit_id": HEAD_A,
-                "user": {"login": "github-actions[bot]"},
+                "user": {"login": "github-actions[bot]", "type": "Bot"},
             }
         ],
     }

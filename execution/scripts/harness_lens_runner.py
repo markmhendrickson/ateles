@@ -2687,7 +2687,13 @@ def _pr_comments(*, repo: str, pr: int) -> list[dict]:
     pages = json.loads(result.stdout or "[]")
     if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
         raise ValueError("GitHub comment listing had an unexpected shape")
-    return [comment for page in pages for comment in page if isinstance(comment, dict)]
+    if any(not isinstance(comment, dict) for page in pages for comment in page):
+        raise ValueError("GitHub comment listing contained a malformed comment")
+    import lens_authors  # noqa: PLC0415 — shared approval reader
+    for page in pages:
+        for comment in page:
+            lens_authors.require_marked_author(comment)
+    return [comment for page in pages for comment in page]
 
 
 def _matching_verdict_comments(
@@ -2711,37 +2717,54 @@ def _matching_verdict_comments(
 
 
 def _one_verdict_comment(
-    *, repo: str, pr: int, lens: str, attribution: str
+    *, repo: str, pr: int, lens: str, attribution: str, verdict_text: str,
+    comments: list[dict] | None = None,
 ) -> dict | None:
+    if comments is None:
+        comments = _pr_comments(repo=repo, pr=pr)
     matches = _matching_verdict_comments(
-        comments=_pr_comments(repo=repo, pr=pr),
+        comments=comments,
         lens=lens,
         attribution=attribution,
     )
-    if len(matches) > 1:
-        ids = ", ".join(str(comment.get("id") or "<missing>") for comment in matches)
-        raise RuntimeError(
-            f"ambiguous prior review:{lens} comments by ateles-agent ({ids}); "
-            "refusing to choose one to edit"
-        )
-    return matches[0] if matches else None
+    if not matches:
+        return None
+    latest = matches[-1]
+    verdicts = [row for row in comments if _REVIEW_MARKER_RE.fullmatch(
+        (str(row.get("body") or "").splitlines() or [""])[0]
+    )]
+    if not verdicts or verdicts[-1].get("id") != latest.get("id"):
+        return None
+    old_marker = _REVIEW_MARKER_RE.fullmatch(str(latest.get("body") or "").splitlines()[0])
+    new_marker = _REVIEW_MARKER_RE.fullmatch(verdict_text.splitlines()[0])
+    if old_marker.group("head") != new_marker.group("head"):
+        return None
+    from review_rounds import verdict_class
+    if (verdict_class(str(latest.get("body") or ""), lens) != verdict_class(verdict_text, lens)
+            or latest.get("body") != verdict_text):
+        return None
+    return latest
 
 
 def post_verdict(*, repo: str, pr: int, verdict_text: str) -> str:
-    """Create or update the lens's one PR comment and return its URL.
+    """Post a new verdict or update an identical latest retry and return its URL.
 
     Never called unless ``validate_verdict(...).ok`` AND the caller passed
     ``--post``. Publication still validates the strict identity fields it needs
-    to honour the canonical edit-not-duplicate contract.
+    to preserve every changed conclusion in the review history.
     """
     lens, attribution = _verdict_identity(verdict_text)
     last_error: Exception | None = None
     for _attempt in range(1, _POST_VERDICT_ATTEMPTS + 1):
+        before = _pr_comments(repo=repo, pr=pr)
+        known_ids = {row.get("id") for row in before}
         existing = _one_verdict_comment(
             repo=repo,
             pr=pr,
             lens=lens,
             attribution=attribution,
+            verdict_text=verdict_text,
+            comments=before,
         )
         if existing is None:
             command = [
@@ -2756,9 +2779,9 @@ def post_verdict(*, repo: str, pr: int, verdict_text: str) -> str:
             run_kwargs: dict = {"input": json.dumps({"body": verdict_text})}
         else:
             comment_id = existing.get("id")
-            if not isinstance(comment_id, int):
+            if type(comment_id) is not int or comment_id <= 0:
                 raise RuntimeError(
-                    f"prior review:{lens} comment has no integer id; refusing to edit"
+                    f"prior review:{lens} comment has no positive integer id; refusing to edit"
                 )
             command = [
                 "gh",
@@ -2780,16 +2803,20 @@ def post_verdict(*, repo: str, pr: int, verdict_text: str) -> str:
             )
         except subprocess.CalledProcessError as exc:
             last_error = exc
-        landed = _one_verdict_comment(
-            repo=repo,
-            pr=pr,
-            lens=lens,
-            attribution=attribution,
-        )
-        if landed is not None and (landed.get("body") or "") == verdict_text:
+        landed = next((row for row in reversed(_matching_verdict_comments(
+            comments=_pr_comments(repo=repo, pr=pr), lens=lens, attribution=attribution,
+        )) if (row.get("body") or "") == verdict_text and (
+            row.get("id") == existing.get("id") if existing else row.get("id") not in known_ids
+        )), None)
+        if landed is not None:
+            landed_id = landed.get("id")
             url = str(landed.get("html_url") or "")
-            if not url:
-                raise RuntimeError(f"review:{lens} write read back without an html_url")
+            if (type(landed_id) is not int or landed_id <= 0
+                    or re.fullmatch(
+                        rf"https://github\.com/{re.escape(repo)}/pull/{pr}#issuecomment-{landed_id}",
+                        url,
+                    ) is None):
+                raise RuntimeError(f"review:{lens} write read back without a matching id and PR-local URL")
             return url
         if last_error is None:
             last_error = RuntimeError(

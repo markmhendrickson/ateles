@@ -57,7 +57,7 @@ def _pr(number: int, *, age_minutes: int = 120, draft: bool = False) -> dict:
         "body": "",
         "draft": draft,
         "updated_at": when.isoformat().replace("+00:00", "Z"),
-        "user": {"login": "someone"},
+        "user": {"login": "someone", "type": "User"},
         "html_url": f"https://github.com/o/r/pull/{number}",
         "head": {"ref": "feature"},
         "base": {"ref": "main"},
@@ -328,7 +328,7 @@ def _comments_response(bodies: list[str]):
             return None
 
         def json(self):
-            return [{"body": b, "user": {"login": "swarm-lens-account"}} for b in self._bodies]
+            return [{"body": b, "user": {"login": "swarm-lens-account", "type": "User"}} for b in self._bodies]
 
     return _Resp(bodies)
 

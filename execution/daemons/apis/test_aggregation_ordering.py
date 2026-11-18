@@ -62,7 +62,7 @@ def _c(
         "id": cid,
         "created_at": created,
         "body": body,
-        "user": {"login": "swarm-lens-account"},
+        "user": {"login": "swarm-lens-account", "type": "User"},
     }
 
 
