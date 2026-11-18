@@ -1502,3 +1502,34 @@ def test_programs_the_guard_cannot_read_or_that_decode_themselves_are_refused(co
 ))
 def test_literal_ordinary_programs_still_allowed(command):
     assert_allowed(command)
+
+
+@pytest.mark.parametrize("command", (
+    "python3 -c 'import subprocess; subprocess.run([\"echo\", \"ok\"])'",
+    "bash -c 'cp a b'",
+    "awk 'BEGIN { system(\"echo ok\") }' notes.txt",
+    "node -e 'require(\"child_process\").spawnSync(\"echo\")'",
+    "perl -e 'system(\"echo ok\")'",
+    "ruby -e 'system(\"echo ok\")'",
+    "python3 -m pytest -q",
+    "source ./ordinary.sh",
+    "eval 'echo ok'",
+    "exec echo ok",
+    "cat <<'E' | sh\ncp a b\nE",
+))
+def test_unproven_program_execution_is_refused(command):
+    assert_refused(command)
+
+
+def test_unproven_script_contents_are_refused(tmp_path):
+    script = tmp_path / "ordinary.py"
+    script.write_text("import subprocess\nsubprocess.run(['echo', 'ok'])\n")
+    assert_refused(f"python3 {script}")
+    script.write_text("print('ok')\n")
+    assert_allowed(f"python3 {script}")
+
+
+def test_plain_operations_and_reviewable_programs_remain_allowed():
+    assert_allowed("git status")
+    assert_allowed("printf ok > src/output")
+    assert_allowed("python3 -c 'print(1)'")

@@ -86,6 +86,7 @@ denies with exit 2. Tools outside the prepare agent's guarded matcher pass.
 from __future__ import annotations
 
 import json
+import ast
 import hashlib
 import os
 import re
@@ -1472,23 +1473,37 @@ def _stdin_program_violation(runner: str, body: str, depth: int) -> str | None:
     """A program read from standard input: a shell parses it as shell, an
     interpreter reads it as that language's code."""
     if _SHELLS.match(runner) or runner in _EVALUATORS:
-        return _judge_program_body(body, depth)
+        return _inline_program_violation(runner, body, depth)
     return _inline_program_violation(runner, body, depth)
 
 
 def _inline_program_violation(runner: str, body: str, depth: int) -> str | None:
+    refusal = (f"{runner} program cannot be proven free of process creation or "
+               "dynamic program construction; use plain git and plain file edits")
     if _SHELLS.match(runner):
-        return _judge_program_body(body, depth)
-    if _interpreter_family(runner) != "awk" and _RUNTIME_EVAL_TEXT.search(body):
-        return f"{runner} program decodes or evaluates program text at run time"
-    if _interpreter_family(runner) == "awk":
-        for include in re.findall(r'@include\s+["\']([^"\']+)["\']', body):
-            hit = _program_file_violation(runner, Word(include), depth + 1)
-            if hit:
-                return hit
-    if _mentions_protected_text(body) or _HOOK_BYPASS_TEXT.search(body) or mentions_git(body):
-        return f"{runner} program names a protected path or hook bypass"
-    return None
+        # Only shell builtins with literal operands are reviewable as inline code.
+        return None if re.fullmatch(r"\s*(?:(?:echo|printf)\s+[A-Za-z0-9 ._-]+|true|:)\s*", body) else refusal
+    family = _interpreter_family(runner)
+    if family == "python":
+        try:
+            tree = ast.parse(body)
+        except SyntaxError:
+            return refusal
+        if tree.body and all(isinstance(node, ast.Expr) and
+                             isinstance(node.value, ast.Call) and
+                             isinstance(node.value.func, ast.Name) and
+                             node.value.func.id == "print" and
+                             not node.value.keywords and
+                             all(isinstance(arg, ast.Constant) and
+                                 isinstance(arg.value, (str, int, float, bool))
+                                 for arg in node.value.args)
+                             for node in tree.body):
+            return None
+    if family == "awk" and re.fullmatch(r"\s*\{\s*print(?:\s+\$[0-9]+)?\s*\}\s*", body):
+        return None
+    if family == "sed" and re.fullmatch(r"s/[^/\\\n]+/[^/\\\n]*/g?", body):
+        return None
+    return refusal
 
 
 def _program_file_violation(runner: str, script: Word, depth: int,
@@ -1510,17 +1525,16 @@ def _program_file_violation(runner: str, script: Word, depth: int,
             if hit:
                 return hit
     if is_shell:
-        return _judge_program_body(text, depth)
-    if _interpreter_family(runner) == "awk":
-        if _mentions_protected_text(text) or _HOOK_BYPASS_TEXT.search(text) or mentions_git(text):
-            return f"{runner} program names a protected path or hook bypass"
-        return None
+        return _inline_program_violation(runner, text, depth)
     return _inline_program_violation(runner, text, depth)
 
 
 def _multi_program_violation(runner: str, tail: list[Word], depth: int) -> str | None:
     """Inspect every program source, including repeated and mixed options."""
     family = _interpreter_family(runner)
+    if family == "python" and any(w.text == "-m" or w.text.startswith("-m")
+                                  for w in tail):
+        return f"{runner} module execution cannot be inspected; use plain git and plain file edits"
     if family == "python" and any(w.text == "-c" for w in tail) and any(
         w.text == "-m" for w in tail
     ):
@@ -1590,22 +1604,10 @@ def _nested_program_violation(cmd: SimpleCommand, rest: list[Word], depth: int) 
     if depth >= _MAX_DEPTH:
         return True, "nested program exceeds inspection depth"
     base = os.path.basename(rest[0].text)
-    if base in {"source", "."} and len(rest) > 1:
-        script = rest[1]
-        if script.expanded or script.globbed or script.braced:
-            return True, "sourced script assembled by the shell"
-        path = _effective_path(script.text)
-        if path.name.startswith(".env") or path.suffix in {".key", ".pem"}:
-            return True, "sourced credential or environment file"
-        try:
-            return True, _judge_program_body(path.read_text(), depth)
-        except (OSError, UnicodeError):
-            return True, "sourced script cannot be read"
+    if base in {"source", "."}:
+        return True, "sourced program cannot be proven safe; use plain git and plain file edits"
     if base == "eval":
-        body = rest[1:]
-        if any(w.expanded or w.globbed or w.braced for w in body):
-            return True, "eval body assembled by the shell"
-        return True, _judge_program_body(" ".join(w.text for w in body), depth)
+        return True, "evaluated program cannot be proven safe; use plain git and plain file edits"
     starts = [0]
     if base in _WRAPPERS:
         executable = _wrapped_executable(rest)
@@ -1627,6 +1629,10 @@ def _nested_program_violation(cmd: SimpleCommand, rest: list[Word], depth: int) 
         if hit:
             return True, hit
         if _interpreter_family(runner) == "sed":
+            script = next((w for w in tail if not w.text.startswith("-")), None)
+            if script is None or script.expanded or script.globbed or script.braced or \
+                    _inline_program_violation(runner, script.text, depth):
+                return True, f"{runner} program cannot be proven safe; use plain git and plain file edits"
             continue
         for i, option in enumerate(tail):
             name = option.text
@@ -1642,11 +1648,11 @@ def _nested_program_violation(cmd: SimpleCommand, rest: list[Word], depth: int) 
             if body.expanded or body.globbed or body.braced:
                 return True, "nested program body assembled by the shell"
             if is_shell:
-                return True, _judge_program_body(body.text, depth)
+                return True, _inline_program_violation(runner, body.text, depth)
             return True, _inline_program_violation(runner, body.text, depth)
         if is_shell and cmd.stdin and _reads_program_from_stdin(rest[start:]):
             return True, next((hit for body in cmd.stdin
-                               if (hit := _judge_program_body(body, depth))), None)
+                               if (hit := _inline_program_violation(runner, body, depth))), None)
         checked, hit = _script_file_violation(runner, tail, is_shell, depth)
         if checked:
             return True, hit
@@ -1673,6 +1679,8 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int =
         return None
     head = rest[0]
     base = os.path.basename(head.text)
+    if base in {"eval", "source", ".", "exec"}:
+        return f"{base} program execution is not allowed; use plain git and plain file edits"
     if base in _DENIED_DIRECTORY_PROGRAMS:
         return f"{base} may change the working directory during release preparation"
     if base in {"make", "gmake"} and any(
