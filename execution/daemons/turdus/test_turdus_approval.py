@@ -928,7 +928,7 @@ def test_corrupt_consumed_reply_state_holds_until_restored(monkeypatch, tmp_path
 def test_first_use_reply_state_is_empty(monkeypatch, tmp_path):
     state_path = tmp_path / "fresh.json"
     monkeypatch.setattr(turdus, "_STATE_FILE", state_path)
-    assert turdus._load_state() == {"last_message_id": None, "processed_count": 0}
+    assert turdus._load_state() == _full_reply_state()
     assert not state_path.with_name(state_path.name + ".initialized").exists()
 
 
@@ -953,6 +953,110 @@ def test_malformed_reply_state_holds(monkeypatch, tmp_path, contents):
     notices = _StubNotifier()
     _run(turdus.poll_once(notices, {}))
     assert any("reply state is unreadable" in message for message in notices.sent)
+
+
+def _full_reply_state():
+    return {"last_message_id": None, "processed_count": 0,
+            "processed_ids": [], "unreadable_notice_ids": [],
+            "approval_correction_ids": [], "held_approval_notice_ids": [],
+            "held_approval_reply_ids": [], "approval_route_pending": {}}
+
+
+_STATE_SHAPE_CASES = [
+    ("structure", []), ("extra", {"unexpected": True}),
+    ("duplicate_top", None), ("duplicate_route", None),
+    ("processed_count", None), ("processed_count", "1"),
+    ("processed_count", []), ("processed_count", {}),
+    ("processed_count", True), ("processed_count", -1),
+    ("last_message_id", ""), ("last_message_id", []),
+    ("last_message_id", {}), ("last_message_id", 1),
+    ("approval_route_pending", None), ("approval_route_pending", []),
+    ("approval_route_pending", "invalid"),
+    ("approval_route_pending", {"": {"target": "o/r#7", "release": False}}),
+    ("approval_route_pending", {"m": None}),
+    ("approval_route_pending", {"m": []}),
+    ("approval_route_pending", {"m": {"target": "o/r#7"}}),
+    ("approval_route_pending", {"m": {"target": None, "release": False}}),
+    ("approval_route_pending", {"m": {"target": "", "release": False}}),
+    ("approval_route_pending", {"m": {"target": [], "release": False}}),
+    ("approval_route_pending", {"m": {"target": "o/r#7", "release": None}}),
+    ("approval_route_pending", {"m": {"target": "o/r#7", "release": 1}}),
+    ("approval_route_pending", {"m": {"target": "o/r#7", "release": []}}),
+    ("approval_route_pending", {"m": {"target": "o/r#7", "release": False,
+                                      "ignored": "x"}}),
+    ("last_poll_at", None), ("last_poll_at", "not-a-time"),
+    ("last_poll_at", "2026-11-18T12:00:00"),
+]
+for _field in ("processed_ids", "unreadable_notice_ids", "approval_correction_ids",
+               "held_approval_notice_ids", "held_approval_reply_ids"):
+    _STATE_SHAPE_CASES.extend(((_field, value) for value in
+                               (None, {}, "invalid", [None], [""], ["m", "m"])))
+    _STATE_SHAPE_CASES.append((_field, ...))
+for _field in ("processed_count", "last_message_id", "approval_route_pending"):
+    _STATE_SHAPE_CASES.append((_field, ...))
+
+
+@pytest.mark.parametrize("field,value", _STATE_SHAPE_CASES)
+def test_initialized_state_shape_matrix_holds_routing(
+        monkeypatch, tmp_path, caplog, field, value):
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(turdus, "_STATE_FILE", state_path)
+    monkeypatch.setattr(turdus, "DRY_RUN", False)
+    state = _full_reply_state()
+    if field == "structure":
+        state = value
+    elif field == "extra":
+        state.update(value)
+    elif field == "duplicate_route":
+        state["approval_route_pending"] = {"m": {"target": "o/r#7", "release": False}}
+    elif value is ...:
+        del state[field]
+    else:
+        state[field] = value
+    contents = json.dumps(state)
+    if field == "duplicate_top":
+        contents = contents[:-1] + ', "processed_ids": []}'
+    elif field == "duplicate_route":
+        contents = contents.replace('"release": false', '"release": false, "release": false')
+    state_path.write_text(contents)
+    state_path.with_name(state_path.name + ".initialized").write_text("initialized\n")
+    monkeypatch.setattr(email_channel, "read_replies_with_status",
+                        lambda *_a, **_k: pytest.fail("reader must not run"))
+    notices = _StubNotifier()
+    _run(turdus.poll_once(notices, {}))
+    assert any("reply state is unreadable" in message for message in notices.sent)
+    assert "Turdus reply state malformed:" in caplog.text
+    assert "o/r#7" not in caplog.text
+
+
+@pytest.mark.parametrize("kind", ("pr", "release"))
+def test_missing_consumed_ids_never_posts_approval(monkeypatch, tmp_path, kind):
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(turdus, "_STATE_FILE", state_path)
+    monkeypatch.setattr(turdus, "DRY_RUN", False)
+    state = _full_reply_state()
+    state["processed_ids"] = ["approval-1"]
+    del state["processed_ids"]
+    state_path.write_text(json.dumps(state))
+    state_path.with_name(state_path.name + ".initialized").write_text("initialized\n")
+    posts = []
+
+    async def post(*args):
+        posts.append(args)
+        return True
+
+    monkeypatch.setattr(turdus, "_post_email_approval", post)
+    monkeypatch.setattr(turdus, "_post_release_approval", post)
+    reply = email_channel.ApprovalReply(
+        "approval-1", "Re: Release v1.2.3 ready to approve" if kind == "release" else
+        "Re: [Ateles] PR o/r#7 is ready to merge",
+        "approve v1.2.3" if kind == "release" else "approve",
+        correlation_target="v1.2.3" if kind == "release" else "o/r#7")
+    monkeypatch.setattr(email_channel, "read_replies_with_status",
+                        lambda *_a, **_k: email_channel.ReadRepliesOutcome(
+                            "ok", [reply.body], replies=(reply,)))
+    _run(turdus.poll_once(_StubNotifier(), {}))
+    assert posts == []
 
 
 def test_unreadable_reply_state_path_holds(monkeypatch, tmp_path):

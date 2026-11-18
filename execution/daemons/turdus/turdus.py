@@ -272,8 +272,32 @@ class StateUnreadableError(Exception):
     """The consumed-reply state cannot be trusted."""
 
 
+_REPLY_ID_FIELDS = ("processed_ids", "unreadable_notice_ids",
+                    "approval_correction_ids", "held_approval_notice_ids",
+                    "held_approval_reply_ids")
+
+
+def _empty_state() -> dict:
+    return {"last_message_id": None, "processed_count": 0,
+            **{field: [] for field in _REPLY_ID_FIELDS},
+            "approval_route_pending": {}}
+
+
+def _unique_state_keys(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise StateUnreadableError("Turdus reply state malformed: duplicate_key")
+        result[key] = value
+    return result
+
+
 def _state_evidence_exists() -> bool:
-    """Distinguish first use from unreadable state or marker paths."""
+    """Distinguish first use from unreadable state or marker paths.
+
+    State lost before the first marker write is indistinguishable from first
+    use. That pre-initialization window remains an accepted limit.
+    """
     found = False
     for path in (_STATE_FILE, _state_marker_file()):
         try:
@@ -289,29 +313,44 @@ def _state_evidence_exists() -> bool:
 def _load_state() -> dict:
     """Load persisted state (last_message_id, etc.) from local state file."""
     if not _state_evidence_exists():
-        return {"last_message_id": None, "processed_count": 0}
+        return _empty_state()
     try:
-        state = json.loads(_STATE_FILE.read_text())
+        state = json.loads(_STATE_FILE.read_text(), object_pairs_hook=_unique_state_keys)
     except (ValueError, OSError) as exc:
         raise StateUnreadableError("Turdus reply state unreadable") from exc
-    id_fields = ("processed_ids", "unreadable_notice_ids",
-                 "approval_correction_ids", "held_approval_notice_ids",
-                 "held_approval_reply_ids")
-    pending_routes = state.get("approval_route_pending") if isinstance(state, dict) else None
-    if (not isinstance(state, dict) or
-            not isinstance(state.get("processed_count", 0), int) or
-            isinstance(state.get("processed_count", 0), bool) or
-            not isinstance(state.get("last_message_id"), (str, type(None))) or
-            any(not isinstance(state.get(field, []), list) or
-                any(not isinstance(mid, str) for mid in state.get(field, []))
-                for field in id_fields) or
-            (pending_routes is not None and
-             (not isinstance(pending_routes, dict) or
-              any(not isinstance(mid, str) or not isinstance(route, dict) or
-                  not isinstance(route.get("target"), str) or
-                  not isinstance(route.get("release"), bool)
-                  for mid, route in pending_routes.items())))):
-        raise StateUnreadableError("Turdus reply state malformed")
+    if not isinstance(state, dict):
+        raise StateUnreadableError("Turdus reply state malformed: structure")
+    expected = set(_empty_state())
+    if not expected <= state.keys() or state.keys() - expected - {"last_poll_at"}:
+        raise StateUnreadableError("Turdus reply state malformed: fields")
+    if type(state["processed_count"]) is not int or state["processed_count"] < 0:
+        raise StateUnreadableError("Turdus reply state malformed: processed_count")
+    last_id = state["last_message_id"]
+    if last_id is not None and (not isinstance(last_id, str) or not last_id.strip()):
+        raise StateUnreadableError("Turdus reply state malformed: last_message_id")
+    for field in _REPLY_ID_FIELDS:
+        ids = state[field]
+        if (not isinstance(ids, list) or
+                any(not isinstance(mid, str) or not mid.strip() for mid in ids) or
+                len(ids) != len(set(ids))):
+            raise StateUnreadableError(f"Turdus reply state malformed: {field}")
+    routes = state["approval_route_pending"]
+    if not isinstance(routes, dict):
+        raise StateUnreadableError("Turdus reply state malformed: approval_route_pending")
+    for mid, route in routes.items():
+        if (not isinstance(mid, str) or not mid.strip() or
+                not isinstance(route, dict) or route.keys() != {"target", "release"} or
+                not isinstance(route["target"], str) or not route["target"].strip() or
+                type(route["release"]) is not bool):
+            raise StateUnreadableError("Turdus reply state malformed: approval_route_pending")
+    if "last_poll_at" in state:
+        stamp = state["last_poll_at"]
+        try:
+            parsed = datetime.fromisoformat(stamp) if isinstance(stamp, str) else None
+        except ValueError:
+            parsed = None
+        if parsed is None or parsed.tzinfo is None:
+            raise StateUnreadableError("Turdus reply state malformed: last_poll_at")
     return state
 
 
@@ -1241,7 +1280,10 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
     try:
         if _state_evidence_exists():
             state = _load_state()
-    except StateUnreadableError:
+        else:
+            state = {**_empty_state(), **state}
+    except StateUnreadableError as exc:
+        log.error("[%s] %s", DAEMON_NAME, exc)
         if not _state_hold_notified:
             _state_hold_notified = bool(notifier.send(
                 "Turdus reply state is unreadable; approval routing is held. "
