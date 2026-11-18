@@ -769,6 +769,25 @@ class TestRenderCleanly(unittest.TestCase):
                 code, output = self._run_mode(text, *flags)
                 self.assertEqual(code, 0, output[:200])
 
+    def test_a_heading_inside_the_register_cannot_drop_later_rows(self):
+        """A `## ` heading between rows ends the section early; the check must notice the rows after it."""
+        head = "## The register of open design decisions\n\n"
+        rows = register(**{"1": "**open**", "2": "**ruled**"})
+        lines = rows.splitlines()
+        # table header + separator + row 1, then a heading, then row 2
+        broken = head + "\n".join(lines[:3]) + "\n\n## An inserted heading\n\n" + "\n".join(lines[3:]) + "\n"
+        for flags in (("--check",), ("--json",), ("--stdout",)):
+            with self.subTest(mode=flags[0]):
+                code, output = self._run_mode(broken, *flags)
+                self.assertEqual(code, 1, output[:200])
+                self.assertIn("outside the register section", output)
+
+    def test_other_sections_with_non_register_tables_are_not_flagged(self):
+        head = "## The register of open design decisions\n\n"
+        text = head + register(**{"1": "**open**"}) + "\n## Another section\n| a | b |\n|---|---|\n| 5 | plain |\n"
+        code, output = self._run_mode(text, "--check")
+        self.assertEqual(code, 0, output[:200])
+
     def test_status_spelling_is_exact(self):
         for bad in ("**Open**", "**open **", "**RULED**", "**ruled **"):
             with self.subTest(status=bad):

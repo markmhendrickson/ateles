@@ -178,6 +178,22 @@ def validate_register(text: str) -> None:
     section = register_section(text)
     if "| # | The question |" not in section:
         raise ValueError("register table header is missing")
+    # Completeness: the section must hold the WHOLE register. A level-two heading inserted
+    # among the rows ends the section early, which would drop every later row from the
+    # projection while the check still passed. Any register-shaped row (a numbered row whose
+    # last cell opens with a bold status) outside the section is therefore an error.
+    outside = text.replace(section, "", 1) if section is not text else ""
+    for line in outside.splitlines():
+        match = ROW_RE.match(line)
+        if not match:
+            continue
+        cells = [cell.strip() for cell in match.group(2).split("|")]
+        if len(cells) >= 4 and STATUS_LEAD_RE.match(cells[-1]):
+            raise ValueError(
+                f"register row {match.group(1)} lies outside the register section "
+                f"({REGISTER_HEADING!r} up to the next level-two heading); a heading "
+                "inside the register would drop later rows from the projection"
+            )
     seen: set[str] = set()
     for line in section.splitlines():
         # A line that looks like a numbered table row - with or without its leading pipe,
