@@ -296,6 +296,13 @@ def test_parse_no_event_is_empty() -> None:
     assert usage_probe.parse_rate_limit_windows('{"type":"result"}\nplain text') == []
 
 
+def test_latest_empty_provider_event_does_not_reuse_prior_windows() -> None:
+    empty = json.dumps({"type": "rate_limit_event", "rate_limit_info": {
+        "unifiedWindows": {},
+    }})
+    assert usage_probe.parse_rate_limit_windows(REAL_SHAPE + "\n" + empty) == []
+
+
 def _fake_run(stdout: str, calls: list, returncode: int = 0):
     def run(cmd, **kwargs):
         calls.append((cmd, kwargs))

@@ -42,8 +42,8 @@ malformed usage file raises one keyed diagnostic notice per source per day.
 Top callers come from the tier ledger's attribution fields
 (``model_tiering.top_callers``) over the window's span. The span is known for
 the window names the usage probe writes (``five_hour``, ``weekly``/
-``weekly_all``/``seven_day``, ``window_<N>m``, ``monthly``); for any other name
-the last seven days are used and the message says so.
+``weekly_all``/``seven_day``, ``window_<N>m``). Monthly and other names have no
+fixed length, so the last seven days are used and the message says so.
 """
 
 from __future__ import annotations
@@ -80,7 +80,6 @@ _NAMED_SPANS: dict[str, timedelta] = {
     "weekly": timedelta(days=7),
     "weekly_all": timedelta(days=7),
     "seven_day": timedelta(days=7),
-    "monthly": timedelta(days=30),
 }
 _MINUTES_NAME = re.compile(r"^window_(\d+)m$")
 
@@ -94,24 +93,7 @@ ALERT_SEND_TIMEOUT_SECONDS = held_view.ALERT_SEND_TIMEOUT_SECONDS
 _retry_after: dict[str, float] = {}
 
 
-def _canonical_window_name(name: object) -> str:
-    if not isinstance(name, str):
-        return "unavailable"
-    cleaned = name.strip().casefold()
-    if not 0 < len(cleaned) <= 64:
-        return "unavailable"
-    if cleaned in ("weekly", "seven_day"):
-        return "weekly_all"
-    if cleaned == "session":
-        return "five_hour"
-    match = _MINUTES_NAME.match(cleaned)
-    if match and len(match.group(1)) <= 6:
-        minutes = int(match.group(1))
-        if abs(minutes - 10080) <= 60:
-            return "weekly_all"
-        if abs(minutes - 300) <= 15:
-            return "five_hour"
-    return cleaned
+_canonical_window_name = held_view.canonical_window_name
 
 
 def window_span(name: str) -> tuple[timedelta, bool]:
@@ -155,7 +137,7 @@ def _percent(raw: object) -> float | None:
 def dedupe_key(provider: str, window: str, resets_at: str | None, threshold: int) -> str:
     reset = _parse_iso(resets_at)
     normalized = reset.isoformat(timespec="seconds") if reset else "no-reset"
-    return f"{DEDUPE_PREFIX}:{provider}:{_canonical_window_name(window)}:{normalized}:{threshold}"
+    return held_view.usage_key(provider, window, normalized, threshold)
 
 
 def _describe_callers(callers: list[tuple[str | None, str | None, int]]) -> str:
@@ -183,6 +165,8 @@ def build_message(
     callers: list[tuple[str | None, str | None, int]],
     span_known: bool,
     attribution_unavailable: bool = False,
+    unreadable_rows: int = 0,
+    unreadable_windows: int = 0,
     observed_at: datetime | None = None,
     reading_fresh: bool = True,
 ) -> str:
@@ -192,6 +176,12 @@ def build_message(
         "attribution unavailable (ledger could not be read)"
         if attribution_unavailable else _describe_callers(callers)
     )
+    if unreadable_rows:
+        caller_text = (
+            f"attribution unavailable ({unreadable_rows} unreadable ledger rows)"
+            if not callers else
+            f"{caller_text}; attribution incomplete ({unreadable_rows} unreadable ledger rows)"
+        )
     usage_text = (
         f"is {used_percent:g}% used" if reading_fresh else
         f"was last observed at {observed_at.isoformat(timespec='minutes') if observed_at else 'unknown time'} as {used_percent:g}% used"
@@ -201,6 +191,8 @@ def build_message(
         f"(crossed {_threshold_text(thresholds)}). Resets {reset_text}. "
         f"Top callers by dispatch count{span_note}: "
         f"{caller_text}."
+        + (f" Usage reading incomplete: {unreadable_windows} provider windows unreadable."
+           if unreadable_windows else "")
     )
 
 
@@ -280,6 +272,11 @@ def check_usage_thresholds(
             except (ValueError, OverflowError, OSError):
                 pass
         windows = harness_router.usage_windows(provider)
+        entry = harness_router._read_usage_object().get(provider, {})
+        probe = entry.get("probe") if isinstance(entry, dict) else None
+        detail = probe.get("detail") if isinstance(probe, dict) else None
+        incomplete_match = re.fullmatch(r"(\d+) unreadable provider windows", detail) if isinstance(detail, str) else None
+        unreadable_windows = int(incomplete_match.group(1)) if incomplete_match else 0
         for window in windows:
             name = _canonical_window_name(window.get("name"))
             used = _percent(window.get("used_percent"))
@@ -287,8 +284,10 @@ def check_usage_thresholds(
                 continue
             resets_raw = window.get("resets_at")
             resets_at = _parse_iso(resets_raw)
+            if resets_raw is not None and resets_at is None:
+                continue  # malformed reset is not evidence of a reset-free window
             if resets_at is not None and not current - timedelta(days=366) <= resets_at <= current + timedelta(days=366):
-                resets_at = None
+                continue
             if resets_at is not None and resets_at <= current:
                 continue  # that window has reset; its reading no longer applies
             reset_key = resets_at.isoformat(timespec="seconds") if resets_at else None
@@ -320,9 +319,11 @@ def check_usage_thresholds(
 
             def handoff(
                 *, probe=probe, keys=keys, crossed=crossed, name=name,
+                raw_name=window.get("name"),
                 resets_at=resets_at, reset_key=reset_key,
                 current_instant=current_instant, used=used, current=current,
                 retry_key=retry_key, notifier=notifier,
+                unreadable_windows=unreadable_windows,
             ) -> None:
                 # This thread owns the journal-sidecar lock until every key
                 # covered by the transport is marked. The caller's join may
@@ -333,16 +334,17 @@ def check_usage_thresholds(
                     if not held:
                         return
                     try:
-                        provider_prefix = f"{DEDUPE_PREFIX}:{provider}:"
-                        for old_key in probe.dedupe_keys_with_prefix(provider_prefix):
-                            old_name, name_separator, remainder = old_key[len(provider_prefix):].partition(":")
-                            if not name_separator or _canonical_window_name(old_name) != name:
+                        for old_key in probe.dedupe_keys_with_prefix(f"{DEDUPE_PREFIX}:"):
+                            parsed = held_view.parse_usage_key(
+                                old_key, (name, raw_name) if isinstance(raw_name, str) else (name,)
+                            )
+                            if parsed is None:
                                 continue
-                            old_reset, separator, threshold_text = remainder.rpartition(":")
-                            if not separator or not threshold_text.isdigit():
+                            old_provider, old_name, old_reset, threshold = parsed
+                            if old_provider != provider or old_name != name:
                                 continue
                             old_instant = _parse_iso(old_reset)
-                            canonical_key = dedupe_key(provider, name, reset_key, int(threshold_text))
+                            canonical_key = dedupe_key(provider, name, reset_key, threshold)
                             if old_key == canonical_key:
                                 continue
                             if old_instant is not None and current >= old_instant:
@@ -362,19 +364,27 @@ def check_usage_thresholds(
                             window_start = current - _DEFAULT_SPAN
                             span_known = False
                         try:
-                            callers = model_tiering.top_callers(
-                                since=window_start, provider=provider, limit=3
+                            caller_result = model_tiering.top_callers(
+                                since=window_start, provider=provider, limit=3,
+                                with_read_status=True,
+                            )
+                            callers, unreadable_rows = (
+                                caller_result if isinstance(caller_result, tuple)
+                                else (caller_result, 0)
                             )
                             attribution_unavailable = False
                         except Exception as exc:  # noqa: BLE001
                             log.warning("[apis] usage alert: ledger unreadable (%s)", exc)
                             callers = []
+                            unreadable_rows = 0
                             attribution_unavailable = True
                         message = build_message(
                             provider=provider, window=name, used_percent=used,
                             thresholds=pending, resets_at=resets_at, callers=callers,
                             span_known=span_known,
                             attribution_unavailable=attribution_unavailable,
+                            unreadable_rows=unreadable_rows,
+                            unreadable_windows=unreadable_windows,
                             observed_at=observed_at, reading_fresh=reading_fresh,
                         )
                         from lib.notify import Priority

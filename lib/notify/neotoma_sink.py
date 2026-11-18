@@ -809,7 +809,9 @@ _SOURCE_LABEL = {"shadow": "would store", "spool": "spooled", "stored": "stored"
 def summarize(days: int = 7, directory: Path | None = None) -> dict[str, Any]:
     d = directory or sink_dir()
     cutoff = (datetime.now() - timedelta(days=max(days, 1) - 1)).strftime("%Y%m%d")
-    out: dict[str, Any] = {"files": 0, "rows": [], "dropped": Counter(), "days": days}
+    out: dict[str, Any] = {"files": 0, "rows": [], "dropped": Counter(),
+                           "days": days, "unreadable_rows": 0,
+                           "unreadable_files": 0}
     for sp in d.glob("state-*.json"):
         daemon = sp.stem.split("-", 2)[-1]
         try:
@@ -818,19 +820,28 @@ def summarize(days: int = 7, directory: Path | None = None) -> dict[str, Any]:
                     for lvl, n in per_level.items():
                         out["dropped"][(daemon, lvl)] += int(n)
         except (OSError, ValueError, AttributeError, TypeError):
-            pass
+            out["unreadable_files"] += 1
     for prefix in ("shadow", "spool", "stored"):
         for path in sorted(d.glob(f"{prefix}-*.jsonl")):
             day = path.stem.split("-", 1)[1]
             if day < cutoff:
                 continue
             out["files"] += 1
-            for line in path.read_text(errors="replace").splitlines():
+            try:
+                lines = path.read_bytes().splitlines()
+            except OSError:
+                out["unreadable_files"] += 1
+                continue
+            for line in lines:
                 try:
-                    r = json.loads(line)
-                except ValueError:
+                    r = json.loads(line.decode("utf-8"))
+                except (ValueError, UnicodeError):
+                    out["unreadable_rows"] += 1
                     continue
-                if not isinstance(r, dict) or r.get("kind", "store") != "store":
+                if not isinstance(r, dict):
+                    out["unreadable_rows"] += 1
+                    continue
+                if r.get("kind", "store") != "store":
                     continue
                 title = r.get("title") or (r.get("entity") or {}).get("title") or "?"
                 out["rows"].append((f"{day[:4]}-{day[4:6]}-{day[6:]}", prefix, r.get("level", "?"), r.get("daemon", "?"), title))
@@ -840,13 +851,18 @@ def summarize(days: int = 7, directory: Path | None = None) -> dict[str, Any]:
 def _format_summary(s: dict[str, Any], top: int = 10) -> str:
     rows = s["rows"]
     lines = [f"notify sink records ({len(rows)} rows from {s['files']} files)"]
+    if s.get("unreadable_rows") or s.get("unreadable_files"):
+        lines.append(f"incomplete: {s.get('unreadable_rows', 0)} unreadable rows, "
+                     f"{s.get('unreadable_files', 0)} unreadable files")
     if s.get("dropped"):
         lines.append(
             f"dropped by the new-key rate cap (last {s.get('days', 7)} days): "
             + ", ".join(f"{dm} {lv} {n}" for (dm, lv), n in sorted(s["dropped"].items()))
         )
     if not rows:
-        return lines[0] + "\nnothing recorded yet"
+        lines.append("sink records unavailable" if s.get("unreadable_rows") or s.get("unreadable_files")
+                     else "nothing recorded yet")
+        return "\n".join(lines)
     sections = (
         ("per day and source", lambda r: f"{r[0]}  {_SOURCE_LABEL.get(r[1], r[1])}"),
         ("per level", lambda r: r[2]),

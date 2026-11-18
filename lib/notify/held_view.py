@@ -39,8 +39,10 @@ import shlex
 import sys
 import tempfile
 import time
+import unicodedata
+from urllib.parse import quote, unquote
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:  # POSIX only; without it locking degrades to fail-open no-ops.
@@ -63,6 +65,82 @@ BACKUP_MAX = 1000
 # Do not follow a symlink planted at a sibling file's path (0 where unsupported).
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 RECOVERED_AT = "__recovered_at__"
+USAGE_KEY_PREFIX = "provider-usage-threshold"
+_MINUTES_WINDOW = re.compile(r"^window_(\d+)m$")
+
+
+def canonical_window_name(name: object) -> str:
+    """One spelling for a recorded usage window and its receipt."""
+    if not isinstance(name, str):
+        return "unavailable"
+    cleaned = unicodedata.normalize("NFC", name).strip().casefold()
+    if not 0 < len(cleaned) <= 64:
+        return "unavailable"
+    if cleaned in ("weekly", "seven_day"):
+        return "weekly_all"
+    if cleaned == "session":
+        return "five_hour"
+    match = _MINUTES_WINDOW.fullmatch(cleaned)
+    if match and len(match.group(1)) <= 6:
+        minutes = int(match.group(1))
+        if abs(minutes - 10080) <= 60:
+            return "weekly_all"
+        if abs(minutes - 300) <= 15:
+            return "five_hour"
+    return cleaned
+
+
+def usage_key(provider: str, window: str, reset: str, threshold: int) -> str:
+    """Versioned, reversible key; colons in values are never separators."""
+    name = canonical_window_name(window)
+    if name == "unavailable":
+        raise ValueError("window name cannot be canonicalized")
+    parts = (provider, name, reset, str(threshold))
+    return f"{USAGE_KEY_PREFIX}:v2:" + ":".join(quote(part, safe="") for part in parts)
+
+
+def parse_usage_key(key: str, known_windows: tuple[str, ...] = ()) -> tuple[str, str, str, int] | None:
+    prefix = f"{USAGE_KEY_PREFIX}:"
+    if not key.startswith(prefix):
+        return None
+    body = key[len(prefix):]
+    if body.startswith("v2:"):
+        parts = body[3:].split(":")
+        if len(parts) != 4 or any(quote(unquote(part), safe="") != part for part in parts):
+            return None
+        provider, window, reset, raw_threshold = map(unquote, parts)
+        if window != canonical_window_name(window):
+            return None
+    else:
+        # Legacy keys did not escape names. Match only names known from the
+        # current snapshot, after NFC normalization, before reading the reset.
+        provider, separator, tail = body.partition(":")
+        if not separator:
+            return None
+        window_and_reset, separator, raw_threshold = tail.rpartition(":")
+        if not separator:
+            return None
+        normalized = unicodedata.normalize("NFC", window_and_reset)
+        known = {canonical_window_name(item) for item in known_windows}
+        candidates = [(item, normalized[len(item) + 1:]) for item in known
+                      if normalized.casefold().startswith(f"{item}:")]
+        if len(candidates) == 1:
+            window, reset = candidates[0]
+        else:
+            # Historical aliases (for example seven_day) may no longer be in
+            # the snapshot. The reset has a distinct ISO shape; match it from
+            # the right, then require the resulting name to be known canonically.
+            match = re.fullmatch(r"(.*):(no-reset|\d{4}-\d{2}-\d{2}T.*)",
+                                 normalized, re.IGNORECASE)
+            if match is None:
+                return None
+            window, reset = match.groups()
+            window = canonical_window_name(window)
+            if window not in known:
+                return None
+    if not provider or not window or not raw_threshold.isdecimal():
+        return None
+    return provider, window, reset, int(raw_threshold)
 # Shared with the usage-alert sender. A short margin allows its bounded join
 # and the receipt write to finish before a send is called interrupted.
 ALERT_SEND_TIMEOUT_SECONDS = 30.0
@@ -146,27 +224,83 @@ def preserve_unreadable(path: Path, raw: bytes) -> None:
         raise
 
 
-def recovered_window_is_new(key: str, recovered_at: str) -> bool:
-    """Only a provably later usage window bypasses an unknown-key quarantine."""
-    parts = key.split(":")
-    if len(parts) < 6 or parts[0] != "provider-usage-threshold":
-        return False
-    name = parts[2]
-    reset = ":".join(parts[3:-1])
+def _aware_instant(raw: object) -> datetime | None:
+    if not isinstance(raw, str):
+        return None
     try:
-        end = datetime.fromisoformat(reset.replace("Z", "+00:00"))
-        epoch = datetime.fromisoformat(recovered_at.replace("Z", "+00:00"))
-        if end.tzinfo is None or epoch.tzinfo is None:
-            return False
-        minutes = {"five_hour": 300, "session": 300, "weekly": 10080,
-                   "weekly_all": 10080, "seven_day": 10080,
-                   "monthly": 43200}.get(name)
-        if minutes is None and re.fullmatch(r"window_\d{1,6}m", name):
-            minutes = int(name[7:-1])
-        return bool(minutes and 1 <= minutes <= 525600
-                    and end - timedelta(minutes=minutes) > epoch)
+        value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except (ValueError, OverflowError):
+        return None
+    return value.astimezone(timezone.utc) if value.tzinfo else None
+
+
+def _valid_percent(raw: object) -> bool:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         return False
+    try:
+        return math.isfinite(raw) and 0 <= raw <= 100
+    except (OverflowError, ValueError):
+        return False
+
+
+def recovery_window_ends(epoch: str) -> dict[str, dict[str, str]]:
+    """Capture the reset actually recorded for each active window at recovery."""
+    path = Path(os.environ.get("APIS_HARNESS_USAGE_FILE", "").strip() or
+                Path.home() / ".config" / "ateles" / "harness-usage.json")
+    try:
+        snapshot = json.loads(read_text_nofollow(path))
+    except (OSError, ValueError, UnicodeError):
+        return {}
+    if not isinstance(snapshot, dict):
+        return {}
+    recovered = _aware_instant(epoch)
+    if recovered is None:
+        return {}
+    ends: dict[str, dict[str, str]] = {}
+    for provider, entry in snapshot.items():
+        if not isinstance(provider, str) or not isinstance(entry, dict):
+            continue
+        observed = _aware_instant(entry.get("observed_at"))
+        windows = entry.get("windows")
+        if observed is None or observed > recovered or not isinstance(windows, list):
+            continue
+        if any(not isinstance(window, dict) or
+               canonical_window_name(window.get("name")) == "unavailable" or
+               not _valid_percent(window.get("used_percent")) or
+               _aware_instant(window.get("resets_at")) is None
+               for window in windows):
+            continue  # a partial provider snapshot cannot prove a boundary
+        conflicts: set[str] = set()
+        for window in windows:
+            name = canonical_window_name(window.get("name"))
+            end = _aware_instant(window.get("resets_at"))
+            if end is not None and end > recovered:
+                normalized_end = end.isoformat()
+                previous = ends.setdefault(provider, {}).get(name)
+                if previous is not None and previous != normalized_end:
+                    conflicts.add(name)
+                ends[provider][name] = normalized_end
+        for name in conflicts:
+            ends[provider].pop(name, None)
+    return ends
+
+
+def recovered_window_is_new(key: str, recovery: object,
+                            now: datetime | None = None) -> bool:
+    """Release only after the observed old window ended and a later reset exists."""
+    if not isinstance(recovery, dict) or not isinstance(recovery.get("windows"), dict):
+        return False  # old epoch-only markers have no proof of a window end
+    parsed = parse_usage_key(key)
+    if parsed is None:
+        return False
+    provider, name, reset, _ = parsed
+    provider_windows = recovery["windows"].get(provider)
+    old_end = _aware_instant(provider_windows.get(name)) if isinstance(provider_windows, dict) else None
+    new_end = _aware_instant(reset)
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        return False
+    return bool(old_end and new_end and current >= old_end and new_end > old_end)
 
 
 def salvage_journal_entries(raw: str) -> dict[str, object]:
@@ -859,6 +993,7 @@ def _clear_unreadable_journal(main: Path) -> int:
                     journal: dict[str, object] = {}
                     additional = []
                     epoch = datetime.now(timezone.utc).isoformat()
+                    prior_marker: object = None
                     copies = (journal_file.with_name(journal_file.name + ".unreadable"),
                               journal_file.with_name(journal_file.name + ".unreadable.latest"),
                               journal_file)
@@ -870,12 +1005,16 @@ def _clear_unreadable_journal(main: Path) -> int:
                             continue
                         if not isinstance(source, dict):
                             continue
-                        prior_epoch = source.get(RECOVERED_AT)
+                        source_marker = source.get(RECOVERED_AT)
+                        prior_epoch = source_marker
+                        if isinstance(prior_epoch, dict):
+                            prior_epoch = prior_epoch.get("at")
                         if isinstance(prior_epoch, str):
                             try:
                                 prior = datetime.fromisoformat(prior_epoch.replace("Z", "+00:00"))
                                 if prior.tzinfo and prior < datetime.fromisoformat(epoch):
                                     epoch = prior_epoch
+                                    prior_marker = source_marker
                             except (ValueError, OverflowError):
                                 pass
                         for key, entry in source.items():
@@ -926,7 +1065,9 @@ def _clear_unreadable_journal(main: Path) -> int:
                             else:
                                 journal[key] = {"state": "held", "held_message": item["message"],
                                                 "handler": ""}
-                    journal[RECOVERED_AT] = epoch
+                    journal[RECOVERED_AT] = (prior_marker if isinstance(prior_marker, dict)
+                                             else {"at": epoch,
+                                                   "windows": recovery_window_ends(epoch)})
                     for path in (main, email_queue_path(main)):
                         queue = read_queue(path)
                         write_queue(path, [item for item in queue if not (

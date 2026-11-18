@@ -1175,8 +1175,8 @@ class Notifier:
                 records = held_view.read_recovery(self._digest_path)
                 row = next((row for row in records if row["key"] == key), None)
                 if row is None:
-                    parts = key.split(":")
-                    window = ":".join(parts[1:-1]) if len(parts) >= 4 else key
+                    parsed = held_view.parse_usage_key(key)
+                    window = parsed[1] if parsed else key
                     row = {"key": key, "window": window,
                            "time": self._now_local().isoformat(), "cause": cause}
                     records.append(row)
@@ -1298,10 +1298,11 @@ class Notifier:
             return True
         epoch = journal.get(held_view.RECOVERED_AT)
         if entry is None and held_view.RECOVERED_AT in journal and (
-            not isinstance(epoch, str) or not held_view.recovered_window_is_new(key, epoch)
+            not held_view.recovered_window_is_new(key, epoch, self._now_local())
         ):
-            attempt_at = epoch if isinstance(epoch, str) and not held_view.receipt_problem(
-                {"state": "delivered_unconfirmed", "attempt_at": epoch}
+            epoch_at = epoch.get("at") if isinstance(epoch, dict) else epoch
+            attempt_at = epoch_at if isinstance(epoch_at, str) and not held_view.receipt_problem(
+                {"state": "delivered_unconfirmed", "attempt_at": epoch_at}
             ) else self._now_local().isoformat()
             def quarantine(current: dict[str, Any]) -> bool:
                 if key in current:

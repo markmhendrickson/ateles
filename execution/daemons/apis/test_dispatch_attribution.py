@@ -1252,6 +1252,235 @@ def test_unreadable_ledger_is_not_described_as_zero_activity(monkeypatch, tmp_pa
     assert "no attributed dispatches in the ledger" in spy.sent[1][0]
 
 
+@pytest.mark.parametrize("kind", ["missing", "valid", "mixed", "invalid"])
+def test_partial_ledger_reports_valid_rows_and_missing_rows(
+    monkeypatch, tmp_path, ledger, kind
+) -> None:
+    valid = {"ts": datetime.now(timezone.utc).isoformat(), "event": "dispatch",
+             "provider": "codex", "tier": "top", "caller_kind": "daemon",
+             "caller": "apis"}
+    lines = ([] if kind == "missing" else
+             [json.dumps(valid)] if kind == "valid" else
+             [json.dumps(valid), "{broken"] if kind == "mixed" else ["{broken"])
+    if lines:
+        ledger.write_text("\n".join(lines) + "\n")
+    expected_bad = int(kind in ("mixed", "invalid"))
+    expected_good = int(kind in ("mixed", "valid"))
+    for report in (model_tiering.tier_counts(), model_tiering.usage_totals(),
+                   model_tiering.attribution_summary()):
+        assert report["unreadable_rows"] == expected_bad
+        assert report["attribution_available"] is (kind != "invalid")
+    summary = model_tiering.attribution_summary()
+    assert summary["dispatch_rows"] == expected_good
+    text = model_tiering.render_attribution_summary(summary)
+    assert ("totals are incomplete" in text) is (kind == "mixed")
+    assert ("attribution unavailable" in text) is (kind == "invalid")
+    if expected_bad:
+        with pytest.raises(model_tiering.LedgerPartialReadError) as error:
+            list(model_tiering.iter_ledger_rows())
+        assert error.value.unreadable_rows == expected_bad
+    else:
+        assert len(list(model_tiering.iter_ledger_rows())) == expected_good
+    callers, unreadable = model_tiering.top_callers(provider="codex", with_read_status=True)
+    assert unreadable == expected_bad
+    assert len(callers) == expected_good
+    window = _window(60)
+    _usage_file(monkeypatch, tmp_path, "codex", [window])
+    spy = _SpyNotifier()
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    message = spy.sent[0][0]
+    assert ("unreadable ledger rows" in message) is bool(expected_bad)
+    assert ("attribution unavailable" in message) is (kind == "invalid")
+    assert ("no attributed dispatches" in message) is (kind == "missing")
+
+
+@pytest.mark.parametrize("name", [
+    "quarter:part", "caf\u00e9", "cafe\u0301", "budget%used",
+    "x" * 64, "emoji\U0001f9ed", "line\nfeed",
+])
+def test_real_writer_reset_correction_keeps_one_receipt_for_escaped_name(
+    monkeypatch, tmp_path, ledger, name
+) -> None:
+    from lib.notify import held_view, neotoma_sink
+
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "held.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    monkeypatch.setattr(neotoma_sink, "migrate_key", lambda *args: True)
+    spy = _SpyNotifier()
+    first = datetime.now(timezone.utc) + timedelta(days=2)
+    corrected = first + timedelta(days=1)
+    for end in (first, corrected):
+        harness_router.record_usage("codex", [{"name": name, "used_percent": 60,
+                                                "resets_at": end.isoformat()}])
+        usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    assert len([item for item in spy.delivered if "Provider usage:" in item]) == 1
+    old = usage_alerts.dedupe_key("codex", name, first.isoformat(), 50)
+    new = usage_alerts.dedupe_key("codex", name, corrected.isoformat(), 50)
+    assert spy.inner._dedupe_journal[old]["migration_to"] == new
+    assert spy.inner._dedupe_journal[new]["state"] == "delivered"
+    assert held_view.parse_usage_key(new) == (
+        "codex", held_view.canonical_window_name(name),
+        corrected.isoformat(timespec="seconds"), 50,
+    )
+
+
+def test_legacy_colon_and_unicode_names_migrate_uncertain_receipts(
+    monkeypatch, tmp_path, ledger
+) -> None:
+    from lib.notify import held_view, neotoma_sink
+
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "held.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    monkeypatch.setattr(neotoma_sink, "migrate_key", lambda *args: True)
+    reset = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    for index, (old_name, new_name) in enumerate((
+        ("topic:part", "topic:part"), ("cafe\u0301", "caf\u00e9"),
+        ("rate%used", "rate%used"),
+    )):
+        spy = _SpyNotifier()
+        old = f"provider-usage-threshold:codex:{old_name}:{reset}:50"
+        spy.inner._mark_dedupe_sending((old,), "apis")
+        spy.inner._mark_delivery_uncertain((old,), "synthetic uncertain outcome")
+        harness_router.record_usage("codex", [{"name": new_name,
+                                                "used_percent": 60,
+                                                "resets_at": reset}])
+        usage_alerts.check_usage_thresholds("codex", notifier=spy)
+        new = usage_alerts.dedupe_key("codex", new_name, reset, 50)
+        assert not [message for message in spy.delivered
+                    if "Provider usage:" in message], index
+        assert spy.inner._dedupe_journal[old]["migration_to"] == new
+        assert spy.inner._dedupe_journal[new]["state"] == "delivered_unconfirmed"
+        assert any(row["key"] == new for row in held_view.read_recovery(spy.inner._digest_path))
+
+
+def test_usage_key_round_trips_generated_names() -> None:
+    from lib.notify import held_view
+    import random
+
+    randomizer = random.Random(7)
+    alphabet = "aA: %/\n\t\x00\U0001f9ed\u00e9e\u0301"
+    for _ in range(400):
+        name = "x" + "".join(randomizer.choice(alphabet)
+                             for _ in range(randomizer.randrange(1, 63)))
+        canonical = held_view.canonical_window_name(name)
+        if canonical == "unavailable":
+            continue
+        key = held_view.usage_key("codex", name, "2026-12-01T12:30:00+00:00", 50)
+        assert held_view.parse_usage_key(key) == (
+            "codex", canonical, "2026-12-01T12:30:00+00:00", 50,
+        )
+
+
+@pytest.mark.parametrize("name,span", [
+    ("monthly", timedelta(days=31)),
+    ("weekly_all", timedelta(days=7)),
+    ("five_hour", timedelta(hours=5)),
+    ("scope:part%\U0001f9ed", timedelta(days=28)),
+])
+@pytest.mark.parametrize("ledger_state", ["missing", "partial", "invalid"])
+@pytest.mark.parametrize("after_end", [False, True])
+def test_usage_alert_recovery_state_matrix(
+    monkeypatch, tmp_path, ledger, name, span, ledger_state, after_end
+) -> None:
+    """Recovery, key encoding and ledger completeness share one real send path."""
+    from lib.notify import held_view
+
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "held.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    epoch = datetime.now(timezone.utc)
+    old_end = epoch + span
+    harness_router.record_usage("codex", [{"name": name, "used_percent": 60,
+                                            "resets_at": old_end.isoformat()}])
+    epoch = datetime.now(timezone.utc)
+    marker = {"at": epoch.isoformat(),
+              "windows": held_view.recovery_window_ends(epoch.isoformat())}
+    canonical = held_view.canonical_window_name(name)
+    assert marker["windows"]["codex"][canonical] == old_end.isoformat()
+    spy = _SpyNotifier()
+    assert spy.inner._persist_dedupe_journal({held_view.RECOVERED_AT: marker})
+    if ledger_state != "missing":
+        rows = [] if ledger_state == "invalid" else [json.dumps({
+            "ts": (old_end + span - timedelta(hours=1) if after_end else epoch).isoformat(),
+            "event": "dispatch", "tier": "top",
+            "provider": "codex", "caller_kind": "daemon", "caller": "apis",
+        })]
+        ledger.write_text("\n".join([*rows, "{broken"]) + "\n")
+    now = old_end + timedelta(seconds=1) if after_end else epoch + timedelta(seconds=1)
+    spy.inner._now_local = lambda: now
+    new_end = old_end + span
+    harness_router.record_usage("codex", [{"name": name, "used_percent": 60,
+                                            "resets_at": new_end.isoformat()}])
+    usage_alerts.check_usage_thresholds("codex", notifier=spy, now=now)
+    delivered = [message for message in spy.delivered if "Provider usage:" in message]
+    assert len(delivered) == int(after_end)
+    key = usage_alerts.dedupe_key("codex", name, new_end.isoformat(), 50)
+    assert held_view.parse_usage_key(key)[1] == canonical
+    assert spy.inner._dedupe_journal[key]["state"] == (
+        "delivered" if after_end else "delivered_unconfirmed"
+    )
+    if after_end:
+        assert ("unreadable ledger rows" in delivered[0]) is (ledger_state != "missing")
+        assert ("attribution unavailable" in delivered[0]) is (ledger_state == "invalid")
+
+
+def test_partial_usage_snapshot_is_reported_without_a_second_usage_key(
+    monkeypatch, tmp_path, ledger
+) -> None:
+    from lib.notify import neotoma_sink
+
+    monkeypatch.setattr(neotoma_sink, "migrate_key", lambda *args: True)
+    spy = _SpyNotifier()
+    first = datetime.now(timezone.utc) + timedelta(days=3)
+    corrected = first + timedelta(days=1)
+    _usage_file(monkeypatch, tmp_path, "codex", [{
+        "name": "scope:part", "used_percent": 60, "resets_at": first.isoformat(),
+    }])
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    assert len([item for item in spy.delivered if "Provider usage:" in item]) == 1
+    _usage_file(monkeypatch, tmp_path, "codex", [
+        {"name": "scope:part", "used_percent": 60, "resets_at": corrected.isoformat()},
+        {"name": "other", "used_percent": 60, "resets_at": "broken"},
+    ])
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    assert len([item for item in spy.delivered if "Provider usage:" in item]) == 1
+    assert any("Usage snapshot unreadable" in item for item in spy.delivered)
+    _usage_file(monkeypatch, tmp_path, "codex", [{
+        "name": "scope:part", "used_percent": 60, "resets_at": corrected.isoformat(),
+    }])
+    usage_alerts.check_usage_thresholds("codex", notifier=spy)
+    assert len([item for item in spy.delivered if "Provider usage:" in item]) == 1
+
+
+def test_provider_report_with_bad_sibling_labels_delivered_alert_incomplete(
+    monkeypatch, tmp_path, ledger
+) -> None:
+    import usage_probe
+
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
+    reset = datetime.now(timezone.utc) + timedelta(days=3)
+    output = json.dumps({"type": "rate_limit_event", "rate_limit_info": {
+        "unifiedWindows": {
+            "five_hour": {"utilization": "bad", "resetsAt": reset.timestamp()},
+            "seven_day": {"utilization": 0.6, "resetsAt": reset.timestamp()},
+        },
+    }})
+    result = usage_probe.probe_claude(
+        "/bin/claude", env={}, run=lambda *args, **kwargs:
+        subprocess.CompletedProcess(args, 0, output, ""),
+    )
+    assert result.ok and result.reading_failure == "1 unreadable provider windows"
+    harness_router.record_usage("claude", result.windows, provider_probe=True,
+                                probe_detail=result.reading_failure)
+    spy = _SpyNotifier()
+    usage_alerts.check_usage_thresholds("claude", notifier=spy)
+    messages = [item for item in spy.delivered if "Provider usage:" in item]
+    assert len(messages) == 1
+    assert "Usage reading incomplete: 1 provider windows unreadable" in messages[0]
+
+
 def test_a_window_with_no_reset_time_alerts_again_after_it_rolls_over(
     monkeypatch, tmp_path, ledger
 ) -> None:
@@ -1263,7 +1492,7 @@ def test_a_window_with_no_reset_time_alerts_again_after_it_rolls_over(
                     [{"name": "monthly", "used_percent": percent}])
         usage_alerts.check_usage_thresholds("cursor", notifier=spy)
     assert [k for _, _, k in spy.sent] == [
-        "provider-usage-threshold:cursor:monthly:no-reset:50",
+        usage_alerts.dedupe_key("cursor", "monthly", None, 50),
     ] * 2
 
 
@@ -1626,7 +1855,7 @@ def test_window_span_names() -> None:
     ("weekly", "2200-01-01T00:00:00Z"),
     (42, None),
 ])
-def test_malformed_window_metadata_never_skips_an_accepted_eighty_percent_alert(
+def test_malformed_window_metadata_reports_unreadable_snapshot_without_usage_key(
     monkeypatch, tmp_path, ledger, name, reset,
 ) -> None:
     import harness_router
@@ -1640,7 +1869,8 @@ def test_malformed_window_metadata_never_skips_an_accepted_eighty_percent_alert(
     spy = _SpyNotifier()
     usage_alerts.check_usage_thresholds("cursor", notifier=spy)
     assert len(spy.delivered) == 1
-    assert "80% used" in spy.delivered[0]
+    assert "Usage snapshot unreadable" in spy.delivered[0]
+    assert "Provider usage:" not in spy.delivered[0]
 
 
 @pytest.mark.parametrize("percent", [float("nan"), float("inf"), float("-inf"), -1, 101])

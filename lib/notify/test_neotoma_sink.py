@@ -36,6 +36,27 @@ def _read(prefix: str) -> list[dict]:
     return rows
 
 
+@pytest.mark.parametrize("kind", ["missing", "valid", "mixed", "invalid"])
+def test_sink_summary_reports_unreadable_rows_without_losing_valid_rows(tmp_path, kind):
+    from datetime import datetime
+
+    day = datetime.now().strftime("%Y%m%d")
+    path = tmp_path / f"shadow-{day}.jsonl"
+    valid = {"kind": "store", "title": "synthetic", "level": "warn",
+             "daemon": "apis"}
+    lines = ([] if kind == "missing" else
+             [json.dumps(valid)] if kind == "valid" else
+             [json.dumps(valid), "{broken"] if kind == "mixed" else ["{broken"])
+    if lines:
+        path.write_text("\n".join(lines) + "\n")
+    summary = sink.summarize(directory=tmp_path)
+    assert len(summary["rows"]) == int(kind in ("valid", "mixed"))
+    assert summary["unreadable_rows"] == int(kind in ("mixed", "invalid"))
+    text = sink._format_summary(summary)
+    assert ("incomplete:" in text) is (kind in ("mixed", "invalid"))
+    assert ("sink records unavailable" in text) is (kind == "invalid")
+
+
 class FakeHttp:
     """Fake transport; replays the old result for a repeated idempotency key."""
 

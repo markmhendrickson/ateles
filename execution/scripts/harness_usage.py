@@ -317,10 +317,18 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0
     if args.command == "tiers":
-        print(json.dumps(
-            model_tiering.tier_counts(
+        try:
+            report = model_tiering.tier_counts(
                 since_hours=args.since_hours, with_reasons=args.reasons
-            ),
+            )
+        except model_tiering.LedgerReadError as exc:
+            print(json.dumps({"error": {"kind": "ledger_unreadable",
+                                        "path": str(exc.path), "cause": exc.cause}},
+                             indent=2, sort_keys=True))
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(
+            report,
             indent=2,
             sort_keys=True,
         ))

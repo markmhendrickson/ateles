@@ -929,11 +929,85 @@ def test_journal_recovery_never_reopens_delivered_or_uncertain_keys(tmp_path, mo
                   dedupe_key=uncertain, retryable=True)
     future = (datetime.now(timezone.utc) + timedelta(days=8)).isoformat(timespec="seconds")
     later = f"provider-usage-threshold:cursor:weekly:{future}:50"
+    assert not n.send("later", Priority.WARN, handler="apis", dedupe_key=later,
+                      retryable=True)
+    assert held_view.main(["--clear-unconfirmed", later]) == 0
     assert n.send("later", Priority.WARN, handler="apis", dedupe_key=later,
                   retryable=True)
     assert not n.send("later", Priority.WARN, handler="apis", dedupe_key=later,
                       retryable=True)
     assert len([message for message in sent if "later" in message]) == 1
+
+
+@pytest.mark.parametrize("name,span", [
+    ("monthly", timedelta(days=28)),
+    ("monthly", timedelta(days=30)),
+    ("monthly", timedelta(days=31)),
+    ("weekly_all", timedelta(days=7)),
+    ("five_hour", timedelta(hours=5)),
+])
+@pytest.mark.parametrize("after_end", [False, True])
+def test_recovered_journal_releases_only_after_observed_window_end(
+    tmp_path, monkeypatch, name, span, after_end
+):
+    from . import held_view
+
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    usage_path = tmp_path / "usage.json"
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(usage_path))
+    epoch = datetime.now(timezone.utc)
+    old_end = epoch + span
+    usage_path.write_text(json.dumps({"cursor": {
+        "observed_at": epoch.isoformat(),
+        "windows": [{"name": name, "used_percent": 60,
+                     "resets_at": old_end.isoformat()}],
+    }}))
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    n._dedupe_path.write_bytes(b"{synthetic unreadable journal")
+    old = held_view.usage_key("cursor", name, old_end.isoformat(), 50)
+    assert not n.send("old", Priority.WARN, handler="apis", dedupe_key=old,
+                      retryable=True)
+    assert held_view.main(["--clear-unreadable-journal"]) == 0
+    marker = n._dedupe_journal[held_view.RECOVERED_AT]
+    assert marker["windows"]["cursor"][name] == old_end.isoformat()
+    n._now_local = lambda: old_end + (timedelta(seconds=1) if after_end
+                                       else -timedelta(seconds=1))
+    next_end = old_end + span
+    new = held_view.usage_key("cursor", name, next_end.isoformat(), 50)
+    accepted = n.send("new", Priority.WARN, handler="apis", dedupe_key=new,
+                      retryable=True)
+    assert accepted is after_end
+    assert len([item for item in sent if item == "⚠ [apis] new"]) == int(after_end)
+    if not after_end:
+        assert n._dedupe_journal[new]["state"] == "delivered_unconfirmed"
+        assert any(row["key"] == new for row in held_view.read_recovery(n._digest_path))
+    else:
+        assert not n.send("new", Priority.WARN, handler="apis", dedupe_key=new,
+                          retryable=True)
+
+
+def test_recovered_journal_without_window_end_needs_explicit_clear(tmp_path, monkeypatch):
+    from . import held_view
+
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "missing-usage.json"))
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    n._dedupe_path.write_bytes(b"{synthetic unreadable journal")
+    key = held_view.usage_key("cursor", "monthly", "2027-01-01T00:00:00+00:00", 50)
+    assert not n.send("uncertain", Priority.WARN, handler="apis", dedupe_key=key,
+                      retryable=True)
+    assert held_view.main(["--clear-unreadable-journal"]) == 0
+    assert n._dedupe_journal[held_view.RECOVERED_AT]["windows"] == {}
+    assert not n.send("unknown", Priority.WARN, handler="apis", dedupe_key=key,
+                      retryable=True)
+    assert held_view.main(["--clear-unconfirmed", key]) == 0
+    assert n.send("cleared", Priority.WARN, handler="apis", dedupe_key=key,
+                  retryable=True)
+    assert sent.count("⚠ [apis] cleared") == 1
 
 
 def test_unreadable_journal_preserves_first_and_latest_distinct_versions(tmp_path):

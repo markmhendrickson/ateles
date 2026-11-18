@@ -1041,8 +1041,8 @@ def tier_counts(
     """Dispatch counts per tier (and per action class) from the ledger.
 
     ``{"total": n, "by_tier": {...}, "by_class": {"class": {"tier": n}}}``.
-    Malformed lines are skipped, not fatal: one torn write must not blind the
-    report. A missing ledger is an empty report, never an error.
+    Malformed lines are counted in ``unreadable_rows`` while valid rows remain
+    visible. A missing ledger is an empty report, never an error.
 
     ``with_reasons`` adds ``"by_reason": {reason: {"total": n, "by_class":
     {class: n}}}``: how many escalated dispatches each signal appears on, so a
@@ -1058,20 +1058,18 @@ def tier_counts(
     by_class: dict[str, dict[str, int]] = {}
     by_reason: dict[str, dict] = {}
     total = 0
-    path = tier_ledger_path()
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        lines = []
-    for line in lines:
-        try:
-            row = json.loads(line)
-            tier = str(row["tier"])
-            when = datetime.fromisoformat(str(row["ts"]))
-        except (ValueError, KeyError, TypeError):
-            continue
+    parsed_rows, unreadable_rows = _read_ledger_rows()
+    for row in parsed_rows:
         if row.get("event") == USAGE_EVENT:
             continue  # a spend row for a dispatch already counted by its start row
+        tier = row.get("tier")
+        if not isinstance(tier, str) or not tier:
+            unreadable_rows += 1
+            continue
+        when = _row_time(row)
+        if when is None:
+            unreadable_rows += 1
+            continue
         if cutoff is not None and when < cutoff:
             continue
         total += 1
@@ -1087,7 +1085,9 @@ def tier_counts(
                 entry = by_reason.setdefault(name, {"total": 0, "by_class": {}})
                 entry["total"] += 1
                 entry["by_class"][klass] = entry["by_class"].get(klass, 0) + 1
-    report = {"total": total, "by_tier": by_tier, "by_class": by_class}
+    report = {"total": total, "by_tier": by_tier, "by_class": by_class,
+              "unreadable_rows": unreadable_rows,
+              "attribution_available": bool(parsed_rows) or unreadable_rows == 0}
     if with_reasons:
         report["by_reason"] = by_reason
     return report
@@ -1100,6 +1100,14 @@ class LedgerReadError(Exception):
         self.path = path
         self.cause = f"{type(cause).__name__}: {cause}"
         super().__init__(f"cannot read tier ledger {path}: {self.cause}")
+
+
+class LedgerPartialReadError(Exception):
+    """A row iterator cannot silently represent a partially readable ledger."""
+
+    def __init__(self, unreadable_rows: int) -> None:
+        self.unreadable_rows = unreadable_rows
+        super().__init__(f"tier ledger has {unreadable_rows} unreadable rows")
 
 
 USAGE_GROUPS: tuple[str, ...] = (
@@ -1120,9 +1128,9 @@ def usage_totals(
     reported it, and a measured zero stays ``0``. ``reported_rows`` is the
     number of dispatches that field's sum covers, so a total built from only
     some of a group's ``dispatches`` is visibly partial, field by field.
-    Malformed lines and start rows are skipped; a missing ledger is an empty
-    report. A ledger that exists but cannot be read raises ``LedgerReadError``
-    rather than reporting as empty.
+    Malformed lines count in ``unreadable_rows``; start rows do not contribute
+    usage. A missing ledger is empty. An unreadable file raises
+    ``LedgerReadError`` rather than reporting as empty.
     """
     if group_by not in USAGE_GROUPS:
         raise ValueError(f"group_by must be one of {', '.join(USAGE_GROUPS)}")
@@ -1131,24 +1139,17 @@ def usage_totals(
         cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
     groups: dict[str, dict] = {}
     rows = 0
-    path = tier_ledger_path()
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        lines = []  # no ledger yet is "no spend", not a failure
-    except (OSError, UnicodeError) as exc:
-        raise LedgerReadError(path, exc) from exc
+    parsed_rows, unreadable_rows = _read_ledger_rows()
 
     def _number(value: object) -> bool:
         return isinstance(value, (int, float)) and not isinstance(value, bool)
 
-    for line in lines:
-        try:
-            row = json.loads(line)
-            when = datetime.fromisoformat(str(row["ts"]))
-        except (ValueError, KeyError, TypeError):
+    for row in parsed_rows:
+        when = _row_time(row)
+        if when is None:
+            unreadable_rows += 1
             continue
-        if not isinstance(row, dict) or row.get("event") != USAGE_EVENT:
+        if row.get("event") != USAGE_EVENT:
             continue
         if cutoff is not None and when < cutoff:
             continue
@@ -1172,7 +1173,9 @@ def usage_totals(
         if _number(cost):
             entry["cost"]["total_usd"] = (entry["cost"]["total_usd"] or 0.0) + float(cost)
             entry["cost"]["reported_rows"] += 1
-    return {"group_by": group_by, "rows": rows, "groups": groups}
+    return {"group_by": group_by, "rows": rows, "groups": groups,
+            "unreadable_rows": unreadable_rows,
+            "attribution_available": bool(parsed_rows) or unreadable_rows == 0}
 
 
 SUMMARY_KEY_FIELDS: tuple[str, ...] = (
@@ -1207,23 +1210,35 @@ def _row_time(row: dict) -> datetime | None:
     return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
 
 
-def iter_ledger_rows(*, since: datetime | None = None):
-    """Yield parsed ledger rows (dicts with a parseable ``ts``), oldest first.
-
-    Malformed lines are skipped. Rows written before attribution existed simply
-    lack those keys; readers use ``row.get`` and see ``None``. A missing ledger
-    yields nothing; an unreadable one raises ``LedgerReadError``.
-    """
+def _read_ledger_rows() -> tuple[list[dict], int]:
+    rows: list[dict] = []
+    unreadable = 0
     for line in _ledger_lines():
         try:
             row = json.loads(line)
         except ValueError:
+            unreadable += 1
             continue
-        if not isinstance(row, dict):
+        if (not isinstance(row, dict) or _row_time(row) is None
+                or row.get("event") not in (None, "", DISPATCH_EVENT, USAGE_EVENT)):
+            unreadable += 1
             continue
+        rows.append(row)
+    return rows, unreadable
+
+
+def iter_ledger_rows(*, since: datetime | None = None):
+    """Yield parsed ledger rows (dicts with a parseable ``ts``), oldest first.
+
+    A partial ledger raises instead of appearing complete. Rows written before attribution existed simply
+    lack those keys; readers use ``row.get`` and see ``None``. A missing ledger
+    yields nothing; an unreadable one raises ``LedgerReadError``.
+    """
+    rows, unreadable_rows = _read_ledger_rows()
+    if unreadable_rows:
+        raise LedgerPartialReadError(unreadable_rows)
+    for row in rows:
         when = _row_time(row)
-        if when is None:
-            continue
         if since is not None and when < since:
             continue
         yield row
@@ -1275,7 +1290,7 @@ def attribution_summary(*, since_hours: float | None = None) -> dict:
     def _number(value: object) -> bool:
         return isinstance(value, (int, float)) and not isinstance(value, bool)
 
-    rows = list(iter_ledger_rows())
+    rows, unreadable_rows = _read_ledger_rows()
     # Every start row's keys, whether or not it falls in the window, so a usage
     # row in the window still joins a dispatch that started before it.
     start_keys: dict[str, tuple] = {}
@@ -1352,14 +1367,19 @@ def attribution_summary(*, since_hours: float | None = None) -> dict:
         "dispatch_rows": dispatch_rows,
         "usage_rows": usage_rows,
         "groups": ordered,
+        "unreadable_rows": unreadable_rows,
+        "attribution_available": bool(rows) or unreadable_rows == 0,
     }
 
 
 def top_callers(*, since: datetime | None = None, provider: str | None = None,
-                limit: int = 3) -> list[tuple[str | None, str | None, int]]:
+                limit: int = 3, with_read_status: bool = False):
     """``[(caller_kind, caller, dispatches)]``: the busiest callers by start rows."""
     counts: dict[tuple[str | None, str | None], int] = {}
-    for row in iter_ledger_rows(since=since):
+    rows, unreadable_rows = _read_ledger_rows()
+    for row in rows:
+        if since is not None and _row_time(row) < since:
+            continue
         if (row.get("event") or DISPATCH_EVENT) != DISPATCH_EVENT:
             continue
         if provider is not None and str(row.get("provider") or "") != provider:
@@ -1367,7 +1387,12 @@ def top_callers(*, since: datetime | None = None, provider: str | None = None,
         key = (_clean(row.get("caller_kind")), _clean(row.get("caller")))
         counts[key] = counts.get(key, 0) + 1
     ranked = sorted(counts.items(), key=lambda kv: (-kv[1], str(kv[0])))
-    return [(kind, name, n) for (kind, name), n in ranked[:limit]]
+    callers = [(kind, name, n) for (kind, name), n in ranked[:limit]]
+    if with_read_status:
+        return callers, unreadable_rows
+    if unreadable_rows:
+        raise LedgerPartialReadError(unreadable_rows)
+    return callers
 
 
 def render_attribution_summary(report: dict) -> str:
@@ -1389,6 +1414,10 @@ def render_attribution_summary(report: dict) -> str:
         + (f", last {window:g}h" if window is not None else ", all rows")
         + f": {report['dispatch_rows']} dispatches, {report['usage_rows']} usage rows",
     ]
+    if report.get("unreadable_rows"):
+        lines.append(f"{report['unreadable_rows']} ledger rows unreadable; totals are incomplete"
+                     if report.get("attribution_available") else
+                     f"attribution unavailable: {report['unreadable_rows']} ledger rows unreadable")
     header = ("group", "provider", "model", "model_is", "caller_kind", "caller",
               "task", "pr", "dispatches", "input_tokens", "output_tokens",
               "total_tokens")

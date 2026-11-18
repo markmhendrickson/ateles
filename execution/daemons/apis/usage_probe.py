@@ -89,14 +89,18 @@ class ProbeResult:
     reading_failure: str = ""
 
 
-def parse_rate_limit_windows(stdout: str) -> list[dict[str, object]]:
+def parse_rate_limit_windows(
+    stdout: str, *, with_status: bool = False
+) -> list[dict[str, object]] | tuple[list[dict[str, object]], int]:
     """Windows from the LAST well-formed ``rate_limit_event`` in stream-json.
 
-    Returns ``[]`` when no event carries a usable window.  Every window is
+    Returns ``[]`` when no event carries a usable window. With status, returns
+    that window list and the unreadable-entry count in the latest event. Every window is
     validated here (finite utilization, integer reset) so a malformed report
     can never reach the snapshot; a fraction above 1 is capped at 100%.
     """
     windows: list[dict[str, object]] = []
+    unreadable = 0
     for line in stdout.splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -116,18 +120,23 @@ def parse_rate_limit_windows(stdout: str) -> list[dict[str, object]]:
             key = info.get("rateLimitType")
             raw = {key: info} if isinstance(key, str) else {}
         parsed: list[dict[str, object]] = []
+        malformed = 0
         for key, window in raw.items():
             if not isinstance(key, str) or not key.strip() or not isinstance(window, dict):
+                malformed += 1
                 continue
             utilization, resets = window.get("utilization"), window.get("resetsAt")
             if isinstance(utilization, bool) or isinstance(resets, bool):
+                malformed += 1
                 continue
             try:
                 fraction = float(utilization)  # type: ignore[arg-type]
                 reset_wall = float(resets)  # type: ignore[arg-type]
             except (TypeError, ValueError):
+                malformed += 1
                 continue
             if not math.isfinite(fraction) or fraction < 0 or not math.isfinite(reset_wall):
+                malformed += 1
                 continue
             parsed.append(
                 {
@@ -136,9 +145,9 @@ def parse_rate_limit_windows(stdout: str) -> list[dict[str, object]]:
                     "resets_at": harness_router._iso_from_wall(reset_wall),
                 }
             )
-        if parsed:
-            windows = parsed  # later events supersede earlier ones
-    return windows
+        windows = parsed  # the latest event supersedes earlier reports, even when empty
+        unreadable = malformed
+    return (windows, unreadable) if with_status else windows
 
 
 _TOKEN_LIKE = re.compile(r"[A-Za-z0-9_\-\.]{32,}")
@@ -440,20 +449,24 @@ def probe_claude(
             f"probe did not run: {type(exc).__name__}: {str(exc)[:120]}",
             source="claude_rate_limit_event",
         )
-    windows = parse_rate_limit_windows(proc.stdout or "")
+    windows, unreadable = parse_rate_limit_windows(proc.stdout or "", with_status=True)
     if not windows:
         return ProbeResult(
             False,
             f"probe exit {proc.returncode} returned no rate_limit_event windows; "
+            f"{unreadable} unreadable provider windows; "
             f"CLI said: {failure_excerpt(proc.stdout or '', proc.stderr or '')}",
             source="claude_rate_limit_event",
         )
     return ProbeResult(
         True,
-        "provider usage report succeeded",
+        (f"provider usage report incomplete: {unreadable} unreadable windows"
+         if unreadable else "provider usage report succeeded"),
         tuple(windows),
         status="available",
         source="claude_rate_limit_event",
+        reading_failure=(f"{unreadable} unreadable provider windows"
+                         if unreadable else ""),
     )
 
 
@@ -794,6 +807,7 @@ def _refresh_provider(
                 probe_source=(
                     "provider_usage_report" if provider == "claude" else result.source
                 ),
+                probe_detail=result.reading_failure or None,
             )
             log.info(
                 f"[apis] {provider} usage refreshed: "

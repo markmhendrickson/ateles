@@ -89,6 +89,30 @@ def test_tiers_command_on_a_missing_ledger_is_an_empty_report(capsys, monkeypatc
     assert json.loads(capsys.readouterr().out)["total"] == 0
 
 
+@pytest.mark.parametrize("kind", ["invalid", "mixed"])
+def test_spend_and_tiers_cli_report_partial_ledger(capsys, monkeypatch, tmp_path, kind) -> None:
+    from datetime import datetime, timezone
+    import model_tiering
+
+    path = tmp_path / "ledger.jsonl"
+    monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(path))
+    good = {"ts": datetime.now(timezone.utc).isoformat(), "event": "usage",
+            "tier": "top", "provider": "codex", "total_tokens": 12}
+    lines = ["{broken"] if kind == "invalid" else [json.dumps(good), "{broken"]
+    path.write_text("\n".join(lines) + "\n")
+    for command in ("spend", "tiers"):
+        assert harness_usage.main([command]) == 0
+        report = json.loads(capsys.readouterr().out)
+        assert report["unreadable_rows"] == 1
+        assert report["attribution_available"] is (kind == "mixed")
+        if command == "spend":
+            assert report["rows"] == int(kind == "mixed")
+    assert model_tiering.main(["--summary", "--since-hours", "0"]) == 0
+    text = capsys.readouterr().out
+    assert ("attribution unavailable" in text) is (kind == "invalid")
+    assert ("totals are incomplete" in text) is (kind == "mixed")
+
+
 def test_show_surfaces_a_spent_session_window(capsys) -> None:
     """Weekly headroom reads healthy while the 5-hour window is spent."""
     until = time.time() + 2 * 3600

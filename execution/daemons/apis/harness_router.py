@@ -88,6 +88,7 @@ from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from lib.notify.held_view import canonical_window_name
 
 log = logging.getLogger(__name__)
 
@@ -182,14 +183,14 @@ def _usage_entry_problem(entry: object) -> bool:
         or ("windows" in entry and (
             not isinstance(entry["windows"], list)
             or any(
-                not isinstance(window, dict) or _percent(window.get("used_percent")) is None
+                _window_problem(window) is not None
                 for window in entry["windows"]
             )
         ))
         or ("model_cooling" in entry and not isinstance(entry["model_cooling"], dict))
         or any(field in entry and not isinstance(entry[field], dict)
                for field in ("probe", "last_probe_failure", "cooling"))
-        or ("observed_at" in entry and not isinstance(entry["observed_at"], str))
+        or ("observed_at" in entry and _wall_from_iso(entry["observed_at"]) is None)
         or ("exhausted_until" in entry and entry["exhausted_until"] is not None
             and not isinstance(entry["exhausted_until"], str))
     )
@@ -488,6 +489,8 @@ def _window_problem(window: object) -> str | None:
         return "window has no name"
     if len(name) > 64:
         return "window name exceeds 64 characters"
+    if canonical_window_name(name) == "unavailable":
+        return "window name cannot be canonicalized"
     if name.startswith("window_") and name.endswith("m"):
         minutes = name[7:-1]
         if minutes.isdigit() and (len(minutes) > 6 or not 1 <= int(minutes) <= 525600):
@@ -769,6 +772,7 @@ def record_usage(
     observed_at: float | None = None,
     provider_probe: bool = False,
     probe_source: str = "provider_usage_report",
+    probe_detail: str | None = None,
 ) -> None:
     """Record a live plan-usage observation for one provider.
 
@@ -807,7 +811,7 @@ def record_usage(
             "status": "available",
             "observed_at": _iso_from_wall(at),
             "source": probe_source,
-            "detail": None,
+            "detail": probe_detail,
         }
     _write_usage_entry(
         normalized,
