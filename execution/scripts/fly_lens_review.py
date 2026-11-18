@@ -356,14 +356,25 @@ def extract_verdict(stdout: str) -> str | None:
 # was posted publicly once, so both are recognised. Everything from the first such line on (and a
 # directly preceding horizontal rule) is private: never posted, kept in a 0600 file.
 PRIVATE_LINE_RE = re.compile(
-    r"^\s*(?:[`*_]*PRIVATE-NOTE:[`*_]*|[`*_]*Private to the requesting session)", re.IGNORECASE)
+    r"^(?:private-note\W*:|private to the requesting session)", re.IGNORECASE)
+# Markdown that can sit before the marker on its line: quote and list markers, headings,
+# numbering, table pipes, code ticks and emphasis. All of it is dropped before matching, and
+# emphasis or ticks BETWEEN the words and the colon are dropped too, so `> - **PRIVATE-NOTE**:`
+# and `## Private to the requesting session` open a private section just like a bare marker.
+_MARKUP_PREFIX_RE = re.compile(r"^[\s>#*_`\-+\d.()\[\]|]+")
+
+
+def _private_line(line: str) -> bool:
+    text = _MARKUP_PREFIX_RE.sub("", line)
+    text = text.replace("*", "").replace("_", "").replace("`", "")
+    return bool(PRIVATE_LINE_RE.match(text.strip()))
 
 
 def split_private(body: str) -> tuple[str, str]:
     """(public body, private text). The private text is "" when the reply has no private section."""
     lines = body.splitlines()
     for i, line in enumerate(lines):
-        if PRIVATE_LINE_RE.match(line):
+        if _private_line(line):
             cut = i
             j = i - 1
             while j >= 0 and not lines[j].strip():

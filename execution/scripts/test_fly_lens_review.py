@@ -82,6 +82,16 @@ def test_verdict_file_shape_and_summary(tmp_path):
     "`PRIVATE-NOTE:` the details",
     "---\n*Private to the requesting session (do not post):* the details of an observation",
     "\n\n---\n\n**Private to the requesting session**: the details",
+    "> PRIVATE-NOTE: the details",
+    "- PRIVATE-NOTE: the details",
+    "1. PRIVATE-NOTE: the details",
+    "## PRIVATE-NOTE: the details",
+    "**PRIVATE-NOTE**: the details",
+    "> *Private to the requesting session ...* the details",
+    "- **Private to the requesting session** the details",
+    "| PRIVATE-NOTE: the details |",
+    "  `PRIVATE-NOTE`: the details",
+    "private-note: the details",
 ])
 def test_a_private_section_is_never_in_the_posted_verdict(tmp_path, private):
     reply = GOOD + "\nOne out-of-scope hardening observation was recorded privately.\n\n" + private + "\n"
@@ -101,6 +111,19 @@ def test_a_private_marker_above_the_verdict_fails_closed_and_posts_nothing(tmp_p
     rc, posts = run(tmp_path, Script(ok_env(reply), ok_env(reply)), "--post")
     assert posts == [] and not (tmp_path / "pm.verdict.md").exists()
     assert rc != 0
+
+
+@pytest.mark.parametrize("line", [
+    "The private note handling is correct.",
+    "Private data is never logged.",
+    "A PRIVATE-NOTE marker is described in the brief.",
+    "See the private-note section of the docs.",
+])
+def test_ordinary_review_text_that_mentions_privacy_is_not_a_private_section(tmp_path, line):
+    reply = GOOD + "\n" + line + "\n"
+    run(tmp_path, Script(ok_env(reply)))
+    assert line in (tmp_path / "pm.verdict.md").read_text()
+    assert not (tmp_path / "pm.private.txt").exists()
 
 
 def test_a_reply_without_a_private_section_is_posted_whole(tmp_path):
