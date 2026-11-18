@@ -83,10 +83,11 @@ def http(monkeypatch):
     return install
 
 
-def _writer(tmp_path: Path, policy: "ns.SignedRetryPolicy | None" = None):
+def _writer(tmp_path: Path, policy: "ns.SignedRetryPolicy | None" = None,
+            mode: ns.SigningMode = ns.SigningMode.ON):
     keys = tmp_path / "keys"
     _write_jwk(keys, "anthus")
-    w = ns.NeotomaWriter("anthus", mode=ns.SigningMode.ON, base_url=BASE, bearer="tok",
+    w = ns.NeotomaWriter("anthus", mode=mode, base_url=BASE, bearer="tok",
                          keys_dir=keys, retry_policy=policy)
     slept: list[float] = []
     w._sleep = slept.append
@@ -181,6 +182,20 @@ def test_auth_required_once_then_ok_succeeds(tmp_path, http):
     w, _ = _writer(tmp_path)
     assert w.post("store", _store_body()).status == 200
     assert len(rec.requests) == 2
+
+
+def test_shadow_auth_required_retry_then_bearer_fallback_preserves_keyed_body(tmp_path, http):
+    rec = http(_auth_required(), _auth_required())
+    w, slept = _writer(tmp_path, mode=ns.SigningMode.SHADOW)
+    result = w.post("store", _store_body())
+    assert result.signed is False
+    assert len(rec.requests) == 3
+    assert [("signature" in r.headers, "authorization" in r.headers) for r in rec.requests] == [
+        (True, False), (True, False), (False, True),
+    ]
+    assert rec.requests[0].content == rec.requests[1].content == rec.requests[2].content
+    assert json.loads(rec.requests[2].content)["idempotency_key"] == "idem-1"
+    assert len(slept) == 1
 
 
 def test_write_without_idempotency_key_is_never_retried(tmp_path, http):

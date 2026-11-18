@@ -1377,7 +1377,7 @@ class NeotomaWriter:
                 "Authorization": f"Bearer {self._bearer}",
                 "Content-Type": "application/json",
             },
-            content=json.dumps(body).encode("utf-8"),
+            content=json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8"),
             signed=False,
             governance=False,
             fallback_allowed=False,
