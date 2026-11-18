@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 r"""
-hub_reconcile.py — add hub cards and check rendered-page reachability.
+hub_reconcile.py — add hub cards and check stored page links.
 
 A hub is a `rendered_page` whose whole value is being the canonical index of a
-page set. This script deliberately does not interpret the hub's arbitrary HTML.
-The hub owner places one explicit marker where a card sequence ends:
+page set. `add` does not interpret the hub's arbitrary HTML. The hub owner
+places one explicit marker where a card sequence ends:
 
     <!-- hub-cards:materials -->
 
@@ -28,8 +28,9 @@ link as a guest before sharing.
 
     hub_reconcile.py check --hub ent_… [--exempt ent_… ...]
 
-`check` lists rendered pages and follows hub cards and their page links up to
-two clicks from the hub. It prints only entity IDs and counts, never titles.
+`check` verifies stored hub markup against explicit rules, not browser
+rendering. It follows qualifying hub cards and their page links up to two
+clicks from the hub. It prints only entity IDs and counts, never titles.
 
 Exit codes: 0 ok; 1 findings; 2 inconclusive enumeration or reachability;
 3 tool error (bad input, missing credentials, HTTP failure, refused write).
@@ -63,6 +64,7 @@ EXIT_OK, EXIT_FINDINGS, EXIT_INCONCLUSIVE, EXIT_ERROR = 0, 1, 2, 3
 
 ENTITY_ID_RE = re.compile(r"ent_[0-9a-f]{24}")
 RENDERED_PAGE_PATH_RE = re.compile(r"/entities/(ent_[0-9a-f]{24})/html/?")
+PAGE_TOKEN_RE = re.compile(r"[A-Za-z0-9_.-]+")
 PROFILE_RE = re.compile(r"[A-Za-z0-9_-]+")
 BADGE_CLASS_RE = re.compile(r"[a-z0-9-]+")
 MARKER_NAME_RE = re.compile(r"[a-z0-9-]{1,64}")
@@ -222,9 +224,60 @@ def _decode_probe(value: str) -> str | None:
     return None
 
 
-# A link counts only when it is unambiguously a live link in a canonical form.
-# Anything ambiguous is NOT counted, so the page is reported as an orphan.
-# A false orphan is safe (a person looks and adds a card); a false OK is not.
+def _page_href(
+    base_url: str,
+    *,
+    entity_id: str | None = None,
+    token: str | None = None,
+    href: str | None = None,
+) -> str | None:
+    """Build or recognize one stored page link using the same grammar."""
+    parsed = urllib.parse.urlsplit(base_url)
+    path_prefix = parsed.path.rstrip("/")
+    if href is None:
+        if entity_id is None or not ENTITY_ID_RE.fullmatch(entity_id):
+            raise ValueError("invalid page ID")
+        if token is None or not PAGE_TOKEN_RE.fullmatch(token):
+            raise ValueError("invalid page token")
+        return (
+            f"{base_url}/entities/{entity_id}/html?"
+            + "access_token"
+            + "="
+            + urllib.parse.quote(token, safe="")
+        )
+
+    authorities = {parsed.netloc}
+    default_port = 443 if parsed.scheme == "https" else 80
+    if parsed.port in (None, default_port):
+        authorities.add(f"{parsed.hostname}:{default_port}")
+        authorities.add(parsed.hostname)
+    origins = {""} | {
+        origin
+        for authority in authorities
+        for origin in (f"{parsed.scheme}://{authority}", f"//{authority}")
+    }
+    origin_pattern = "|".join(
+        re.escape(origin) for origin in sorted(origins, reverse=True)
+    )
+    pattern = re.compile(
+        rf"(?:{origin_pattern}){re.escape(path_prefix)}/entities/"
+        rf"({ENTITY_ID_RE.pattern})/html/?"
+        rf"(?:\?access_token={PAGE_TOKEN_RE.pattern})?"
+    )
+    match = pattern.fullmatch(href)
+    return match.group(1) if match else None
+
+
+# check verifies STORED hub markup, not browser rendering. OK means every
+# non-exempt listed rendered_page is linked by a qualifying hub card or one
+# qualifying link from a carded page. The anchor must have exactly one href,
+# no duplicate attribute name, and match _page_href's shared URL grammar. It
+# and every open ancestor must lack style, download, hidden, inert, and
+# aria-hidden. It must not be inside template, noscript, script, style, iframe,
+# object, svg, or math; self-closing template counts as open. Any <base>
+# element makes the result INCONCLUSIVE. All other excluded links leave orphans.
+# False orphans are accepted; a false OK is a defect. The parser does not
+# percent-decode or recursively decode entities; HTMLParser decodes once.
 class _PageLinks(HTMLParser):
     _VOID_ELEMENTS = {
         "area",
@@ -255,46 +308,30 @@ class _PageLinks(HTMLParser):
 
     def __init__(self, base_url: str):
         super().__init__(convert_charrefs=True)
-        parsed = urllib.parse.urlsplit(base_url)
-        authorities = {parsed.netloc}
-        default_port = 443 if parsed.scheme == "https" else 80
-        if parsed.port in (None, default_port):
-            authorities.add(f"{parsed.hostname}:{default_port}")
-            authorities.add(parsed.hostname)
-        origins = {""} | {
-            origin
-            for authority in authorities
-            for origin in (f"{parsed.scheme}://{authority}", f"//{authority}")
-        }
-        origin_pattern = "|".join(
-            re.escape(origin) for origin in sorted(origins, reverse=True)
-        )
-        self.href_pattern = re.compile(
-            rf"(?:{origin_pattern})/entities/({ENTITY_ID_RE.pattern})/html/?"
-            r"(?:\?access_token=[A-Za-z0-9-]+)?"
-        )
+        self.base_url = base_url
         self.links: set[str] = set()
         self.cards: set[str] = set()
         self.open_elements: list[tuple[str, bool]] = []
+        self.has_base = False
 
     def handle_starttag(self, tag, attrs):
+        if tag == "base":
+            self.has_base = True
         attributes = dict(attrs)
-        inert = (
-            tag in self._INERT_ELEMENTS
-            or "hidden" in attributes
-            or "inert" in attributes
-            or attributes.get("aria-hidden") == "true"
+        inert = tag in self._INERT_ELEMENTS or any(
+            name in attributes
+            for name in ("style", "download", "hidden", "inert", "aria-hidden")
         )
         if (
             tag == "a"
             and not inert
             and not any(ancestor_inert for _, ancestor_inert in self.open_elements)
+            and len(attributes) == len(attrs)
         ):
             hrefs = [value for name, value in attrs if name == "href"]
             if len(hrefs) == 1 and isinstance(hrefs[0], str):
-                match = self.href_pattern.fullmatch(hrefs[0])
-                if match:
-                    entity_id = match.group(1)
+                entity_id = _page_href(self.base_url, href=hrefs[0])
+                if entity_id:
                     self.links.add(entity_id)
                     classes = attributes.get("class") or ""
                     if "card" in re.split(r"[ \t\n\f\r]+", classes):
@@ -396,7 +433,10 @@ def cmd_check(args, base_url, token) -> int:
             fail("hub is not a readable rendered_page; refusing")
         if not isinstance(hub.get("html_body"), str):
             raise ValueError("unreadable page")
-        carded = _page_links(hub["html_body"], base_url).cards & pages
+        hub_links = _page_links(hub["html_body"], base_url)
+        if hub_links.has_base:
+            raise ValueError("base element in hub")
+        carded = hub_links.cards & pages
         reachable = {args.hub} | carded
         for entity_id in sorted(carded):
             snapshot = _fetch_snapshot(base_url, token, entity_id)
@@ -406,7 +446,10 @@ def cmd_check(args, base_url, token) -> int:
                 snapshot.get("html_body"), str
             ):
                 raise ValueError("unreadable page")
-            reachable.update(_page_links(snapshot["html_body"], base_url).links & pages)
+            page_links = _page_links(snapshot["html_body"], base_url)
+            if page_links.has_base:
+                raise ValueError("base element in carded page")
+            reachable.update(page_links.links & pages)
     except (
         urllib.error.URLError,
         json.JSONDecodeError,
@@ -486,6 +529,8 @@ def cmd_add(args, base_url, token) -> int:
     if not args.page_token:
         fail("PAGE_GUEST_TOKEN must be non-empty")
     _check_token("PAGE_GUEST_TOKEN", args.page_token)
+    if not PAGE_TOKEN_RE.fullmatch(args.page_token):
+        fail("PAGE_GUEST_TOKEN must match [A-Za-z0-9_.-]+")
 
     badges = []
     if args.badge_text:
@@ -522,8 +567,7 @@ def cmd_add(args, base_url, token) -> int:
             f"(found {marker_count}); add it by hand"
         )
 
-    quoted = urllib.parse.quote(args.page_token, safe="")
-    href = f"{base_url}/entities/{args.page}/html?access_token={quoted}"
+    href = _page_href(base_url, entity_id=args.page, token=args.page_token)
     probe = _decode_probe(before_body)
     if probe is None:
         fail("hub body has unresolvable encoding; refusing")
@@ -616,7 +660,25 @@ def _run() -> int:
         action="store_true",
         help="actually write to the live hub (default is a dry run)",
     )
-    check = sub.add_parser("check", help="report pages unreachable from hub cards")
+    check = sub.add_parser(
+        "check",
+        help="verify stored hub markup against explicit anchor rules",
+        description=(
+            "Verify stored hub markup, not browser rendering. OK means each "
+            "non-exempt listed rendered_page has a qualifying hub card or a "
+            "qualifying link from a carded page. An anchor needs exactly one "
+            "href, no duplicate attribute names, and a same-origin "
+            "/entities/<id>/html URL under the configured base path. The "
+            "optional access_token uses only letters, digits, _, ., and -. "
+            "It and its open ancestors must have no style, download, "
+            "hidden, inert, or aria-hidden attribute, and it cannot be inside "
+            "template, noscript, script, style, iframe, object, svg, or math. "
+            "Self-closing template stays open. Any base element makes the "
+            "result INCONCLUSIVE; other excluded links leave orphans. HTML "
+            "entities decode once; percent escapes are not decoded. False "
+            "orphans are accepted, but false OK is a defect."
+        ),
+    )
     check.add_argument("--hub", default=argparse.SUPPRESS)
     check.add_argument("--exempt", nargs="+", default=[], metavar="ENTITY_ID")
 

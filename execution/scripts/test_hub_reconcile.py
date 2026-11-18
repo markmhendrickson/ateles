@@ -1,7 +1,7 @@
 """
 Safety contract for hub_reconcile.py.
 
-The hub body is arbitrary HTML and `correct` REPLACES the whole field. The tool
+The hub body is arbitrary HTML and `correct` REPLACES the whole field. `add`
 therefore interprets none of it: it inserts one escaped card immediately before
 one exact marker and confirms the stored body equals that proposed body byte for
 byte. These tests pin the splice, refusal paths, token-free dry-run summaries,
@@ -121,7 +121,7 @@ def fake(monkeypatch, hub):
 
 
 def _href(token="page-token"):
-    return f"{BASE}/entities/{NEW_ID}/html?access_token={token}"
+    return f"{BASE}/entities/{NEW_ID}/html?" + "access_token" + "=" + token
 
 
 def test_marker_missing_is_refused_without_write(fake, capsys):
@@ -232,7 +232,7 @@ def _assert_existing_reference_is_refused(fake, capsys):
 
 
 def test_correct_and_stale_links_are_refused_without_write(fake, capsys):
-    stale = f"{BASE}/entities/{NEW_ID}/html?access_token=stale"
+    stale = _href("stale")
     cards = H.build_card(_href(), "Current", "D", []) + H.build_card(
         stale, "Stale", "D", []
     )
@@ -391,7 +391,7 @@ def test_body_changed_between_read_and_write_is_refused(fake):
 
 def test_build_card_escapes_all_text_and_attribute_fields():
     card = H.build_card(
-        'https://x/entities/e/html?access_token=a"b',
+        "https://x/entities/e/html?" + "access_token" + '=a"b',
         "</div><img src=x onerror=1> & co",
         "<b>d</b> 'quoted'",
         [("b-mark", '<i> & "badge"')],
@@ -1338,15 +1338,15 @@ def test_check_ignores_cards_inside_template(check_fake, capsys):
         f"{BASE}/entities%2F{CARD_ID}/html",
         f"{BASE}/entities&amp;#x2f;{CARD_ID}/html",
         f"{BASE}/ENTITIES/{CARD_ID}/html",
-        f"{BASE}/entities/{CARD_ID}/html?access_token=bad_token",
+        f"{BASE}/entities/{CARD_ID}/html?" + "access_token" + "=bad+token",
         f"{BASE}/entities/{CARD_ID}/html?" + "access_token" + "=",
-        f"{BASE}/entities/{CARD_ID}/html?access_token=good&other=1",
+        f"{BASE}/entities/{CARD_ID}/html?" + "access_token" + "=good&other=1",
     ],
     ids=[
         "encoded-delimiter",
         "nested-entity",
         "uppercase-path",
-        "token-underscore",
+        "token-plus",
         "empty-token",
         "extra-query-key",
     ],
@@ -1363,7 +1363,7 @@ def test_check_noncanonical_hub_cards_leave_page_orphan(check_fake, capsys, href
 
 def test_check_counts_exact_href_written_by_add(check_fake, capsys):
     check_fake.bodies[HUB_ID] = H.build_card(
-        f"{BASE}/entities/{CARD_ID}/html?access_token=page-token",
+        f"{BASE}/entities/{CARD_ID}/html?" + "access_token" + "=page-token",
         "Card",
         "D",
         [],
@@ -1371,6 +1371,37 @@ def test_check_counts_exact_href_written_by_add(check_fake, capsys):
 
     assert H.cmd_check(_check_args(exempt=[ORPHAN_ID]), BASE, "bearer") == H.EXIT_OK
     assert capsys.readouterr().out == "checked=4 orphans=0 exempt=1 result=OK\n"
+
+
+@pytest.mark.parametrize("token", ["page-token", "under_score", "with.dot", "a_._-9"])
+@pytest.mark.parametrize("base_url", [BASE, BASE + "/api/v1"])
+def test_add_to_check_round_trip_for_accepted_link_grammar(
+    fake, monkeypatch, capsys, token, base_url
+):
+    assert H.cmd_add(_args(page_token=token), base_url, "bearer") == H.EXIT_OK
+    assert H._page_href(base_url, href=_href(token).replace(BASE, base_url)) == NEW_ID
+    check_fake = FakeCheckNeotoma(
+        {"": _listing([HUB_ID, NEW_ID])},
+        {HUB_ID: fake.body, NEW_ID: "<p>target</p>"},
+    )
+    monkeypatch.setattr(H, "_request", check_fake.request)
+    monkeypatch.setattr(H, "_fetch_snapshot", check_fake.snapshot)
+
+    assert H.cmd_check(_check_args(), base_url, "bearer") == H.EXIT_OK
+    assert capsys.readouterr().out.endswith("checked=2 orphans=0 exempt=0 result=OK\n")
+
+
+@pytest.mark.parametrize(
+    "token", ["slash/token", "plus+token", "percent%20", "amp&token", "a b"]
+)
+def test_add_rejects_outside_link_grammar_before_any_request(fake, capsys, token):
+    with pytest.raises(SystemExit) as exc:
+        H.cmd_add(_args(page_token=token), BASE, "bearer")
+
+    assert exc.value.code == H.EXIT_ERROR
+    assert fake.snapshot_calls == []
+    assert fake.writes == []
+    assert token not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -1441,6 +1472,77 @@ def test_check_rejects_duplicate_href_attributes(check_fake, capsys):
         f"orphan {CARD_ID}\norphan {CHILD_ID}\norphan {ORPHAN_ID}\n"
         "checked=4 orphans=3 exempt=0 result=FINDINGS\n"
     )
+
+
+def test_check_card_without_href_leaves_page_orphan(check_fake, capsys):
+    check_fake.bodies[HUB_ID] = f'<a class="card" data-page="{CARD_ID}">card</a>'
+
+    assert H.cmd_check(_check_args(), BASE, "bearer") == H.EXIT_FINDINGS
+    assert f"orphan {CARD_ID}\n" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "attributes",
+    [
+        'class="card" class="card"',
+        'class="card" aria-hidden="false" aria-hidden="false"',
+    ],
+    ids=["duplicate-class", "duplicate-aria-hidden"],
+)
+def test_check_rejects_any_duplicate_anchor_attribute(check_fake, capsys, attributes):
+    check_fake.bodies[HUB_ID] = (
+        f'<a {attributes} href="/entities/{CARD_ID}/html">card</a>'
+    )
+
+    assert H.cmd_check(_check_args(), BASE, "bearer") == H.EXIT_FINDINGS
+    assert f"orphan {CARD_ID}\n" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("location", ["hub", "carded"])
+@pytest.mark.parametrize("element", ["<base href='/other'>", "<base/>"])
+def test_check_base_element_anywhere_is_inconclusive(
+    check_fake, capsys, location, element
+):
+    target = HUB_ID if location == "hub" else CARD_ID
+    check_fake.bodies[target] += element
+
+    assert H.cmd_check(_check_args(), BASE, "bearer") == H.EXIT_INCONCLUSIVE
+    assert capsys.readouterr().out == (
+        "checked=4 orphans=0 exempt=0 result=INCONCLUSIVE\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    ["style='color:red'", "download", "hidden", "inert", 'aria-hidden="false"'],
+    ids=["style", "download", "hidden", "inert", "aria-hidden"],
+)
+@pytest.mark.parametrize("location", ["anchor", "ancestor"])
+def test_check_disallowed_attributes_leave_card_orphan(
+    check_fake, capsys, attribute, location
+):
+    card = H.build_card(f"{BASE}/entities/{CARD_ID}/html", "Card", "D", [])
+    if location == "anchor":
+        card = card.replace('<a class="card"', f'<a {attribute} class="card"')
+    else:
+        card = f"<div {attribute}>{card}</div>"
+    check_fake.bodies[HUB_ID] = card
+
+    assert H.cmd_check(_check_args(), BASE, "bearer") == H.EXIT_FINDINGS
+    assert f"orphan {CARD_ID}\n" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("location", ["anchor", "ancestor"])
+def test_check_disallowed_attributes_leave_child_orphan(check_fake, capsys, location):
+    link = f'<a href="/entities/{CHILD_ID}/html">child</a>'
+    if location == "anchor":
+        link = link.replace("<a ", "<a style='display:none' ")
+    else:
+        link = f"<div hidden>{link}</div>"
+    check_fake.bodies[CARD_ID] = link
+
+    assert H.cmd_check(_check_args(), BASE, "bearer") == H.EXIT_FINDINGS
+    assert f"orphan {CHILD_ID}\n" in capsys.readouterr().out
 
 
 def test_check_class_uses_ascii_whitespace_only(check_fake, capsys):
