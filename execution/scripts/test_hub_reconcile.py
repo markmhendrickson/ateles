@@ -1601,13 +1601,16 @@ def test_check_counts_exact_href_written_by_add(check_fake, capsys):
     ("base_url", "accepted"),
     [
         (BASE, True),
-        (BASE + "/api/v1", True),
-        (BASE + "/api/v1/", True),
         (BASE + "/", True),
-        (BASE + "/p", True),
+        (BASE + "/api/v1", False),
+        (BASE + "/api/v1/", False),
+        (BASE + "/p", False),
         (BASE + ":443", True),
-        ("http://[::1]:3080/p", True),
-        ("http://127.0.0.1:3080/p/", True),
+        ("https://example-neotoma.fly.dev:8443", True),
+        ("http://localhost", True),
+        ("http://127.0.0.1:8080", True),
+        ("http://[::1]:3080/p", False),
+        ("http://127.0.0.1:3080/p/", False),
         (BASE + "//x", False),
         (BASE + "/a//b", False),
         (BASE + "/a/../b", False),
@@ -1657,19 +1660,10 @@ def test_add_to_check_round_trip_for_accepted_link_grammar(
     [
         BASE,
         BASE + "/",
-        BASE + "/p",
-        BASE + "/p/",
         BASE + ":443",
-        BASE + "//x",
-        BASE + "/a//b",
-        BASE + "/a/../b",
-        BASE + "/a/./b",
-        BASE + "/a/%2e%2e/b",
-        BASE + "/a/%2F/b",
-        BASE + "/a/%5c/b",
-        BASE + "/a\\b",
-        BASE + "/a//",
-        "http://[::1]:3080/p",
+        BASE + ":8443",
+        "http://localhost",
+        "http://127.0.0.1:8080",
     ],
 )
 def test_check_foreign_scheme_relative_card_is_orphan_for_every_base(
@@ -1682,6 +1676,84 @@ def test_check_foreign_scheme_relative_card_is_orphan_for_every_base(
 
     assert H.cmd_check(_check_args(), base_url, "bearer") == H.EXIT_FINDINGS
     assert f"orphan {CARD_ID}\n" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        BASE + "/p",
+        BASE + "/p/",
+        BASE + "//x",
+        BASE + "/a//b",
+        BASE + "/%00",
+        BASE + "/%0A",
+        BASE + "/%7F",
+        BASE + "/%C3%A9",
+        BASE + "/%2e%2e",
+        BASE + "/a\\b",
+        "https://exa%mple-neotoma.fly.dev",
+        "https://exämple-neotoma.fly.dev",
+        BASE + "\n",
+        "https://[::1]",
+        "https://[::1]:8443",
+        "https://[2001:db8::1]",
+        "https://[2001:db8::1]:8443",
+        "http://[::1]:8080",
+        BASE + "?x",
+        BASE + "#x",
+        "https://user@example-neotoma.fly.dev",
+        "http://example-neotoma.fly.dev",
+        "https://EXAMPLE-neotoma.fly.dev",
+    ],
+    ids=[
+        "path",
+        "path-trailing-slash",
+        "double-leading-slash",
+        "double-interior-slash",
+        "encoded-nul",
+        "encoded-lf",
+        "encoded-del",
+        "encoded-non-ascii",
+        "encoded-dot-dot",
+        "backslash",
+        "percent-host",
+        "non-ascii-host",
+        "control",
+        "ipv6-loopback",
+        "ipv6-loopback-port",
+        "ipv6-other",
+        "ipv6-other-port",
+        "ipv6-http-loopback-port",
+        "query",
+        "fragment",
+        "userinfo",
+        "nonlocal-http",
+        "uppercase-host",
+    ],
+)
+def test_add_and_check_refuse_invalid_base_before_request(
+    fake, monkeypatch, capsys, base_url
+):
+    with pytest.raises(SystemExit) as exc:
+        H.cmd_add(_args(), base_url, "bearer")
+
+    assert exc.value.code == H.EXIT_ERROR
+    assert fake.writes == []
+    assert fake.snapshot_calls == []
+    assert capsys.readouterr().err == H.BASE_URL_INPUT_ERROR + "\n"
+
+    check_fake = FakeCheckNeotoma({}, {})
+    monkeypatch.setattr(H, "_request", check_fake.request)
+    monkeypatch.setattr(H, "_fetch_snapshot", check_fake.snapshot)
+    with pytest.raises(SystemExit) as exc:
+        H.cmd_check(_check_args(), base_url, "bearer")
+
+    assert exc.value.code == H.EXIT_ERROR
+    assert check_fake.requests == []
+    assert check_fake.snapshots == []
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == H.BASE_URL_INPUT_ERROR + "\n"
 
 
 @pytest.mark.parametrize(

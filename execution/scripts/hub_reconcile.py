@@ -68,7 +68,8 @@ PAGE_TOKEN_RE = re.compile(r"[A-Za-z0-9_.-]+")
 PROFILE_RE = re.compile(r"[A-Za-z0-9_-]+")
 BADGE_CLASS_RE = re.compile(r"[a-z0-9-]+")
 MARKER_NAME_RE = re.compile(r"[a-z0-9-]{1,64}")
-LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+LOOPBACK_HOSTS = {"localhost", "127.0.0.1"}
+BASE_ORIGIN_RE = re.compile(r"(https?)://([a-z0-9.-]+)(?::[0-9]+)?/?")
 MAX_LIST_PAGES = 100
 BASE_URL_INPUT_ERROR = (
     "NEOTOMA_BASE_URL must not contain credentials, a query, "
@@ -132,31 +133,15 @@ def _check_token(variable_name: str, token: str) -> str:
 def _check_base_url(base_url: str) -> str:
     if _contains_non_printable_ascii(base_url):
         fail(BASE_URL_INPUT_ERROR)
+    match = BASE_ORIGIN_RE.fullmatch(base_url)
+    if not match:
+        fail(BASE_URL_INPUT_ERROR)
     try:
-        parsed = urllib.parse.urlparse(base_url)
-        has_userinfo = parsed.username is not None or parsed.password is not None
-        host = parsed.hostname or ""
+        urllib.parse.urlsplit(base_url).port
     except ValueError:
         fail(BASE_URL_INPUT_ERROR)
-    if has_userinfo or "?" in base_url or "#" in base_url:
-        fail(BASE_URL_INPUT_ERROR)
-    if not host:
-        fail("base URL has no host")
-    if parsed.scheme != "https" and not (
-        parsed.scheme == "http" and host in LOOPBACK_HOSTS
-    ):
-        fail(
-            "base URL must be https (http is allowed only for localhost, 127.0.0.1, ::1)"
-        )
-    path = parsed.path
-    if path and (
-        not path.startswith("/")
-        or path.startswith("//")
-        or "//" in path
-        or "\\" in path
-        or any(segment in {".", ".."} for segment in path.split("/"))
-        or re.search(r"%2[ef]|%5c", path, re.IGNORECASE)
-    ):
+    host = match.group(2)
+    if match.group(1) == "http" and host not in LOOPBACK_HOSTS:
         fail(BASE_URL_INPUT_ERROR)
     normalized = base_url.rstrip("/")
     # The link builder and the stored-markup verifier must agree before add
@@ -165,16 +150,6 @@ def _check_base_url(base_url: str) -> str:
     try:
         probe_href = _page_href(normalized, entity_id=probe_id, token="probe")
         if _page_href(normalized, href=probe_href) != probe_id:
-            fail(BASE_URL_INPUT_ERROR)
-        resolved = urllib.parse.urlsplit(
-            urllib.parse.urljoin(normalized + "/", probe_href)
-        )
-        base = urllib.parse.urlsplit(normalized)
-        if (resolved.scheme, resolved.hostname, resolved.port) != (
-            base.scheme,
-            base.hostname,
-            base.port,
-        ) or not resolved.path.startswith(base.path.rstrip("/") + "/"):
             fail(BASE_URL_INPUT_ERROR)
     except ValueError:
         fail(BASE_URL_INPUT_ERROR)
@@ -282,7 +257,6 @@ def _page_href(
 ) -> str | None:
     """Build or recognize one stored page link using the same grammar."""
     parsed = urllib.parse.urlsplit(base_url)
-    path_prefix = parsed.path.rstrip("/")
     if href is None:
         if entity_id is None or not ENTITY_ID_RE.fullmatch(entity_id):
             raise ValueError("invalid page ID")
@@ -303,16 +277,12 @@ def _page_href(
     if parsed.port in (None, default_port):
         authorities.add(f"{parsed.hostname}:{default_port}")
         authorities.add(parsed.hostname)
-    origins = {""} | {
-        origin
-        for authority in authorities
-        for origin in (f"{parsed.scheme}://{authority}", f"//{authority}")
-    }
+    origins = {""} | {f"{parsed.scheme}://{authority}" for authority in authorities}
     origin_pattern = "|".join(
         re.escape(origin) for origin in sorted(origins, reverse=True)
     )
     pattern = re.compile(
-        rf"(?:{origin_pattern}){re.escape(path_prefix)}/entities/"
+        rf"(?:{origin_pattern})/entities/"
         rf"({ENTITY_ID_RE.pattern})/html/?"
         rf"(?:\?access_token={PAGE_TOKEN_RE.pattern})?"
     )
@@ -545,6 +515,7 @@ def _list_rendered_pages(base_url: str, token: str) -> tuple[set[str], bool]:
 
 def cmd_check(args, base_url, token) -> int:
     """Report pages unreachable from hub cards within two clicks."""
+    base_url = _check_base_url(base_url)
     if not ENTITY_ID_RE.fullmatch(args.hub):
         fail("--hub must look like ent_ followed by 24 hex characters")
     if any(not ENTITY_ID_RE.fullmatch(entity_id) for entity_id in args.exempt):
@@ -801,7 +772,9 @@ def _run() -> int:
             "non-exempt listed rendered_page has a qualifying hub card or a "
             "qualifying link from a carded page. An anchor needs exactly one "
             "href, no duplicate attribute names, and a same-origin "
-            "/entities/<id>/html URL under the configured base path. The "
+            "/entities/<id>/html URL at the configured base URL origin. "
+            "The base URL must be a bare origin: https, or http only for "
+            "localhost and 127.0.0.1; no path prefix or IPv6 host. The "
             "optional access_token uses only letters, digits, _, ., and -. "
             "It and its open ancestors must have no style, download, "
             "hidden, inert, or aria-hidden attribute, and it cannot be inside "
