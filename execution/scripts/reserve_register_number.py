@@ -15,10 +15,12 @@ import re
 import subprocess
 import sys
 import uuid
+from collections import Counter
 
 KINDS = {"decision": "docs/foundation/conformance.md", "revision": "docs/foundation/revisions.md"}
 REF_ROOT = "refs/reservations"
 MAX_ATTEMPTS = 20
+MAX_RANGE = 200
 
 
 def git(*args: str) -> str:
@@ -35,7 +37,15 @@ def numbers(kind: str, content: str) -> list[int]:
         if header not in content:
             raise ValueError("decision register table is missing")
         content = content.split(header, 1)[1]
-    found = [int(match.group(1)) for match in re.finditer(r"^\|\s*(\d+)\s*\|", content, re.M)]
+    found: list[int] = []
+    for match in re.finditer(r"^\|\s*(\d+)(?:\s*[\u2013-]\s*(\d+))?\s*\|", content, re.M):
+        low = int(match.group(1))
+        high = int(match.group(2)) if match.group(2) else low
+        # The register carries range rows ("1-12"); every number in a range is
+        # occupied, and a new range must reserve every number it covers.
+        if high < low or high - low > MAX_RANGE:
+            raise ValueError(f"{kind} row range {low}-{high} is not a valid range")
+        found.extend(range(low, high + 1))
     if not found:
         raise ValueError(f"{kind} rows are missing")
     return found
@@ -122,12 +132,21 @@ def check(kind: str, remote: str, base: str) -> list[str]:
     from pathlib import Path
     after = numbers(kind, Path(source).read_text(encoding="utf-8"))
     errors: list[str] = []
-    if kind == "decision" and len(after) != len(set(after)):
-        errors.append("duplicate decision row number in the register")
-    added = set(after) - set(before)
+    counts_before = Counter(before)
+    counts_after = Counter(after)
     held = reservations(kind, remote)
-    for number in sorted(added):
-        if number not in held:
+    for number in sorted(counts_after):
+        gained = counts_after[number] - counts_before.get(number, 0)
+        if gained <= 0:
+            continue
+        if kind == "decision" and counts_after[number] > 1:
+            errors.append(f"duplicate decision row number {number} in the register")
+        elif number in counts_before:
+            # Numbers are never reused (revisions.md): a pass that amends several
+            # documents adds its rows under ONE number in the same change, which
+            # is a number NEW to origin/main, never one already there.
+            errors.append(f"{kind} {number} already exists on {base}; a number is never reused")
+        elif number not in held:
             errors.append(
                 f"{kind} {number} has no reservation; run "
                 f"python3 execution/scripts/reserve_register_number.py reserve {kind} "

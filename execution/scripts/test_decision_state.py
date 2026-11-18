@@ -694,6 +694,33 @@ class TestRenderCleanly(unittest.TestCase):
             self.assertEqual(ds.main(["--check", "--source", "worktree"]), 1)
         self.assertIn("malformed register row", error.getvalue())
 
+    def _check_error(self, text: str) -> tuple[int, str]:
+        import contextlib
+        import io
+
+        self.register.write_text(text)
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            code = ds.main(["--check", "--source", "worktree"])
+        return code, error.getvalue()
+
+    def test_unknown_status_fails_the_clean_render(self):
+        for bad in ("**rulled**", "**ruled out**", "**ruled-ish**", "**done**", "**OPEN!**"):
+            with self.subTest(status=bad):
+                code, err = self._check_error(register(**{"1": "**open**", "2": bad}))
+                self.assertEqual(code, 1)
+                self.assertIn("unknown status", err)
+
+    def test_every_declared_status_passes_the_clean_render(self):
+        rows = {str(i + 1): f"**{status}**" for i, status in enumerate(ds.STATUS_ORDER)}
+        code, err = self._check_error(register(**rows))
+        self.assertEqual((code, err), (0, ""))
+
+    def test_a_prefixed_status_is_never_read_as_ruled(self):
+        parsed = ds.parse_rows(register(**{"1": "**ruled out**", "2": "**ruled**"}))
+        self.assertEqual(parsed["2"]["status"], "ruled")
+        self.assertNotEqual(parsed["1"]["status"], "ruled")
+
     def test_duplicate_row_fails(self):
         import contextlib
         import io

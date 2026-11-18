@@ -138,10 +138,10 @@ def parse_rows(text: str) -> dict[str, dict[str, str]]:
         lead = STATUS_LEAD_RE.match(cells[-1])
         if not lead:
             continue
-        status_lead = lead.group(1).strip().lower()
-        status = next(
-            (k for k in STATUS_ORDER if status_lead.startswith(k)), status_lead
-        )
+        # Exact match only. A prefix match let "**ruled-ish**" or "**ruled out**"
+        # project as ruled; an unknown value stays as written (and the clean-render
+        # check rejects it) rather than being read as the nearest status.
+        status = lead.group(1).strip().lower()
         rows[m.group(1)] = {
             "question": cells[0],
             "argued_in": cells[1],
@@ -175,6 +175,12 @@ def validate_register(text: str) -> None:
         cells = [cell.strip() for cell in match.group(2).split("|")]
         if len(cells) < 4 or not all(cells[:3]) or not STATUS_LEAD_RE.match(cells[-1]):
             raise ValueError(f"malformed register row {number}")
+        status = STATUS_LEAD_RE.match(cells[-1]).group(1).strip().lower()
+        if status not in STATUS_ORDER:
+            raise ValueError(
+                f"unknown status {status!r} in register row {number}; "
+                f"allowed: {', '.join(STATUS_ORDER)}"
+            )
         if number in seen:
             raise ValueError(f"duplicate register row {number}")
         seen.add(number)

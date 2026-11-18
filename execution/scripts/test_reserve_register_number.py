@@ -155,3 +155,57 @@ def test_revision_row_requires_reservation(clones: tuple[Path, Path, Path]) -> N
     assert run(first, "check", "revision").returncode == 1
     assert run(first, "reserve", "revision").stdout.strip() == "18"
     assert run(first, "check", "revision").returncode == 0
+
+
+def test_range_row_needs_a_reservation_for_every_number_it_covers(clones: tuple[Path, Path, Path]) -> None:
+    _, first, _ = clones
+    register = first / "docs" / "foundation" / "conformance.md"
+    register.write_text(register.read_text() + "| 41\u201343 | a range | `doc.md#r` | \u2014 | **ruled** |\n")
+    missing = run(first, "check", "decision")
+    assert missing.returncode == 1
+    for number in (41, 42, 43):
+        assert f"decision {number} has no reservation" in missing.stderr
+    for _ in range(3):
+        run(first, "reserve", "decision")
+    assert run(first, "check", "decision").returncode == 0
+    # an ASCII hyphen range is the same row form
+    register.write_text(register.read_text().replace("41\u201343", "41-43"))
+    assert run(first, "check", "decision").returncode == 0
+
+
+def test_range_row_occupies_every_number_for_next(clones: tuple[Path, Path, Path]) -> None:
+    _, first, _ = clones
+    register = first / "docs" / "foundation" / "conformance.md"
+    register.write_text(register.read_text() + "| 41\u201348 | a range | `doc.md#r` | \u2014 | **ruled** |\n")
+    git(first, "add", ".")
+    git(first, "commit", "-m", "range on main")
+    git(first, "push", "origin", "main")
+    assert run(first, "next", "decision").stdout.strip() == "49"
+
+
+def test_duplicate_revision_row_fails(clones: tuple[Path, Path, Path]) -> None:
+    _, first, _ = clones
+    revisions = first / "docs" / "foundation" / "revisions.md"
+    revisions.write_text(revisions.read_text() + "| 17 | pass | reuses a number already on main |\n")
+    result = run(first, "check", "revision")
+    assert result.returncode == 1
+    assert "revision 17 already exists" in result.stderr
+
+
+def test_one_new_revision_may_appear_in_several_document_tables(clones: tuple[Path, Path, Path]) -> None:
+    """A pass that amends several documents adds one row to each table under ONE number."""
+    _, first, _ = clones
+    revisions = first / "docs" / "foundation" / "revisions.md"
+    revisions.write_text(revisions.read_text() + "| 18 | pass | first doc |\n\n## Other\n| 18 | pass | second doc |\n")
+    assert run(first, "check", "revision").returncode == 1  # not reserved yet
+    assert run(first, "reserve", "revision").stdout.strip() == "18"
+    assert run(first, "check", "revision").returncode == 0
+
+
+def test_an_unreasonable_range_is_rejected(clones: tuple[Path, Path, Path]) -> None:
+    _, first, _ = clones
+    register = first / "docs" / "foundation" / "conformance.md"
+    register.write_text(register.read_text() + "| 41\u2013999999 | huge | `doc.md#r` | \u2014 | **ruled** |\n")
+    result = run(first, "check", "decision")
+    assert result.returncode == 1
+    assert "not a valid range" in result.stderr
