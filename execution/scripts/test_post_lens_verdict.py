@@ -103,7 +103,7 @@ class _Client:
         self._last = {
             "id": comment_id, "body": json["body"],
             "html_url": f"https://github.com/{REPO}/pull/{PR}#issuecomment-{comment_id}",
-            "user": {"login": self.author_login},
+            "user": {"login": self.author_login, "type": "Bot"},
             "created_at": f"2026-11-17T00:00:{len(self.comments):02d}Z",
         }
         if method == "POST":
@@ -155,7 +155,7 @@ def test_posts_the_marker_and_the_body_as_the_app(monkeypatch, tmp_path, capsys)
     assert body.startswith(swarm_dispatch.compose_lens_review_marker("arch", HEAD) + "\n")
     # exactly what the approval tool's own reader clears on
     assert swarm_dispatch.sign_off_is_warranted(body, lens_agent="waxwing")
-    probe = {"user": {"login": APP_LOGIN}, "body": body}
+    probe = {"user": {"login": APP_LOGIN, "type": "Bot"}, "body": body}
     assert lens_authors.is_swarm_comment(probe, frozenset({APP_LOGIN}))
     out = capsys.readouterr().out
     assert "posted:" in out and APP_LOGIN in out
@@ -285,7 +285,7 @@ def test_a_shared_identity_is_refused_for_a_lens_that_has_its_own_app(monkeypatc
 
 def test_a_second_post_for_the_same_head_edits_in_place(monkeypatch, tmp_path, capsys):
     marker = swarm_dispatch.compose_lens_review_marker("arch", HEAD)
-    existing = {"id": 41, "body": marker + "\n" + GOOD_BODY, "user": {"login": APP_LOGIN}}
+    existing = {"id": 41, "body": marker + "\n" + GOOD_BODY, "user": {"login": APP_LOGIN, "type": "Bot"}}
     client = _Client(comments=[existing])
     assert _run(monkeypatch, tmp_path, client) == 0
     method, url, _ = client.writes[0]
@@ -296,7 +296,7 @@ def test_a_second_post_for_the_same_head_edits_in_place(monkeypatch, tmp_path, c
 def test_same_kind_with_changed_findings_preserves_old_comment(monkeypatch, tmp_path):
     marker = swarm_dispatch.compose_lens_review_marker("arch", HEAD)
     old = marker + "\n" + GOOD_BODY.replace("SIGNED_OFF", "BLOCKED")
-    client = _Client(comments=[{"id": 41, "body": old, "user": {"login": APP_LOGIN}}])
+    client = _Client(comments=[{"id": 41, "body": old, "user": {"login": APP_LOGIN, "type": "Bot"}}])
     body = GOOD_BODY.replace("SIGNED_OFF", "BLOCKED") + "Additional finding.\n"
     assert _run(monkeypatch, tmp_path, client, body=body) == 0
     assert client.writes[0][0] == "POST" and client.comments[0]["body"] == old
@@ -308,10 +308,27 @@ def test_malformed_comment_listing_refuses_without_write(monkeypatch, tmp_path):
     assert client.writes == []
 
 
+def test_marked_history_with_unresolved_author_refuses_without_write(monkeypatch, tmp_path):
+    marker = swarm_dispatch.compose_lens_review_marker("arch", HEAD)
+    client = _Client(comments=[{"id": 41, "body": marker + "\n" + GOOD_BODY,
+                                "user": {"login": APP_LOGIN}}])
+    assert _run(monkeypatch, tmp_path, client) == 1
+    assert client.writes == []
+
+
+def test_indented_marker_is_not_an_editable_retry(monkeypatch, tmp_path):
+    marker = swarm_dispatch.compose_lens_review_marker("arch", HEAD)
+    old = "    " + marker + "\n" + GOOD_BODY
+    client = _Client(comments=[{"id": 41, "body": old,
+                                "user": {"login": APP_LOGIN, "type": "Bot"}}])
+    assert _run(monkeypatch, tmp_path, client) == 0
+    assert client.writes[0][0] == "POST" and client.comments[0]["body"] == old
+
+
 def test_identical_retry_with_unusable_comment_id_refuses_without_write(monkeypatch, tmp_path):
     marker = swarm_dispatch.compose_lens_review_marker("arch", HEAD)
     client = _Client(comments=[{"id": None, "body": marker + "\n" + GOOD_BODY,
-                                "user": {"login": APP_LOGIN}}])
+                                "user": {"login": APP_LOGIN, "type": "Bot"}}])
     assert _run(monkeypatch, tmp_path, client) == 1
     assert client.writes == []
 
@@ -345,7 +362,7 @@ def test_changed_verdict_class_posts_new_history_record(monkeypatch, tmp_path, o
     marker = swarm_dispatch.compose_lens_review_marker("arch", HEAD)
     old = GOOD_BODY.replace("SIGNED_OFF", old_verdict)
     new = GOOD_BODY.replace("SIGNED_OFF", new_verdict)
-    client = _Client(comments=[{"id": 41, "body": marker + "\n" + old, "user": {"login": APP_LOGIN}}])
+    client = _Client(comments=[{"id": 41, "body": marker + "\n" + old, "user": {"login": APP_LOGIN, "type": "Bot"}}])
     assert _run(monkeypatch, tmp_path, client, body=new) == 0
     assert client.writes[0][0] == "POST"
     assert len(client.comments) == 2
@@ -359,7 +376,7 @@ def test_blocking_change_preserves_spent_round_and_identical_retry_edits(monkeyp
         rows.append({"id": number, "body": swarm_dispatch.compose_lens_review_marker("arch", head)
                      + "\n" + GOOD_BODY.replace("SIGNED_OFF", "BLOCKED"),
                      "created_at": f"2026-11-17T00:00:0{number}Z",
-                     "user": {"login": APP_LOGIN}})
+                     "user": {"login": APP_LOGIN, "type": "Bot"}})
     client = _Client(comments=rows)
     replacement_body = GOOD_BODY.replace("SIGNED_OFF", replacement)
     assert _run(monkeypatch, tmp_path, client, body=replacement_body) == 0
@@ -373,12 +390,12 @@ def test_blocking_change_preserves_spent_round_and_identical_retry_edits(monkeyp
 
 def test_two_existing_matches_form_history_and_a_new_episode(monkeypatch, tmp_path):
     marker = swarm_dispatch.compose_lens_review_marker("arch", HEAD)
-    rows = [{"id": 41, "body": marker + "\nold\n", "user": {"login": APP_LOGIN}},
+    rows = [{"id": 41, "body": marker + "\nold\n", "user": {"login": APP_LOGIN, "type": "Bot"}},
             {"id": 42, "body": swarm_dispatch.compose_lens_review_marker("pm", OTHER_HEAD),
-             "user": {"login": APP_LOGIN}},
-            {"id": 43, "body": marker + "\nold again\n", "user": {"login": APP_LOGIN}},
+             "user": {"login": APP_LOGIN, "type": "Bot"}},
+            {"id": 43, "body": marker + "\nold again\n", "user": {"login": APP_LOGIN, "type": "Bot"}},
             {"id": 44, "body": swarm_dispatch.compose_lens_review_marker("qa", OTHER_HEAD),
-             "user": {"login": APP_LOGIN}}]
+             "user": {"login": APP_LOGIN, "type": "Bot"}}]
     client = _Client(comments=rows)
     assert _run(monkeypatch, tmp_path, client) == 0
     assert client.writes[0][0] == "POST"
@@ -386,7 +403,7 @@ def test_two_existing_matches_form_history_and_a_new_episode(monkeypatch, tmp_pa
 
 def test_another_accounts_comment_is_not_edited(monkeypatch, tmp_path):
     marker = swarm_dispatch.compose_lens_review_marker("arch", HEAD)
-    rows = [{"id": 41, "body": marker + "\nold\n", "user": {"login": "someone-else"}}]
+    rows = [{"id": 41, "body": marker + "\nold\n", "user": {"login": "someone-else", "type": "User"}}]
     client = _Client(comments=rows)
     assert _run(monkeypatch, tmp_path, client) == 0
     assert client.writes[0][0] == "POST"

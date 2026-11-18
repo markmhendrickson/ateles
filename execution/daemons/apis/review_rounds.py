@@ -45,10 +45,15 @@ class ReviewRound:
     heads: tuple[str, ...]
     blocking: bool
     started_reason: str
+    awaiting_head: str = ""
 
     def describe(self) -> str:
         heads = ", ".join(head[:7] for head in self.heads)
-        return f"heads {heads}; {'blocking lens findings' if self.blocking else 'all clear'}"
+        reviewed = (f"heads {heads}; {'blocking lens findings' if self.blocking else 'all clear'}"
+                    if self.heads else "")
+        candidate = (f"candidate {self.awaiting_head[:7]} awaiting lens verdicts"
+                     if self.awaiting_head else "")
+        return "; ".join(part for part in (reviewed, candidate) if part)
 
 
 @dataclass(frozen=True)
@@ -82,6 +87,8 @@ class RoundStatus:
         lines.extend(f"  round {i} started: {round_.started_reason}; {round_.describe()}"
                      for i, round_ in enumerate(self.rounds, 1))
         if self.indeterminate_head:
+            if not self.current_has_verdict:
+                lines.append(f"  candidate {self.current_head[:7]} awaiting lens verdicts")
             lines.append(f"  unplaced reviewed heads: {', '.join(self.unplaced_heads)}")
             lines.append(
                 f"round order indeterminate: {self.indeterminate_reason} "
@@ -205,10 +212,10 @@ def round_status(records: dict[str, list], current_head: str, *, cap: int = ROUN
             reason = ("first review episode" if previous is None else
                       "the previous episode was blocking" if previous.blocking else
                       f"returned to {current[:7]} after an earlier blocking episode")
-            rounds.append(ReviewRound((current,), False, reason))
+            rounds.append(ReviewRound((), False, reason, current))
         else:
             last = rounds[-1]
-            rounds[-1] = ReviewRound(last.heads + (current,), False, last.started_reason)
+            rounds[-1] = ReviewRound(last.heads, last.blocking, last.started_reason, current)
     return RoundStatus(current, tuple(rounds), len(rounds), cap, current in reviewed)
 
 
@@ -242,7 +249,7 @@ def operator_override(comments: list[dict], owner_login: str, operator_login: st
         comment_id = comment.get("id")
         reason = "\n".join(lines[1:]).strip()
         if (
-            lines and lines[0].strip() == OVERRIDE_COMMAND
+            lines and lines[0].rstrip(" \t") == OVERRIDE_COMMAND
             and login == operator_login
             and user.get("type") == "User"
             and isinstance(association, str) and bool(association)

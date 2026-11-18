@@ -273,7 +273,7 @@ def check_author_admitted(identity: Identity, composed: str) -> None:
         raise Refusal(
             f"could not resolve the swarm's lens-comment identities ({exc.__class__.__name__})"
         ) from None
-    probe = {"user": {"login": identity.login}, "body": composed}
+    probe = {"user": {"login": identity.login, "type": "Bot"}, "body": composed}
     if not lens_authors.is_swarm_comment(probe, authors):
         raise Refusal(
             f"{identity.login} (via {identity.via}) is not an identity the approval tool "
@@ -312,6 +312,11 @@ def _comments(client: httpx.Client, repo: str, pr: int, identity: Identity) -> l
         rows = resp.json()
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise Refusal("GitHub comment listing is partial or malformed; refusing to post")
+        for row in rows:
+            try:
+                lens_authors.require_marked_author(row)
+            except ValueError as exc:
+                raise Refusal(str(exc)) from exc
         out.extend(rows)
         if len(rows) < 100:
             return out
@@ -322,7 +327,7 @@ def _existing_for_head(comments: list[dict], *, login: str, marker: str) -> dict
     # GitHub's issue comments API returns creation order, including across
     # pages. Only the final verdict can be retried without rewriting history.
     for comment in reversed(comments):
-        first = (str(comment.get("body") or "").splitlines() or [""])[0].strip()
+        first = (str(comment.get("body") or "").splitlines() or [""])[0]
         if not swarm_dispatch._LENS_MARKER_RE.search(str(comment.get("body") or "")):
             continue
         if (first == marker and

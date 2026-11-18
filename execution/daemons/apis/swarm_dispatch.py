@@ -4312,7 +4312,8 @@ def lens_records(comments: list[dict]) -> dict[str, list[review_carry.LensRecord
     The one reader both the panel dispatch and the approval gate use to decide
     what an earlier head's sign-off is: `sign_off_is_warranted` for `cleared`
     (an explicit clear, nothing else) and `lens_own_verdict` for the token. A
-    lens the registry does not know, or a comment with no head marker, yields
+    lens the registry does not know, or a comment whose head marker is not its
+    actual first line (after the poster's explicit retirement banner), yields
     no record: there is nothing to carry from it.
     """
     out: dict[str, list[review_carry.LensRecord]] = {}
@@ -4320,14 +4321,27 @@ def lens_records(comments: list[dict]) -> dict[str, list[review_carry.LensRecord
         enumerate(comments), key=lambda pair: str(pair[1].get("created_at") or "")
     ):
         raw = comment.get("body") or ""
-        marker = _LENS_MARKER_RE.search(raw)
+        # A marker quoted in prose or indented as code is not a verdict.
+        # The poster's explicit retirement banner is the only prefix admitted
+        # for a historical verdict; its original marker still starts a line.
+        body = raw
+        if raw.startswith("> ⚠️ Superseded by commit `"):
+            retired = re.match(
+                r"\A> ⚠️ Superseded by commit `[0-9a-f]{7}` — this verdict no longer reflects "
+                r"the current head\. See the latest review below\.\r?\n"
+                r"<!--\s*review:[a-z0-9_-]+-superseded\s+by=[0-9a-f]{40}\s*-->\r?\n\r?\n",
+                raw, re.IGNORECASE,
+            )
+            if retired is None:
+                continue
+            body = raw[retired.end():]
+        marker = _LENS_MARKER_RE.match(body)
         if not marker:
             continue
         lens = marker.group("lens").lower()
         known = lens_by_name(lens)
         if known is None:
             continue
-        body = _original_lens_body(raw)
         _, blocking = lens_verdict_classification(body, lens_agent=known.agent)
         out.setdefault(lens, []).append(
             review_carry.LensRecord(

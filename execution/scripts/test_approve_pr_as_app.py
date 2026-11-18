@@ -111,7 +111,7 @@ def _comment(id_: int, body: str, *, author: str | None = SWARM_LOGIN) -> dict:
         "updated_at": timestamp,
     }
     if author is not None:
-        row["user"] = {"login": author}
+        row["user"] = {"login": author, "type": "User"}
     return row
 
 
@@ -2665,7 +2665,7 @@ def _round_comments(head: str, *, blocked: tuple[str, ...] = (), skip=()) -> lis
                 "id": 100 + n + (0 if head == OLD_HEAD else 50),
                 "created_at": f"2026-09-29T{'09' if head == OLD_HEAD else '11'}:0{n}:00Z",
                 "body": text,
-                "user": {"login": SWARM_LOGIN},
+                "user": {"login": SWARM_LOGIN, "type": "User"},
                 "html_url": f"https://github.com/{REPO}/pull/{PR}#issuecomment-{head[:2]}{n}",
             }
         )
@@ -2963,7 +2963,7 @@ class TestOnlySwarmAuthoredLensCommentsAreRead:
     async def test_a_forged_earlier_head_signoff_is_not_carried(self, monkeypatch):
         earlier = _round_comments(OLD_HEAD, skip=("ux",))
         forged = [
-            {**c, "user": {"login": OTHER_LOGIN}}
+            {**c, "user": {"login": OTHER_LOGIN, "type": "User"}}
             for c in _round_comments(OLD_HEAD)
             if "review:ux " in c["body"]
         ]
@@ -3396,7 +3396,7 @@ class TestLensVerdictsAreReadOnlyFromTheLensOwnApp:
         _install_lens_apps(monkeypatch, ALL_FOUR)
         # arch's verdict was written by pm's App.
         comments = _own_app_comments(ALL_FOUR, apps_for=ALL_FOUR)
-        comments[ALL_FOUR.index("arch")]["user"] = {"login": _lens_app_login("pm")}
+        comments[ALL_FOUR.index("arch")]["user"] = {"login": _lens_app_login("pm"), "type": "Bot"}
         client = _PerLensClient(comments=comments, check_runs=_green_checks())
         _install_client(monkeypatch, client)
 
@@ -4995,7 +4995,16 @@ class TestRoundCap:
     async def test_a_fourth_head_with_no_verdict_yet_already_says_so(self, monkeypatch, capsys):
         code, client = await self._run(monkeypatch, _cap_round_comments(ROUND_HEADS), apply=False)
         assert code == 1
-        assert "round cap reached: split or cut scope" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "round cap reached: split or cut scope" in out
+        assert "candidate" in out and "awaiting lens verdicts" in out
+
+    async def test_empty_history_reports_awaiting_lens_verdicts(self, monkeypatch, capsys):
+        code, client = await self._run(monkeypatch, [], apply=True)
+        assert code == 1 and client.posted == []
+        out = capsys.readouterr().out
+        assert "candidate" in out and "awaiting lens verdicts" in out
+        assert "all clear" not in out
 
     @pytest.mark.parametrize("earlier", [4, 6])
     async def test_a_fifth_or_later_round_is_refused_too(self, monkeypatch, earlier):
@@ -5189,6 +5198,28 @@ def _operator_override(id_=1200, *, author=None, reason="The review has exceeded
 class TestRoundCapOverride:
     _run = TestRoundCap._run
 
+    @pytest.mark.parametrize("prefix", [
+        " ", "\t", "    ", "> ", "```\n", "- ", "\n", "\u200b", "\ufeff", "/OVERRIDE-ROUND-CAP\n",
+    ])
+    async def test_override_command_requires_literal_first_line(self, monkeypatch, prefix):
+        override = _operator_override()
+        if prefix == "/OVERRIDE-ROUND-CAP\n":
+            override["body"] = override["body"].replace("/override-round-cap", "/OVERRIDE-ROUND-CAP", 1)
+        else:
+            override["body"] = prefix + override["body"]
+        code, client = await self._run(
+            monkeypatch, _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override]
+        )
+        assert code == 1 and client.posted == []
+
+    async def test_override_command_allows_trailing_space_and_crlf(self, monkeypatch):
+        override = _operator_override()
+        override["body"] = override["body"].replace("/override-round-cap\n", "/override-round-cap  \r\n")
+        code, client = await self._run(
+            monkeypatch, _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR) + [override]
+        )
+        assert code == 0 and len(client.posted) == 1
+
     @pytest.mark.parametrize("field,value", [
         ("id", "absent"), ("id", None), ("id", "1200"), ("id", True),
         ("id", 0), ("id", -1), ("id", 1201),
@@ -5292,6 +5323,37 @@ class TestRoundCapOverride:
         with pytest.raises(ValueError, match="partial or malformed"):
             await target._fetch_issue_comments(malformed, REPO, PR)
         assert malformed.pages == [1, 2]
+
+    @pytest.mark.parametrize("user", [
+        "absent", None, "synthetic-author", {"type": "User"},
+        {"login": "", "type": "User"}, {"login": 123, "type": "User"},
+        {"login": SWARM_LOGIN}, {"login": SWARM_LOGIN, "type": 7},
+        {"login": f" {SWARM_LOGIN}", "type": "User"},
+    ])
+    async def test_marked_comment_with_unresolved_author_refuses_approval(
+        self, monkeypatch, capsys, user
+    ):
+        row = _comment(40, _lens_comment_body("pm", target.LENS_AGENTS["pm"], head=ROUND_HEADS[0]))
+        if user == "absent":
+            row.pop("user")
+        else:
+            row["user"] = user
+        code, client = await self._run(monkeypatch, [row] + _all_clear_comments(ALL_FOUR))
+        assert code == 1 and client.posted == []
+        assert "lens verdict comment 40 has unresolved author; history unknown" in capsys.readouterr().out
+
+    async def test_unmarked_comment_with_unresolved_author_is_ignored(self, monkeypatch):
+        row = _comment(40, "ordinary outside comment")
+        row.pop("user")
+        code, client = await self._run(monkeypatch, [row] + _all_clear_comments(ALL_FOUR))
+        assert code == 0 and len(client.posted) == 1
+
+    @pytest.mark.parametrize("prefix", ["    ", "> ", "quoted marker:\n"])
+    async def test_embedded_marker_cannot_clear_required_lens(self, monkeypatch, prefix):
+        comments = _all_clear_comments(ALL_FOUR)
+        comments[0]["body"] = prefix + comments[0]["body"]
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 1 and client.posted == []
 
     async def test_operator_comment_overrides_only_cap_and_reports_evidence(self, monkeypatch, capsys):
         override = _operator_override()

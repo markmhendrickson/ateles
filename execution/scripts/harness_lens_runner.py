@@ -2689,6 +2689,10 @@ def _pr_comments(*, repo: str, pr: int) -> list[dict]:
         raise ValueError("GitHub comment listing had an unexpected shape")
     if any(not isinstance(comment, dict) for page in pages for comment in page):
         raise ValueError("GitHub comment listing contained a malformed comment")
+    import lens_authors  # noqa: PLC0415 — shared approval reader
+    for page in pages:
+        for comment in page:
+            lens_authors.require_marked_author(comment)
     return [comment for page in pages for comment in page]
 
 

@@ -34,6 +34,30 @@ def test_cap_stays_three():
     assert rr.CAP_REACHED == "round cap reached: split or cut scope"
 
 
+def test_unreviewed_head_is_a_candidate_not_an_all_clear_round():
+    status = _status([], H1)
+    assert status.round_number == 1
+    assert "round 1 started: first review episode; candidate 1111111 awaiting lens verdicts" in status.describe()
+    assert "all clear" not in status.describe()
+
+
+@pytest.mark.parametrize("prefix", ["    ", "> ", "quoted marker:\n"])
+def test_embedded_marker_does_not_enter_round_history(prefix):
+    row = _verdict("pm", H1, n=1)
+    row["body"] = prefix + row["body"]
+    assert swarm_dispatch.lens_records([row]) == {}
+
+
+@pytest.mark.parametrize("verdict,expected", [
+    ("SIGNED_OFF", "all clear"), ("BLOCKED", "blocking lens findings"),
+])
+def test_fresh_head_keeps_earlier_outcome_and_awaits_verdicts(verdict, expected):
+    status = _status([_verdict("pm", H1, verdict=verdict)], H2)
+    assert status.round_number == (1 if verdict == "SIGNED_OFF" else 2)
+    assert expected in status.describe()
+    assert "candidate 2222222 awaiting lens verdicts" in status.describe()
+
+
 def test_override_requires_repository_owner_to_equal_operator():
     row = {
         "id": 1,
@@ -164,7 +188,8 @@ def test_reset_to_earlier_clear_head_spends_after_blocking_history():
                 for i, head in enumerate((H1, H2, H3, H4))]
     status = _status(comments, H2)
     assert status.round_number == 4 and status.refused
-    assert status.rounds[-1].heads == (H2,)
+    assert status.rounds[-1].heads == ()
+    assert status.rounds[-1].awaiting_head == H2
     assert all(head[:7] in status.describe() for head in (H1, H2, H3, H4))
     assert "whole verdict history" in status.describe()
 
@@ -173,7 +198,8 @@ def test_reset_to_earlier_head_after_all_clear_history_does_not_spend():
     comments = [_verdict("pm", head, n=i) for i, head in enumerate((H1, H2, H3, H4))]
     status = _status(comments, H2)
     assert status.round_number == 1 and not status.refused
-    assert status.rounds[0].heads == (H1, H2, H3, H4, H2)
+    assert status.rounds[0].heads == (H1, H2, H3, H4)
+    assert status.rounds[0].awaiting_head == H2
 
 
 def test_rerun_on_latest_reviewed_head_spends_no_further_round():

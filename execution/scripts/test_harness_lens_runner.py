@@ -2803,7 +2803,7 @@ def test_post_verdict_retries_transient_gh_failure(monkeypatch, tmp_path):
                             "id": 1,
                             "body": SIGNED_OFF_VERDICT,
                             "html_url": "https://github.com/o/r/pull/1#issuecomment-1",
-                            "user": {"login": "ateles-agent"},
+                            "user": {"login": "ateles-agent", "type": "User"},
                         }
                     ]
                 ]
@@ -2851,7 +2851,7 @@ def test_post_verdict_does_not_duplicate_when_failed_call_already_landed(
                             "id": 1,
                             "body": SIGNED_OFF_VERDICT,
                             "html_url": "https://github.com/o/r/pull/1#issuecomment-1",
-                            "user": {"login": "ateles-agent"},
+                            "user": {"login": "ateles-agent", "type": "User"},
                         }
                     ]
                 ]
@@ -2911,7 +2911,7 @@ def test_post_verdict_edits_existing_lens_comment_in_place(monkeypatch, tmp_path
                         "id": 41,
                         "body": current_body,
                         "html_url": "https://github.com/o/r/pull/1#issuecomment-41",
-                        "user": {"login": "ateles-agent"},
+                        "user": {"login": "ateles-agent", "type": "User"},
                     }
                 ]
             ]
@@ -2941,7 +2941,7 @@ def test_harness_poster_refuses_unusable_retry_id_before_write(monkeypatch, bad_
         if command[1] == "api" and command[2].startswith("repos/o/r/issues/1/comments?"):
             row = {"id": bad_id, "body": SIGNED_OFF_VERDICT,
                    "html_url": "https://github.com/o/r/pull/1#issuecomment-41",
-                   "user": {"login": "ateles-agent"}}
+                   "user": {"login": "ateles-agent", "type": "User"}}
             return subprocess.CompletedProcess(command, 0, stdout=json.dumps([[row]]), stderr="")
         writes.append(command)
         raise AssertionError("unusable id must not reach a write")
@@ -2962,7 +2962,7 @@ def test_harness_poster_refuses_nonlocal_readback_url(monkeypatch):
         writes.append(command)
         comments.append({"id": 41, "body": SIGNED_OFF_VERDICT,
                          "html_url": "https://github.com/o/r/pull/99#issuecomment-41",
-                         "user": {"login": "ateles-agent"}})
+                         "user": {"login": "ateles-agent", "type": "User"}})
         return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
     monkeypatch.setattr(hlr.subprocess, "run", _run)
@@ -2978,7 +2978,7 @@ def test_harness_poster_preserves_blocking_round_then_edits_identical_retry(monk
                  .replace("SIGNED_OFF", "BLOCKED"),
                  "created_at": f"2026-11-17T00:00:0{index}Z",
                  "html_url": f"https://github.com/o/r/pull/1#issuecomment-{index}",
-                 "user": {"login": "ateles-agent"}}
+                 "user": {"login": "ateles-agent", "type": "User"}}
                 for index, head in enumerate(heads, 1)]
     replacement_body = SIGNED_OFF_VERDICT.replace("SIGNED_OFF", replacement)
     writes = []
@@ -2992,7 +2992,7 @@ def test_harness_poster_preserves_blocking_round_then_edits_identical_retry(monk
             comments.append({"id": 4, "body": json.loads(kwargs["input"])["body"],
                              "created_at": "2026-11-17T00:00:04Z",
                              "html_url": "https://github.com/o/r/pull/1#issuecomment-4",
-                             "user": {"login": "ateles-agent"}})
+                             "user": {"login": "ateles-agent", "type": "User"}})
         else:
             assert method == "PATCH" and command[4].endswith("/issues/comments/4")
         return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
@@ -3014,9 +3014,20 @@ def test_harness_comment_reader_refuses_malformed_history_row(monkeypatch):
         hlr._pr_comments(repo="o/r", pr=1)
 
 
+def test_harness_comment_reader_refuses_unresolved_marked_author(monkeypatch):
+    row = {"id": 41, "body": SIGNED_OFF_VERDICT, "user": {"login": "ateles-agent"}}
+
+    def _run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps([[row]]), stderr="")
+
+    monkeypatch.setattr(hlr.subprocess, "run", _run)
+    with pytest.raises(ValueError, match="comment 41.*history unknown"):
+        hlr._pr_comments(repo="o/r", pr=1)
+
+
 def test_harness_same_kind_changed_findings_are_not_an_identical_retry():
     old = SIGNED_OFF_VERDICT.replace("SIGNED_OFF", "BLOCKED")
-    row = {"id": 41, "body": old, "user": {"login": "ateles-agent"}}
+    row = {"id": 41, "body": old, "user": {"login": "ateles-agent", "type": "User"}}
     changed = old + "Additional finding.\n"
     assert hlr._one_verdict_comment(repo="o/r", pr=1, lens="pm",
                                      attribution=old.splitlines()[1], verdict_text=changed,
@@ -3027,10 +3038,10 @@ def test_harness_same_kind_changed_findings_are_not_an_identical_retry():
 def test_post_verdict_preserves_changed_or_intervened_history(monkeypatch, intervening):
     old = SIGNED_OFF_VERDICT.replace("SIGNED_OFF", "REQUEST_CHANGES")
     comments = [{"id": 41, "body": old, "html_url": "https://github.com/o/r/pull/1#issuecomment-41",
-                 "user": {"login": "ateles-agent"}}]
+                 "user": {"login": "ateles-agent", "type": "User"}}]
     if intervening:
         comments.append({"id": 42, "body": SIGNED_OFF_VERDICT.replace("review:pm", "review:qa"),
-                         "user": {"login": "ateles-agent"}})
+                         "user": {"login": "ateles-agent", "type": "User"}})
     writes = []
 
     def _run(command, **kwargs):
@@ -3040,7 +3051,7 @@ def test_post_verdict_preserves_changed_or_intervened_history(monkeypatch, inter
         assert command[:4] == ["gh", "api", "-X", "POST"]
         comments.append({"id": 43, "body": json.loads(kwargs["input"])["body"],
                          "html_url": "https://github.com/o/r/pull/1#issuecomment-43",
-                         "user": {"login": "ateles-agent"}})
+                         "user": {"login": "ateles-agent", "type": "User"}})
         return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
     monkeypatch.setattr(hlr.subprocess, "run", _run)
@@ -3053,7 +3064,7 @@ def test_post_verdict_preserves_prior_lens_comments(monkeypatch, tmp_path):
     comments = [{
         "id": i, "body": SIGNED_OFF_VERDICT.replace(SAMPLE_HEAD, "b" * 40),
         "html_url": f"https://github.com/o/r/pull/1#issuecomment-{i}",
-        "user": {"login": "ateles-agent"},
+        "user": {"login": "ateles-agent", "type": "User"},
     } for i in (1, 2)]
 
     def _run(command, **kwargs):
@@ -3068,7 +3079,7 @@ def test_post_verdict_preserves_prior_lens_comments(monkeypatch, tmp_path):
         assert command[:4] == ["gh", "api", "-X", "POST"]
         comments.append({"id": 3, "body": json.loads(kwargs["input"])["body"],
                          "html_url": "https://github.com/o/r/pull/1#issuecomment-3",
-                         "user": {"login": "ateles-agent"}})
+                         "user": {"login": "ateles-agent", "type": "User"}})
         return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
     monkeypatch.setattr(hlr.subprocess, "run", _run)

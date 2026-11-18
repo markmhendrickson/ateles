@@ -156,6 +156,8 @@ integer id matching its PR-local URL. The profile listing must explicitly prove
 completeness through a matching total or `has_more: false`, and contain exactly
 one default profile. `APIS_OPERATOR_LOGIN` is not authority for this override. A
 valid override lifts only the round cap and timestamp or tie indeterminacy.
+A marked verdict comment with unresolved author makes history unknown and refuses
+approval regardless of override; an unreviewed head is shown as a candidate.
 Unresolved or partial lens identity resolution independently refuses approval;
 an override never lifts it. The override is revalidated at each approval POST.
 Every other gate still binds.
@@ -625,9 +627,10 @@ async def _fetch_issue_comments(client: httpx.AsyncClient, repo: str, pr: int) -
         rows = resp.json()
         if (not isinstance(rows, list) or any(
             not isinstance(row, dict) or not isinstance(row.get("body"), str)
-            or not isinstance(row.get("user"), dict) for row in rows
         )):
             raise ValueError("GitHub comment listing is partial or malformed")
+        for row in rows:
+            lens_authors.require_marked_author(row)
         out.extend(rows)
         if len(rows) < 100:
             break
@@ -638,7 +641,7 @@ async def _fetch_issue_comments(client: httpx.AsyncClient, repo: str, pr: int) -
 def _latest_matching_comment(
     comments: list[dict], *, marker: str, authors: frozenset[str]
 ) -> dict | None:
-    """The LATEST comment a swarm identity wrote that carries *marker*, or None.
+    """The LATEST comment a swarm identity wrote starting with *marker*, or None.
 
     Latest, not first: a lens can post more than once for the same head (a
     correction after its own comment), and the most recent word is the one
@@ -651,7 +654,8 @@ def _latest_matching_comment(
     they are; an empty set matches nothing.
     """
     for c in reversed(comments):
-        if marker in (c.get("body") or "") and lens_authors.is_swarm_comment(c, authors):
+        body = c.get("body") or ""
+        if body.splitlines()[:1] == [marker] and lens_authors.is_swarm_comment(c, authors):
             return c
     return None
 
@@ -659,14 +663,15 @@ def _latest_matching_comment(
 def _matching_comments(
     comments: list[dict], *, marker: str, authors: frozenset[str]
 ) -> list[dict]:
-    """EVERY swarm-written comment carrying *marker*, in creation order.
+    """EVERY swarm-written comment starting with *marker*, in creation order.
 
     Same author rule as `_latest_matching_comment`.
     """
     return [
         c
         for c in comments
-        if marker in (c.get("body") or "") and lens_authors.is_swarm_comment(c, authors)
+        if (c.get("body") or "").splitlines()[:1] == [marker]
+        and lens_authors.is_swarm_comment(c, authors)
     ]
 
 
@@ -1261,6 +1266,8 @@ def find_unadmitted_objections(
     unreadable verdict is not an objection here (only a plain one holds).
     """
     out: list[UnadmittedObjection] = []
+    for comment in comments:
+        lens_authors.require_marked_author(comment)
     for lens, agent in LENS_AGENTS.items():
         marker = compose_lens_review_marker(lens, head_sha)
         for c in comments:
@@ -2972,7 +2979,7 @@ def main() -> int:
             "--panel required to use the diff-derived floor alone (where "
             "content can still appear), or set "
             "ATELES_APPROVE_PANEL_REQUIRED_ONLY=1 to change the default. "
-            "An operator /override-round-cap comment lifts only the round cap "
+            "An operator comment whose exact first line is /override-round-cap lifts only the round cap "
             "and timestamp or tie indeterminacy; unresolved lens identity still "
             "refuses, and a relied-on override is rechecked at each approval POST. "
             "Exit codes: 0 pass, 1 refused, 2 usage, 75 GitHub rate limit "
