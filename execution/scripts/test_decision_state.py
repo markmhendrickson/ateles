@@ -14,6 +14,9 @@ from __future__ import annotations
 import sys
 import unittest
 import unittest.mock
+import contextlib
+import io
+import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -373,6 +376,10 @@ class FakeGit:
 
     def __call__(self, args: list[str]) -> tuple[int, str]:
         self.calls.append(args)
+        if args[:2] == ["git", "ls-tree"]:
+            ref = args[2]
+            return ((0, f"100644 blob {'a' * 40}\tdocs/foundation/conformance.md\n")
+                    if ref in self.registers else (0, ""))
         if args[:2] == ["git", "show"]:
             ref = args[2].split(":", 1)[0]
             text = self.registers.get(ref)
@@ -415,6 +422,88 @@ class TestBranchRegistersAreReadStrictly(unittest.TestCase):
             code = ds.main(["--branches"])
         self.assertEqual(code, 1)
         self.assertIn("origin/feature", err.getvalue())
+
+    def test_branch_enumeration_failure_is_not_zero_branches(self):
+        def failed(args):
+            if tuple(args) == ds.BRANCH_LIST_ARGS:
+                return 1, "injected failure"
+            raise AssertionError(args)
+
+        err = io.StringIO()
+        with unittest.mock.patch.object(ds, "run", failed), contextlib.redirect_stderr(err):
+            self.assertEqual(ds.main(["--branches"]), 1)
+        self.assertIn("cannot enumerate remote branches", err.getvalue())
+
+    def test_absent_branch_is_reported_but_unreadable_branch_fails(self):
+        class BranchGit(FakeGit):
+            def __init__(self, failure):
+                super().__init__({ds.MAIN_REF: TestBranchRegistersAreReadStrictly.GOOD}, ["origin/old"])
+                self.failure = failure
+
+            def __call__(self, args):
+                if args[:3] == ["git", "ls-tree", "origin/old"]:
+                    if self.failure == "tree":
+                        return 1, "corrupt tree"
+                    if self.failure == "absent":
+                        return 0, ""
+                    return 0, f"100644 blob {'b' * 40}\tdocs/foundation/conformance.md\n"
+                if args[:2] == ["git", "show"] and args[2].startswith("origin/old:"):
+                    return 1, "corrupt blob"
+                return super().__call__(args)
+
+        for failure in ("absent", "tree", "blob"):
+            with self.subTest(failure=failure):
+                out, err = io.StringIO(), io.StringIO()
+                with unittest.mock.patch.object(ds, "run", BranchGit(failure)), \
+                     contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = ds.main(["--branches", "--json"])
+                if failure == "absent":
+                    self.assertEqual(code, 0, err.getvalue())
+                    self.assertEqual(json.loads(out.getvalue())["refs_absent"], ["origin/old"])
+                    report = io.StringIO()
+                    with unittest.mock.patch.object(ds, "run", BranchGit(failure)), \
+                         contextlib.redirect_stdout(report):
+                        self.assertEqual(ds.main(["--branches"]), 0)
+                    self.assertIn("origin/old: absent", report.getvalue())
+                else:
+                    self.assertEqual(code, 1)
+                    self.assertIn("origin/old", err.getvalue())
+                    self.assertIn("register object", err.getvalue())
+
+
+class TestBranchCandidateAccounting(unittest.TestCase):
+    SPELLINGS = (
+        "999", "**999**", "_999_", "`999`", "~~999~~", "[999](x)",
+        "<b>999</b>", "\\999", "９９９", "٩٩٩", "𝟡𝟡𝟡", "999-", "999.", "999x",
+        "99 9", "999–1000", "", "label",
+    )
+
+    def test_branch_copy_matrix_has_no_silent_omission(self):
+        base = register(**{"1": "**open**"})
+        heading = "## The register of open design decisions\n"
+        for cell in self.SPELLINGS:
+            for indent in ("", " ", "   ", "    ", "     ", "\t"):
+                candidate = indent + f"| {cell} | question | `doc.md#q` | — | **open** |\n"
+                for place in ("inside", "before", "after"):
+                    if place == "inside":
+                        branch = heading + base + candidate
+                    elif place == "before":
+                        branch = candidate + heading + base
+                    else:
+                        branch = heading + base + "## Later\n" + candidate
+                    fake = FakeGit({ds.MAIN_REF: base, "origin/feature": branch}, ["origin/feature"])
+                    out, err = io.StringIO(), io.StringIO()
+                    with unittest.mock.patch.object(ds, "run", fake), \
+                         contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        code = ds.main(["--branches", "--json"])
+                    valid = cell in ("999", "999–1000") and place == "inside" and indent in ("", " ", "   ")
+                    no_digit = cell in ("", "label") and place != "inside"
+                    if valid or no_digit:
+                        self.assertEqual(code, 0, (cell, indent, place, err.getvalue()))
+                        self.assertEqual(len(json.loads(out.getvalue())["rows"]), 1)
+                    else:
+                        self.assertEqual(code, 1, (cell, indent, place))
+                        self.assertIn("origin/feature", err.getvalue())
 
 class TestCommittedProjectionIsBranchIndependent(unittest.TestCase):
     """An open PR's --check result must not move when an unrelated branch does.

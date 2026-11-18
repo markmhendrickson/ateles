@@ -245,9 +245,21 @@ def register_at(ref: str, strict: bool = False) -> dict[str, dict[str, str]] | N
             validate_register(out)
         rows = parse_rows(out)
         return rows or None
-    code, out = run(["git", "show", f"{ref}:{FOUNDATION_DIR}/{REGISTER_DOC}"])
-    if code != 0 or not out.strip():
+    source_path = f"{FOUNDATION_DIR}/{REGISTER_DOC}"
+    code, entry = run(["git", "ls-tree", ref, "--", source_path])
+    if code != 0:
+        raise ValueError(f"{ref}: cannot inspect register object (git ls-tree failed)")
+    if not entry.strip():
         return None
+    if not re.fullmatch(
+        r"\d+ blob [0-9a-f]{40,64}\t" + re.escape(source_path) + r"\n?", entry
+    ):
+        raise ValueError(f"{ref}: unreadable register object")
+    code, out = run(["git", "show", f"{ref}:{source_path}"])
+    if code != 0:
+        raise ValueError(f"{ref}: cannot read register object (git show failed)")
+    if not out.strip():
+        raise ValueError(f"{ref}: register object is empty")
     if strict:
         validate_register(out)
     rows = parse_rows(out)
@@ -257,7 +269,7 @@ def register_at(ref: str, strict: bool = False) -> dict[str, dict[str, str]] | N
 def remote_branches(exclude: str = MAIN_REF) -> list[str]:
     code, out = run(list(BRANCH_LIST_ARGS))
     if code != 0:
-        return []
+        raise ValueError("cannot enumerate remote branches (git for-each-ref failed)")
     names = []
     for line in out.split("\n"):
         ref = line.strip()
@@ -455,6 +467,7 @@ def collect_main(source: str = MAIN_REF) -> list[Row]:
 
 def collect_branches(
     refs_scanned: list[str],
+    refs_absent: list[str] | None = None,
 ) -> tuple[list[Row], list[str], list[str], list[Collision]]:
     """The cross-branch view: rulings ``main`` does not have yet.
 
@@ -495,6 +508,8 @@ def collect_branches(
         except ValueError as exc:
             raise ValueError(f"{ref}: {exc}") from exc
         if branch_rows is None:
+            if refs_absent is not None:
+                refs_absent.append(ref)
             continue
         read.append(ref)
         for num, data in branch_rows.items():
@@ -683,7 +698,7 @@ def render(rows: list[Row]) -> str:
 
 def render_branches(
     rows: list[Row], refs_read: list[str], refs_stale: list[str],
-    collisions: list[Collision],
+    collisions: list[Collision], refs_absent: list[str] | None = None,
 ) -> str:
     """The cross-branch report. Printed to stdout by --branches, never written.
 
@@ -761,6 +776,13 @@ def render_branches(
             add(f"- {s}")
         add("")
 
+    if refs_absent:
+        add("## Branches with no register file")
+        add("")
+        for ref in refs_absent:
+            add(f"- {ref}: absent")
+        add("")
+
     add(
         "**No count of branches is written into the committed document.** A "
         "number there would change every time anyone updated a branch, failing "
@@ -803,7 +825,7 @@ def as_json(rows: list[Row]) -> str:
 
 def as_json_branches(
     rows: list[Row], refs_read: list[str], refs_stale: list[str],
-    collisions: list[Collision],
+    collisions: list[Collision], refs_absent: list[str] | None = None,
 ) -> str:
     return (
         json.dumps(
@@ -811,6 +833,7 @@ def as_json_branches(
                 "main_ref": MAIN_REF,
                 "refs_read": refs_read,
                 "refs_stale": refs_stale,
+                "refs_absent": refs_absent or [],
                 "collisions": [
                     {
                         "number": c.number,
@@ -901,16 +924,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.branches:
-        refs = remote_branches()
         try:
-            rows, refs_read, refs_stale, collisions = collect_branches(refs)
-        except ValueError as exc:
+            refs = remote_branches()
+            refs_absent: list[str] = []
+            rows, refs_read, refs_stale, collisions = collect_branches(refs, refs_absent)
+        except (OSError, ValueError) as exc:
             print(f"decision state: cannot read a register: {exc}", file=sys.stderr)
             return 1
         if args.json:
-            sys.stdout.write(as_json_branches(rows, refs_read, refs_stale, collisions))
+            sys.stdout.write(as_json_branches(rows, refs_read, refs_stale, collisions, refs_absent))
         else:
-            sys.stdout.write(render_branches(rows, refs_read, refs_stale, collisions))
+            sys.stdout.write(render_branches(rows, refs_read, refs_stale, collisions, refs_absent))
         return 1 if collisions else 0
 
     source = WORKTREE_SOURCE if args.source == "worktree" else MAIN_REF
