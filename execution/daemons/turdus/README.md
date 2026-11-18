@@ -6,11 +6,13 @@ that a state write completed. An unreadable or malformed state file holds **all*
 Turdus triage, including invoices and email approval routing. The blocker notice
 names both paths and a fixed failure code, without including a state value.
 
-Restore the state file from a backup that retains its consumed `processed_ids`;
-this is safe. Do not delete or reset the state file to resume polling: doing so
-replays consumed approvals. Keep the marker with a restored initialized state.
-If recovery is uncertain, leave Turdus held and investigate the backup rather
-than discarding the consumed IDs.
+Restore the state file from a backup only if it was taken after the most recent
+approval reply Turdus consumed within the three-day reply window. The backup
+must retain the consumed `processed_ids` and `approval_route_pending` entries.
+Keep the marker with a restored initialized state. If that timing cannot be
+confirmed, leave Turdus held or approve through Telegram and wait until the
+three-day reply window has passed before restoring or resetting state.
+Deleting or resetting state sooner replays consumed approvals.
 
 On upgrade, an existing file without the marker is accepted only when it has
 the legacy fields `last_message_id`, `processed_count`, `processed_ids`, and

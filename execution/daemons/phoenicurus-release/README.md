@@ -188,12 +188,15 @@ Config: set `APIS_APPROVE_EMAIL_SECRET` (shared, Turdus + Apis) and
 Turdus also keeps a local consumed-reply state file, `.turdus_state.json`, and
 an `.initialized` marker beside it. An unreadable or malformed state, or a
 missing state after initialization, holds all email approval routing and sends
-one Telegram blocker notice. Restore both files from a known-good backup, or
-explicitly reset the consumed-reply state by stopping Turdus, moving both
-files aside, and starting Turdus again. A reset loses consumed-reply history:
-before restarting, inspect recent approval replies and resolve any outstanding
-PR or release approvals through Telegram. The first clean poll recreates the
-state and marker. A fresh installation with neither file starts with empty state.
+one Telegram blocker notice. Restore both files only from a backup taken after
+the most recent approval reply Turdus consumed within the three-day reply
+window. The backup must retain consumed IDs and pending approval routes. If
+that timing cannot be confirmed, leave Turdus held or approve through Telegram;
+wait until the three-day reply window has passed before restoring or resetting
+state. To reset after that window, stop Turdus, move both files aside, then
+start Turdus again. Deleting or resetting sooner can replay consumed approvals.
+The first clean poll recreates the state and marker. A fresh installation with
+neither file starts with empty state.
 If both files are lost before the first successful write, that loss cannot be
 distinguished from first use.
 

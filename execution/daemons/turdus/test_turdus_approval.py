@@ -1022,7 +1022,7 @@ def test_malformed_reply_state_holds(monkeypatch, tmp_path, contents):
     assert any("reply state is unreadable" in message for message in notices.sent)
 
 
-def test_unreadable_state_notice_names_safe_recovery_and_scope(monkeypatch, tmp_path):
+def test_unreadable_state_notice_names_conditional_recovery_and_scope(monkeypatch, tmp_path):
     state_path = tmp_path / "state.json"
     state_path.write_text(json.dumps({"last_message_id": "private-state-value",
                                       "processed_count": 1,
@@ -1040,7 +1040,10 @@ def test_unreadable_state_notice_names_safe_recovery_and_scope(monkeypatch, tmp_
     assert str(state_path) + ".initialized" in notice
     assert "malformed: processed_ids" in notice
     assert "ALL Turdus triage" in notice
-    assert "backup" in notice and "safe" in notice
+    assert "backup" in notice and "only if it was taken after the most recent approval reply" in notice
+    assert "consumed within the three-day reply window" in notice
+    assert "cannot confirm" in notice and "leave Turdus held" in notice
+    assert "Telegram" in notice and "wait until the three-day reply window has passed" in notice
     assert "deleting or resetting" in notice and "replays consumed approvals" in notice
     assert "private-state-value" not in notice
     assert "42" not in notice

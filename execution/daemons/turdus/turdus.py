@@ -1300,8 +1300,11 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
                 f"Turdus reply state is unreadable ({failure_code}); "
                 "ALL Turdus triage is held, including invoice and approval routing. "
                 f"State file: {_STATE_FILE}; initialized marker: {_state_marker_file()}. "
-                "Restoring the state file from a backup is safe; deleting or resetting "
-                "it is not safe because it replays consumed approvals.",
+                "Restoring a backup is safe only if it was taken after the most recent approval reply "
+                "Turdus consumed within the three-day reply window. If you cannot confirm that, "
+                "leave Turdus held or approve through Telegram; wait until the three-day reply window "
+                "has passed before restoring or resetting state; deleting or resetting state sooner "
+                "replays consumed approvals.",
                 priority=Priority.BLOCKER, handler=DAEMON_NAME,
                 email_eligible=False,
             ))
