@@ -35,10 +35,20 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from email.utils import parseaddr
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable, Literal
 
 log = logging.getLogger("ateles.approval.email")
+
+
+@dataclass(frozen=True)
+class ApprovalReply:
+    message_id: str
+    subject: str
+    body: str = ""
+    authenticated: bool = True
+    correlation_target: str | None = None
 
 
 @dataclass(frozen=True)
@@ -49,7 +59,8 @@ class ReadRepliesOutcome:
       - ``ok``              — transport succeeded; ``texts`` may be empty (no reply yet)
       - ``transport_error`` — ANY gws fetch in the sweep failed (triage, auth
                               metadata, or body); ``texts`` is always ``[]``,
-                              never a partial set
+                              never a partial set. ``replies`` may hold readable,
+                              authenticated messages for correction-only handling.
       - ``disabled``        — ``ATELES_NOTIFY_EMAIL`` is not armed
 
     Payment-consent callers MUST use this form and treat non-``ok`` as blocked
@@ -60,33 +71,376 @@ class ReadRepliesOutcome:
     kind: Literal["ok", "transport_error", "disabled"]
     texts: list[str]
     detail: str = ""
+    replies: tuple[ApprovalReply, ...] = ()
+    rejected_replies: tuple[ApprovalReply, ...] = ()
+    unreadable_replies: tuple[ApprovalReply, ...] = ()
+
+
+_ATTRIBUTION = re.compile(
+    r"(?i)^(?:on\s+\S.+\s+\S.+\s+wrote:|"
+    r"le\s+\S.+\s+\S.+\s+a écrit\s*:|"
+    r"el\s+\S.+\s+\S.+\s+escribió:)$"
+)
+_FORWARD = re.compile(r"(?i)^(?:-----Original Message-----|Begin forwarded message:)$")
+_OUTLOOK_HEADERS = ("from:", "sent:", "to:", "subject:")
+
+_NON_RENDERED = frozenset({
+    "head", "title", "script", "style", "template", "noscript", "object",
+    "iframe", "svg", "math", "canvas", "audio", "video", "select", "option",
+    "datalist", "textarea", "meta", "menu", "slot", "noembed",
+    "picture", "frameset",
+})
+_RENDERED_PROSE = frozenset({
+    "html", "body", "p", "div", "span", "blockquote", "a", "b", "strong",
+    "i", "em", "u", "s", "del", "ins", "mark", "small", "big", "sub", "sup",
+    "ul", "ol", "li", "table", "thead", "tbody", "tfoot", "tr", "td", "th",
+    "h1", "h2", "h3", "h4", "h5", "h6", "font", "center", "pre", "code",
+    "q", "cite", "address", "section", "article", "header", "footer", "main",
+    "aside", "details", "summary", "dl", "dt", "dd",
+    "dialog",
+})
+_DARK_NAMES = {"black": (0, 0, 0), "navy": (0, 0, 128),
+               "darkblue": (0, 0, 139), "midnightblue": (25, 25, 112),
+               "darkslategray": (47, 79, 79), "dimgray": (105, 105, 105)}
+_LIGHT_NAMES = {"white": (255, 255, 255)}
+_SAFE_STYLE = frozenset({"font-family", "font-size", "font-weight", "font-style",
+                         "text-align", "text-decoration", "line-height", "white-space",
+                         "word-wrap", "overflow-wrap", "direction", "color",
+                         "background", "background-color"})
+_SAFE_FONTS = frozenset({
+    "arial", "helvetica", "helvetica neue", "verdana", "tahoma", "trebuchet ms",
+    "calibri", "cambria", "candara", "segoe ui", "aptos", "georgia", "times",
+    "times new roman", "garamond", "palatino", "courier", "courier new",
+    "menlo", "monaco", "consolas", "roboto", "open sans", "lato",
+    "system-ui", "-apple-system", "blinkmacsystemfont", "sans-serif", "serif",
+    "monospace", "ui-sans-serif", "ui-serif", "ui-monospace",
+})
+_LAYOUT_VALUE = re.compile(r"(0|\d+(?:\.\d+)?)(px|pt|em|rem|%)?")
+_LAYOUT_LIMITS = {"px": 100, "pt": 75, "em": 8, "rem": 8, "%": 10}
+
+
+def _rgba(value: str) -> tuple[int, int, int, float] | None:
+    """Parse only opaque, unambiguous CSS colours used by the approval policy."""
+    value = value.strip().lower()
+    if value in _DARK_NAMES | _LIGHT_NAMES:
+        return (*(_DARK_NAMES | _LIGHT_NAMES)[value], 1.0)
+    match = re.fullmatch(r"#([0-9a-f]{3}|[0-9a-f]{6})", value)
+    if match:
+        digits = match.group(1)
+        if len(digits) == 3:
+            return (*(int(c * 2, 16) for c in digits), 1.0)
+        return (*(int(digits[i:i + 2], 16) for i in (0, 2, 4)), 1.0)
+    match = re.fullmatch(
+        r"rgba?\(\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\s*[, ]\s*(\d{1,3})"
+        r"\s*(?:[,/]\s*(1(?:\.0+)?|0?\.\d+|0))?\s*\)", value)
+    if match:
+        channels = tuple(int(match.group(i)) for i in (1, 2, 3))
+        alpha = float(match.group(4)) if match.group(4) else 1.0
+        if all(channel <= 255 for channel in channels):
+            return (*channels, alpha)
+    return None
+
+
+def _safe_colour(value: str, *, background: bool) -> bool:
+    if not background and value.strip().lower() in _DARK_NAMES:
+        return True
+    rgba = _rgba(value)
+    return bool(rgba and rgba[3] == 1.0 and
+                (all(c >= 224 for c in rgba[:3]) if background else
+                 all(c <= 100 for c in rgba[:3])))
+
+
+def _safe_font_family(value: str) -> bool:
+    families = value.split(",")
+    return bool(families) and all(
+        (family.strip().strip('"\'').casefold() in _SAFE_FONTS and
+         (family.strip()[0] not in '"\'' or family.strip()[-1] == family.strip()[0]))
+        for family in families if family.strip()
+    ) and all(family.strip() for family in families)
+
+
+def _safe_style(style: str, parent_px: float = 16, relative_scale: float = 1) -> tuple[bool, float, float]:
+    font_px = parent_px
+    scale = relative_scale
+    if re.search(r"(?i)/\*|[{}]|(?:var|calc|env)\s*\(", style):
+        return False, font_px, scale
+    for declaration in style.split(";"):
+        if not declaration.strip():
+            continue
+        if declaration.count(":") != 1:
+            return False, font_px, scale
+        name, value = (part.strip().lower() for part in declaration.split(":", 1))
+        if not value or "!important" in value:
+            return False, font_px, scale
+        if name in {"color", "background", "background-color"}:
+            if not _safe_colour(value, background=name != "color"):
+                return False, font_px, scale
+        elif name == "font-family":
+            if not _safe_font_family(value):
+                return False, font_px, scale
+        elif name in {"text-transform", "direction", "unicode-bidi"}:
+            if value != {"text-transform": "none", "direction": "ltr",
+                         "unicode-bidi": "normal"}[name]:
+                return False, font_px, scale
+        elif name == "font-size":
+            keyword = {"small": 13, "medium": 16, "large": 18,
+                       "smaller": .8, "larger": 1.2}
+            size = re.fullmatch(r"(\d+(?:\.\d+)?)(px|pt|em|rem|%)", value)
+            if value in {"smaller", "larger"}:
+                factor = keyword[value]
+                font_px *= factor
+                scale *= factor
+            elif value in {"small", "medium", "large"}:
+                font_px = keyword[value]
+            elif size:
+                amount = float(size.group(1))
+                unit = size.group(2)
+                if unit in {"em", "%"}:
+                    factor = amount if unit == "em" else amount / 100
+                    font_px *= factor
+                    scale *= factor
+                else:
+                    font_px = amount * {"px": 1, "pt": 4 / 3, "rem": 16}[unit]
+            else:
+                return False, font_px, scale
+            if font_px < 8 or scale < .7:
+                return False, font_px, scale
+        elif name == "line-height":
+            if value != "normal":
+                measure = _LAYOUT_VALUE.fullmatch(value)
+                if not measure or not .7 <= float(measure.group(1)) * {
+                    None: 1, "px": 1 / font_px, "pt": 4 / (3 * font_px),
+                    "em": 1, "rem": 16 / font_px, "%": .01,
+                }[measure.group(2)] <= 3:
+                    return False, font_px, scale
+        elif name in {"margin", "padding"} or re.fullmatch(
+                r"(?:margin|padding)-(?:top|right|bottom|left)", name):
+            values = value.split()
+            if not 1 <= len(values) <= (4 if name in {"margin", "padding"} else 1):
+                return False, font_px, scale
+            for item in values:
+                measure = _LAYOUT_VALUE.fullmatch(item)
+                if not measure or float(measure.group(1)) > _LAYOUT_LIMITS.get(
+                        measure.group(2), 0):
+                    return False, font_px, scale
+        elif name.startswith("border"):
+            if value not in {"none", "0", "0px"}:
+                return False, font_px, scale
+        elif name not in _SAFE_STYLE:
+            return False, font_px, scale
+    return True, font_px, scale
+
+
+def _hiding_style(style: str) -> bool:
+    return not _safe_style(style)[0]
+
+
+def _authored_plain_checked(text: str) -> tuple[str, bool]:
+    """Keep every authored line; remove only structurally proven quotations."""
+    lines: list[str] = []
+    source = text.splitlines()
+    saw_quote = False
+    for index, line in enumerate(source):
+        stripped = line.strip()
+        if _ATTRIBUTION.fullmatch(stripped) and all(
+                not tail.strip() or tail.lstrip().startswith(">")
+                for tail in source[index + 1:]):
+            return "\n".join(lines), True
+        header_start = index + 1 if _FORWARD.fullmatch(stripped) else index
+        headers = source[header_start:header_start + len(_OUTLOOK_HEADERS)]
+        if (len(headers) == len(_OUTLOOK_HEADERS) and
+                all(header.strip().casefold().startswith(name) and
+                    header.strip()[len(name):].strip()
+                    for header, name in zip(headers, _OUTLOOK_HEADERS)) and
+                (header_start != index or all(
+                    not tail.strip() or tail.lstrip().startswith(">")
+                    for tail in source[header_start + len(_OUTLOOK_HEADERS):]))):
+            return "\n".join(lines), True
+        if stripped.startswith(">"):
+            saw_quote = True
+            continue
+        if stripped:
+            if saw_quote:
+                return "\n".join([*lines, stripped]), False
+            lines.append(stripped)
+    return "\n".join(lines), True
+
+
+def _authored_plain(text: str) -> str:
+    body, safe = _authored_plain_checked(text)
+    return body if safe else ""
+
+
+class _AuthoredHTML(HTMLParser):
+    """Extract visible authored text while discarding quoted subtrees."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.stack: list[tuple[str, bool]] = []
+        self.quote_depth = 0
+        self.non_rendered_depth = 0
+        self.structured = False
+        self.body_depth = 0
+        self.boundary_seen = False
+        self.terminal = False
+        self.unsafe = False
+        self.font_stack: list[tuple[float, float]] = []
+        self.closed_dialog_stack: list[bool] = []
+
+    _VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img",
+                       "input", "link", "meta", "param", "source", "track", "wbr"})
+    _MAX_STACK = 64
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        names = [name.lower() for name, _ in attrs]
+        if len(names) != len(set(names)):
+            self.unsafe = True
+        attrs_by_name = dict(attrs)
+        parent_px, parent_scale = self.font_stack[-1] if self.font_stack else (16, 1)
+        style_safe, font_px, scale = _safe_style(
+            attrs_by_name.get("style") or "", parent_px, parent_scale)
+        if tag == "small":
+            font_px *= .8
+            scale *= .8
+        elif tag == "big":
+            font_px *= 1.2
+            scale *= 1.2
+        if font_px < 8 or scale < .7:
+            self.unsafe = True
+        if tag not in _RENDERED_PROSE and tag not in _NON_RENDERED and tag not in self._VOID:
+            self.unsafe = True
+        if ("hidden" in attrs_by_name or
+                (attrs_by_name.get("aria-hidden") or "").strip().lower() == "true" or
+                not style_safe or
+                ("face" in attrs_by_name and tag == "font" and
+                 not _safe_font_family(attrs_by_name.get("face") or "")) or
+                (tag == "link" and "stylesheet" in (attrs_by_name.get("rel") or "").lower().split())):
+            self.unsafe = True
+        for name in ("color", "text", "bgcolor"):
+            if name in attrs_by_name and not _safe_colour(
+                attrs_by_name[name] or "", background=name == "bgcolor"):
+                self.unsafe = True
+        if tag in {"html", "head", "body"}:
+            if not self.structured:
+                self.parts.clear()
+            self.structured = True
+        if tag == "body":
+            self.body_depth += 1
+        classes = set((attrs_by_name.get("class") or "").lower().split())
+        element_id = (attrs_by_name.get("id") or "").lower()
+        quote = (tag == "blockquote"
+                 or bool(classes & {"gmail_quote", "gmail_extra", "yahoo_quoted",
+                                    "protonmail_quote", "msoquote", "outlookmessageheader"})
+                 or element_id in {"divrplyfwdmsg", "appendonsend"}
+                 or (tag == "div" and (attrs_by_name.get("type") or "").lower() == "cite"))
+        if ("gmail_attr" in classes or "moz-cite-prefix" in classes
+                or element_id in {"divrplyfwdmsg", "appendonsend"}):
+            self.terminal = True
+            self.boundary_seen = True
+        if tag in self._VOID:
+            if tag == "area":
+                self.unsafe = True
+            if tag == "hr" and self.quote_depth == 0 and not self.non_rendered_depth:
+                self.parts.append("\n")
+            elif tag == "br" and self.quote_depth == 0 and not self.non_rendered_depth:
+                self.parts.append("\n")
+            return
+        if len(self.stack) >= self._MAX_STACK:
+            self.unsafe = True
+            return
+        if quote:
+            self.quote_depth += 1
+            self.boundary_seen = True
+        if tag in _NON_RENDERED:
+            self.non_rendered_depth += 1
+        closed_dialog = tag == "dialog" and "open" not in attrs_by_name
+        if closed_dialog:
+            self.non_rendered_depth += 1
+        self.stack.append((tag, quote))
+        self.font_stack.append((font_px, scale))
+        self.closed_dialog_stack.append(closed_dialog)
+        if tag in ("p", "div", "li", "tr") and self.quote_depth == 0 and not self.non_rendered_depth:
+            self.parts.append("\n")
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # HTML ignores the slash on a non-void element: `<blockquote/>` OPENS a
+        # blockquote. Treat it as a start tag only, so a quote container written
+        # that way keeps hiding what follows (and an unclosed one is unreadable).
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._VOID:
+            return
+        if not self.stack or self.stack[-1][0] != tag:
+            self.unsafe = True
+            return
+        _, quote = self.stack.pop()
+        self.font_stack.pop()
+        closed_dialog = self.closed_dialog_stack.pop()
+        if quote:
+            self.quote_depth -= 1
+        if tag in _NON_RENDERED:
+            self.non_rendered_depth -= 1
+        if closed_dialog:
+            self.non_rendered_depth -= 1
+        if tag == "body":
+            self.body_depth -= 1
+        if tag in ("p", "div", "li", "tr") and self.quote_depth == 0 and not self.non_rendered_depth:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        tags = [tag for tag, _ in self.stack]
+        if data.strip() and (any(tag in {"menu", "slot", "noembed", "object",
+                                 "picture", "audio", "video", "frameset"}
+                                 for tag in tags) or
+                             ("details" in tags and "summary" not in tags) or
+                             "dialog" in tags):
+            self.unsafe = True
+        if self.stack and self.stack[-1][0] == "style":
+            # Empty rules cannot affect rendering. A rule with declarations
+            # can affect any descendant through selectors and cascade.
+            if "@font-face" in data.casefold() or data.strip() and not re.fullmatch(
+                r"(?:\s*[.#]?[a-zA-Z][\w-]*\s*\{\s*\}\s*)+", data):
+                self.unsafe = True
+        if self.quote_depth or self.non_rendered_depth or (self.structured and not self.body_depth):
+            return
+        if self.boundary_seen and data.strip():
+            self.unsafe = True
+        if self.terminal:
+            return
+        self.parts.append(data)
+
+    def unknown_decl(self, data: str) -> None:
+        self.unsafe = True
+
+
+def _extract_authored_html(html: str) -> tuple[str, bool]:
+    """Return authored text only when the HTML can be separated safely."""
+    parser = _AuthoredHTML()
+    try:
+        parser.feed(html)
+        parser.close()
+    except Exception:  # noqa: BLE001 — malformed HTML cannot grant approval
+        return "", False
+    if parser.unsafe or parser.stack or parser.rawdata:
+        return "", False
+    body, safe = _authored_plain_checked("".join(parser.parts))
+    return (body if safe else ""), parser.boundary_seen
 
 
 def _strip_html(html: str) -> str:
-    """Reduce an HTML email part to plain text good enough for verdict parsing.
+    """Plain authored text from HTML, retained for callers of this helper."""
+    return _extract_authored_html(html)[0]
 
-    Only used for the HTML-only fallback (a reply with no plaintext part). Drops
-    <script>/<style> blocks, turns block-level tag boundaries into newlines so a
-    verb keeps leading its line, removes the remaining tags, and unescapes the
-    handful of entities that show up in real replies. Not a general HTML
-    sanitizer — just enough that `<p>approve v0.20.0</p>` reads as
-    `approve v0.20.0`.
-    """
-    if not html:
-        return ""
-    # Remove script/style content entirely.
-    html = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", html)
-    # Block-level boundaries → newlines so lines don't run together.
-    html = re.sub(r"(?i)<\s*(br|/p|/div|/li|/tr|/h[1-6])\s*/?>", "\n", html)
-    # Drop all remaining tags.
-    html = re.sub(r"<[^>]+>", "", html)
-    # Unescape the common entities seen in plain replies.
-    for ent, ch in (("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"),
-                    ("&gt;", ">"), ("&quot;", '"'), ("&#39;", "'")):
-        html = html.replace(ent, ch)
-    # Collapse runs of blank lines / trailing spaces.
-    lines = [ln.strip() for ln in html.splitlines()]
-    return "\n".join(ln for ln in lines if ln)
+
+def _unmarked_notification_copy(body: str) -> bool:
+    """An HTML-only copy of an instruction with its token has no safe boundary."""
+    return bool(re.search(
+        r"(?i)\breply\s+(?:approve|attended|to approve|with one line per payment)\b",
+        body,
+    )
+                and re.search(r"(?i)(?:swarm-approve:|release-approve:|\[APPROVE-[0-9A-F]+\])", body))
 
 
 def email_enabled() -> bool:
@@ -110,6 +464,26 @@ def _swarm_config_dir() -> str:
     return os.path.expanduser(
         os.environ.get("ATELES_SWARM_GWS_CONFIG_DIR", "").strip()
     )
+
+
+def gws_config_dir_env(*, allow_ambient: bool = False,
+                       require_existing: bool = False) -> dict[str, str]:
+    """The gws config selection for a child process, as an env fragment.
+
+    Non-approval reads may explicitly opt into the ambient directory. Approval
+    sends pass ``require_existing=True`` so a missing
+    swarm directory cannot select the operator's mailbox or gws default.
+    ``_gws_env`` separately checks the full swarm mailbox configuration.
+    """
+    swarm_dir = _swarm_config_dir()
+    if swarm_dir and (not require_existing or os.path.isdir(swarm_dir)):
+        return {_GWS_CONFIG_ENV: swarm_dir}
+    if not allow_ambient:
+        return {}
+    ambient = os.environ.get(_GWS_CONFIG_ENV, "")
+    if require_existing and not os.path.isdir(os.path.expanduser(ambient)):
+        return {}
+    return {_GWS_CONFIG_ENV: ambient} if ambient else {}
 
 
 def swarm_mailbox_problems() -> list[str]:
@@ -162,7 +536,9 @@ def _gws_env() -> dict[str, str] | None:
         )
         return None
     env = dict(os.environ)
-    env[_GWS_CONFIG_ENV] = _swarm_config_dir()
+    # Configured implies ATELES_SWARM_GWS_CONFIG_DIR is set, so the shared
+    # mapping always selects the swarm mailbox here.
+    env.update(gws_config_dir_env())
     return env
 
 
@@ -450,6 +826,7 @@ def read_replies_with_status(
     on_reply_message: Callable[[str, str], None] | None = None,
     on_sender_rejected: Callable[[], None] | None = None,
     on_unauthenticated_operator_reply: Callable[[], None] | None = None,
+    require_enabled: bool = True,
 ) -> ReadRepliesOutcome:
     """Statusful inbox sweep — distinguish empty-ok from transport failure.
 
@@ -467,7 +844,7 @@ def read_replies_with_status(
     operator-facing message. The reply is still ignored. When this callback
     is not given, ``on_sender_rejected`` fires instead (prior behaviour).
     """
-    if not email_enabled():
+    if require_enabled and not email_enabled():
         return ReadRepliesOutcome(kind="disabled", texts=[], detail="ATELES_NOTIFY_EMAIL")
     if not tokens:
         return ReadRepliesOutcome(kind="ok", texts=[], detail="")
@@ -483,6 +860,9 @@ def read_replies_with_status(
         )
 
     texts: list[str] = []
+    replies: list[ApprovalReply] = []
+    rejected_replies: list[ApprovalReply] = []
+    unreadable_replies: list[ApprovalReply] = []
     seen_ids: set[str] = set()
     saw_transport_error = False
     transport_detail = ""
@@ -525,6 +905,7 @@ def read_replies_with_status(
                     except Exception as exc:  # noqa: BLE001
                         log.warning(f"on_sender_rejected callback failed: {exc}")
                 continue
+            seen_ids.add(mid)
             # The From address is text the sender chose. Require Gmail's own
             # record that the operator's domain authorized this message before
             # its body is read or its verdict counted. Unreadable metadata is a
@@ -534,12 +915,14 @@ def read_replies_with_status(
             if auth_results is None:
                 saw_transport_error = True
                 transport_detail = "gws_auth_metadata_failed"
+                unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
             if not sender_domain_authenticated(auth_results):
                 log.warning(
                     "approval: ignoring reply — sender domain authentication "
                     "absent or not a pass (address matched, identity unknown)"
                 )
+                rejected_replies.append(ApprovalReply(mid, subject, authenticated=False))
                 cb = on_unauthenticated_operator_reply or on_sender_rejected
                 if cb is not None:
                     try:
@@ -547,51 +930,70 @@ def read_replies_with_status(
                     except Exception as exc:  # noqa: BLE001
                         log.warning(f"reply-rejected callback failed: {exc}")
                 continue
-            seen_ids.add(mid)
             body_data = gws_json(["gmail", "+read", "--id", mid, "--headers",
                                   "--format", "json"], timeout=30)
-            if body_data is None:
+            if not isinstance(body_data, dict):
                 saw_transport_error = True
                 transport_detail = "gws_read_failed"
+                unreadable_replies.append(ApprovalReply(mid, subject))
                 continue
-            body = ""
-            if isinstance(body_data, dict):
-                # Prefer plaintext (where the operator's verdict + the quoted
-                # token live). Fall back to the HTML part only if that is all gws
-                # returns — an HTML-only reply must not read as an empty body and
-                # silently drop the approval (the ateles#286 failure mode: a live
-                # release approval was lost because the reader missed the
-                # plaintext key).
-                body = str(body_data.get("body_text")
-                           or body_data.get("body")
-                           or body_data.get("text")
-                           or body_data.get("plain") or "")
-                if not body:
-                    # HTML-only: strip tags so the verb leads its line, otherwise
-                    # parse_verdict (which keys off the FIRST word of a line) sees
-                    # "<p>approve" and returns None — a non-empty-but-unparseable
-                    # body would still drop the approval. Tag-strip makes an
-                    # HTML-only `approve <version>` reply actually register.
-                    raw_html = str(body_data.get("body_html") or "")
-                    if raw_html:
-                        body = _strip_html(raw_html)
-                    else:
-                        body = str(body_data.get("snippet") or "")
+            # A triage snippet, subject, preview, or header can contain both
+            # verdict and token, but none proves that the full reply was read.
+            plain = next((value for key in ("body_text", "body", "text", "plain")
+                         if isinstance((value := body_data.get(key)), str)
+                         and value.strip()), "")
+            body, plain_safe = _authored_plain_checked(plain)
+            raw_html = body_data.get("body_html")
+            # Preserve the target from the matched request token before quote
+            # removal. The affirmative must still come from authored text.
+            raw_source = plain + "\n" + (raw_html if isinstance(raw_html, str) else "")
+            token_pattern = (r"release-approve:\s*(v[0-9][0-9A-Za-z.\-+]*)"
+                             if token == "release-approve:" else
+                             r"swarm-approve:\s*([A-Za-z0-9._-]+/[A-Za-z0-9._-]+#\d+)")
+            targets = set(re.findall(token_pattern, raw_source, re.IGNORECASE))
+            correlation_target = next(iter(targets)) if len(targets) == 1 else None
+            if not plain_safe:
+                saw_transport_error = True
+                transport_detail = "reply_quote_boundary_unknown"
+                unreadable_replies.append(ApprovalReply(mid, subject))
+                continue
+            if not body and isinstance(raw_html, str):
+                body, boundary_seen = _extract_authored_html(raw_html)
+                if body and not boundary_seen and _unmarked_notification_copy(body):
+                    body = ""
+            # A blank authored reply above a recognizable quote is readable:
+            # it is a non-approval, so Turdus owes a correction.
+            blank_quoted_reply = bool(plain and not body and
+                                      (any(line.lstrip().startswith(">") for line in plain.splitlines())
+                                       or any(_ATTRIBUTION.match(line.strip()) or _FORWARD.match(line.strip())
+                                              for line in plain.splitlines())))
+            if not body.strip() and not blank_quoted_reply:
+                saw_transport_error = True
+                transport_detail = "reply_quote_boundary_unknown"
+                unreadable_replies.append(ApprovalReply(mid, subject))
+                continue
             if on_reply_message is not None:
                 try:
                     on_reply_message(token, mid)
                 except Exception as exc:  # noqa: BLE001
                     log.warning(f"on_reply_message callback failed: {exc}")
             texts.append(f"{subject}\n{body}")
+            replies.append(ApprovalReply(mid, subject, body,
+                                         correlation_target=correlation_target))
 
     # Any fetch failure within the sweep fails the WHOLE read: a verdict set
     # built from only the messages that loaded is incomplete, and acting on it
     # could honour one reply while missing a later one that changes it.
     if saw_transport_error:
         return ReadRepliesOutcome(
-            kind="transport_error", texts=[], detail=transport_detail or "gws_failed"
+            kind="transport_error", texts=[], detail=transport_detail or "gws_failed",
+            replies=tuple(replies),
+            rejected_replies=tuple(rejected_replies),
+            unreadable_replies=tuple(unreadable_replies),
         )
-    return ReadRepliesOutcome(kind="ok", texts=texts, detail="")
+    return ReadRepliesOutcome(kind="ok", texts=texts, detail="",
+                              replies=tuple(replies),
+                              rejected_replies=tuple(rejected_replies))
 
 
 def read_replies(

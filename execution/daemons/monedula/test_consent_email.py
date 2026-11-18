@@ -319,6 +319,18 @@ def test_body_does_not_treat_paid_as_pre_execution_verb():
     assert states["AAAA1111"] != "approved"
 
 
+@pytest.mark.parametrize("calendar,verb", ((True, "ATTENDED"), (False, "APPROVE")))
+@pytest.mark.parametrize("extra", ("wait", "actually no", "unless X",
+                                  "APPROVE [APPROVE-BBBB2222]", "thank you"))
+def test_payment_reply_with_second_authored_line_never_approves(calendar, verb, extra):
+    item = consent_email.PendingItem(
+        "synthetic", "Synthetic", 25, "2026-09-22", calendar, "AAAA1111")
+    states, unrecognized = consent_email.overlay_verdicts(
+        [item], [f"RE: [APPROVE-AAAA1111]\n{verb}\n{extra}"])
+    assert states["AAAA1111"] != "approved"
+    assert unrecognized
+
+
 def test_statusful_ok_empty_is_awaiting_approval_not_skipped(monkeypatch, tmp_path):
     h = _Handler("therapy", label="Studio Example", amount=60)
     monkeypatch.setattr(consent_email, "send_request", lambda *a, **k: True)
@@ -754,7 +766,7 @@ def _fake_gws(tok: str, *, auth_by_id: dict, body_by_id: dict):
         if "+read" in args:
             mid = args[args.index("--id") + 1]
             body = body_by_id.get(mid)
-            return None if body is None else {"body_text": body}
+            return None if body is None else body if isinstance(body, dict) else {"body_text": body}
         return None
     return fake
 
@@ -779,6 +791,376 @@ def test_real_read_authenticated_operator_attended_is_approved(monkeypatch, tmp_
     assert result.states[key] == "approved"
 
 
+@pytest.mark.parametrize("format", ("plain", "html"))
+@pytest.mark.parametrize("authored", (False, True))
+def test_consent_reader_excludes_quoted_request(monkeypatch, tmp_path, format, authored):
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    items = consent_email.build_pending_items([(h, [{}])], "2026-09-22")
+    tok = items[0].token
+    request = "Reply ATTENDED (calendar) or APPROVE (one-off) or SKIP"
+    if format == "plain":
+        body = ("ATTENDED\n" if authored else "") + "> " + request
+        payload = {"body_text": body}
+    else:
+        body = ("<p>ATTENDED</p>" if authored else "") + \
+               f"<div class='gmail_quote'>{request}</div>"
+        payload = {"body_html": body}
+    _arm_email(monkeypatch)
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        tok, auth_by_id={"m1": [_GOOGLE_PASS]}, body_by_id={"m1": payload}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert (tok in result.approved) is authored
+
+
+def test_consent_unmarked_html_request_is_unreadable(monkeypatch, tmp_path):
+    h = _Handler("oneoff", label="Example", amount=60)
+    items = consent_email.build_pending_items([(h, [{}])], "2026-09-22")
+    tok = items[0].token
+    _arm_email(monkeypatch)
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        tok, auth_by_id={"m1": [_GOOGLE_PASS]}, body_by_id={"m1": {
+            "body_html": f"<p>Reply APPROVE to pay</p><p>{subject_marker(tok)}</p>"
+        }}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == set()
+    assert result.reason_code == "consent_reply_read_failed"
+
+
+@pytest.mark.parametrize("wrapper", (
+    "<head>{text}</head>", "<title>{text}</title>",
+    "<script>{text}</script>", "<style>{text}</style>",
+    "<template>{text}</template>", "<noscript>{text}</noscript>",
+    "<object>{text}</object>", "<iframe>{text}</iframe>",
+    "<svg>{text}</svg>", "<math>{text}</math>",
+    "<canvas>{text}</canvas>", "<audio>{text}</audio>",
+    "<video>{text}</video>", "<select>{text}</select>",
+    "<option>{text}</option>", "<datalist>{text}</datalist>",
+    "<textarea>{text}</textarea>",
+))
+def test_consent_nonrendered_html_affirmative_holds(monkeypatch, tmp_path, wrapper):
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    tok = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0].token
+    _arm_email(monkeypatch)
+    html = f"<body>{wrapper.format(text='ATTENDED')}<blockquote>{subject_marker(tok)}</blockquote></body>"
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        tok, auth_by_id={"m1": [_GOOGLE_PASS]}, body_by_id={"m1": {"body_html": html}}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == set()
+    assert result.reason_code == "consent_reply_read_failed"
+
+
+@pytest.mark.parametrize("attr", (
+    "hidden", 'aria-hidden="true"', 'style="display:none"',
+    'style="visibility:hidden"', 'style="opacity:0"',
+    'style="font-size:0"', 'style="font-size:0px"', 'style="font-size:0pt"',
+    'style="max-height:0"', 'style="max-width:0"',
+    'style="height:0;overflow:hidden"', 'style="width:0;overflow:hidden"',
+    'style="mso-hide:all"', 'style="position:absolute;left:-9999px"',
+    'style="text-indent:-9999px"',
+    'style="color:#fff;background-color:#fff"',
+    'style="color:white;background:white"',
+    'style="clip:rect(0,0,0,0)"', 'style="clip-path:inset(100%)"',
+    'style="color:transparent"',
+    'style="-webkit-text-fill-color:transparent"',
+    'style="line-height:0"', 'style="transform:translateX(9999px)"',
+))
+def test_consent_hidden_html_affirmative_holds(monkeypatch, tmp_path, attr):
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    tok = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0].token
+    _arm_email(monkeypatch)
+    html = f"<body><p {attr}>ATTENDED</p><blockquote>{subject_marker(tok)}</blockquote></body>"
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        tok, auth_by_id={"m1": [_GOOGLE_PASS]}, body_by_id={"m1": {"body_html": html}}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == set()
+    assert result.reason_code == "consent_reply_read_failed"
+
+
+def test_consent_class_hidden_by_stylesheet_holds(monkeypatch, tmp_path):
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    tok = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0].token
+    _arm_email(monkeypatch)
+    html = ("<html><head><style>.hidden{display:none}</style></head>"
+            f"<body><p class='hidden'>ATTENDED</p><blockquote>{subject_marker(tok)}</blockquote></body></html>")
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        tok, auth_by_id={"m1": [_GOOGLE_PASS]}, body_by_id={"m1": {"body_html": html}}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == set()
+    assert result.reason_code == "consent_reply_read_failed"
+
+
+@pytest.mark.parametrize("colour", (
+    "#0000", "#fff0", "hsla(0,0%,0%,0)", "hwb(0 0% 0% / 0)",
+    "lab(0 0 0 / 0)", "lch(0 0 0 / 0)", "color(srgb 0 0 0 / 0)",
+    "hsl(0,0%,0%)", "rgb(0,0,0)",
+))
+@pytest.mark.parametrize("property_name", ("color", "background"))
+def test_consent_unsafe_html_colour_holds(monkeypatch, tmp_path, colour, property_name):
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    tok = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0].token
+    _arm_email(monkeypatch)
+    html = (f"<body><p style='{property_name}:{colour}'>ATTENDED</p>"
+            f"<blockquote>{subject_marker(tok)}</blockquote></body>")
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        tok, auth_by_id={"m1": [_GOOGLE_PASS]}, body_by_id={"m1": {"body_html": html}}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    if property_name == "color" and colour == "rgb(0,0,0)":
+        assert result.approved == {consent_email.match_key(
+            consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0])}
+    else:
+        assert result.approved == set()
+        assert result.reason_code == "consent_reply_read_failed"
+
+
+@pytest.mark.parametrize("style", (
+    "color:#222;background:rgb(34,34,34)",
+    "color:black;background:rgb(0,0,0)",
+    "color:white;background:#fff",
+    "color:hsl(0,0%,0%);background:black",
+))
+def test_consent_equal_or_dark_background_holds(monkeypatch, tmp_path, style):
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    tok = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0].token
+    _arm_email(monkeypatch)
+    html = (f"<body><p style='{style}'>ATTENDED</p>"
+            f"<blockquote>{subject_marker(tok)}</blockquote></body>")
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        tok, auth_by_id={"m1": [_GOOGLE_PASS]}, body_by_id={"m1": {"body_html": html}}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == set()
+    assert result.reason_code == "consent_reply_read_failed"
+
+
+def test_consent_normal_styled_html_approves(monkeypatch, tmp_path):
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    item = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0]
+    _arm_email(monkeypatch)
+    html = ("<body style='background:white'><p style='color:rgb(34,34,34);"
+            "font-family:Arial;font-size:14px;margin:0'>ATTENDED</p>"
+            f"<blockquote>{subject_marker(item.token)}</blockquote></body>")
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        item.token, auth_by_id={"m1": [_GOOGLE_PASS]}, body_by_id={"m1": {"body_html": html}}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == {consent_email.match_key(item)}
+
+
+@pytest.mark.parametrize("calendar", (True, False))
+@pytest.mark.parametrize("wrapper", (
+    "<span style='font-size:50%'>" * 20 + "{verb}" + "</span>" * 20,
+    "<span style='font-size:.5em'>" * 20 + "{verb}" + "</span>" * 20,
+    "<span style='font-size:smaller'>" * 20 + "{verb}" + "</span>" * 20,
+    *[f"<p style='{side}:99999px'>{{verb}}</p>" for side in (
+        "margin", "padding", "margin-left", "margin-right", "margin-top",
+        "margin-bottom", "padding-left", "padding-right", "padding-top", "padding-bottom")],
+    "<p style='margin:0 0 0 99999px'>{verb}</p>",
+    "<p style='padding:0 99999px'>{verb}</p>",
+    "<p style='width:99999px'>{verb}</p>",
+    "<details><p>{verb}</p></details>",
+    "<dialog>{verb}</dialog>",
+    '<p style="font-size:14px" style="font-size:0">{verb}</p>',
+    '<p class="ordinary" class="gmail_quote">{verb}</p>',
+    '<p hidden="" hidden="false">{verb}</p>',
+    '<p id="ordinary" id="divRplyFwdMsg">{verb}</p>',
+))
+def test_ambiguous_html_holds_calendar_and_oneoff_payment(
+        monkeypatch, tmp_path, calendar, wrapper):
+    h = _Handler("therapy" if calendar else "oneoff", label="Example", amount=60,
+                 calendar=calendar)
+    item = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0]
+    _arm_email(monkeypatch)
+    html = (f"<body>{wrapper.format(verb='ATTENDED' if calendar else 'APPROVE')}"
+            f"<blockquote>{subject_marker(item.token)}</blockquote></body>")
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        item.token, auth_by_id={"m1": [_GOOGLE_PASS]},
+        body_by_id={"m1": {"body_html": html}}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == set()
+    assert result.reason_code == "consent_reply_read_failed"
+
+
+@pytest.mark.parametrize("calendar", (True, False))
+@pytest.mark.parametrize("tail", (
+    "I withdraw", "Name\nTitle\nLocation\nPhone\nExtra",
+    "Please approve later", "Review PR #7", "Version v1.2.3",
+    "From: old request\n> quoted\nI changed my mind",
+))
+def test_ambiguous_plain_tail_holds_payment(monkeypatch, tmp_path, calendar, tail):
+    h = _Handler("therapy" if calendar else "oneoff", label="Example", amount=60,
+                 calendar=calendar)
+    item = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0]
+    _arm_email(monkeypatch)
+    separator = "\n" if tail.startswith("From:") else "\n-- \n"
+    body = ("ATTENDED" if calendar else "APPROVE") + separator + tail
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        item.token, auth_by_id={"m1": [_GOOGLE_PASS]},
+        body_by_id={"m1": {"body_text": body}}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == set()
+    assert result.reason_code in {"consent_reply_read_failed", "consent_reply_unrecognized"}
+
+
+@pytest.mark.parametrize("calendar", (True, False))
+def test_benign_signature_does_not_approve_payment(monkeypatch, tmp_path, calendar):
+    h = _Handler("therapy" if calendar else "oneoff", label="Example", amount=60,
+                 calendar=calendar)
+    item = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0]
+    _arm_email(monkeypatch)
+    body = ("ATTENDED" if calendar else "APPROVE") + "\n-- \nExample Name\nEngineer"
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        item.token, auth_by_id={"m1": [_GOOGLE_PASS]},
+        body_by_id={"m1": {"body_text": body}}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == set()
+    assert result.reason_code == "consent_reply_unrecognized"
+
+
+@pytest.mark.parametrize("calendar", (True, False))
+@pytest.mark.parametrize("tail", (
+    "Subject: I rescind my consent", "From: I rescind my consent",
+    "Date: I rescind my consent", "-- \nI rescind my consent",
+    "--\nI rescind my consent",
+    "-----Original Message-----\nI rescind my consent",
+    "From: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\nI rescind my consent",
+))
+def test_authored_withdrawal_holds_payment(monkeypatch, tmp_path, calendar, tail):
+    h = _Handler("therapy" if calendar else "oneoff", label="Example", amount=60,
+                 calendar=calendar)
+    item = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0]
+    _arm_email(monkeypatch)
+    body = ("ATTENDED" if calendar else "APPROVE") + "\n" + tail
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        item.token, auth_by_id={"m1": [_GOOGLE_PASS]},
+        body_by_id={"m1": {"body_text": body}}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == set()
+    assert result.reason_code == "consent_reply_unrecognized"
+
+
+@pytest.mark.parametrize("calendar", (True, False))
+@pytest.mark.parametrize("quote", (
+    "On Tuesday Example wrote:\n> old request",
+    "-----Original Message-----\nFrom: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\nold request",
+))
+def test_proven_bottom_quote_can_approve_payment(monkeypatch, tmp_path, calendar, quote):
+    h = _Handler("therapy" if calendar else "oneoff", label="Example", amount=60,
+                 calendar=calendar)
+    item = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0]
+    _arm_email(monkeypatch)
+    body = ("ATTENDED" if calendar else "APPROVE") + "\n" + quote
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        item.token, auth_by_id={"m1": [_GOOGLE_PASS]},
+        body_by_id={"m1": {"body_text": body}}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == {consent_email.match_key(item)}
+
+
+@pytest.mark.parametrize("calendar", (True, False))
+@pytest.mark.parametrize("markup", (
+    "<p style='font-family:Wingdings'>{verb}</p>",
+    "<font face='Symbol'>{verb}</font>",
+    "<p style='font:14px Webdings'>{verb}</p>",
+    "<p style='font-variant:small-caps'>{verb}</p>",
+    "<p style='font-feature-settings:normal'>{verb}</p>",
+    "<p style='font-synthesis:none'>{verb}</p>",
+    "<p style='unicode-range:U+0-FFFF'>{verb}</p>",
+    "<p style='text-transform:uppercase'>{verb}</p>",
+    "<p style='direction:rtl'>{verb}</p>",
+    "<p style='unicode-bidi:bidi-override'>{verb}</p>",
+    "<p style='writing-mode:vertical-rl'>{verb}</p>",
+    "<p style='text-orientation:sideways'>{verb}</p>",
+))
+def test_unsafe_font_holds_payment(monkeypatch, tmp_path, calendar, markup):
+    h = _Handler("therapy" if calendar else "oneoff", label="Example", amount=60,
+                 calendar=calendar)
+    item = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0]
+    _arm_email(monkeypatch)
+    verb = "ATTENDED" if calendar else "APPROVE"
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        item.token, auth_by_id={"m1": [_GOOGLE_PASS]},
+        body_by_id={"m1": {"body_html": f"<body>{markup.format(verb=verb)}</body>"}}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == set()
+    assert result.reason_code == "consent_reply_read_failed"
+
+
+def test_unreadable_payment_reply_gets_one_correction_and_no_payment(monkeypatch, tmp_path):
+    h = _Handler("therapy", label="Example", amount=60)
+    item = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0]
+    _arm_email(monkeypatch)
+    sent = []
+    monkeypatch.setattr(consent_email, "send_request", lambda *args: sent.append(args) or True)
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        item.token, auth_by_id={"m1": [_GOOGLE_PASS]},
+        body_by_id={"m1": {"body_text": "ATTENDED\n-- \nI withdraw"}}))
+    for _ in range(2):
+        result = consent_email.request_and_collect(
+            [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+        assert result.approved == set()
+    assert len(sent) == 2  # one request, one correction; the second poll retries the held reply
+
+
+@pytest.mark.parametrize("format", ("plain", "html"))
+def test_consent_bottom_posted_reply_holds(monkeypatch, tmp_path, format):
+    h = _Handler("therapy", label="Studio Example", amount=60)
+    tok = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0].token
+    _arm_email(monkeypatch)
+    body = ({"body_text": f"> {subject_marker(tok)}\nATTENDED"} if format == "plain" else
+            {"body_html": f"<body><blockquote>{subject_marker(tok)}</blockquote><p>ATTENDED</p></body>"})
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        tok, auth_by_id={"m1": [_GOOGLE_PASS]}, body_by_id={"m1": body}))
+    result = consent_email.request_and_collect(
+        [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == set()
+    assert result.reason_code == "consent_reply_read_failed"
+
+
+@pytest.mark.parametrize("calendar", (True, False))
+@pytest.mark.parametrize("invalid_first", (True, False))
+def test_consent_reply_invalid_verb_holds_whole_reply(calendar, invalid_first):
+    h = _Handler("payment", label="Example", amount=60, calendar=calendar)
+    items = consent_email.build_pending_items([(h, [{}])], "2026-09-22")
+    tok = items[0].token
+    valid = "ATTENDED" if calendar else "APPROVE"
+    invalid = "APPROVE" if calendar else "ATTENDED"
+    lines = [invalid, valid] if invalid_first else [valid, invalid]
+    text = f"Re: Consent {subject_marker(tok)}\n" + "\n".join(lines)
+    states, flagged = consent_email.overlay_verdicts(items, [text])
+    assert flagged is True
+    assert states[consent_email.match_key(items[0])] == "awaiting_approval"
+
+
+def test_consent_multi_item_reply_is_atomic_and_valid_reply_approves_both():
+    calendar = _Handler("session", label="Studio", amount=60)
+    oneoff = _Handler("invoice", label="Vendor", amount=40, calendar=False)
+    items = consent_email.build_pending_items(
+        [(calendar, [{}]), (oneoff, [{}])], "2026-09-22")
+    first, second = items
+    good = (f"ATTENDED {subject_marker(first.token)}\n"
+            f"APPROVE {subject_marker(second.token)}")
+    states, flagged = consent_email.overlay_verdicts(items, [good])
+    assert not flagged
+    assert all(state == "approved" for state in states.values())
+    bad = (f"ATTENDED {subject_marker(first.token)}\n"
+           f"ATTENDED {subject_marker(second.token)}")
+    states, flagged = consent_email.overlay_verdicts(items, [bad])
+    assert flagged
+    assert all(state == "awaiting_approval" for state in states.values())
+
+
 def test_real_read_unauthenticated_operator_attended_is_held(monkeypatch, tmp_path):
     h = _Handler("therapy", label="Studio Example", amount=60)
     items = consent_email.build_pending_items([(h, [{}])], "2026-09-22")
@@ -793,7 +1175,9 @@ def test_real_read_unauthenticated_operator_attended_is_held(monkeypatch, tmp_pa
     assert key not in result.approved
 
 
-def test_real_read_partial_failure_holds_every_payment(monkeypatch, tmp_path):
+@pytest.mark.parametrize("failure", ("metadata", "body_missing", "body_empty",
+                                     "snippet_only", "preview_only", "html_empty"))
+def test_real_read_partial_failure_holds_every_payment(monkeypatch, tmp_path, failure):
     """m1 (authenticated ATTENDED) loads; m2 fails. Monedula must hold, not act
     on the half it could read."""
     h = _Handler("therapy", label="Studio Example", amount=60)
@@ -803,8 +1187,20 @@ def test_real_read_partial_failure_holds_every_payment(monkeypatch, tmp_path):
     _arm_email(monkeypatch)
     monkeypatch.setattr(_ec, "gws_json", _fake_gws(
         tok,
-        auth_by_id={"m1": [_GOOGLE_PASS], "m2": [_GOOGLE_PASS]},
-        body_by_id={"m1": "ATTENDED", "m2": None}))
+        auth_by_id={"m1": [_GOOGLE_PASS],
+                    "m2": None if failure == "metadata" else [_GOOGLE_PASS]},
+        body_by_id={"m1": "ATTENDED",
+                    "m2": ({"snippet": "ATTENDED", "subject": "ATTENDED"}
+                           if failure == "snippet_only" else
+                           {"preview": "ATTENDED"} if failure == "preview_only" else
+                           {"body_html": "<style>ATTENDED</style>"}
+                           if failure == "html_empty" else
+                           {} if failure == "body_empty" else None)}))
+    outcome = _ec.read_replies_with_status([tok])
+    assert outcome.kind == "transport_error"
+    assert outcome.texts == []
+    assert [reply.message_id for reply in outcome.replies] == ["m1"]
+    assert [r.message_id for r in outcome.unreadable_replies] == ["m2"]
     result = consent_email.request_and_collect(
         [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
     assert result.reason_code == "consent_reply_read_failed"

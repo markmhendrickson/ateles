@@ -65,6 +65,9 @@ class TestSpawnPrepareAgentMissingClaudeCLI:
 
     def test_present_claude_spawns_without_telegram(self, monkeypatch, tmp_path):
         monkeypatch.setattr(shutil, "which", lambda name: "/usr/local/bin/claude")
+        # The agent's GitHub identity check is covered in test_prepare.py; this
+        # test is about the CLI lookup, so the identity is taken as verified.
+        monkeypatch.setattr(prepare, "_agent_github_identity_ok", lambda env: True)
         agent_log = tmp_path / "agent.log"
         monkeypatch.setattr(prepare, "AGENT_LOG", agent_log)
         with patch.object(prepare, "telegram_send") as mock_telegram, patch.object(

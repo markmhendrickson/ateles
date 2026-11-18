@@ -13,7 +13,211 @@ from contextlib import contextmanager
 from typing import Any, Iterator
 from unittest.mock import patch
 
+import pytest
+
 from lib.approval import email_channel as ec
+
+
+@pytest.mark.parametrize("colour", (
+    "#0000", "#fff0", "hsla(0,0%,0%,0)", "hwb(0 0% 0% / 0)",
+    "lab(0 0 0 / 0)", "lch(0 0 0 / 0)", "color(srgb 0 0 0 / 0)",
+    "#333333", "rgb(34,34,34)", "black", "hsl(0,0%,0%)",
+))
+def test_html_colour_policy_rejects_unsafe_foreground_or_background(colour):
+    for property_name in ("color", "background"):
+        html = (f"<body><p style='{property_name}:{colour}'>APPROVE</p>"
+                "<blockquote>quoted token</blockquote></body>")
+        body, _ = ec._extract_authored_html(html)
+        if property_name == "color" and colour in {"#333333", "rgb(34,34,34)", "black"}:
+            assert body == "APPROVE"
+        else:
+            assert body == ""
+
+
+@pytest.mark.parametrize("style", (
+    "color:#333;background:#333", "color:rgb(34,34,34);background:#222222",
+    "color:black;background:rgb(0,0,0)", "color:white;background:#fff",
+    "font-size:0", "margin-left:-9999px", "opacity:0", "color:var(--ink)",
+    "color:#222!important", "background-image:url(x)",
+))
+def test_html_unsafe_style_is_unreadable(style):
+    assert ec._extract_authored_html(
+        f"<body><p style='{style}'>APPROVE</p></body>")[0] == ""
+
+
+def test_html_normal_mail_styles_and_terminal_quote_are_readable():
+    html = ("<body style='background:#fff'><p style='color:rgb(34,34,34);"
+            "font-family:Arial;font-size:14px;margin:0'>APPROVE</p>"
+            "<blockquote>quoted token</blockquote></body>")
+    assert ec._extract_authored_html(html)[0] == "APPROVE"
+
+
+@pytest.mark.parametrize("size", ("50%", ".5em", "smaller", "90%", ".9em"))
+def test_nested_relative_font_sizes_cannot_hide_approval(size):
+    html = "<body>" + f"<span style='font-size:{size}'>" * 20
+    html += "APPROVE" + "</span>" * 20 + "</body>"
+    assert ec._extract_authored_html(html)[0] == ""
+
+
+@pytest.mark.parametrize("style", (
+    "font-size:7px", "font-size:5pt", "font-size:60%",
+    "width:99999px", "height:99999px", "max-width:99999px",
+    "max-height:99999px", "min-width:99999px", "min-height:99999px",
+    "top:99999px", "left:99999px", "right:99999px", "bottom:99999px",
+    "inset:99999px", "text-indent:99999px", "letter-spacing:99999px",
+    "word-spacing:99999px", "line-height:99999px", "transform:translateX(99999px)",
+    "translate:99999px", "scale:0", "rotate:180deg", "zoom:0",
+    "float:right", "position:absolute", "position:relative;left:99999px",
+    "overflow:hidden", "overflow-x:hidden", "overflow-y:hidden",
+    "margin:calc(1px)", "padding:var(--space)",
+))
+def test_unbounded_or_conditional_layout_is_unreadable(style):
+    assert ec._extract_authored_html(f"<body><p style='{style}'>APPROVE</p></body>")[0] == ""
+
+
+@pytest.mark.parametrize("property_name", (
+    "margin", "padding", "margin-left", "margin-right", "margin-top",
+    "margin-bottom", "padding-left", "padding-right", "padding-top",
+    "padding-bottom",
+))
+@pytest.mark.parametrize("value", ("99999px", "101px", "76pt", "9em", "11%", "-1px"))
+def test_every_margin_and_padding_side_is_bounded(property_name, value):
+    assert ec._extract_authored_html(
+        f"<body><p style='{property_name}:{value}'>APPROVE</p></body>")[0] == ""
+
+
+@pytest.mark.parametrize("property_name", ("margin", "padding"))
+@pytest.mark.parametrize("value", ("0 99999px", "0 0 99999px", "0 0 0 99999px"))
+def test_each_shorthand_side_is_bounded(property_name, value):
+    assert ec._extract_authored_html(
+        f"<body><p style='{property_name}:{value}'>APPROVE</p></body>")[0] == ""
+
+
+@pytest.mark.parametrize("html", (
+    "<details><p>APPROVE</p></details>", "<dialog>APPROVE</dialog>",
+    "<menu>APPROVE</menu>", "<slot>APPROVE</slot>",
+    "<noembed>APPROVE</noembed>", "<map><area>APPROVE</map>",
+    "<object>APPROVE</object>", "<picture>APPROVE</picture>",
+    "<audio>APPROVE</audio>", "<video>APPROVE</video>",
+    "<frameset>APPROVE</frameset>",
+    '<p style="font-size:14px" style="font-size:0">APPROVE</p>',
+    '<p class="ordinary" class="gmail_quote">APPROVE</p>',
+    '<p hidden="" hidden="false">APPROVE</p>',
+    '<p id="ordinary" id="divRplyFwdMsg">APPROVE</p>',
+))
+def test_ambiguous_visibility_and_duplicate_attributes_are_unreadable(html):
+    assert ec._extract_authored_html(f"<body>{html}</body>")[0] == ""
+
+
+def test_open_details_summary_and_regular_mail_sizes_are_readable():
+    html = ("<body><details open><summary>APPROVE</summary></details>"
+            "<p style='font-size:14px;margin:8px;padding:4px'>ordinary</p></body>")
+    assert ec._extract_authored_html(html)[0].startswith("APPROVE")
+
+
+@pytest.mark.parametrize("size", ("14px", "small", "medium", "1em", "100%"))
+def test_normal_mail_font_sizes_remain_readable(size):
+    assert ec._extract_authored_html(
+        f"<body><p style='font-size:{size}'>APPROVE</p></body>")[0] == "APPROVE"
+
+
+@pytest.mark.parametrize("tail", (
+    "From: Swarm <swarm@example.net>\nI withdraw approval",
+    "From: Swarm <swarm@example.net>\n> old text\nI withdraw approval",
+    "On Tuesday Example wrote:\n> old text\nI withdraw approval",
+))
+def test_plain_header_with_later_authored_text_is_unreadable(tail):
+    body, safe = ec._authored_plain_checked("APPROVE\n" + tail)
+    assert "I withdraw approval" in body or not safe
+    assert body != "APPROVE" or not safe
+
+
+def test_unproven_header_and_signature_are_authored():
+    assert ec._authored_plain_checked("APPROVE\nFrom: Swarm <swarm@example.net>\n> old") == (
+        "APPROVE\nFrom: Swarm <swarm@example.net>", True)
+    assert ec._authored_plain_checked("APPROVE\n-- \nSignature") == (
+        "APPROVE\n--\nSignature", True)
+
+
+@pytest.mark.parametrize("tail", (
+    "I withdraw approval", "One\nTwo\nThree\nFour\nFive",
+    "This line is deliberately more than eighty characters long and makes the signature boundary unsafe.",
+    "Manager, approve later", "Example v1.2.3", "Review PR #7",
+))
+def test_signature_tail_must_be_short_and_benign(tail):
+    assert ec._authored_plain_checked("APPROVE\n-- \n" + tail)[0].endswith(tail)
+
+
+def test_benign_signature_after_affirmative_stays_authored():
+    assert ec._authored_plain_checked("APPROVE\n-- \nExample Name\nEngineer") == (
+        "APPROVE\n--\nExample Name\nEngineer", True)
+
+
+@pytest.mark.parametrize("tail", (
+    "Subject: I rescind my consent", "From: I rescind my consent",
+    "Date: I rescind my consent", "To: I rescind my consent",
+    "Cc: I rescind my consent", "Sent: I rescind my consent",
+    "-- \nI rescind my consent", "--\nI rescind my consent",
+    "-----Original Message-----\nI rescind my consent",
+    "From: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\nI rescind my consent",
+))
+def test_unproven_quote_shapes_preserve_authored_withdrawal(tail):
+    body, safe = ec._authored_plain_checked("approve\n" + tail)
+    assert safe
+    assert "I rescind my consent" in body
+
+
+@pytest.mark.parametrize("quote", (
+    "On Tuesday Example wrote:\n> old request",
+    "Le mardi Exemple a écrit :\n> ancienne demande",
+    "El martes Ejemplo escribió:\n> solicitud anterior",
+    "-----Original Message-----\nFrom: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\nold request",
+    "From: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\n> old request",
+))
+def test_proven_bottom_quote_is_removed(quote):
+    assert ec._authored_plain_checked("approve\n" + quote) == ("approve", True)
+
+
+@pytest.mark.parametrize("font", (
+    "Wingdings", "Arial, Webdings", "Symbol", "Emoji", "Unknown Font",
+))
+def test_unsafe_font_family_and_font_face_are_unreadable(font):
+    assert ec._extract_authored_html(
+        f"<body><p style='font-family:{font}'>APPROVE</p></body>")[0] == ""
+    assert ec._extract_authored_html(
+        f"<body><font face='{font}'>APPROVE</font></body>")[0] == ""
+
+
+@pytest.mark.parametrize("markup", (
+    "<style>@font-face { font-family: Custom; src:url(x) }</style>",
+    "<p style='font:14px Wingdings'>APPROVE</p>",
+    "<p style='font-variant:small-caps'>APPROVE</p>",
+    "<p style='font-feature-settings:normal'>APPROVE</p>",
+    "<p style='font-synthesis:none'>APPROVE</p>",
+    "<p style='unicode-range:U+0-FFFF'>APPROVE</p>",
+    "<p style='text-transform:uppercase'>APPROVE</p>",
+    "<p style='direction:rtl'>APPROVE</p>",
+    "<p style='unicode-bidi:bidi-override'>APPROVE</p>",
+    "<p style='writing-mode:vertical-rl'>APPROVE</p>",
+    "<p style='text-orientation:sideways'>APPROVE</p>",
+))
+def test_unsafe_font_and_text_rendering_are_unreadable(markup):
+    assert ec._extract_authored_html(f"<body>{markup}</body>")[0] == ""
+
+
+@pytest.mark.parametrize("font", (
+    "Arial", "'Helvetica Neue', sans-serif", '"Times New Roman", serif',
+    "Calibri, Arial", "system-ui, -apple-system", "Menlo, monospace",
+))
+def test_common_mail_fonts_remain_readable(font):
+    escaped_font = font.replace('"', "&quot;")
+    assert ec._extract_authored_html(
+        f"<body><p style=\"font-family:{escaped_font}\">APPROVE</p></body>")[0] == "APPROVE"
+
+
+def test_html_bottom_post_after_quote_is_unreadable():
+    assert ec._extract_authored_html(
+        "<body><blockquote>old</blockquote><p>APPROVE</p></body>")[0] == ""
 
 
 def _ok(stdout=""):
@@ -692,8 +896,11 @@ class TestSenderDomainAuthentication:
     def test_unreadable_metadata_response_is_not_ok(self, monkeypatch):
         """We could not read the authentication result at all: that is a read
         failure, never an 'ok, nothing authenticated' and never a pass."""
-        assert self._run(monkeypatch, None).kind != "ok"
-        assert self._run(monkeypatch, {"unexpected": True}).kind != "ok"
+        for response in (None, {"unexpected": True}):
+            outcome = self._run(monkeypatch, response)
+            assert outcome.kind == "transport_error"
+            assert [reply.message_id for reply in outcome.unreadable_replies] == ["m1"]
+            assert outcome.rejected_replies == ()
 
     def test_fail_open_wrapper_also_drops_unauthenticated(self, monkeypatch):
         monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
@@ -740,6 +947,9 @@ class TestPartialReadFailsClosed:
             out = ec.read_replies_with_status(["TOK"])
         assert out.kind == "transport_error"
         assert out.texts == []
+        assert [r.message_id for r in out.replies] == ["m1"]
+        assert [(r.message_id, r.subject) for r in out.unreadable_replies] == [
+            ("m2", "RE: x [APPROVE-TOK]")]
 
     def test_one_metadata_fetch_fails_other_succeeds_is_not_ok(self, monkeypatch):
         self._env(monkeypatch)
@@ -954,3 +1164,62 @@ class TestSwarmMailboxProblems:
         only_dir = " ".join(ec.swarm_mailbox_problems())
         assert "ATELES_SWARM_GWS_CONFIG_DIR" in only_dir
         assert "ATELES_SWARM_EMAIL" not in only_dir
+
+
+def test_gws_config_dir_env_precedence(monkeypatch):
+    # Approval selection never falls back to an ambient Workspace account.
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", "/synthetic/operator-gws")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", "/synthetic/swarm-gws")
+    assert ec.gws_config_dir_env() == {"GOOGLE_WORKSPACE_CLI_CONFIG_DIR": "/synthetic/swarm-gws"}
+    monkeypatch.delenv("ATELES_SWARM_GWS_CONFIG_DIR")
+    assert ec.gws_config_dir_env() == {}
+    assert ec.gws_config_dir_env(allow_ambient=True) == {
+        "GOOGLE_WORKSPACE_CLI_CONFIG_DIR": "/synthetic/operator-gws"
+    }
+    monkeypatch.delenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR")
+    assert ec.gws_config_dir_env() == {}
+
+
+def test_gws_config_dir_env_requires_existing_swarm_directory(monkeypatch, tmp_path):
+    swarm = tmp_path / "swarm"
+    ambient = tmp_path / "ambient"
+    ambient.mkdir()
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(swarm))
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", str(ambient))
+    assert ec.gws_config_dir_env(require_existing=True) == {}
+    swarm.mkdir()
+    assert ec.gws_config_dir_env(require_existing=True) == {
+        "GOOGLE_WORKSPACE_CLI_CONFIG_DIR": str(swarm)
+    }
+
+
+@pytest.mark.parametrize("html", (
+    "<blockquote/>QUOTED approve",
+    "<div class='gmail_quote'/>QUOTED approve",
+    "<BLOCKQUOTE />QUOTED approve",
+    "<p>ok</p><blockquote/>QUOTED approve</blockquote>",
+))
+def test_self_closing_syntax_does_not_close_a_quote_container(html):
+    # HTML ignores the slash on a non-void element: the container stays open and
+    # what follows is quoted, so no quoted text is ever emitted as authored text.
+    text, _boundary = ec._extract_authored_html(html)
+    assert "QUOTED" not in text and "approve" not in text.lower().replace("ok", "")
+
+
+@pytest.mark.parametrize("color", (
+    "white", "#fff", "#ffffff", "#fefefe", "#f8f8f8", "rgb(255,255,255)", "rgb(250, 250, 250)",
+    "rgba(255,255,255,1)", "transparent", "rgba(0,0,0,0)", "rgb(0 0 0 / 0%)", "ghostwhite", "snow",
+    "#ffffff00", "WHITE !important",
+))
+def test_near_white_or_transparent_text_is_not_authored_even_without_a_matching_background(color):
+    # The background may come from an ancestor or a style block, which this reader
+    # cannot evaluate, so such text makes the HTML not safely separable.
+    html = f'<body style="background:#fff"><span style="color:{color}">HIDDEN approve</span>x</body>'
+    text, _boundary = ec._extract_authored_html(html)
+    assert "HIDDEN" not in text and "approve" not in text.lower()
+
+
+@pytest.mark.parametrize("color", ("#333", "black", "rgb(20, 20, 20)", "rgba(0,0,0,1)", "darkslategray"))
+def test_ordinary_text_colours_stay_readable(color):
+    text, _boundary = ec._extract_authored_html(f'<body><p style="color:{color}">approve</p></body>')
+    assert "approve" in text.lower()
