@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import consent_email  # noqa: E402
 import monedula  # noqa: E402
 import payment_journal  # noqa: E402
+from conftest import initialize_test_journal  # noqa: E402
 from lib.approval.email_channel import ReadRepliesOutcome  # noqa: E402
 from lib.approval.tokens import subject_marker  # noqa: E402
 from strandings import REASON_FETCH_FAILED, Stranding  # noqa: E402
@@ -76,6 +77,7 @@ class _World:
     """Fake gws + clock + profile loader + mailbox, shared across ticks."""
 
     def __init__(self, monkeypatch, tmp_path, handler):
+        initialize_test_journal(tmp_path)
         self.handler = handler
         self.now = SESSION_END + timedelta(minutes=10)
         self.calendars: dict[str, list[dict]] = {"primary": []}

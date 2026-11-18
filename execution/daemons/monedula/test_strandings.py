@@ -466,7 +466,11 @@ def test_run_with_no_strandings_is_clean(monkeypatch, tmp_path):
     import types
 
     import monedula
+    import consent_email
+    from conftest import initialize_test_journal
 
+    initialize_test_journal(tmp_path)
+    monkeypatch.setattr(consent_email, "STATE_FILE", tmp_path / "consent.json")
     monkeypatch.setattr(monedula, "STATE_FILE", tmp_path / ".last_run")
     monkeypatch.setattr(monedula, "_notify", lambda *a, **k: None, raising=False)
     monkeypatch.setattr(monedula, "telegram_send", lambda *a, **k: None, raising=False)

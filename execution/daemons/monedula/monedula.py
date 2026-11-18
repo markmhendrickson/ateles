@@ -68,6 +68,84 @@ _notifier: Any = None
 _notify_undeliverable = False
 
 
+def _payment_journal_alert(detail: str) -> str:
+    """Use fixed alert text; journal errors may contain private path details."""
+    from payment_journal import MISSING_AFTER_FIRST_USE, NOT_INITIALIZED
+
+    if detail == NOT_INITIALIZED:
+        return (
+            "monedula: payment journal not initialized "
+            "(payment_journal_unreadable). No payment will execute. "
+            "Reconcile against the chain and wallet, then initialize the journal."
+        )
+
+    if detail == MISSING_AFTER_FIRST_USE:
+        return (
+            "monedula: payment journal missing after first use "
+            "(payment_journal_unreadable). No payment will execute. "
+            "Reconcile against the chain and wallet before restoring the journal."
+        )
+    return (
+        "monedula: payment journal could not be read or written "
+        "(payment_journal_unreadable). No further payment will execute "
+        "until it is readable. Inspect the journal before anything is paid."
+    )
+
+
+def _payment_journal_alert_key(detail: str) -> str:
+    from payment_journal import MISSING_AFTER_FIRST_USE, NOT_INITIALIZED
+
+    return (
+        "monedula:payment_journal_missing"
+        if detail in (MISSING_AFTER_FIRST_USE, NOT_INITIALIZED)
+        else _CONSENT_CHANNEL_DEDUPE_KEY
+    )
+
+
+def _payment_terms_current(item: Any, label: str) -> bool:
+    """Require the live handler to match the obligation shown for consent."""
+    from consent_email import obligation_key
+
+    current = obligation_key(item.handler, item.payment_date, item.match_id)
+    if current == item.obligation:
+        return True
+    log.warning(
+        f"consent_terms_changed {label} — approval does not cover the "
+        "current payment terms; holding and re-requesting."
+    )
+    _notify(
+        f"monedula: approval no longer covers {item.handler_name} "
+        f"session {item.payment_date} [{str(item.obligation)[:12]}]: "
+        "the payee, amount, or currency changed after you approved it. Nothing "
+        "was paid; a fresh request is raised on the current terms.",
+        priority="blocker",
+        dedupe_key=f"monedula:payment_terms_changed:{item.obligation}",
+        email_eligible=True,
+    )
+    return False
+
+
+def _payment_preflight_safe(handler: Any, match: Any, label: str) -> bool:
+    """Run the handler's live safety preflight before recording intent."""
+    preflight = getattr(handler, "preflight", None)
+    if not callable(preflight):
+        return True
+    try:
+        preflight(match)
+    except Exception as exc:
+        log.error(f"payment_preflight_failed {label}: {exc}")
+        _notify(
+            f"monedula: payment held for {handler.name} — preflight "
+            "failed (see the daemon log). No transfer was attempted; "
+            "fix the payee and it retries.",
+            priority="blocker",
+            dedupe_key=f"monedula:preflight:{handler.name}",
+            email_eligible=True,
+        )
+        return False
+    return True
+
+
 def _get_notifier() -> Any:
     """Return the Notifier, building it now if a prior attempt failed."""
     global _notifier
@@ -654,10 +732,17 @@ def _task_to_preview_item(task: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def telegram_send(text: str) -> None:
+@dataclass(frozen=True)
+class TelegramPreview:
+    message_id: int
+    sent_at: int
+
+
+def telegram_send(text: str) -> TelegramPreview | None:
     """
     Send a Telegram message via the shared Node.js send.mjs helper,
-    falling back to telegram-send CLI.
+    falling back to telegram-send CLI. Only a verified Telegram response
+    supplies a receipt; the CLI fallback cannot authorize an approval poll.
     """
     import shutil
 
@@ -665,13 +750,25 @@ def telegram_send(text: str) -> None:
     send_script = PROJECT_ROOT / "execution" / "lib" / "telegram" / "send.mjs"
     if node and send_script.exists():
         try:
-            args = [node, str(send_script), "--text", text]
+            args = [node, str(send_script), "--text", text, "--json"]
             if TELEGRAM_TOPIC_MONEDULA:
-                args += ["--thread-id", TELEGRAM_TOPIC_MONEDULA]
-            subprocess.run(args, timeout=15, capture_output=True, env=os.environ)
-            return
+                args += ["--topic", TELEGRAM_TOPIC_MONEDULA]
+            completed = subprocess.run(
+                args, timeout=15, capture_output=True, env=os.environ, check=True
+            )
+            response = json.loads(completed.stdout)
+            result = response.get("result") if response.get("ok") is True else None
+            result = result if isinstance(result, dict) else {}
+            message_id = result.get("message_id")
+            sent_at = result.get("date")
+            if (type(message_id) is int and message_id > 0
+                    and type(sent_at) is int and sent_at > 0
+                    and str((result.get("chat") or {}).get("id")) == TELEGRAM_CHAT_ID):
+                return TelegramPreview(message_id, sent_at)
+            log.error("Telegram send receipt is incomplete; approval will be held")
+            return None
         except Exception as exc:
-            log.warning(f"send.mjs failed: {exc}, trying fallback")
+            log.warning(f"send.mjs failed ({type(exc).__name__}); trying fallback")
 
     telegram_cmd = shutil.which("telegram-send")
     if telegram_cmd:
@@ -681,6 +778,7 @@ def telegram_send(text: str) -> None:
             )
         except Exception as exc:
             log.warning(f"telegram-send fallback failed: {exc}")
+    return None
 
 
 def telegram_long_poll_once(timeout_sec: int = 120) -> str | None:
@@ -834,7 +932,9 @@ def _resolve_operator_principal() -> tuple[int | None, str]:
                       "(TELEGRAM_ALLOWED_USER_ID is not a numeric user id)")
 
 
-def telegram_poll_approval(timeout_sec: int = 120) -> TelegramPollResult:
+def telegram_poll_approval(
+    timeout_sec: int = 120, preview: TelegramPreview | None = None
+) -> TelegramPollResult:
     """Long-poll Telegram getUpdates for an approval reply.
 
     Structured sibling of `telegram_long_poll_once`. A 409 Conflict (another
@@ -844,6 +944,12 @@ def telegram_poll_approval(timeout_sec: int = 120) -> TelegramPollResult:
     burning the full timeout on a lock we cannot acquire only delays the
     escalation that should fire instead.
     """
+    if (preview is None or type(preview.message_id) is not int
+            or preview.message_id <= 0 or type(preview.sent_at) is not int
+            or preview.sent_at <= 0):
+        log.error("Telegram preview receipt unavailable — refusing approval")
+        return TelegramPollResult(kind="channel_error", error_detail="preview_receipt_unavailable")
+
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         log.error(
             "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — channel_error, cannot poll"
@@ -928,6 +1034,9 @@ def telegram_poll_approval(timeout_sec: int = 120) -> TelegramPollResult:
         updates = data.get("result") or []
         for update in updates:
             update_id = update.get("update_id", 0)
+            if type(update_id) is not int or update_id < offset:
+                log.info("Ignoring Telegram update already consumed or without an id")
+                continue
             offset = max(offset, update_id + 1)
             offset_file.write_text(str(offset))
 
@@ -947,6 +1056,19 @@ def telegram_poll_approval(timeout_sec: int = 120) -> TelegramPollResult:
                 log.warning(
                     f"Ignoring Telegram message from non-operator sender "
                     f"(user_id={user_id!r}) — not an approval")
+                continue
+
+            reply_to = msg.get("reply_to_message")
+            reply_id = reply_to.get("message_id") if isinstance(reply_to, dict) else None
+            message_date = msg.get("date")
+            message_id = msg.get("message_id")
+            if ((reply_to is not None and reply_id != preview.message_id)
+                    or type(message_date) is not int
+                    or message_date < preview.sent_at
+                    or (reply_to is None and
+                        (type(message_id) is not int
+                         or message_id <= preview.message_id))):
+                log.info("Ignoring Telegram message outside current preview")
                 continue
 
             text = (msg.get("text") or "").strip()
@@ -1716,11 +1838,9 @@ def main() -> bool:
     except _SessionJournalError as exc:
         log.error(f"payment_journal_unreadable — payments held: {exc}")
         _notify(
-            "monedula: payment journal could not be read or written "
-            "(payment_journal_unreadable). No further payment will execute "
-            "until it is readable. Inspect the journal before anything is paid.",
+            _payment_journal_alert(str(exc)),
             priority="blocker",
-            dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
+            dedupe_key=_payment_journal_alert_key(str(exc)),
             email_eligible=True,
         )
         return False
@@ -1807,14 +1927,6 @@ def main() -> bool:
 
     handler_names = list(dict.fromkeys([h.name for h, _ in triggered]))
     summaries = _pending_summaries(triggered)
-
-    if channel == "telegram" and calendar_fetch_ok:
-        # Break-glass polls in the same tick — the request is raised exactly
-        # once, so resolve these sessions now (email path defers this until
-        # consent is terminal).
-        if not profile_load_degraded:
-            _mark_ran_today()
-        _resolve_sessions(triggered, "settled")
 
     if channel in ("email", "payment_approval"):
         import payment_journal
@@ -1906,11 +2018,9 @@ def main() -> bool:
         def _journal_failure(detail: str) -> bool:
             log.error(f"payment_journal_unreadable — payments held: {detail}")
             _notify(
-                "monedula: payment journal could not be read or written "
-                "(payment_journal_unreadable). No further payment will execute "
-                "until it is readable. Inspect the journal before anything is paid.",
+                _payment_journal_alert(detail),
                 priority="blocker",
-                dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
+                dedupe_key=_payment_journal_alert_key(detail),
                 email_eligible=True,
             )
             return False
@@ -1952,44 +2062,16 @@ def main() -> bool:
                 continue
             handler = item.handler
             match = item.match
-            # Execute-time term check: the obligation the live handler would
-            # pay must be exactly the one the operator approved.
-            current = obligation_key(handler, item.payment_date, item.match_id)
-            if current != item.obligation:
-                log.warning(
-                    f"consent_terms_changed {label} — approval does not cover the "
-                    "current payee/amount; holding and re-requesting."
-                )
+            # The live terms must still be the ones shown for consent.
+            if not _payment_terms_current(item, label):
                 terms_changed.add(key)
-                _notify(
-                    f"monedula: approval no longer covers {item.handler_name} "
-                    f"session {item.payment_date} [{str(item.obligation)[:12]}]: "
-                    "the payee or amount changed after you approved it. Nothing "
-                    "was paid; a fresh request is raised on the current terms.",
-                    priority="blocker",
-                    dedupe_key=f"monedula:payment_terms_changed:{item.obligation}",
-                    email_eligible=True,
-                )
                 continue
             # Preflight BEFORE intent: a payee that cannot be paid safely
             # (inactive/unknown recipient, unresolved payee) fails closed
             # without poisoning the journal, and is retried once fixed.
-            preflight = getattr(handler, "preflight", None)
-            if callable(preflight):
-                try:
-                    preflight(match)
-                except Exception as exc:
-                    log.error(f"payment_preflight_failed {label}: {exc}")
-                    _notify(
-                        f"monedula: payment held for {handler.name} — preflight "
-                        "failed (see the daemon log). No transfer was attempted; "
-                        "fix the payee and it retries.",
-                        priority="blocker",
-                        dedupe_key=f"monedula:preflight:{handler.name}",
-                        email_eligible=True,
-                    )
-                    held_preflight.append(label)
-                    continue
+            if not _payment_preflight_safe(handler, match, label):
+                held_preflight.append(label)
+                continue
             try:
                 payment_journal.record_intent(
                     jpath, item.obligation, key, generation=item.generation
@@ -2092,12 +2174,66 @@ def main() -> bool:
         return not strandings
 
     # channel == "telegram" — break-glass path (unchanged attendance phrases)
+    import payment_journal
+    from consent_email import build_pending_items, journal_path
+
+    jpath = journal_path()
+
+    def _telegram_journal_failure(detail: str) -> bool:
+        log.error(f"payment_journal_unreadable — payments held: {detail}")
+        _notify(
+            _payment_journal_alert(detail),
+            priority="blocker",
+            dedupe_key=_payment_journal_alert_key(detail),
+            email_eligible=True,
+        )
+        return False
+
+    # An earlier transfer with no recorded outcome must never be converted
+    # into a skipped session by a later Telegram reply (including "no").
+    try:
+        journal = payment_journal.load(jpath)
+    except payment_journal.JournalError as exc:
+        return _telegram_journal_failure(str(exc))
+    # Reuse the email route's per-match identity, including its fallback for
+    # multiple matches without calendar event ids.
+    pending_items = build_pending_items(triggered, yesterday_str)
+    item_by_match = {id(item.match): item for item in pending_items}
+    held_unknown: list[str] = []
+    eligible: list[tuple] = []
+    for handler, matches in triggered:
+        remaining = []
+        for match in matches:
+            item = item_by_match[id(match)]
+            state = payment_journal.obligation_state(journal, item.obligation)
+            if state == payment_journal.STATE_DONE:
+                _resolve_sessions([(handler, [match])], "settled")
+            elif state == payment_journal.STATE_INTENT:
+                held_unknown.append(f"{handler.name}:{item.match_id or 'solo'}")
+            else:
+                remaining.append(match)
+        if remaining:
+            eligible.append((handler, remaining))
+    if held_unknown:
+        _notify_unknown_outcome(held_unknown, yesterday_str)
+    triggered = eligible
+    if not triggered:
+        if (
+            calendar_fetch_ok
+            and not profile_load_degraded
+            and not _has_pending_sessions()
+        ):
+            _mark_ran_today()
+        return not strandings and not held_unknown
+    handler_names = list(dict.fromkeys(h.name for h, _ in triggered))
+    summaries = _pending_summaries(triggered)
+
     preview_msg = _build_preview_message(triggered, yesterday_str, due_tasks=due_tasks)
     log.info("Sending payment preview to Telegram...")
-    telegram_send(preview_msg)
+    preview = telegram_send(preview_msg)
 
     # Wait for operator reply (2 minutes)
-    poll_result = telegram_poll_approval(timeout_sec=120)
+    poll_result = telegram_poll_approval(timeout_sec=120, preview=preview)
 
     if poll_result.kind in ("channel_error", "timeout"):
         # Channel failure, NOT a decline. Fail closed (no execute, same as a
@@ -2157,34 +2293,95 @@ def main() -> bool:
 
     if not approved:
         log.info(f"No payments approved (reply={reply!r}) — skipping all.")
+        _resolve_sessions(triggered, "skipped")
+        if (
+            calendar_fetch_ok
+            and not profile_load_degraded
+            and not _has_pending_sessions()
+        ):
+            _mark_ran_today()
         telegram_send(f"⏭️ Monedula: skipped all payments for {yesterday_str}.")
-        return not strandings
+        return not strandings and not held_unknown
 
     log.info(f"Approved handlers: {approved}")
 
     # Execute approved payments
     all_results = []
+    unknown: list[str] = list(held_unknown)
+    terms_changed = False
+    preflight_held = False
     for handler, matches in triggered:
         if handler.name not in approved:
             log.info(f"Skipping {handler.name} (not approved).")
+            _resolve_sessions([(handler, matches)], "skipped")
             continue
         for match in matches:
+            item = item_by_match[id(match)]
+            obligation = item.obligation
+            label = f"{handler.name}:{item.match_id or 'solo'}"
+            try:
+                journal = payment_journal.load(jpath)
+            except payment_journal.JournalError as exc:
+                return _telegram_journal_failure(str(exc))
+            state = payment_journal.obligation_state(journal, obligation)
+            if state == payment_journal.STATE_DONE:
+                _resolve_sessions([(handler, [match])], "settled")
+                continue
+            if state == payment_journal.STATE_INTENT:
+                log.error(f"payment_outcome_unknown {label} — holding, not retrying.")
+                unknown.append(label)
+                _notify_unknown_outcome(unknown, yesterday_str)
+                continue
+            if not _payment_terms_current(item, label):
+                terms_changed = True
+                continue
+            if not _payment_preflight_safe(handler, match, label):
+                preflight_held = True
+                continue
+            token = f"telegram:{obligation}"
+            try:
+                payment_journal.record_intent(jpath, obligation, token, generation=0)
+            except payment_journal.JournalError as exc:
+                return _telegram_journal_failure(str(exc))
             log.info(f"Executing {handler.name} payment...")
             _job = _activity.started(f"executing {handler.name} payment") if _activity else None
             try:
                 result = handler.execute(match)
-                all_results.append((handler, result))
-                log.info(f"{handler.name} result: {result}")
-                if _job:
-                    # Keep summary generic — no amounts, IBANs, or memos.
-                    _job.finished(f"{handler.name} payment executed")
             except Exception as _exc:
                 if _job:
                     _job.failed(f"{handler.name} payment error: {type(_exc).__name__}")
+                _notify_unknown_outcome([label], yesterday_str)
                 raise
+            status = (
+                str(result.get("status") or "unreported")
+                if isinstance(result, dict)
+                else "unreported"
+            )
+            try:
+                payment_journal.record_outcome(jpath, obligation, status)
+            except payment_journal.JournalError as exc:
+                _notify_unknown_outcome([label], yesterday_str)
+                return _telegram_journal_failure(str(exc))
+            _resolve_sessions([(handler, [match])], "settled")
+            all_results.append((handler, result))
+            log.info(f"{handler.name} result: {result}")
+            if _job:
+                # Keep summary generic — no amounts, IBANs, or memos.
+                _job.finished(f"{handler.name} payment executed")
+
+    if (
+        not terms_changed
+        and not preflight_held
+        and calendar_fetch_ok
+        and not profile_load_degraded
+        and not _has_pending_sessions()
+    ):
+        _mark_ran_today()
 
     # Send confirmation
     if not all_results:
+        if unknown or terms_changed or preflight_held:
+            return False
         telegram_send(f"⚠️ Monedula: no payments executed for {yesterday_str}.")
         return not strandings
 
@@ -2201,7 +2398,7 @@ def main() -> bool:
     log.info("Sending confirmation to Telegram...")
     telegram_send(confirmation_msg)
     log.info("Monedula run complete.")
-    return not strandings
+    return not strandings and not unknown and not terms_changed and not preflight_held
 
 
 def _alert_ref(message: str) -> str:

@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import consent_email  # noqa: E402
 import payment_journal  # noqa: E402
 import monedula  # noqa: E402
+from conftest import initialize_test_journal  # noqa: E402
 from lib.approval.email_channel import ReadRepliesOutcome
 from lib.approval.tokens import subject_marker, token_for
 
@@ -31,6 +32,7 @@ def _swarm_mailbox(monkeypatch, tmp_path):
     Configure one by default so the flow under test is the one that can
     actually succeed; tests of the unconfigured case remove it explicitly.
     """
+    initialize_test_journal(tmp_path)
     cfg = tmp_path / "swarm-gws"
     cfg.mkdir(exist_ok=True)
     # The gate compares the swarm address against OPERATOR_EMAIL, so a test
@@ -1072,6 +1074,32 @@ def test_unreadable_payment_journal_holds_every_payment(monkeypatch, tmp_path):
     assert ok is False
     assert h.execute_calls == []
     assert any("payment_journal_unreadable" in c[0] for c in notify_calls)
+
+
+def test_legacy_email_outstanding_request_holds_when_journal_disappears(monkeypatch, tmp_path):
+    h = _Handler("therapy", label="Studio Example", amount=60, calendar=True)
+    match = {"trigger": "calendar", "handler": "therapy"}
+    h._match_fn = lambda events: [match]
+    _email_env(monkeypatch)
+    _install(monkeypatch, [h], tmp_path)
+    notify_calls = _quiet_main(monkeypatch)
+    monkeypatch.setattr(consent_email, "send_request", lambda *a_, **k: True)
+    monkeypatch.setattr(
+        consent_email,
+        "read_replies_with_status",
+        lambda *a, **k: ReadRepliesOutcome(kind="ok", texts=[]),
+    )
+
+    # First tick issues the request and persists a generation; the later
+    # reply must not authorize a payment after the journal disappears.
+    monedula.main()
+    path = tmp_path / payment_journal.JOURNAL_NAME
+    assert (tmp_path / ".monedula_payment_journal.initialized").is_file()
+    path.unlink()
+    monkeypatch.setattr(consent_email, "read_replies_with_status", _approve_all_read([]))
+    assert monedula.main() is False
+    assert h.execute_calls == []
+    assert any("payment journal missing after first use" in c[0] for c in notify_calls)
 
 
 # ── ux review (PR #1202): swarm-mailbox dependency + unauthenticated replies ─

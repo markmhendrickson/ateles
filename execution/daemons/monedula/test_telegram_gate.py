@@ -20,6 +20,8 @@ Run with: pytest execution/daemons/monedula/test_telegram_gate.py -v
 from __future__ import annotations
 
 import json
+import inspect
+import subprocess
 import sys
 import types
 import urllib.error
@@ -30,6 +32,15 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 
 import monedula  # noqa: E402
+import consent_email  # noqa: E402
+import payment_journal  # noqa: E402
+from conftest import initialize_test_journal  # noqa: E402
+from test_payment_approval import env  # noqa: E402,F401 - shared payment fixture
+from test_session_payments import _event  # noqa: E402
+
+
+def _preview(message_id: int = 77, sent_at: int = 1000) -> types.SimpleNamespace:
+    return types.SimpleNamespace(message_id=message_id, sent_at=sent_at)
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -84,7 +95,9 @@ class _RecordingHandler:
 @pytest.fixture
 def sent_messages(tmp_path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Neutralise every outbound effect of `main()` except Telegram sends."""
+    initialize_test_journal(tmp_path)
     monkeypatch.setattr(monedula, "STATE_FILE", tmp_path / ".monedula_last_run")
+    monkeypatch.setattr(consent_email, "STATE_FILE", tmp_path / "consent.json")
     monkeypatch.setattr(
         monedula, "GATE_HEALTH_FILE", tmp_path / ".monedula_gate_health"
     )
@@ -127,6 +140,31 @@ def _install_handlers(monkeypatch, handlers):
     monkeypatch.setitem(sys.modules, "handlers", fake_mod)
 
 
+def _journal_failure_observers(monkeypatch: pytest.MonkeyPatch):
+    """Keep the real settlement path, while recording any attempt to reach it."""
+    handler = _RecordingHandler("therapy")
+    _install_handlers(monkeypatch, [handler])
+    polls: list[int] = []
+    resolutions: list[str] = []
+    notifications: list[str] = []
+    real_resolve = monedula._resolve_sessions
+
+    def record_resolve(triggered, state):
+        resolutions.append(state)
+        return real_resolve(triggered, state)
+
+    monkeypatch.setattr(monedula, "_resolve_sessions", record_resolve)
+    monkeypatch.setattr(
+        monedula, "_notify", lambda message, **kwargs: notifications.append(message)
+    )
+    return handler, polls, resolutions, notifications
+
+
+def _attended_therapy(polls: list[int]) -> monedula.TelegramPollResult:
+    polls.append(1)
+    return monedula.TelegramPollResult(kind="reply", text="attended therapy")
+
+
 # ── 1. Poll layer: telegram_poll_approval structured outcomes ────────────────
 
 
@@ -157,7 +195,7 @@ def test_http_409_short_circuits_as_channel_error(
 
     monkeypatch.setattr(monedula.urllib.request, "urlopen", _conflict)
 
-    result = monedula.telegram_poll_approval(timeout_sec=120)
+    result = monedula.telegram_poll_approval(timeout_sec=120, preview=_preview())
 
     assert result.kind == "channel_error"
     assert result.error_code == 409
@@ -200,7 +238,7 @@ def test_timeout_with_no_error_is_channel_error_not_reply(
 
     monkeypatch.setattr(monedula.urllib.request, "urlopen", _blocking_getupdates)
 
-    result = monedula.telegram_poll_approval(timeout_sec=10)
+    result = monedula.telegram_poll_approval(timeout_sec=10, preview=_preview())
 
     assert result.kind == "timeout"
     assert result.text is None
@@ -210,7 +248,7 @@ def test_missing_credentials_is_channel_error(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(monedula, "TELEGRAM_BOT_TOKEN", "")
     monkeypatch.setattr(monedula, "TELEGRAM_CHAT_ID", "")
 
-    result = monedula.telegram_poll_approval(timeout_sec=10)
+    result = monedula.telegram_poll_approval(timeout_sec=10, preview=_preview())
 
     assert result.kind == "channel_error"
 
@@ -234,15 +272,16 @@ def test_ok_false_payload_is_channel_error(monkeypatch: pytest.MonkeyPatch) -> N
         monedula.urllib.request, "urlopen", lambda url, timeout=None: _FakeResponse()
     )
 
-    result = monedula.telegram_poll_approval(timeout_sec=10)
+    result = monedula.telegram_poll_approval(timeout_sec=10, preview=_preview())
 
     assert result.kind == "channel_error"
 
 
-def test_genuine_reply_is_returned_as_reply_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_genuine_reply_is_returned_as_reply_kind(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.setattr(monedula, "TELEGRAM_BOT_TOKEN", "test-token")
     monkeypatch.setattr(monedula, "TELEGRAM_CHAT_ID", "12345")
     monkeypatch.setattr(monedula, "TELEGRAM_ALLOWED_USER_ID", "67890")
+    monkeypatch.setattr(monedula, "TG_OFFSET_FILE", tmp_path / ".offset")
 
     payload = {
         "ok": True,
@@ -253,6 +292,8 @@ def test_genuine_reply_is_returned_as_reply_kind(monkeypatch: pytest.MonkeyPatch
                     "text": "attended yoga",
                     "from": {"id": 67890},
                     "chat": {"id": 12345},
+                    "date": 1001,
+                    "reply_to_message": {"message_id": 77},
                 },
             }
         ],
@@ -272,7 +313,7 @@ def test_genuine_reply_is_returned_as_reply_kind(monkeypatch: pytest.MonkeyPatch
         monedula.urllib.request, "urlopen", lambda url, timeout=None: _FakeResponse()
     )
 
-    result = monedula.telegram_poll_approval(timeout_sec=10)
+    result = monedula.telegram_poll_approval(timeout_sec=10, preview=_preview())
 
     assert result.kind == "reply"
     assert result.text == "attended yoga"
@@ -375,6 +416,38 @@ def test_timeout_blocks_payment_and_escalates(
     assert ok is False
     assert len(escalation_posts) == 1
     assert "monedula_consent_channel_failure" in escalation_posts[0][0]["tags"]
+
+
+def test_telegram_timeout_preserves_pending_session_and_reprompts(
+    env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timed-out consent request must be retried before settling the session."""
+    w, _ = env
+    monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", "telegram")
+    previews: list[str] = []
+    polls: list[int] = []
+    monkeypatch.setattr(monedula, "telegram_send", previews.append)
+
+    def timeout(**kwargs):
+        polls.append(kwargs["timeout_sec"])
+        return monedula.TelegramPollResult(kind="timeout")
+
+    monkeypatch.setattr(monedula, "telegram_poll_approval", timeout)
+
+    assert w.tick() is False
+    assert len(previews) == len(polls) == 1
+    assert "preview" in previews[0]
+    assert payment_journal.session_state(w.journal, "yoga:evt-1") == "pending"
+    assert not monedula.STATE_FILE.exists()
+    assert w.handler.execute_calls == []
+
+    assert w.tick(minutes=15) is False
+    assert len(previews) == len(polls) == 2
+    assert previews[1] == previews[0]
+    assert polls == [120, 120]
+    assert payment_journal.session_state(w.journal, "yoga:evt-1") == "pending"
+    assert not monedula.STATE_FILE.exists()
+    assert w.handler.execute_calls == []
 
 
 def test_consent_channel_failure_notify_carries_dedupe_key_and_email_eligible(
@@ -629,6 +702,240 @@ def test_partial_approval_executes_only_the_named_handler(
     ), "a partial approval must still confirm what was paid"
 
 
+# ── Telegram consent is bound to the terms used at execution ─────────────────
+
+
+@pytest.mark.parametrize("change", ["amount", "payee", "currency"])
+def test_telegram_changed_terms_hold_without_intent_and_reissue(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str], change: str
+) -> None:
+    handler, polls, resolutions, _ = _journal_failure_observers(monkeypatch)
+    handler.profile.wise_recipient_name = "synthetic-recipient-a"
+    notices: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        monedula, "_notify", lambda message, **kwargs: notices.append((message, kwargs))
+    )
+
+    def change_during_poll(*args, **kwargs):
+        polls.append(1)
+        if len(polls) == 1:
+            if change == "amount":
+                handler.profile.amount_eur += 1
+            elif change == "payee":
+                handler.profile.wise_recipient_name = "synthetic-recipient-b"
+            else:
+                monkeypatch.setattr(consent_email, "CURRENCY", "TEST")
+            return monedula.TelegramPollResult(kind="reply", text="attended therapy")
+        return monedula.TelegramPollResult(kind="timeout")
+
+    monkeypatch.setattr(monedula, "telegram_poll_approval", change_during_poll)
+    assert monedula.main() is False
+    assert not handler.execute_calls and not resolutions
+    assert payment_journal.load(consent_email.journal_path())["obligations"] == {}
+    changed = [
+        (message, kwargs)
+        for message, kwargs in notices
+        if "payment_terms_changed" in kwargs.get("dedupe_key", "")
+    ]
+    assert len(changed) == 1
+    assert "Nothing was paid" in changed[0][0]
+    assert changed[0][1]["priority"] == "blocker"
+    assert changed[0][1]["dedupe_key"].startswith("monedula:payment_terms_changed:")
+    assert monedula.main() is False
+    assert len(sent_messages) == 2, "a new preview must be sent on the next tick"
+
+
+def test_telegram_unchanged_terms_execute_once(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
+) -> None:
+    handler, polls, _, _ = _journal_failure_observers(monkeypatch)
+    monkeypatch.setattr(
+        monedula, "telegram_poll_approval", lambda *a, **k: _attended_therapy(polls)
+    )
+    assert monedula.main() is True
+    assert len(handler.execute_calls) == 1
+    assert len(payment_journal.load(consent_email.journal_path())["obligations"]) == 1
+    monedula.main()
+    assert len(handler.execute_calls) == 1
+
+
+def test_telegram_reply_after_terms_change_back_executes(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
+) -> None:
+    handler, polls, _, _ = _journal_failure_observers(monkeypatch)
+    original = handler.profile.amount_eur
+
+    def change_back_during_poll(*args, **kwargs):
+        handler.profile.amount_eur = original + 1
+        handler.profile.amount_eur = original
+        return _attended_therapy(polls)
+
+    monkeypatch.setattr(monedula, "telegram_poll_approval", change_back_during_poll)
+    assert monedula.main() is True
+    assert len(handler.execute_calls) == 1
+
+
+def test_telegram_preflight_failure_holds_without_intent(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
+) -> None:
+    handler, polls, _, _ = _journal_failure_observers(monkeypatch)
+    calls = []
+
+    def reject(match):
+        calls.append(match)
+        raise ValueError("synthetic preflight refusal")
+
+    handler.preflight = reject
+    notices = []
+    monkeypatch.setattr(
+        monedula, "_notify", lambda message, **kwargs: notices.append((message, kwargs))
+    )
+    monkeypatch.setattr(
+        monedula, "telegram_poll_approval", lambda *a, **k: _attended_therapy(polls)
+    )
+    assert monedula.main() is False
+    assert len(calls) == 1 and not handler.execute_calls
+    assert payment_journal.load(consent_email.journal_path())["obligations"] == {}
+    assert any(
+        kwargs.get("dedupe_key") == "monedula:preflight:therapy"
+        for _, kwargs in notices
+    )
+
+
+# ── Telegram journal failures hold payments at every read/write ───────────────
+
+
+def test_telegram_holds_when_both_journal_files_are_absent(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
+) -> None:
+    handler, polls, resolutions, notifications = _journal_failure_observers(monkeypatch)
+    path = consent_email.journal_path()
+    path.unlink()
+    path.with_name(payment_journal.MARKER_NAME).unlink()
+    monkeypatch.setattr(monedula, "telegram_poll_approval", lambda *a, **k: _attended_therapy(polls))
+
+    assert monedula.main() is False
+    assert not polls and not sent_messages
+    assert not handler.execute_calls and not resolutions
+    assert any("payment journal not initialized" in notice for notice in notifications)
+
+
+def test_telegram_holds_after_unknown_intent_and_both_files_lost(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
+) -> None:
+    handler, polls, resolutions, notifications = _journal_failure_observers(monkeypatch)
+    path = consent_email.journal_path()
+
+    def lose_directory_during_poll(*args, **kwargs):
+        item = consent_email.build_pending_items(
+            [(handler, handler.matches([]))], monedula._yesterday().isoformat()
+        )[0]
+        payment_journal.record_intent(path, item.obligation, "synthetic-token", generation=0)
+        path.unlink()
+        path.with_name(payment_journal.MARKER_NAME).unlink()
+        return _attended_therapy(polls)
+
+    monkeypatch.setattr(monedula, "telegram_poll_approval", lose_directory_during_poll)
+    assert monedula.main() is False
+    assert len(polls) == 1 and len(sent_messages) == 1
+    assert not handler.execute_calls and not resolutions
+    assert any("payment journal not initialized" in notice for notice in notifications)
+
+
+def test_telegram_initial_journal_read_failure_blocks_before_preview(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
+) -> None:
+    handler, polls, resolutions, notifications = _journal_failure_observers(monkeypatch)
+    monkeypatch.setattr(
+        monedula,
+        "telegram_poll_approval",
+        lambda *a, **k: _attended_therapy(polls),
+    )
+    real_apply = monedula._apply_session_journal
+
+    def corrupt_after_session_read(triggered, *, reconcile):
+        result = real_apply(triggered, reconcile=reconcile)
+        consent_email.journal_path().write_text("{not json")
+        return result
+
+    monkeypatch.setattr(monedula, "_apply_session_journal", corrupt_after_session_read)
+
+    assert monedula.main() is False
+    assert sent_messages == []
+    assert polls == []
+    assert handler.execute_calls == []
+    assert resolutions == []
+    assert not monedula.STATE_FILE.exists()
+    assert any("payment_journal_unreadable" in msg for msg in notifications)
+
+
+def test_telegram_journal_reload_failure_blocks_before_execution(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
+) -> None:
+    handler, polls, resolutions, notifications = _journal_failure_observers(monkeypatch)
+
+    def corrupt_during_poll(*args, **kwargs):
+        consent_email.journal_path().write_text("{not json")
+        return _attended_therapy(polls)
+
+    monkeypatch.setattr(monedula, "telegram_poll_approval", corrupt_during_poll)
+
+    assert monedula.main() is False
+    assert len(polls) == 1
+    assert len(sent_messages) == 1  # preview reached, then journal reload failed
+    assert handler.execute_calls == []
+    assert resolutions == []
+    assert not monedula.STATE_FILE.exists()
+    assert any("payment_journal_unreadable" in msg for msg in notifications)
+
+
+def test_telegram_record_intent_failure_blocks_before_execution(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
+) -> None:
+    handler, polls, resolutions, notifications = _journal_failure_observers(monkeypatch)
+    monkeypatch.setattr(
+        monedula,
+        "telegram_poll_approval",
+        lambda *a, **k: _attended_therapy(polls),
+    )
+
+    def fail_intent(*args, **kwargs):
+        raise payment_journal.JournalError("intent write failed")
+
+    monkeypatch.setattr(payment_journal, "record_intent", fail_intent)
+
+    assert monedula.main() is False
+    assert len(polls) == 1
+    assert handler.execute_calls == []
+    assert resolutions == []
+    assert not monedula.STATE_FILE.exists()
+    assert any("payment_journal_unreadable" in msg for msg in notifications)
+
+
+def test_telegram_record_outcome_failure_reports_unknown_without_settlement(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
+) -> None:
+    handler, polls, resolutions, notifications = _journal_failure_observers(monkeypatch)
+    monkeypatch.setattr(
+        monedula,
+        "telegram_poll_approval",
+        lambda *a, **k: _attended_therapy(polls),
+    )
+
+    def fail_outcome(*args, **kwargs):
+        raise payment_journal.JournalError("outcome write failed")
+
+    monkeypatch.setattr(payment_journal, "record_outcome", fail_outcome)
+
+    assert monedula.main() is False
+    assert len(polls) == 1
+    assert len(handler.execute_calls) == 1
+    assert "settled" not in resolutions
+    assert not monedula.STATE_FILE.exists()
+    assert any("payment outcome UNKNOWN" in msg for msg in notifications)
+    assert any("payment_journal_unreadable" in msg for msg in notifications)
+
+
 # ── 5. Dead-gate detector ─────────────────────────────────────────────────────
 
 
@@ -864,7 +1171,8 @@ def test_payment_approved_never_referenced_to_gate_execute() -> None:
 # never a wildcard.
 
 
-def _poll_with(monkeypatch, payload: dict, *, allowed: str, tmp_path=None):
+def _poll_with(monkeypatch, payload: dict, *, allowed: str, tmp_path=None,
+               preview: types.SimpleNamespace | None = None):
     """Drive one poll against a canned getUpdates payload.
 
     The offset file is redirected into tmp_path: `telegram_poll_approval`
@@ -890,15 +1198,36 @@ def _poll_with(monkeypatch, payload: dict, *, allowed: str, tmp_path=None):
 
     if tmp_path is not None:
         monkeypatch.setattr(monedula, "TG_OFFSET_FILE", tmp_path / ".offset")
-    monkeypatch.setattr(
-        monedula.urllib.request, "urlopen", lambda url, timeout=None: _FakeResponse()
-    )
+    clock = _FakeClock()
+    monkeypatch.setattr(monedula.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(monedula.time, "sleep", clock.sleep)
+    calls = 0
+
+    def _updates(url, timeout=None):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            clock.sleep(timeout or 0)
+            return _FakeEmptyResponse()
+        return _FakeResponse()
+
+    class _FakeEmptyResponse(_FakeResponse):
+        def read(self):
+            return b'{"ok": true, "result": []}'
+
+    monkeypatch.setattr(monedula.urllib.request, "urlopen", _updates)
     # timeout_sec=10, not 1: the loop computes `int(deadline - monotonic())`,
     # so with a 1s budget the truncation to 0 breaks out before the first
     # request — a measurement artifact that reads as "no reply", which is the
     # very outcome these tests assert. The canned response returns instantly,
     # so a larger budget costs nothing.
-    return monedula.telegram_poll_approval(timeout_sec=10)
+    # The original implementation has no preview argument. Calling its old
+    # signature in the counterfactual run lets the effect assertion expose the
+    # stale approval instead of stopping at an unrelated TypeError.
+    if "preview" not in inspect.signature(monedula.telegram_poll_approval).parameters:
+        return monedula.telegram_poll_approval(timeout_sec=10)
+    return monedula.telegram_poll_approval(timeout_sec=10,
+                                          preview=_preview() if preview is None else preview)
 
 
 def _msg(user_id, text="attended all", chat_id=12345):
@@ -907,9 +1236,225 @@ def _msg(user_id, text="attended all", chat_id=12345):
         "ok": True,
         "result": [{
             "update_id": 1,
-            "message": {"text": text, "from": from_block, "chat": {"id": chat_id}},
+            "message": {"text": text, "from": from_block, "chat": {"id": chat_id},
+                        "date": 1001, "reply_to_message": {"message_id": 77}},
         }],
     }
+
+
+def _update(update_id: int, *, message_id: int = 88, sent_at: int = 1001,
+            reply_to: int | None = 77, user_id: int = 67890,
+            chat_id: int = 12345, text: str = "attended all") -> dict:
+    message = {"text": text, "from": {"id": user_id}, "chat": {"id": chat_id},
+               "date": sent_at, "message_id": message_id}
+    if reply_to is not None:
+        message["reply_to_message"] = {"message_id": reply_to}
+    return {"update_id": update_id, "message": message}
+
+
+@pytest.mark.parametrize("message", [
+    _update(1, sent_at=999, reply_to=None),
+    _update(1, message_id=76, sent_at=1000, reply_to=None),
+    _update(1, reply_to=76),
+    _update(1, sent_at=999, reply_to=77),
+    _update(1, user_id=67891),
+    _update(1, chat_id=12346),
+    _update(1, sent_at=1001, reply_to=None, text="attended all"),
+], ids=["stale_plain", "same_second_old_plain", "older_preview", "forged_early_reply",
+        "other_user", "other_chat", "current_plain"])
+def test_preview_binding_variants(monkeypatch, tmp_path, message):
+    result = _poll_with(monkeypatch, {"ok": True, "result": [message]},
+                        allowed="67890", tmp_path=tmp_path)
+    if (message["message"]["from"]["id"] == 67890 and
+        message["message"]["chat"]["id"] == 12345 and
+        message["message"]["date"] >= 1000 and
+        ("reply_to_message" not in message["message"] or
+         message["message"]["reply_to_message"] == {"message_id": 77}) and
+        ("reply_to_message" in message["message"] or
+         message["message"]["message_id"] > 77)
+    ):
+        assert result.kind == "reply"
+    else:
+        assert result.kind == "timeout"
+    assert (tmp_path / ".offset").read_text() == "2"
+
+
+def test_ignored_reply_does_not_lose_later_bound_reply(monkeypatch, tmp_path):
+    payload = {"ok": True, "result": [
+        _update(1, reply_to=76),
+        _update(2, message_id=88, reply_to=77, text="attended service"),
+    ]}
+    result = _poll_with(monkeypatch, payload, allowed="67890", tmp_path=tmp_path)
+    assert result == monedula.TelegramPollResult(kind="reply", text="attended service")
+    assert (tmp_path / ".offset").read_text() == "3"
+
+
+@pytest.mark.parametrize("preview", [
+    None, _preview(0, 1000), _preview(77, 0),
+])
+def test_unknown_preview_receipt_holds(monkeypatch, preview):
+    result = monedula.telegram_poll_approval(timeout_sec=10, preview=preview)
+    assert result.kind == "channel_error"
+    assert result.text is None
+
+
+def test_send_receipt_uses_telegram_response_and_topic(monkeypatch):
+    calls = []
+    monkeypatch.setattr("shutil.which", lambda name: "/bin/node" if name == "node" else None)
+    monkeypatch.setattr(monedula, "TELEGRAM_CHAT_ID", "12345")
+    monkeypatch.setattr(monedula, "TELEGRAM_TOPIC_MONEDULA", "topic-7")
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps({
+            "ok": True,
+            "result": {"message_id": 77, "date": 1000, "chat": {"id": 12345}},
+        }).encode(), stderr=b"")
+
+    monkeypatch.setattr(monedula.subprocess, "run", fake_run)
+    receipt = monedula.telegram_send("synthetic preview")
+    assert receipt.message_id == 77 and receipt.sent_at == 1000
+    assert calls[0][-3:] == ["--json", "--topic", "topic-7"]
+
+
+@pytest.mark.parametrize("receipt", [
+    {"message_id": 77, "chat": {"id": 12345}},
+    {"date": 1000, "chat": {"id": 12345}},
+    {"message_id": 77, "date": 1000, "chat": {"id": 99999}},
+])
+def test_incomplete_send_receipt_cannot_bind_preview(monkeypatch, receipt):
+    monkeypatch.setattr("shutil.which", lambda name: "/bin/node" if name == "node" else None)
+    monkeypatch.setattr(monedula, "TELEGRAM_CHAT_ID", "12345")
+    monkeypatch.setattr(monedula.subprocess, "run", lambda args, **kw:
+                        subprocess.CompletedProcess(args, 0, stdout=json.dumps({
+                            "ok": True, "result": receipt,
+                        }).encode(), stderr=b""))
+    assert monedula.telegram_send("synthetic preview") is None
+
+
+@pytest.mark.parametrize("message,receipt", [
+    (_update(1, sent_at=999, reply_to=None), _preview()),
+    (_update(1, message_id=76, sent_at=1000, reply_to=None), _preview()),
+    (_update(1, reply_to=76), _preview()),
+    (_update(1, sent_at=999), _preview()),
+    (_update(1, user_id=67891), _preview()),
+    (_update(1, chat_id=12346), _preview()),
+    (_update(1), None),
+    (_update(1), _preview(0, 1000)),
+    (_update(1), _preview(77, 0)),
+])
+def test_unbound_reply_never_records_payment_intent(env, monkeypatch, message, receipt):
+    w, _ = env
+    monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", "telegram")
+    monkeypatch.setattr(monedula, "TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setattr(monedula, "TELEGRAM_CHAT_ID", "12345")
+    monkeypatch.setattr(monedula, "TELEGRAM_ALLOWED_USER_ID", "67890")
+    monkeypatch.setattr(monedula, "TG_OFFSET_FILE", w.tmp_path / ".offset")
+    monkeypatch.setattr(monedula, "telegram_send", lambda text: receipt)
+    clock = _FakeClock()
+    monkeypatch.setattr(monedula.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(monedula.time, "sleep", clock.sleep)
+    delivered = False
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+    def fake_updates(url, timeout=None):
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return FakeResponse({"ok": True, "result": [message]})
+        clock.sleep(timeout or 0)
+        return FakeResponse({"ok": True, "result": []})
+
+    monkeypatch.setattr(monedula.urllib.request, "urlopen", fake_updates)
+    assert w.tick() is False
+    assert w.handler.execute_calls == []
+    assert w.journal["obligations"] == {}
+
+
+def test_replayed_update_does_not_approve_again(monkeypatch, tmp_path):
+    payload = {"ok": True, "result": [_update(1)]}
+    assert _poll_with(monkeypatch, payload, allowed="67890", tmp_path=tmp_path).kind == "reply"
+    assert _poll_with(monkeypatch, payload, allowed="67890", tmp_path=tmp_path).kind == "timeout"
+    assert (tmp_path / ".offset").read_text() == "2"
+
+
+def test_stale_reply_across_ticks_cannot_approve_changed_terms(env, monkeypatch):
+    w, _ = env
+    monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", "telegram")
+    monkeypatch.setattr(monedula, "TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setattr(monedula, "TELEGRAM_CHAT_ID", "12345")
+    monkeypatch.setattr(monedula, "TELEGRAM_ALLOWED_USER_ID", "67890")
+    monkeypatch.setattr(monedula, "TG_OFFSET_FILE", w.tmp_path / ".offset")
+    sent = []
+
+    def fake_send(text):
+        sent.append(text)
+        return _preview([77, 78, 79][min(len(sent) - 1, 2)],
+                        [1000, 2000, 3000][min(len(sent) - 1, 2)])
+
+    monkeypatch.setattr(monedula, "telegram_send", fake_send)
+    clock = _FakeClock()
+    monkeypatch.setattr(monedula.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(monedula.time, "sleep", clock.sleep)
+    tick_number = 0
+    delivered = set()
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+    def fake_updates(url, timeout=None):
+        payload = {"ok": True, "result": []}
+        if tick_number == 1 and tick_number not in delivered:
+            payload["result"] = [_update(1, reply_to=77, sent_at=1001)]
+            delivered.add(tick_number)
+        if tick_number == 2 and tick_number not in delivered:
+            payload["result"] = [_update(2, reply_to=79, sent_at=3001)]
+            delivered.add(tick_number)
+        if not payload["result"]:
+            clock.sleep(timeout or 0)
+        return FakeResponse(payload)
+
+    monkeypatch.setattr(monedula.urllib.request, "urlopen", fake_updates)
+    assert w.tick() is False
+    assert w.handler.execute_calls == []
+    # The obligation changes between previews; the queued answer still names
+    # tick N's preview and must not approve tick N+1's terms.
+    w.handler.profile.amount_eur += 1
+    w.calendars["primary"].append(_event("evt-2"))
+    tick_number = 1
+    assert w.tick(minutes=15) is False
+    assert w.handler.execute_calls == []
+    assert w.journal["obligations"] == {}
+    assert (w.tmp_path / ".offset").read_text() == "2"
+    # A fresh, correctly bound answer can authorize once; the journal prevents
+    # the same reply or a later tick from repeating the effect.
+    tick_number = 2
+    assert w.tick(minutes=15) is True
+    assert len(w.handler.execute_calls) == 2
+    assert w.tick(minutes=15) is True
+    assert len(w.handler.execute_calls) == 2
 
 
 def test_unset_allowed_user_id_does_not_authorize_anyone(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

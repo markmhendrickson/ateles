@@ -25,19 +25,33 @@ timestamps and status strings — no payee names, account numbers or amounts.
 
 Fail closed (``docs/foundation/principles.md#5``): an unreadable or malformed
 journal raises :class:`JournalError`; callers hold every payment rather than
-treat the journal as empty.
+treat the journal as empty. The adjacent first-use marker is durably written
+before the first journal write. If either file is absent on a fresh host,
+payments remain held. After reconciling against the chain and wallet, the
+operator explicitly runs ``python3 execution/daemons/monedula/payment_journal.py
+init`` to create both files. A valid legacy journal without a marker remains
+readable and gains the marker on read. Restoring an older backup requires
+operator reconciliation, never automatic recovery.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import stat
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 JOURNAL_NAME = ".monedula_payment_journal.json"
+MARKER_NAME = ".monedula_payment_journal.initialized"
+MISSING_AFTER_FIRST_USE = (
+    "payment journal missing after first use; reconcile before any payment"
+)
+NOT_INITIALIZED = "payment journal not initialized; reconcile and initialize before any payment"
+INIT_REFUSED = "payment journal initialization refused; journal or marker already exists"
 
 STATE_INTENT = "intent"
 STATE_DONE = "done"
@@ -58,10 +72,21 @@ def _empty() -> dict[str, Any]:
 
 
 def load(path: Path) -> dict[str, Any]:
-    """Return the journal. A missing file is an empty journal; anything
-    unreadable or structurally wrong raises :class:`JournalError`."""
-    if not path.exists():
-        return _empty()
+    """Return the journal; absence is never interpreted as a fresh start.
+
+    A journal with no marker is a legacy deployment: create the marker when
+    possible, but do not fail a valid read if that write fails. Every journal
+    write must establish the marker durably first.
+    """
+    marker = path.with_name(MARKER_NAME)
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        if _marker_present(marker):
+            raise JournalError(MISSING_AFTER_FIRST_USE)
+        raise JournalError(NOT_INITIALIZED)
+    except OSError as exc:
+        raise JournalError(f"payment journal unreadable: {type(exc).__name__}") from exc
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
@@ -79,11 +104,40 @@ def load(path: Path) -> dict[str, Any]:
         data["sessions"] = {}
     elif not isinstance(data["sessions"], dict):
         raise JournalError("payment journal malformed")
+    try:
+        _ensure_marker(marker)
+    except JournalError:
+        # A valid legacy journal remains readable. Its next write must
+        # establish the marker before changing any payment state.
+        pass
     return data
 
 
-def _write(path: Path, data: dict[str, Any]) -> None:
-    """Atomic, fsynced replace. Any failure raises :class:`JournalError`."""
+def _marker_present(path: Path) -> bool:
+    """Count even an unreadable file or broken link as an existing marker."""
+    try:
+        path.lstat()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise JournalError(f"payment journal marker unreadable: {type(exc).__name__}") from exc
+
+
+def _ensure_marker(path: Path) -> None:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        _atomic_write(path, {"version": 1, "created_at": time.time()})
+        return
+    except OSError as exc:
+        raise JournalError(f"payment journal marker unreadable: {type(exc).__name__}") from exc
+    if not stat.S_ISREG(mode):
+        raise JournalError("payment journal marker is not a regular file")
+
+
+def _atomic_write(path: Path, data: dict[str, Any]) -> None:
+    """Atomic, fsynced replace for the journal and its first-use marker."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".journal-", dir=str(path.parent))
@@ -108,6 +162,66 @@ def _write(path: Path, data: dict[str, Any]) -> None:
         raise JournalError(
             f"payment journal write failed: {type(exc).__name__}"
         ) from exc
+
+
+def _atomic_create(path: Path, data: dict[str, Any]) -> None:
+    """Create an fsynced file atomically, refusing an existing destination."""
+    tmp: str | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".journal-", dir=str(path.parent))
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(data, indent=2, sort_keys=True))
+            fh.flush()
+            os.fsync(fh.fileno())
+        # A hard link publishes the complete file without replacing a file
+        # another process may have created since the initial existence check.
+        os.link(tmp, path)
+        dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except FileExistsError as exc:
+        raise JournalError(INIT_REFUSED) from exc
+    except OSError as exc:
+        raise JournalError(f"payment journal initialization failed: {type(exc).__name__}") from exc
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def init_journal(path: Path) -> None:
+    """Explicit first-use bootstrap; partial failure leaves a restrictive hold."""
+    marker = path.with_name(MARKER_NAME)
+    if _marker_present(path) or _marker_present(marker):
+        raise JournalError(INIT_REFUSED)
+    _atomic_create(marker, {"version": 1, "created_at": time.time()})
+    _atomic_create(path, _empty())
+    if load(path) != _empty():
+        raise JournalError("payment journal initialization did not persist")
+
+
+def _main() -> int:
+    parser = argparse.ArgumentParser(description="Bootstrap the Monedula payment journal")
+    parser.add_argument("command", choices=["init"])
+    parser.add_argument("--path", type=Path, default=Path(__file__).parent / JOURNAL_NAME)
+    args = parser.parse_args()
+    try:
+        init_journal(args.path)
+    except JournalError as exc:
+        parser.exit(1, f"{exc}\n")
+    print("payment journal initialized; verify the journal and marker before the next tick")
+    return 0
+
+
+def _write(path: Path, data: dict[str, Any]) -> None:
+    """Establish durable first-use evidence before any journal write."""
+    _ensure_marker(path.with_name(MARKER_NAME))
+    _atomic_write(path, data)
 
 
 def current_generation(path: Path) -> int:
@@ -245,3 +359,7 @@ def set_session_state(path: Path, key: str, state: str) -> None:
     _write(path, data)
     if session_state(load(path), key) != state:
         raise JournalError("session state did not persist")
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
