@@ -25,6 +25,7 @@ import logging
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -144,14 +145,19 @@ class _FakeClient:
         comments: list[dict],
         check_runs: list[dict],
         comments_after_first_get: list[dict] | None = None,
+        comments_after_second_get: list[dict] | None = None,
+        check_runs_after_first_pr_get: list[dict] | None = None,
         combined_state: str = "success",
         legacy_status_total_count: int = 1,
         changed_files: list[str] | None = None,
         parent_issue_comments: list[dict] | None = None,
+        parent_issue_comments_after_first_get: list[dict] | None = None,
         pr_author: str = AUTHOR,
         pr_state: str = "open",
         pr_merged_at: str | None = None,
         pr_head_after_first_get: str | None = None,
+        pr_head_after_second_get: str | None = None,
+        pr_body_after_second_get: str | None = None,
         review_readback: dict | None = None,
         protection_rsc: dict | None = None,
         branch_payload: dict | int | None = None,
@@ -202,16 +208,22 @@ class _FakeClient:
         self.scope_refs: list[str] = []
         self.comments = comments
         self.comments_after_first_get = comments_after_first_get
+        self.comments_after_second_get = comments_after_second_get
+        self.check_runs_after_first_pr_get = check_runs_after_first_pr_get
         self.comment_get_count = 0
         self.check_runs = check_runs
         self.combined_state = combined_state
         self.legacy_status_total_count = legacy_status_total_count
         self.changed_files = changed_files if changed_files is not None else NEUTRAL_FILES
         self.parent_issue_comments = parent_issue_comments or []
+        self.parent_issue_comments_after_first_get = parent_issue_comments_after_first_get
+        self.parent_issue_get_count = 0
         self.pr_author = pr_author
         self.pr_state = pr_state
         self.pr_merged_at = pr_merged_at
         self.pr_head_after_first_get = pr_head_after_first_get
+        self.pr_head_after_second_get = pr_head_after_second_get
+        self.pr_body_after_second_get = pr_body_after_second_get
         self.review_readback = review_readback
         # Branch-protection / scheduling surfaces (operator ruling
         # 2026-09-25, "not run (no runner)"). Defaults mirror the live repo:
@@ -248,16 +260,24 @@ class _FakeClient:
 
     def _pr_payload(self) -> dict:
         self.pr_get_count += 1
+        if self.pr_get_count > 1 and self.check_runs_after_first_pr_get is not None:
+            self.check_runs = self.check_runs_after_first_pr_get
         head = HEAD
         if self.pr_get_count > 1 and self.pr_head_after_first_get is not None:
             head = self.pr_head_after_first_get
+        if self.pr_get_count > 2 and self.pr_head_after_second_get is not None:
+            head = self.pr_head_after_second_get
         base = BASE_REF
         if self.pr_get_count > 1 and self.base_ref_after_first_get is not None:
             base = self.base_ref_after_first_get
         payload = {
             "head": {"sha": head},
             "number": PR,
-            "body": f"Closes #{PARENT_ISSUE}",
+            "body": (
+                self.pr_body_after_second_get
+                if self.pr_get_count > 2 and self.pr_body_after_second_get is not None
+                else f"Closes #{PARENT_ISSUE}"
+            ),
             "user": {"login": self.pr_author},
             "state": self.pr_state,
             "merged_at": self.pr_merged_at,
@@ -341,10 +361,16 @@ class _FakeClient:
             comments = self.comments
             if self.comment_get_count > 1 and self.comments_after_first_get is not None:
                 comments = self.comments_after_first_get
+            if self.comment_get_count > 2 and self.comments_after_second_get is not None:
+                comments = self.comments_after_second_get
             return _FakeResponse(comments if page == 1 else [])
         if url.endswith(f"/issues/{PARENT_ISSUE}/comments"):
+            self.parent_issue_get_count += 1
             page = (params or {}).get("page", 1)
-            return _FakeResponse(self.parent_issue_comments if page == 1 else [])
+            rows = self.parent_issue_comments
+            if self.parent_issue_get_count > 1 and self.parent_issue_comments_after_first_get is not None:
+                rows = self.parent_issue_comments_after_first_get
+            return _FakeResponse(rows if page == 1 else [])
         if url.endswith("/status"):
             return _FakeResponse(
                 {"state": self.combined_state, "total_count": self.legacy_status_total_count}
@@ -4929,9 +4955,12 @@ def _cap_round_comments(heads: list[str], *, author: str = SWARM_LOGIN, start: i
 @pytest.mark.asyncio
 class TestRoundCap:
     async def _run(self, monkeypatch, comments, *, apply=True, comments_after_first_get=None,
+                   comments_after_second_get=None, check_runs_after_first_pr_get=None,
                    profile_response=None, **kw):
         client = _FakeClient(comments=comments, check_runs=_green_checks(),
                              comments_after_first_get=comments_after_first_get,
+                             comments_after_second_get=comments_after_second_get,
+                             check_runs_after_first_pr_get=check_runs_after_first_pr_get,
                              profile_response=profile_response)
         _install_client(monkeypatch, client)
         _install_app_mint(monkeypatch)
@@ -5446,6 +5475,91 @@ class TestRoundCapOverride:
                                         comments_after_first_get=comments + [{**original}])
         assert code == 0 and len(client.posted) == 1 and client.comment_get_count >= 2
 
+    @pytest.mark.parametrize("change", ["deleted", "edited", "replaced"])
+    async def test_override_changed_at_approval_boundary_refuses(self, monkeypatch, capsys, change):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        original = _operator_override()
+        late = {
+            "deleted": [],
+            "edited": [{**original, "body": original["body"] + " edited"}],
+            "replaced": [_operator_override(id_=1201)],
+        }[change]
+        code, client = await self._run(
+            monkeypatch, comments + [original],
+            comments_after_first_get=comments + [{**original}],
+            comments_after_second_get=comments + late,
+        )
+        assert code == 1 and client.posted == [] and client.comment_get_count >= 3
+        assert "override changed or vanished" in capsys.readouterr().out
+
+    async def test_override_still_valid_at_approval_boundary_posts_once(self, monkeypatch):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        original = _operator_override()
+        code, client = await self._run(
+            monkeypatch, comments + [original],
+            comments_after_first_get=comments + [{**original}],
+            comments_after_second_get=comments + [{**original}],
+        )
+        assert code == 0 and len(client.posted) == 1 and client.comment_get_count >= 3
+
+    async def test_check_changed_at_approval_boundary_refuses(self, monkeypatch, capsys):
+        comments = _all_clear_comments(ALL_FOUR)
+        red = [{"name": "ateles-tests", "status": "completed", "conclusion": "failure"}]
+        code, client = await self._run(
+            monkeypatch, comments, check_runs_after_first_pr_get=red
+        )
+        assert code == 1 and client.posted == []
+        assert "checks changed before approval submission" in capsys.readouterr().out
+
+    async def test_head_changed_at_approval_boundary_refuses(self, monkeypatch, capsys):
+        client = _FakeClient(
+            comments=_all_clear_comments(ALL_FOUR), check_runs=_green_checks(),
+            pr_head_after_second_get=OLD_HEAD,
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        assert await target.run(REPO, PR, ALL_FOUR, apply=True) == 1
+        assert client.posted == [] and client.pr_get_count >= 3
+        assert "PR state changed before approval submission" in capsys.readouterr().out
+
+    async def test_new_lens_comment_at_approval_boundary_refuses(self, monkeypatch, capsys):
+        comments = _all_clear_comments(ALL_FOUR)
+        late_block = _comment(
+            1300, _lens_comment_body("pm", target.LENS_AGENTS["pm"], verdict="BLOCKED")
+        )
+        code, client = await self._run(
+            monkeypatch, comments, comments_after_first_get=comments + [late_block]
+        )
+        assert code == 1 and client.posted == [] and client.comment_get_count >= 2
+        assert "PR comment history changed before approval submission" in capsys.readouterr().out
+
+    async def test_pr_body_changed_at_approval_boundary_refuses(self, monkeypatch, capsys):
+        client = _FakeClient(
+            comments=_all_clear_comments(ALL_FOUR), check_runs=_green_checks(),
+            pr_body_after_second_get="Closes #99",
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        assert await target.run(REPO, PR, ALL_FOUR, apply=True) == 1
+        assert client.posted == []
+        assert "PR body changed before approval submission" in capsys.readouterr().out
+
+    async def test_new_required_lens_at_approval_boundary_refuses(self, monkeypatch, capsys):
+        expectation = {
+            "id": 1,
+            "body": f"**{swarm_dispatch.EXPECTATION_MARKER} (arch)** — what waxwing will verify: contract review.",
+        }
+        client = _FakeClient(
+            comments=_all_clear_comments(["pm", "qa"]), check_runs=_green_checks(),
+            parent_issue_comments_after_first_get=[expectation],
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        code = await target.run(REPO, PR, [], apply=True)
+        assert client.parent_issue_get_count >= 2
+        assert code == 1 and client.posted == []
+        assert "required lenses changed before approval submission" in capsys.readouterr().out
+
     async def test_malformed_fresh_override_history_refuses_before_submit(self, monkeypatch):
         comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
         original = _operator_override()
@@ -5523,13 +5637,25 @@ class TestPartialLensIdentityHistory:
         assert code == 0 and len(client.posted) == 1
 
     async def test_valid_owner_override_can_lift_unknown_history(self, monkeypatch):
+        comments = _all_clear_comments(ALL_FOUR)
+        comments[0]["created_at"] = None
+        code, client = await self._run(monkeypatch, comments + [_operator_override()])
+        assert code == 0 and len(client.posted) == 1
+
+    @pytest.mark.parametrize("partial", [False, True])
+    async def test_valid_override_cannot_lift_unresolved_identity(self, monkeypatch, capsys, partial):
         monkeypatch.setattr(
             target, "lens_comment_authors_resolution",
-            lambda: lens_authors.Resolution(SWARM_AUTHORS, ("the account behind PAVO_AGENT_PAT",)),
-            raising=False,
+            lambda: SimpleNamespace(
+                authors=SWARM_AUTHORS,
+                failed=("the account behind PAVO_AGENT_PAT",),
+                complete=partial,
+                partial=partial,
+            ),
         )
         code, client = await self._run(monkeypatch, _all_clear_comments(ALL_FOUR) + [_operator_override()])
-        assert code == 0 and len(client.posted) == 1
+        assert code == 1 and client.posted == []
+        assert "lens identity unresolved for pm" in capsys.readouterr().out
 
 
 # ── Approval tool fails closed on an unreadable review scope (ateles#1674) ──

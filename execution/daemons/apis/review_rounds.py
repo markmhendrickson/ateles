@@ -8,10 +8,11 @@ round. Returning to a previously reviewed head after any earlier blocking
 episode starts a new round, even when the immediately previous episode cleared;
 otherwise an episode after an all-clear one stays in the same round. Timestamp
 ties use integer GitHub comment ids, then source order.
-Missing timestamps or ids needed to resolve a tie make order indeterminate and
-refuse approval unless a valid operator override is present.
-The three-round cap can be overridden only by the operator's unedited,
-PR-local GitHub comment; the approval gate verifies that comment separately.
+Missing or malformed timestamps and ties without usable integer comment ids
+make order indeterminate and refuse approval unless a valid operator override
+is present. The same override can lift the three-round cap, but never unresolved
+or partial lens identity resolution. The operator's unedited, PR-local GitHub
+comment is revalidated immediately before each approval POST.
 """
 
 from __future__ import annotations
@@ -84,7 +85,7 @@ class RoundStatus:
             lines.append(f"  unplaced reviewed heads: {', '.join(self.unplaced_heads)}")
             lines.append(
                 f"round order indeterminate: {self.indeterminate_reason} "
-                f"for {self.indeterminate_head}; refusing unless the operator override is valid."
+                f"for {self.indeterminate_head}; refusing unless the timestamp/tie override is valid."
             )
         elif self.capped:
             lines.append(
@@ -212,7 +213,10 @@ def round_status(records: dict[str, list], current_head: str, *, cap: int = ROUN
 
 
 def operator_override(comments: list[dict], owner_login: str, operator_login: str, repo: str, pr: int) -> dict | None:
-    """Latest valid operator comment when the human owner is the operator."""
+    """Latest PR-local operator comment for the cap or timestamp/tie uncertainty.
+
+    Lens identity remains an independent refusal; this comment cannot lift it.
+    """
     if (not isinstance(owner_login, str) or not isinstance(operator_login, str)
             or not owner_login or owner_login != operator_login):
         return None

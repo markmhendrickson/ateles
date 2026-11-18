@@ -155,8 +155,10 @@ characters, present correctly typed author and timestamp fields, and a positive
 integer id matching its PR-local URL. The profile listing must explicitly prove
 completeness through a matching total or `has_more: false`, and contain exactly
 one default profile. `APIS_OPERATOR_LOGIN` is not authority for this override. A
-partial lens identity resolution makes round order indeterminate; a valid
-override lifts only this uncertainty or the cap. Every other gate still binds.
+valid override lifts only the round cap and timestamp or tie indeterminacy.
+Unresolved or partial lens identity resolution independently refuses approval;
+an override never lifts it. The override is revalidated at each approval POST.
+Every other gate still binds.
 
 Usage:
     python3 execution/scripts/approve_pr_as_app.py --repo <owner/name> --pr <n> \\
@@ -1867,6 +1869,11 @@ async def submit_app_approval(
     cleared_phrase: str = "every required review lens cleared",
     panel_note: str = "",
     expected_base_ref: str = "",
+    expected_comments: list[dict] | None = None,
+    override_authority: tuple[dict, str, str] | None = None,
+    expected_scope: review_scope.ScopeLoad | None = None,
+    expected_pr_body: str | None = None,
+    required_lens_context: tuple[list[str], list[str], bool] | None = None,
 ) -> dict:
     """Mint an App installation token and submit a formal APPROVE review.
 
@@ -1899,8 +1906,10 @@ async def submit_app_approval(
          readback, never the POST response alone, is treated as proof the
          approval landed as intended.
 
-    Raises on any failure; the caller treats a raised exception as
-    "submitted nothing" per the --apply contract.
+    When the caller relies on an operator override, its exact comment and
+    owner authority are revalidated after all other network work, immediately
+    before this review's POST. The same boundary rechecks comments and CI.
+    Raises on any failure before the POST; a later failure may leave a review.
     """
     if token is not None and not (expected_login or "").strip():
         raise RuntimeError(
@@ -2003,6 +2012,55 @@ async def submit_app_approval(
     body = "\n".join(body_lines)
 
     url = f"{GITHUB_API}/repos/{repo}/pulls/{pr}/reviews"
+    if expected_comments is not None:
+        _, fresh_checks_green = await evaluate_checks(
+            client, repo=repo, head_sha=head_sha, base_ref=expected_base_ref
+        )
+        if not fresh_checks_green:
+            raise RuntimeError("checks changed before approval submission — submitting nothing")
+        if expected_scope is not None:
+            fresh_scope = await fetch_review_scope(client, repo, expected_base_ref)
+            if fresh_scope != expected_scope:
+                raise RuntimeError("review scope changed before approval submission — submitting nothing")
+        fresh_pr = await client.get(f"{GITHUB_API}/repos/{repo}/pulls/{pr}", headers=headers)
+        if fresh_pr.status_code >= 400:
+            raise RuntimeError("PR state could not be read at approval submission — submitting nothing")
+        boundary_pr = fresh_pr.json() or {}
+        boundary_head = _normalise_full_sha(str((boundary_pr.get("head") or {}).get("sha") or ""))
+        if (boundary_pr.get("state") != "open" or boundary_pr.get("merged_at")
+                or boundary_head != head_sha
+                or str((boundary_pr.get("base") or {}).get("ref") or "") != expected_base_ref
+                or merge_conflict_gate(boundary_pr, head_sha) is not None):
+            raise RuntimeError("PR state changed before approval submission — submitting nothing")
+        if expected_pr_body is not None and (boundary_pr.get("body") or "") != expected_pr_body:
+            raise RuntimeError("PR body changed before approval submission — submitting nothing")
+        if required_lens_context is not None:
+            expected_lenses, extra_lenses, panel_all = required_lens_context
+            fresh_lenses, _, _ = await resolve_lenses(
+                client, repo=repo, pr=pr, pr_body=expected_pr_body or "",
+                extra_lenses=extra_lenses, panel_all=panel_all,
+            )
+            if fresh_lenses != expected_lenses:
+                raise RuntimeError("required lenses changed before approval submission — submitting nothing")
+        if override_authority is not None:
+            expected_override, owner_login, operator_login = override_authority
+            fresh_owner, fresh_operator, owner_error = await _repository_operator(client, repo)
+        try:
+            fresh_comments = await _fetch_issue_comments(client, repo, pr)
+        except ValueError as exc:
+            raise RuntimeError(f"pre-submit comment read failed: {exc} — submitting nothing") from exc
+        if override_authority is not None:
+            fresh_override = (
+                review_rounds.operator_override(fresh_comments, fresh_owner, fresh_operator, repo, pr)
+                if fresh_owner and not owner_error else None
+            )
+            if (fresh_owner != owner_login or fresh_operator != operator_login
+                    or fresh_override != expected_override):
+                raise RuntimeError(
+                    "operator round-cap override changed or vanished — submitting nothing"
+                )
+        if fresh_comments != expected_comments:
+            raise RuntimeError("PR comment history changed before approval submission — submitting nothing")
     # 2. commit_id pinned to the verified (and just re-confirmed) head.
     resp = await client.post(
         url,
@@ -2208,6 +2266,11 @@ async def submit_approvals(
     pr_author: str = "",
     panel_note: str = "",
     expected_base_ref: str = "",
+    expected_comments: list[dict] | None = None,
+    override_authority: tuple[dict, str, str] | None = None,
+    expected_scope: review_scope.ScopeLoad | None = None,
+    expected_pr_body: str | None = None,
+    required_lens_context: tuple[list[str], list[str], bool] | None = None,
 ) -> list[dict]:
     """Submit the APPROVE review(s), each as the App that matches who reviewed.
 
@@ -2243,6 +2306,11 @@ async def submit_approvals(
                 check_outcomes=check_outcomes,
                 panel_note=panel_note,
                 expected_base_ref=expected_base_ref,
+                expected_comments=expected_comments,
+                override_authority=override_authority,
+                expected_scope=expected_scope,
+                expected_pr_body=expected_pr_body,
+                required_lens_context=required_lens_context,
             )
         ]
 
@@ -2340,6 +2408,11 @@ async def submit_approvals(
                 ),
                 panel_note=panel_note,
                 expected_base_ref=expected_base_ref,
+                expected_comments=expected_comments,
+                override_authority=override_authority,
+                expected_scope=expected_scope,
+                expected_pr_body=expected_pr_body,
+                required_lens_context=required_lens_context,
             )
             landed.append((", ".join(o.lens for o in lenses), login, review))
     except GitHubRateLimited as exc:
@@ -2660,20 +2733,23 @@ async def run(
             head_sha,
         )
         identity_gap = not resolution.complete or bool(getattr(resolution, "partial", False))
+        order_indeterminate = bool(rounds.indeterminate_head)
+        override_needed = rounds.round_number > rounds.cap or order_indeterminate
         owner_login, operator_login, owner_error = (await _repository_operator(client, repo)
-                                    if rounds.capped or identity_gap else ("", "", ""))
+                                    if override_needed else ("", "", ""))
         override = (review_rounds.operator_override(comments, owner_login, operator_login, repo, pr)
-                    if owner_login and (rounds.capped or identity_gap) else None)
+                    if owner_login and override_needed else None)
         print(rounds.describe())
         if identity_gap:
             print(_unresolved_lens_reason(resolution))
+            print("unresolved lens identity independently refuses approval; an override cannot lift it")
             if "the PR-opener App's bot login" in resolution.failed:
                 print("the PR-opener App is declared but its login cannot be read; approval is held")
         if owner_error:
             print(f"round-cap override unavailable: {owner_error}")
         if override:
             print(
-                f"round cap OVERRIDDEN by the operator ({override['html_url']})\n"
+                f"round cap or order OVERRIDDEN by the operator ({override['html_url']})\n"
                 f"  author: {override['user']['login']}\n"
                 f"  posted: {override['created_at']}\n"
                 f"  literal text: {override['body']}"
@@ -2764,7 +2840,8 @@ async def run(
             and no_non_required_blocks
             and not unadmitted
             and checks_green
-            and (not rounds.refused and not identity_gap or override is not None)
+            and not identity_gap
+            and (not override_needed or override is not None)
         )
 
         print(f"head_sha={head_sha}")
@@ -2778,8 +2855,8 @@ async def run(
         print(
             "round cap: "
             + (f"OVERRIDDEN by the operator ({override['html_url']})" if override
-               else "INDETERMINATE (refusing)" if rounds.indeterminate_head or identity_gap
-               else "REACHED (split or cut scope)" if rounds.refused else "OK")
+               else "INDETERMINATE (refusing)" if order_indeterminate
+               else "REACHED (split or cut scope)" if rounds.round_number > rounds.cap else "OK")
         )
         print(f"overall: {'PASS' if overall_pass else 'FAIL'}")
 
@@ -2845,6 +2922,11 @@ async def run(
                 pr_author=str((pr_data.get("user") or {}).get("login") or ""),
                 panel_note=panel_note,
                 expected_base_ref=expected_base_ref,
+                expected_comments=comments,
+                override_authority=(override, owner_login, operator_login) if override else None,
+                expected_scope=scope_load,
+                expected_pr_body=pr_body,
+                required_lens_context=(lenses, extra_lenses, panel_all) if panel_mode != "path" else None,
             )
         except Exception as exc:
             print()
@@ -2890,6 +2972,9 @@ def main() -> int:
             "--panel required to use the diff-derived floor alone (where "
             "content can still appear), or set "
             "ATELES_APPROVE_PANEL_REQUIRED_ONLY=1 to change the default. "
+            "An operator /override-round-cap comment lifts only the round cap "
+            "and timestamp or tie indeterminacy; unresolved lens identity still "
+            "refuses, and a relied-on override is rechecked at each approval POST. "
             "Exit codes: 0 pass, 1 refused, 2 usage, 75 GitHub rate limit "
             "exhausted before any review was posted (reset time printed; safe to "
             "re-run after it), 76 rate limit hit after a review was posted (the "
