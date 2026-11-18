@@ -724,6 +724,35 @@ class TestRenderCleanly(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("duplicate register row 1", err)
 
+    def test_a_malformed_numbered_row_after_a_blank_line_fails(self):
+        """Not just a bad status: a row with no bold status at all must not be silently omitted."""
+        for bad_row in (
+            "| 999 | question | `x#q` | \u2014 | plain open |",      # no bold status
+            "999 | question | `x#q` | \u2014 | **open** |",          # no leading pipe
+            "   | 999 | question | `x#q` | \u2014 | **open** |",     # indented table row
+            "| 999 | question | `x#q` | **open** |",                 # a cell short
+        ):
+            with self.subTest(row=bad_row):
+                text = register(**{"1": "**open**"}) + "\n" + bad_row + "\n"
+                code, err = self._check_error(text)
+                self.assertEqual(code, 1)
+                self.assertIn("malformed register row", err)
+
+    def test_status_spelling_is_exact(self):
+        for bad in ("**Open**", "**open **", "**RULED**", "**ruled **"):
+            with self.subTest(status=bad):
+                code, err = self._check_error(register(**{"1": "**open**", "2": bad}))
+                self.assertEqual(code, 1)
+                self.assertIn("unknown status", err)
+
+    def test_validation_and_projection_select_the_same_rows(self):
+        text = register(**{"1": "**open**", "2": "**ruled**"})
+        self.assertEqual(sorted(ds.parse_rows(text)), ["1", "2"])
+        with_prose_table = text + "\n## Another section\n| 5 | q | `a#b` | \u2014 | **open** |\n"
+        # a numbered row outside the register section is neither projected nor validated
+        self.assertEqual(sorted(ds.parse_rows("## The register of open design decisions\n" + text + "\n## Another section\n| 5 | q | `a#b` | \u2014 | **open** |\n")), ["1", "2"])
+        self.assertEqual(sorted(ds.parse_rows(with_prose_table)), ["1", "2", "5"])  # bare text: no heading, read whole
+
     def test_every_declared_status_passes_the_clean_render(self):
         rows = {str(i + 1): f"**{status}**" for i, status in enumerate(ds.STATUS_ORDER)}
         code, err = self._check_error(register(**rows))

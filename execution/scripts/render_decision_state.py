@@ -125,10 +125,25 @@ def run(args: list[str]) -> tuple[int, str]:
     return proc.returncode, proc.stdout
 
 
+REGISTER_HEADING = "## The register of open design decisions"
+
+
+def register_section(text: str) -> str:
+    """The text the register's rows are read from: the register section, up to the next
+    `## ` heading. A text with no such heading (a bare table) is read whole. Validation and
+    projection both read ONLY this text, so no row can be projected that was not validated
+    and none can be skipped silently."""
+    start = text.find(REGISTER_HEADING)
+    if start < 0:
+        return text
+    end = text.find("\n## ", start + len(REGISTER_HEADING))
+    return text[start:] if end < 0 else text[start:end]
+
+
 def parse_rows(text: str) -> dict[str, dict[str, str]]:
     """Return {row number as written: {question, argued_in, blocks, status, cell}}."""
     rows: dict[str, dict[str, str]] = {}
-    for line in text.split("\n"):
+    for line in register_section(text).split("\n"):
         m = ROW_RE.match(line)
         if not m:
             continue
@@ -141,7 +156,7 @@ def parse_rows(text: str) -> dict[str, dict[str, str]]:
         # Exact match only. A prefix match let "**ruled-ish**" or "**ruled out**"
         # project as ruled; an unknown value stays as written (and the clean-render
         # check rejects it) rather than being read as the nearest status.
-        status = lead.group(1).strip().lower()
+        status = lead.group(1)
         rows[m.group(1)] = {
             "question": cells[0],
             "argued_in": cells[1],
@@ -153,62 +168,43 @@ def parse_rows(text: str) -> dict[str, dict[str, str]]:
 
 
 def validate_register(text: str) -> None:
-    """Reject malformed or duplicate numbered rows in the register table."""
-    lines = text.splitlines()
-    try:
-        start = next(i for i, line in enumerate(lines) if line.startswith("| # | The question |")) + 2
-    except StopIteration as exc:
-        raise ValueError("register table header is missing") from exc
+    """Reject a malformed register: every numbered row in the register section must be a
+    well-formed row with an EXACT declared status and a number used once.
+
+    This reads the same text the projection reads (`register_section`), so a row cannot be
+    projected unvalidated, and a malformed numbered row - after a blank line or anywhere in
+    the section - is an error, never a silent omission.
+    """
+    section = register_section(text)
+    if "| # | The question |" not in section:
+        raise ValueError("register table header is missing")
     seen: set[str] = set()
-    count = 0
-    for line in lines[start:]:
-        if not line.startswith("|"):
-            if line.strip():
-                raise ValueError(f"malformed register row: {line[:100]}")
-            if count:
-                break
-            continue
+    for line in section.splitlines():
+        # A line that looks like a numbered table row - with or without its leading pipe,
+        # indented or not - is a row the projection must either read or reject. Markdown
+        # renders an indented or pipe-less row as part of the table, so skipping it here would
+        # omit it from the projection silently.
+        if not re.match(r"^\s*\|?\s*\d+(?:\s*[\u2013-]\s*\d+)?\s*\|", line):
+            continue  # header, separator, prose
         match = ROW_RE.match(line)
         if not match:
             raise ValueError(f"malformed register row: {line[:100]}")
         number = match.group(1)
         cells = [cell.strip() for cell in match.group(2).split("|")]
-        if len(cells) < 4 or not all(cells[:3]) or not STATUS_LEAD_RE.match(cells[-1]):
+        lead = STATUS_LEAD_RE.match(cells[-1]) if len(cells) >= 4 else None
+        if len(cells) < 4 or not all(cells[:3]) or not lead:
             raise ValueError(f"malformed register row {number}")
-        status = STATUS_LEAD_RE.match(cells[-1]).group(1).strip().lower()
+        status = lead.group(1)
         if status not in STATUS_ORDER:
             raise ValueError(
                 f"unknown status {status!r} in register row {number}; "
-                f"allowed: {', '.join(STATUS_ORDER)}"
+                f"allowed exactly: {', '.join(STATUS_ORDER)}"
             )
         if number in seen:
             raise ValueError(f"duplicate register row {number}")
         seen.add(number)
-        count += 1
-    if not count:
+    if not seen:
         raise ValueError("register table has no numbered rows")
-    # The projection (`parse_rows`) reads EVERY numbered row of the document, not only the
-    # contiguous table above: a row after a blank line is projected too. Validate that same
-    # set, so no row can reach the projection without passing the status vocabulary and
-    # the one-row-per-number rule.
-    projected: set[str] = set()
-    for line in lines:
-        match = ROW_RE.match(line)
-        if not match:
-            continue
-        cells = [cell.strip() for cell in match.group(2).split("|")]
-        lead = STATUS_LEAD_RE.match(cells[-1]) if len(cells) >= 4 else None
-        if not lead:
-            continue
-        status = lead.group(1).strip().lower()
-        if status not in STATUS_ORDER:
-            raise ValueError(
-                f"unknown status {status!r} in register row {match.group(1)}; "
-                f"allowed: {', '.join(STATUS_ORDER)}"
-            )
-        if match.group(1) in projected:
-            raise ValueError(f"duplicate register row {match.group(1)}")
-        projected.add(match.group(1))
 
 
 def requalify(text: str) -> str:
