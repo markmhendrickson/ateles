@@ -209,3 +209,23 @@ def test_an_unreasonable_range_is_rejected(clones: tuple[Path, Path, Path]) -> N
     result = run(first, "check", "decision")
     assert result.returncode == 1
     assert "not a valid range" in result.stderr
+
+
+def test_a_revision_may_not_repeat_inside_one_document_table(clones: tuple[Path, Path, Path]) -> None:
+    _, first, _ = clones
+    revisions = first / "docs" / "foundation" / "revisions.md"
+    revisions.write_text(revisions.read_text() + "| 18 | pass | one |\n| 18 | pass | two, same table |\n")
+    assert run(first, "reserve", "revision").stdout.strip() == "18"
+    result = run(first, "check", "revision")
+    assert result.returncode == 1
+    assert "appears 2 times in the table" in result.stderr
+
+
+def test_in_table_repeats_already_on_the_base_are_history_not_a_failure(clones: tuple[Path, Path, Path]) -> None:
+    _, first, _ = clones
+    revisions = first / "docs" / "foundation" / "revisions.md"
+    revisions.write_text(revisions.read_text() + "| 17 | pass | historical double |\n")
+    git(first, "add", ".")
+    git(first, "commit", "-m", "historical doubled row on main")
+    git(first, "push", "origin", "main")
+    assert run(first, "check", "revision").returncode == 0

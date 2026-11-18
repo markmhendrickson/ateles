@@ -51,6 +51,17 @@ def numbers(kind: str, content: str) -> list[int]:
     return found
 
 
+def table_counts(content: str) -> Counter[tuple[str, int]]:
+    """Revision rows per (document table, number). A document's table sits under its own
+    `## ` heading; one revision legitimately appears once in EACH document its pass amends."""
+    counts: Counter[tuple[str, int]] = Counter()
+    for section in re.split(r"^## ", content, flags=re.M)[1:]:
+        title = section.split("\n", 1)[0].strip()
+        for match in re.finditer(r"^\|\s*(\d+)\s*\|", section, re.M):
+            counts[(title, int(match.group(1)))] += 1
+    return counts
+
+
 def reservations(kind: str, remote: str) -> set[int]:
     prefix = f"{REF_ROOT}/{kind}/"
     output = git("ls-remote", remote, f"{prefix}*")
@@ -132,6 +143,16 @@ def check(kind: str, remote: str, base: str) -> list[str]:
     from pathlib import Path
     after = numbers(kind, Path(source).read_text(encoding="utf-8"))
     errors: list[str] = []
+    if kind == "revision":
+        # One row per revision per document table: a number may not repeat INSIDE one table
+        # (across different tables it may). Rows already doubled on the base are history.
+        old_text = git("show", f"{base}:{source}")
+        new_text = Path(source).read_text(encoding="utf-8")
+        tables_before, tables_after = table_counts(old_text), table_counts(new_text)
+        for (title, number), count in sorted(tables_after.items()):
+            if count > 1 and count > tables_before.get((title, number), 0):
+                errors.append(f"revision {number} appears {count} times in the table under {title!r}; "
+                              "one row per revision per document")
     counts_before = Counter(before)
     counts_after = Counter(after)
     held = reservations(kind, remote)
