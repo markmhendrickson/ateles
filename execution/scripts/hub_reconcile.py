@@ -255,7 +255,7 @@ def _fetch_snapshot(base_url: str, token: str, entity_id: str) -> dict:
         snapshot = snapshot["snapshot"]
         if not isinstance(snapshot, dict):
             raise ValueError("unreadable snapshot")
-    if "entity_type" not in fields:
+    if "entity_type" not in fields or "entity_id" not in fields:
         raise ValueError("unreadable snapshot")
     return fields
 

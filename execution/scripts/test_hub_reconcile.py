@@ -614,12 +614,14 @@ def test_fetch_snapshot_preserves_top_level_entity_version(monkeypatch):
         H,
         "_request",
         lambda *args, **kwargs: {
+            "entity_id": HUB_ID,
             "entity_type": "rendered_page",
             "entity_version": "version-7",
             "snapshot": {"html_body": "<p>hub</p>"},
         },
     )
     assert H._fetch_snapshot(BASE, "bearer", HUB_ID) == {
+        "entity_id": HUB_ID,
         "entity_type": "rendered_page",
         "entity_version": "version-7",
         "html_body": "<p>hub</p>",
@@ -760,10 +762,11 @@ def test_check_rejects_inconsistent_snapshot_fields(
     )
 
 
-def test_check_accepts_snapshot_without_entity_id_when_other_fields_agree(
+def test_check_snapshot_without_entity_id_is_inconclusive(
     check_fake, monkeypatch, capsys
 ):
-    # Older response shapes omit entity_id; a present ID must match the request.
+    # The live response carries entity_id; a body whose identity cannot be
+    # checked against the request must not be counted.
     original_request = check_fake.request
 
     def request(url, token, payload=None):
@@ -778,8 +781,13 @@ def test_check_accepts_snapshot_without_entity_id_when_other_fields_agree(
     monkeypatch.setattr(H, "_request", request)
     monkeypatch.setattr(H, "_fetch_snapshot", ORIGINAL_FETCH_SNAPSHOT)
 
-    assert H.cmd_check(_check_args(exempt=[ORPHAN_ID]), BASE, "bearer") == H.EXIT_OK
-    assert capsys.readouterr().out == "checked=4 orphans=0 exempt=1 result=OK\n"
+    assert (
+        H.cmd_check(_check_args(exempt=[ORPHAN_ID]), BASE, "bearer")
+        == H.EXIT_INCONCLUSIVE
+    )
+    assert capsys.readouterr().out == (
+        "checked=4 orphans=0 exempt=1 result=INCONCLUSIVE\n"
+    )
 
 
 @pytest.mark.parametrize("response", [[], {"snapshot": []}])
