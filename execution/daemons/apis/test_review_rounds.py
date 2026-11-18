@@ -13,6 +13,7 @@ for _p in (str(_HERE), str(_HERE.parents[2])):
         sys.path.insert(0, _p)
 
 import review_rounds as rr  # noqa: E402
+import review_carry  # noqa: E402
 import lens_authors  # noqa: E402
 import swarm_dispatch  # noqa: E402
 
@@ -318,6 +319,29 @@ def test_panel_completion_uses_each_lens_latest_comment():
     unreadable = _verdict("arch", H1, verdict="unreadable", n=2)
     assert not swarm_dispatch.panel_finished_at_head([clear, unreadable], H1, {"arch"})
     assert swarm_dispatch.panel_finished_at_head([unreadable, clear], H1, {"arch"})
+
+
+@pytest.mark.parametrize("first,second,timestamp,candidate,indeterminate", [
+    ("SIGNED_OFF", "BLOCKED", None, None, H2),
+    ("SIGNED_OFF", "BLOCKED", "unparseable", None, H2),
+    ("SIGNED_OFF", "BLOCKED", "2026-10-27T10:00:00Z", None, ""),
+    ("BLOCKED", "SIGNED_OFF", "2026-10-27T10:00:00Z", H2, ""),
+])
+def test_lens_record_round_and_carry_readers_agree_on_history(
+    first, second, timestamp, candidate, indeterminate
+):
+    comments = [_verdict("arch", H1, verdict=first, n=20),
+                _verdict("arch", H2, verdict=second, n=10)]
+    comments[1]["created_at"] = timestamp
+    records = swarm_dispatch.lens_records(comments)
+    assert [r.head for r in records["arch"]] == [H1, H2]
+    assert [r.source_order for r in records["arch"]] == [0, 1]
+    status = rr.round_status(records, H3)
+    assert status.indeterminate_head == indeterminate
+    found = review_carry.carry_candidate(records["arch"], H3)
+    assert (found.head if found else None) == candidate
+    if not indeterminate:
+        assert status.round_number == 2
 
 
 def test_missing_comment_id_with_unique_timestamp_still_has_known_order():
