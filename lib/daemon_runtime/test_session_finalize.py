@@ -464,6 +464,23 @@ def test_a_healthy_but_slow_provenance_write_still_opens_the_run_session(monkeyp
     assert calls[0] == 60.0 and len(calls) == 1  # one attempt, at the provenance limit
 
 
+def test_delayed_provenance_write_opens_after_real_readbacks(monkeypatch):
+    def delayed_post(*_args, **_kwargs):
+        time.sleep(0.5)  # longer than the previous reduced 0.2s limit
+        return response({"entities": [
+            {"entity_type": "conversation", "entity_id": "ent_conv99"},
+            {"entity_type": "agent_session", "entity_id": "ent_session99"},
+        ]})
+
+    response = _run_session_fakes(monkeypatch, delayed_post)
+    monkeypatch.setattr(sf, "PROVENANCE_STORE_ATTEMPT_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(sf, "RUN_SESSION_TOTAL_SECONDS", 2.0)
+    started = time.monotonic()
+    run = sf.create_run_session(task_id="ent_task", agent="cicada", run_key="created-0")
+    assert run == sf.RunSession("ent_conv99", "ent_session99", "ent_task:created-0")
+    assert time.monotonic() - started >= 0.5
+
+
 def test_the_refusal_stays_when_the_provenance_write_never_succeeds(monkeypatch):
     """The requirement is unchanged: if the store keeps timing out the run session is NOT opened
     (Apis then refuses to spawn). The bound is three attempts."""
