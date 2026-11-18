@@ -845,6 +845,21 @@ class TestRenderCleanly(unittest.TestCase):
                     self.assertEqual(code, 1, output[:200])
                     self.assertIn("outside the register section", output)
 
+    def test_out_mode_rejects_a_decorated_row_after_a_heading_and_writes_nothing(self):
+        head = "## The register of open design decisions\n\n"
+        rows = register(**{"1": "**open**"})
+        target = self.foundation / "projection_out.md"
+        for after in (
+            "| **999** | question | `x#q` | \u2014 | **ruled** |",
+            "| `999` | question | `x#q` | \u2014 | **ruled** |",
+        ):
+            with self.subTest(row=after):
+                text = head + rows + "\n## An inserted heading\n\n" + after + "\n"
+                code, output = self._run_mode(text, "--out", str(target))
+                self.assertEqual(code, 1, output[:200])
+                self.assertIn("outside the register section", output)
+                self.assertFalse(target.exists())
+
     def test_plain_and_unbolded_numbered_rows_after_a_heading_are_caught_too(self):
         """Not only rows that look like register rows: any numbered table row outside the section."""
         head = "## The register of open design decisions\n\n"
