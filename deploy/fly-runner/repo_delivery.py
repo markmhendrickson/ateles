@@ -471,9 +471,11 @@ def clone_origin(work: Work, *, url: str, base_branch: str, token: str,
                  expected_head: str = "") -> str:  # fmt: skip
     """Fetch the base branch (depth 1) into a fresh root-owned ``origin.git``
     and return its commit. The token reaches only the fetching process."""
-    if type(max_bytes) is not int or max_bytes <= 0:
+    # A cap that is not a positive integer, or that exceeds the absolute
+    # ceiling, is not honoured at all: it falls to the default, never upward
+    # (the same rule Apis applies when it chooses the cap).
+    if type(max_bytes) is not int or not 0 < max_bytes <= ABSOLUTE_ORIGIN_CEILING_BYTES:
         max_bytes = MAX_ORIGIN_BYTES
-    max_bytes = min(max_bytes, ABSOLUTE_ORIGIN_CEILING_BYTES)
     _check_work(work)
     if expected_head:
         if not isinstance(expected_head, str) or not _OID_RE.fullmatch(expected_head.encode("ascii", "replace")):

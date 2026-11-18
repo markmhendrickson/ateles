@@ -163,6 +163,22 @@ def test_origin_cap_boundary_and_absolute_ceiling(tmp_path, world, monkeypatch):
                                 token=TOKEN, allow="file", max_bytes=cap)
 
 
+def test_a_cap_above_the_ceiling_falls_to_the_default_not_up_to_the_ceiling(tmp_path, world, monkeypatch):
+    # A clone of 400 MiB is between the 300 MiB default and the 512 MiB
+    # ceiling: clamping an oversized cap to the ceiling would accept it, the
+    # fall-to-default rule refuses it, and a cap exactly at the ceiling accepts it.
+    four_hundred = 400 * 1024 * 1024
+    assert rd.MAX_ORIGIN_BYTES < four_hundred < rd.ABSOLUTE_ORIGIN_CEILING_BYTES
+    monkeypatch.setattr(rd, "_size", lambda _path: four_hundred)
+    over = rd.prepare_work(tmp_path / "over", run_id="over")
+    with pytest.raises(rd.RepoWorkError, match="clone_refused: the clone is larger"):
+        rd.clone_origin(over, url=f"file://{world['remote']}", base_branch="main", token=TOKEN,
+                        allow="file", max_bytes=rd.ABSOLUTE_ORIGIN_CEILING_BYTES + 1)
+    at = rd.prepare_work(tmp_path / "at", run_id="at")
+    rd.clone_origin(at, url=f"file://{world['remote']}", base_branch="main", token=TOKEN,
+                    allow="file", max_bytes=rd.ABSOLUTE_ORIGIN_CEILING_BYTES)
+
+
 @pytest.mark.parametrize("cap", [0, -1, True, "999999999"])
 def test_invalid_runner_origin_caps_use_default(tmp_path, world, monkeypatch, cap):
     monkeypatch.setattr(rd, "_size", lambda _path: rd.MAX_ORIGIN_BYTES + 1)
