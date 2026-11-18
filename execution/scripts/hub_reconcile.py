@@ -132,15 +132,14 @@ def _check_token(variable_name: str, token: str) -> str:
 def _check_base_url(base_url: str) -> str:
     if _contains_non_printable_ascii(base_url):
         fail(BASE_URL_INPUT_ERROR)
-    parsed = urllib.parse.urlparse(base_url)
-    if (
-        parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-    ):
+    try:
+        parsed = urllib.parse.urlparse(base_url)
+        has_userinfo = parsed.username is not None or parsed.password is not None
+        host = parsed.hostname or ""
+    except ValueError:
         fail(BASE_URL_INPUT_ERROR)
-    host = parsed.hostname or ""
+    if has_userinfo or "?" in base_url or "#" in base_url:
+        fail(BASE_URL_INPUT_ERROR)
     if not host:
         fail("base URL has no host")
     if parsed.scheme != "https" and not (
@@ -149,7 +148,17 @@ def _check_base_url(base_url: str) -> str:
         fail(
             "base URL must be https (http is allowed only for localhost, 127.0.0.1, ::1)"
         )
-    return base_url.rstrip("/")
+    normalized = base_url.rstrip("/")
+    # The link builder and the stored-markup verifier must agree before add
+    # can write a card. Keep this check at the shared grammar boundary.
+    probe_id = "ent_" + "0" * 24
+    try:
+        probe_href = _page_href(normalized, entity_id=probe_id, token="probe")
+        if _page_href(normalized, href=probe_href) != probe_id:
+            fail(BASE_URL_INPUT_ERROR)
+    except ValueError:
+        fail(BASE_URL_INPUT_ERROR)
+    return normalized
 
 
 def _load_env(profile: str) -> tuple:
@@ -198,11 +207,21 @@ def _fetch_snapshot(base_url: str, token: str, entity_id: str) -> dict:
     entity = _request(f"{base_url}/entities/{entity_id}", token)
     if not isinstance(entity, dict):
         raise ValueError("unreadable snapshot")
-    snapshot = entity.get("snapshot", entity)
-    if not isinstance(snapshot, dict):
-        raise ValueError("unreadable snapshot")
-    if isinstance(snapshot.get("snapshot"), dict):
+    snapshot = entity
+    body = None
+    while True:
+        if "html_body" in snapshot:
+            candidate = snapshot["html_body"]
+            if not isinstance(candidate, str) or (
+                body is not None and candidate != body
+            ):
+                raise ValueError("unreadable snapshot")
+            body = candidate
+        if "snapshot" not in snapshot:
+            break
         snapshot = snapshot["snapshot"]
+        if not isinstance(snapshot, dict):
+            raise ValueError("unreadable snapshot")
     snapshot = dict(snapshot)
     if "entity_type" in entity:
         snapshot["entity_type"] = entity["entity_type"]
@@ -305,6 +324,49 @@ class _PageLinks(HTMLParser):
         "svg",
         "math",
     }
+    _OPTIONAL_END_PARENTS = {
+        "li": {"ul", "ol", "menu"},
+        "dt": {"dl"},
+        "dd": {"dl"},
+        "tr": {"table", "tbody", "thead", "tfoot"},
+        "td": {"tr"},
+        "th": {"tr"},
+        "option": {"select", "datalist", "optgroup"},
+    }
+    _P_END_STARTS = {
+        "address",
+        "article",
+        "aside",
+        "blockquote",
+        "details",
+        "dialog",
+        "div",
+        "dl",
+        "fieldset",
+        "figcaption",
+        "figure",
+        "footer",
+        "form",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "header",
+        "hgroup",
+        "hr",
+        "main",
+        "menu",
+        "nav",
+        "ol",
+        "p",
+        "pre",
+        "search",
+        "section",
+        "table",
+        "ul",
+    }
 
     def __init__(self, base_url: str):
         super().__init__(convert_charrefs=True)
@@ -313,8 +375,29 @@ class _PageLinks(HTMLParser):
         self.cards: set[str] = set()
         self.open_elements: list[tuple[str, bool]] = []
         self.has_base = False
+        self.malformed = False
+
+    def _close_optional_before_start(self, tag):
+        closing_starts = {
+            "li": {"li"},
+            "dt": {"dt", "dd"},
+            "dd": {"dt", "dd"},
+            "tr": {"tr"},
+            "td": {"td", "th", "tr"},
+            "th": {"td", "th", "tr"},
+            "option": {"option", "optgroup"},
+        }
+        while self.open_elements:
+            top = self.open_elements[-1][0]
+            if (top == "p" and tag in self._P_END_STARTS) or tag in closing_starts.get(
+                top, set()
+            ):
+                self.open_elements.pop()
+            else:
+                break
 
     def handle_starttag(self, tag, attrs):
+        self._close_optional_before_start(tag)
         if tag == "base":
             self.has_base = True
         attributes = dict(attrs)
@@ -340,10 +423,23 @@ class _PageLinks(HTMLParser):
             self.open_elements.append((tag, inert))
 
     def handle_endtag(self, tag):
-        for index in range(len(self.open_elements) - 1, -1, -1):
-            if self.open_elements[index][0] == tag:
-                del self.open_elements[index:]
-                break
+        if tag in self._VOID_ELEMENTS:
+            return
+        while self.open_elements and self.open_elements[-1][0] != tag:
+            top = self.open_elements[-1][0]
+            parent = self.open_elements[-2][0] if len(self.open_elements) > 1 else None
+            if (top == "p" and tag in self._P_END_STARTS) or (
+                parent in self._OPTIONAL_END_PARENTS.get(top, set())
+                and tag in (element for element, _ in self.open_elements[:-1])
+            ):
+                self.open_elements.pop()
+            else:
+                self.malformed = True
+                return
+        if self.open_elements:
+            self.open_elements.pop()
+        else:
+            self.malformed = True
 
     def handle_startendtag(self, tag, attrs):
         # HTML ignores the slash on non-void elements, including <template/>.
@@ -434,7 +530,7 @@ def cmd_check(args, base_url, token) -> int:
         if not isinstance(hub.get("html_body"), str):
             raise ValueError("unreadable page")
         hub_links = _page_links(hub["html_body"], base_url)
-        if hub_links.has_base:
+        if hub_links.has_base or hub_links.malformed:
             raise ValueError("base element in hub")
         carded = hub_links.cards & pages
         reachable = {args.hub} | carded
@@ -447,7 +543,7 @@ def cmd_check(args, base_url, token) -> int:
             ):
                 raise ValueError("unreadable page")
             page_links = _page_links(snapshot["html_body"], base_url)
-            if page_links.has_base:
+            if page_links.has_base or page_links.malformed:
                 raise ValueError("base element in carded page")
             reachable.update(page_links.links & pages)
     except (
@@ -507,6 +603,7 @@ def insert_card(body: str, marker_name: str, card: str) -> str:
 
 def cmd_add(args, base_url, token) -> int:
     """Read-modify-write one exact card splice and verify the stored bytes."""
+    base_url = _check_base_url(base_url)
     if not ENTITY_ID_RE.fullmatch(args.hub):
         fail("--hub must look like ent_ followed by 24 hex characters")
     if _contains_unsafe_free_text(args.title):
