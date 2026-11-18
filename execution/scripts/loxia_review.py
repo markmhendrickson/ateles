@@ -234,19 +234,13 @@ def find_existing_review_comment(marker: str) -> int | None:
 
 
 def post_github_comment(body: str, marker: str | None = None) -> None:
-    """Upsert a review comment on the PR: when `marker` is supplied and a prior
-    comment carries it, update that comment in place; otherwise post fresh."""
+    """Post a fresh legacy review record; these comments have no head pin."""
     if not GITHUB_TOKEN or not PR_NUMBER or not REPO:
         print("[loxia] Cannot post comment — missing GITHUB_TOKEN/PR_NUMBER/REPO")
         return
 
-    existing_id = find_existing_review_comment(marker) if marker else None
-    if existing_id is not None:
-        url = f"{GITHUB_API_URL}/repos/{REPO}/issues/comments/{existing_id}"
-        method, action = "PATCH", "updated"
-    else:
-        url = f"{GITHUB_API_URL}/repos/{REPO}/issues/{PR_NUMBER}/comments"
-        method, action = "POST", "posted"
+    url = f"{GITHUB_API_URL}/repos/{REPO}/issues/{PR_NUMBER}/comments"
+    method, action = "POST", "posted"
 
     req = urllib.request.Request(
         url,

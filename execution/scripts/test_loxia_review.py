@@ -60,7 +60,7 @@ def test_find_existing_none_when_marker_absent(monkeypatch):
     assert lx.find_existing_review_comment("## Monedula Review 🪙") is None
 
 
-def test_post_patches_when_existing(monkeypatch):
+def test_post_preserves_existing_review(monkeypatch):
     captured = {}
 
     def fake_urlopen(req, *a, **k):
@@ -76,8 +76,8 @@ def test_post_patches_when_existing(monkeypatch):
 
     lx.post_github_comment("body", marker="## Loxia Review 🪶")
 
-    assert captured["method"] == "PATCH"
-    assert captured["url"].endswith("/issues/comments/4242")
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/issues/87/comments")
 
 
 def test_post_creates_when_no_existing(monkeypatch):

@@ -83,7 +83,7 @@ class _Comments:
                     {
                         "id": len(store.comments) + 1,
                         "body": body,
-                        "user": {"login": SWARM_LOGIN},
+                        "user": {"login": SWARM_LOGIN, "type": "Bot" if str(SWARM_LOGIN).endswith("[bot]") else "User"},
                         "created_at": datetime.now(timezone.utc).strftime(
                             "%Y-%m-%dT%H:%M:%SZ"
                         ),
@@ -409,10 +409,10 @@ def test_neotoma_retry_count_resets_after_a_verdict(monkeypatch):
                 "id": 1,
                 "body": "<!-- review-deferred-until:2026-11-06T10:00:00Z -->\n"
                 + SwarmDispatcher._NEOTOMA_DEFERRAL_MARKER.format(attempt=3, head=HEAD),
-                "user": {"login": SWARM_LOGIN},
+                "user": {"login": SWARM_LOGIN, "type": "Bot" if str(SWARM_LOGIN).endswith("[bot]") else "User"},
             },
             {"id": 2, "body": "<!-- vanellus-aggregation -->\n**APPROVE**",
-             "user": {"login": SWARM_LOGIN}},
+             "user": {"login": SWARM_LOGIN, "type": "Bot" if str(SWARM_LOGIN).endswith("[bot]") else "User"}},
         ]
     )
     _wire_github(monkeypatch, comments)
@@ -492,7 +492,7 @@ class _PagedComments(_Comments):
                 store.posted.append(body)
                 store.comments.append(
                     {"id": store.next_id, "body": body,
-                     "user": {"login": SWARM_LOGIN},
+                     "user": {"login": SWARM_LOGIN, "type": "Bot" if str(SWARM_LOGIN).endswith("[bot]") else "User"},
                      "created_at": datetime.now(timezone.utc).strftime(
                          "%Y-%m-%dT%H:%M:%SZ")}
                 )
@@ -504,7 +504,7 @@ class _PagedComments(_Comments):
 
 def _chatter(n):
     return [
-        {"id": i, "body": f"discussion {i}", "user": {"login": "someone"},
+        {"id": i, "body": f"discussion {i}", "user": {"login": "someone", "type": "User"},
          "created_at": "2026-11-01T10:00:00Z"}
         for i in range(1, n + 1)
     ]
@@ -564,7 +564,7 @@ def test_failed_read_of_a_later_comment_page_stops_the_panel(monkeypatch):
         + "\n" + SwarmDispatcher._NEOTOMA_DEFERRAL_MARKER.format(attempt=1, head=HEAD)
     )
     comments = _PagedComments(
-        _chatter(120) + [{"id": 121, "body": marker, "user": {"login": SWARM_LOGIN}}],
+        _chatter(120) + [{"id": 121, "body": marker, "user": {"login": SWARM_LOGIN, "type": "Bot" if str(SWARM_LOGIN).endswith("[bot]") else "User"}}],
         fail_page=2,
     )
     _wire_long_thread(monkeypatch, comments)
@@ -590,7 +590,7 @@ def _deferral(cid, attempt):
         ) + "\n" + SwarmDispatcher._NEOTOMA_DEFERRAL_MARKER.format(
             attempt=attempt, head=HEAD
         ),
-        "user": {"login": SWARM_LOGIN},
+        "user": {"login": SWARM_LOGIN, "type": "Bot" if str(SWARM_LOGIN).endswith("[bot]") else "User"},
     }
 
 
@@ -623,7 +623,7 @@ def test_deferral_of_another_kind_still_counts_as_no_neotoma_retries(monkeypatch
         "body": SwarmDispatcher._REVIEW_DEFERRED_MARKER.format(
             iso="2026-11-06T10:00:00Z"
         ),
-        "user": {"login": SWARM_LOGIN},
+        "user": {"login": SWARM_LOGIN, "type": "Bot" if str(SWARM_LOGIN).endswith("[bot]") else "User"},
     }
     comments = _Comments([_deferral(1, 2), other])
     _wire_long_thread(monkeypatch, comments)
@@ -633,7 +633,7 @@ def test_deferral_of_another_kind_still_counts_as_no_neotoma_retries(monkeypatch
 def test_deferred_sweep_sees_a_marker_past_the_first_page(monkeypatch):
     """Red before: both sweep reads stopped at the first 100 comments."""
     marker = SwarmDispatcher._REVIEW_DEFERRED_MARKER.format(iso="2026-11-06T10:00:00Z")
-    thread = _chatter(140) + [{"id": 141, "body": marker, "user": {"login": SWARM_LOGIN}}]
+    thread = _chatter(140) + [{"id": 141, "body": marker, "user": {"login": SWARM_LOGIN, "type": "Bot" if str(SWARM_LOGIN).endswith("[bot]") else "User"}}]
     pr = {"number": 87, "head": {"sha": HEAD}}
 
     class _Sweep(_PagedComments):
@@ -661,7 +661,7 @@ def test_deferred_sweep_sees_a_marker_past_the_first_page(monkeypatch):
 
     comments.comments.append(
         {"id": 142, "body": "<!-- vanellus-aggregation -->\n**APPROVE**",
-         "user": {"login": SWARM_LOGIN}}
+         "user": {"login": SWARM_LOGIN, "type": "Bot" if str(SWARM_LOGIN).endswith("[bot]") else "User"}}
     )
     assert asyncio.run(live()) is False
     comments.comments.pop()
@@ -747,7 +747,7 @@ def test_panel_guard_clears_after_an_exception(monkeypatch):
 def test_deferred_sweep_skips_a_head_whose_panel_is_running(monkeypatch):
     d = _dispatcher()
     pr = {"number": 87, "title": "t", "head": {"sha": HEAD, "ref": "b"},
-          "base": {"ref": "main"}, "user": {"login": "someone"}}
+          "base": {"ref": "main"}, "user": {"login": "someone", "type": "User"}}
 
     async def due(self, repository, now):
         return {"due": [pr], "scanned": 1, "not_yet": 0}

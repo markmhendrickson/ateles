@@ -139,11 +139,28 @@ conclusion always blocks. See `_unscheduled_non_required_reason`.
 
 Three-round cap (operator ruling 2026-10-27, `review_rounds`): a repair unit
 not merged after three build, review and correct rounds is split or cut in scope
-before another round runs. A round is a distinct head that received a lens
-verdict (the swarm's own verdict comments and their `commit=` markers). When the
-head being approved would be a fourth round or later, the tool prints "round cap
-reached: split or cut scope" and refuses, whatever the lenses said. There is no
-override: the unit is split or cut in scope and continues in a fresh PR.
+before another round runs. Contiguous verdicts on one head form a review
+episode; returning to an earlier head after another head forms another episode.
+An episode after a blocking or unreadable episode starts a round. Returning to
+a previously reviewed head after any earlier blocking episode starts a new
+round, even when the immediately previous episode cleared; otherwise an
+episode after an all-clear one stays in the same round. Verdicts are ordered by UTC creation
+time, integer comment id, then source order. Missing or malformed timestamps,
+or timestamp ties without usable comment ids, refuse approval because the
+round order is unknown. The cap uses the whole PR history. A
+fourth round is refused unless the repository's human owner matches the default
+Neotoma operator_profile.github_login and posted an unedited,
+PR-specific `/override-round-cap` comment with a reason of at least 20
+characters, present correctly typed author and timestamp fields, and a positive
+integer id matching its PR-local URL. The profile listing must explicitly prove
+completeness through a matching total or `has_more: false`, and contain exactly
+one default profile. `APIS_OPERATOR_LOGIN` is not authority for this override. A
+valid override lifts only the round cap and timestamp or tie indeterminacy.
+A marked verdict comment with unresolved author makes history unknown and refuses
+approval regardless of override; an unreviewed head is shown as a candidate.
+Unresolved or partial lens identity resolution independently refuses approval;
+an override never lifts it. The override is revalidated at each approval POST.
+Every other gate still binds.
 
 Usage:
     python3 execution/scripts/approve_pr_as_app.py --repo <owner/name> --pr <n> \\
@@ -258,7 +275,7 @@ from swarm_dispatch import (  # noqa: E402
     _reviewer_app_private_key_pem,
     body_has_blocking_findings,
     compose_lens_review_marker,
-    lens_comment_authors,
+    lens_comment_authors_resolution,
     lens_explicit_objection,
     lens_own_verdict,
     lens_records,
@@ -505,6 +522,97 @@ async def _fetch_pr(client: httpx.AsyncClient, repo: str, pr: int) -> dict:
     return resp.json() or {}
 
 
+async def _repository_operator(client: httpx.AsyncClient, repo: str) -> tuple[str, str, str]:
+    """Read the human repository owner only if the operator profile agrees.
+
+    `APIS_OPERATOR_LOGIN` is useful elsewhere but cannot confer override
+    authority. An unreadable owner or organization disables the override.
+    """
+    try:
+        resp = await client.get(f"{GITHUB_API}/repos/{repo}", headers=_github_headers(repo))
+        resp.raise_for_status()
+        owner = (resp.json() or {}).get("owner") or {}
+    except Exception:  # noqa: BLE001 — an unknown owner cannot authorize
+        return "", "", "repository owner could not be read"
+    if not isinstance(owner, dict):
+        return "", "", "repository owner could not be read"
+    if owner.get("type") != "User":
+        return "", "", "repository owner is not a User; organization-owned repositories have no override"
+    login = owner.get("login")
+    if not isinstance(login, str) or not login:
+        return "", "", "repository owner login could not be read"
+    operator_login, profile_error = await _operator_profile_login(client)
+    if profile_error:
+        return "", "", profile_error
+    if login != operator_login:
+        return "", "", "repository owner differs from the operator_profile GitHub login"
+    return login, operator_login, ""
+
+
+async def _operator_profile_login(client: httpx.AsyncClient) -> tuple[str, str]:
+    """Resolve the default operator's GitHub login from Neotoma, never caller login config."""
+    token = (os.environ.get("NEOTOMA_BEARER_TOKEN") or "").strip()
+    if not token:
+        return "", "Neotoma bearer token unavailable for operator_profile read"
+    base = (os.environ.get("NEOTOMA_BASE_URL") or "https://neotoma.markmhendrickson.com").rstrip("/")
+    try:
+        resp = await client.post(
+            f"{base}/entities/query",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"entity_type": "operator_profile", "include_snapshots": True, "limit": 100},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        rows = data.get("entities") if isinstance(data, dict) else None
+        total = data.get("total") if isinstance(data, dict) else None
+        has_more = data.get("has_more") if isinstance(data, dict) else None
+        next_cursor = data.get("next_cursor") if isinstance(data, dict) else None
+        offset = data.get("offset") if isinstance(data, dict) else None
+        if (not isinstance(rows, list) or (has_more is not None and type(has_more) is not bool)
+                or has_more is True
+                or isinstance(total, bool) or (total is not None and
+                    (not isinstance(total, int) or total != len(rows)))
+                or (total is None and has_more is not False)
+                or next_cursor not in (None, "")
+                or (offset is not None and (type(offset) is not int or offset != 0))):
+            return "", "operator_profile read is partial or malformed"
+        matches = []
+        for row in rows:
+            if not isinstance(row, dict):
+                return "", "operator_profile read is partial or malformed"
+            outer = row.get("snapshot") if isinstance(row, dict) else None
+            snap = outer.get("snapshot", outer) if isinstance(outer, dict) else None
+            if not isinstance(snap, dict) or not isinstance(snap.get("profile_key"), str):
+                return "", "operator_profile read is partial or malformed"
+            if isinstance(snap, dict) and snap.get("profile_key") == "default":
+                matches.append(snap)
+        if len(matches) != 1:
+            return "", "default operator_profile is missing or ambiguous"
+        login = matches[0].get("github_login")
+        if not isinstance(login, str) or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", login):
+            return "", "default operator_profile lacks a valid github_login field"
+        return login, ""
+    except Exception:  # noqa: BLE001 — unreadable authority fails closed
+        return "", "default operator_profile could not be read"
+
+
+def _unresolved_lens_reason(resolution: lens_authors.Resolution) -> str:
+    """Name every unresolved source, including the lens behind an agent PAT."""
+    failures = list(resolution.failed)
+    if getattr(resolution, "partial", False) and not failures:
+        failures.append("partial identity resolution")
+    if not failures:
+        failures.append("no complete identity resolution")
+    named = []
+    for failure in failures:
+        lens = next(
+            (lens for lens, agent in LENS_AGENTS.items() if f"{agent.upper()}_AGENT_PAT" in failure),
+            "swarm",
+        )
+        named.append(f"{lens} ({failure})")
+    return "round order indeterminate: lens identity unresolved for " + ", ".join(named)
+
+
 async def _fetch_issue_comments(client: httpx.AsyncClient, repo: str, pr: int) -> list[dict]:
     """All issue-API comments on the PR (GitHub serves PR comments there)."""
     out: list[dict] = []
@@ -516,7 +624,14 @@ async def _fetch_issue_comments(client: httpx.AsyncClient, repo: str, pr: int) -
             params={"per_page": 100, "page": page},
         )
         resp.raise_for_status()
-        rows = resp.json() or []
+        rows = resp.json()
+        if (not isinstance(rows, list) or any(
+            not isinstance(row, dict) or not isinstance(row.get("body"), str)
+            for row in rows
+        )):
+            raise ValueError("GitHub comment listing is partial or malformed")
+        for row in rows:
+            lens_authors.require_marked_author(row)
         out.extend(rows)
         if len(rows) < 100:
             break
@@ -527,7 +642,7 @@ async def _fetch_issue_comments(client: httpx.AsyncClient, repo: str, pr: int) -
 def _latest_matching_comment(
     comments: list[dict], *, marker: str, authors: frozenset[str]
 ) -> dict | None:
-    """The LATEST comment a swarm identity wrote that carries *marker*, or None.
+    """The LATEST comment a swarm identity wrote starting with *marker*, or None.
 
     Latest, not first: a lens can post more than once for the same head (a
     correction after its own comment), and the most recent word is the one
@@ -539,8 +654,9 @@ def _latest_matching_comment(
     default, so a caller cannot read lens comments without deciding whose
     they are; an empty set matches nothing.
     """
-    for c in reversed(comments):
-        if marker in (c.get("body") or "") and lens_authors.is_swarm_comment(c, authors):
+    for c in reversed(review_rounds.ordered_comments(comments)):
+        body = c.get("body") or ""
+        if body.splitlines()[:1] == [marker] and lens_authors.is_swarm_comment(c, authors):
             return c
     return None
 
@@ -548,14 +664,15 @@ def _latest_matching_comment(
 def _matching_comments(
     comments: list[dict], *, marker: str, authors: frozenset[str]
 ) -> list[dict]:
-    """EVERY swarm-written comment carrying *marker*, in creation order.
+    """EVERY swarm-written comment starting with *marker*, in creation order.
 
     Same author rule as `_latest_matching_comment`.
     """
     return [
         c
-        for c in comments
-        if marker in (c.get("body") or "") and lens_authors.is_swarm_comment(c, authors)
+        for c in review_rounds.ordered_comments(comments)
+        if (c.get("body") or "").splitlines()[:1] == [marker]
+        and lens_authors.is_swarm_comment(c, authors)
     ]
 
 
@@ -1150,10 +1267,12 @@ def find_unadmitted_objections(
     unreadable verdict is not an objection here (only a plain one holds).
     """
     out: list[UnadmittedObjection] = []
+    for comment in comments:
+        lens_authors.require_marked_author(comment)
     for lens, agent in LENS_AGENTS.items():
-        marker = compose_lens_review_marker(lens, head_sha)
         for c in comments:
-            if marker not in (c.get("body") or ""):
+            parsed = lens_authors.verdict_marker(c.get("body"))
+            if not parsed or parsed.lens != lens or parsed.head != head_sha.lower() or parsed.retired:
                 continue
             if lens_authors.is_swarm_comment(c, authors):
                 continue
@@ -1758,6 +1877,11 @@ async def submit_app_approval(
     cleared_phrase: str = "every required review lens cleared",
     panel_note: str = "",
     expected_base_ref: str = "",
+    expected_comments: list[dict] | None = None,
+    override_authority: tuple[dict, str, str] | None = None,
+    expected_scope: review_scope.ScopeLoad | None = None,
+    expected_pr_body: str | None = None,
+    required_lens_context: tuple[list[str], list[str], bool] | None = None,
 ) -> dict:
     """Mint an App installation token and submit a formal APPROVE review.
 
@@ -1790,8 +1914,10 @@ async def submit_app_approval(
          readback, never the POST response alone, is treated as proof the
          approval landed as intended.
 
-    Raises on any failure; the caller treats a raised exception as
-    "submitted nothing" per the --apply contract.
+    When the caller relies on an operator override, its exact comment and
+    owner authority are revalidated after all other network work, immediately
+    before this review's POST. The same boundary rechecks comments and CI.
+    Raises on any failure before the POST; a later failure may leave a review.
     """
     if token is not None and not (expected_login or "").strip():
         raise RuntimeError(
@@ -1894,6 +2020,55 @@ async def submit_app_approval(
     body = "\n".join(body_lines)
 
     url = f"{GITHUB_API}/repos/{repo}/pulls/{pr}/reviews"
+    if expected_comments is not None:
+        _, fresh_checks_green = await evaluate_checks(
+            client, repo=repo, head_sha=head_sha, base_ref=expected_base_ref
+        )
+        if not fresh_checks_green:
+            raise RuntimeError("checks changed before approval submission — submitting nothing")
+        if expected_scope is not None:
+            fresh_scope = await fetch_review_scope(client, repo, expected_base_ref)
+            if fresh_scope != expected_scope:
+                raise RuntimeError("review scope changed before approval submission — submitting nothing")
+        fresh_pr = await client.get(f"{GITHUB_API}/repos/{repo}/pulls/{pr}", headers=headers)
+        if fresh_pr.status_code >= 400:
+            raise RuntimeError("PR state could not be read at approval submission — submitting nothing")
+        boundary_pr = fresh_pr.json() or {}
+        boundary_head = _normalise_full_sha(str((boundary_pr.get("head") or {}).get("sha") or ""))
+        if (boundary_pr.get("state") != "open" or boundary_pr.get("merged_at")
+                or boundary_head != head_sha
+                or str((boundary_pr.get("base") or {}).get("ref") or "") != expected_base_ref
+                or merge_conflict_gate(boundary_pr, head_sha) is not None):
+            raise RuntimeError("PR state changed before approval submission — submitting nothing")
+        if expected_pr_body is not None and (boundary_pr.get("body") or "") != expected_pr_body:
+            raise RuntimeError("PR body changed before approval submission — submitting nothing")
+        if required_lens_context is not None:
+            expected_lenses, extra_lenses, panel_all = required_lens_context
+            fresh_lenses, _, _ = await resolve_lenses(
+                client, repo=repo, pr=pr, pr_body=expected_pr_body or "",
+                extra_lenses=extra_lenses, panel_all=panel_all,
+            )
+            if fresh_lenses != expected_lenses:
+                raise RuntimeError("required lenses changed before approval submission — submitting nothing")
+        if override_authority is not None:
+            expected_override, owner_login, operator_login = override_authority
+            fresh_owner, fresh_operator, owner_error = await _repository_operator(client, repo)
+        try:
+            fresh_comments = await _fetch_issue_comments(client, repo, pr)
+        except ValueError as exc:
+            raise RuntimeError(f"pre-submit comment read failed: {exc} — submitting nothing") from exc
+        if override_authority is not None:
+            fresh_override = (
+                review_rounds.operator_override(fresh_comments, fresh_owner, fresh_operator, repo, pr)
+                if fresh_owner and not owner_error else None
+            )
+            if (fresh_owner != owner_login or fresh_operator != operator_login
+                    or fresh_override != expected_override):
+                raise RuntimeError(
+                    "operator round-cap override changed or vanished — submitting nothing"
+                )
+        if fresh_comments != expected_comments:
+            raise RuntimeError("PR comment history changed before approval submission — submitting nothing")
     # 2. commit_id pinned to the verified (and just re-confirmed) head.
     resp = await client.post(
         url,
@@ -2099,6 +2274,11 @@ async def submit_approvals(
     pr_author: str = "",
     panel_note: str = "",
     expected_base_ref: str = "",
+    expected_comments: list[dict] | None = None,
+    override_authority: tuple[dict, str, str] | None = None,
+    expected_scope: review_scope.ScopeLoad | None = None,
+    expected_pr_body: str | None = None,
+    required_lens_context: tuple[list[str], list[str], bool] | None = None,
 ) -> list[dict]:
     """Submit the APPROVE review(s), each as the App that matches who reviewed.
 
@@ -2134,6 +2314,11 @@ async def submit_approvals(
                 check_outcomes=check_outcomes,
                 panel_note=panel_note,
                 expected_base_ref=expected_base_ref,
+                expected_comments=expected_comments,
+                override_authority=override_authority,
+                expected_scope=expected_scope,
+                expected_pr_body=expected_pr_body,
+                required_lens_context=required_lens_context,
             )
         ]
 
@@ -2231,6 +2416,11 @@ async def submit_approvals(
                 ),
                 panel_note=panel_note,
                 expected_base_ref=expected_base_ref,
+                expected_comments=expected_comments,
+                override_authority=override_authority,
+                expected_scope=expected_scope,
+                expected_pr_body=expected_pr_body,
+                required_lens_context=required_lens_context,
             )
             landed.append((", ".join(o.lens for o in lenses), login, review))
     except GitHubRateLimited as exc:
@@ -2523,17 +2713,21 @@ async def run(
         added = [lens for lens in lenses if lens not in floor_names]
         _print_derived_lenses(required, added, excluded=excluded)
 
-        comments = await _fetch_issue_comments(client, repo, pr)
+        try:
+            comments = await _fetch_issue_comments(client, repo, pr)
+        except ValueError as exc:
+            print(f"refusing: {exc}")
+            return 1
 
         # Whose comments are lens verdicts. The head marker is text any account
         # can post on a public repo, so a lens comment counts only when a swarm
         # identity wrote it (`lens_authors`; fails closed). Resolved once for
         # the whole run so every read below agrees.
         try:
-            authors = await asyncio.to_thread(lens_comment_authors)
+            resolution = await asyncio.to_thread(lens_comment_authors_resolution)
         except Exception as exc:  # noqa: BLE001 — unreadable identities admit nobody
-            print(f"lens comment identities unreadable ({exc.__class__.__name__})")
-            authors = frozenset()
+            resolution = lens_authors.Resolution(frozenset(), (f"lookup raised {exc.__class__.__name__}",))
+        authors = resolution.authors
         _limit_notice = lens_authors.rate_limit_notice()
         if _limit_notice:
             raise GitHubRateLimited(_limit_notice)
@@ -2546,7 +2740,28 @@ async def run(
             lens_records(lens_authors.scope_lens_comments(comments, authors)),
             head_sha,
         )
+        identity_gap = not resolution.complete or bool(getattr(resolution, "partial", False))
+        order_indeterminate = bool(rounds.indeterminate_head)
+        override_needed = rounds.round_number > rounds.cap or order_indeterminate
+        owner_login, operator_login, owner_error = (await _repository_operator(client, repo)
+                                    if override_needed else ("", "", ""))
+        override = (review_rounds.operator_override(comments, owner_login, operator_login, repo, pr)
+                    if owner_login and override_needed else None)
         print(rounds.describe())
+        if identity_gap:
+            print(_unresolved_lens_reason(resolution))
+            print("unresolved lens identity independently refuses approval; an override cannot lift it")
+            if "the PR-opener App's bot login" in resolution.failed:
+                print("the PR-opener App is declared but its login cannot be read; approval is held")
+        if owner_error:
+            print(f"round-cap override unavailable: {owner_error}")
+        if override:
+            print(
+                f"round cap or order OVERRIDDEN by the operator ({override['html_url']})\n"
+                f"  author: {override['user']['login']}\n"
+                f"  posted: {override['created_at']}\n"
+                f"  literal text: {override['body']}"
+            )
         print()
 
         lens_outcomes: list[LensOutcome] = []
@@ -2633,7 +2848,8 @@ async def run(
             and no_non_required_blocks
             and not unadmitted
             and checks_green
-            and not rounds.refused
+            and not identity_gap
+            and (not override_needed or override is not None)
         )
 
         print(f"head_sha={head_sha}")
@@ -2646,7 +2862,9 @@ async def run(
         print(f"checks: {'GREEN' if checks_green else 'NOT GREEN'}")
         print(
             "round cap: "
-            + ("REACHED (split or cut scope)" if rounds.refused else "OK")
+            + (f"OVERRIDDEN by the operator ({override['html_url']})" if override
+               else "INDETERMINATE (refusing)" if order_indeterminate
+               else "REACHED (split or cut scope)" if rounds.round_number > rounds.cap else "OK")
         )
         print(f"overall: {'PASS' if overall_pass else 'FAIL'}")
 
@@ -2685,6 +2903,22 @@ async def run(
             print("refusing to approve: gate is not clear. Submitting nothing.")
             return 1
 
+        if override:
+            try:
+                fresh_comments = await _fetch_issue_comments(client, repo, pr)
+            except ValueError as exc:
+                print(f"refusing to approve: {exc}. Submitting nothing.")
+                return 1
+            fresh_owner, fresh_operator, fresh_owner_error = await _repository_operator(client, repo)
+            fresh_override = (review_rounds.operator_override(fresh_comments, fresh_owner, fresh_operator, repo, pr)
+                              if fresh_owner and not fresh_owner_error else None)
+            if fresh_owner != owner_login or fresh_operator != operator_login or fresh_override != override:
+                print("refusing to approve: operator round-cap override changed or vanished. Submitting nothing.")
+                return 1
+            if fresh_comments != comments:
+                print("refusing to approve: PR comment history changed since gate evaluation. Submitting nothing.")
+                return 1
+
         try:
             reviews = await submit_approvals(
                 client,
@@ -2696,6 +2930,11 @@ async def run(
                 pr_author=str((pr_data.get("user") or {}).get("login") or ""),
                 panel_note=panel_note,
                 expected_base_ref=expected_base_ref,
+                expected_comments=comments,
+                override_authority=(override, owner_login, operator_login) if override else None,
+                expected_scope=scope_load,
+                expected_pr_body=pr_body,
+                required_lens_context=(lenses, extra_lenses, panel_all) if panel_mode != "path" else None,
             )
         except Exception as exc:
             print()
@@ -2741,6 +2980,9 @@ def main() -> int:
             "--panel required to use the diff-derived floor alone (where "
             "content can still appear), or set "
             "ATELES_APPROVE_PANEL_REQUIRED_ONLY=1 to change the default. "
+            "An operator comment whose exact first line is /override-round-cap lifts only the round cap "
+            "and timestamp or tie indeterminacy; unresolved lens identity still "
+            "refuses, and a relied-on override is rechecked at each approval POST. "
             "Exit codes: 0 pass, 1 refused, 2 usage, 75 GitHub rate limit "
             "exhausted before any review was posted (reset time printed; safe to "
             "re-run after it), 76 rate limit hit after a review was posted (the "

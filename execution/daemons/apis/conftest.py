@@ -119,7 +119,9 @@ def _isolate_lens_comment_identities(monkeypatch):
         lens_authors, "_REAL_APP_BOT_LOGINS", lens_authors._app_bot_logins, raising=False
     )
     monkeypatch.setattr(lens_authors, "_app_bot_logins", lambda: (set(), False))
-    monkeypatch.setattr(lens_authors, "_login_for_token", lambda token: "")
+    # The synthetic write credential below belongs to this same synthetic
+    # account. A failed lookup would make the identity history partial.
+    monkeypatch.setattr(lens_authors, "_login_for_token", lambda token: "swarm-lens-account")
     lens_authors.clear_cache()
 
 

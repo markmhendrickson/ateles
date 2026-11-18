@@ -51,9 +51,11 @@ def logins(monkeypatch):
 
 
 def _c(author: str | None, lens: str, extra: str = "") -> dict:
-    row = {"body": f"<!-- review:{lens} commit={HEAD} -->\n**verdict**{extra}"}
+    row = {"id": 1, "created_at": "2026-10-14T10:01:00Z",
+           "html_url": "https://example.invalid/c/1",
+           "body": f"<!-- review:{lens} commit={HEAD} -->\n**verdict**{extra}"}
     if author is not None:
-        row["user"] = {"login": author}
+        row["user"] = {"login": author, "type": "Bot" if author.endswith("[bot]") else "User"}
     return row
 
 
@@ -89,13 +91,13 @@ class TestALensWithAnAppIsReadOnlyFromThatApp:
         _declare(monkeypatch, "reviewer_pm")
         authors = lens_authors.resolve().authors
         aggregation = {
-            "user": {"login": SWARM},
+            "user": {"login": SWARM, "type": "Bot" if str(SWARM).endswith("[bot]") else "User"},
             "body": f"<!-- vanellus-aggregation commit={HEAD} -->\n### pm\nnotes",
         }
         assert _admitted(authors, aggregation)
         # ...but not when it names a lens that has an App (that lens is read from
         # its own App wherever in the body it is named; see the class below).
-        naming = {"user": {"login": SWARM}, "body": aggregation["body"] + "\nsee review:pm"}
+        naming = {"user": {"login": SWARM, "type": "Bot" if str(SWARM).endswith("[bot]") else "User"}, "body": aggregation["body"] + "\nsee review:pm"}
         assert not _admitted(authors, naming)
 
 
@@ -131,7 +133,7 @@ class TestOneLensCannotPostAnothersVerdict:
             "<!-- swarm-run-confirmation -->",
             "<!-- review-deferred-until=x -->",
         ):
-            assert not _admitted(authors, {"user": {"login": PM_APP}, "body": body})
+            assert not _admitted(authors, {"user": {"login": PM_APP, "type": "Bot" if str(PM_APP).endswith("[bot]") else "User"}, "body": body})
 
     def test_scope_lens_comments_drops_the_impostor_and_keeps_the_owner(self, monkeypatch, logins):
         _declare(monkeypatch, "reviewer_pm")
@@ -272,7 +274,7 @@ def _row(author: str, body: str, id_: int = 1) -> dict:
         "id": id_,
         "created_at": f"2026-10-14T10:{id_:02d}:00Z",
         "html_url": f"https://example.invalid/c/{id_}",
-        "user": {"login": author},
+        "user": {"login": author, "type": "Bot" if author.endswith("[bot]") else "User"},
         "body": body,
     }
 

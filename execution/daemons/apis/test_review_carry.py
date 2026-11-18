@@ -25,6 +25,7 @@ for _p in (str(_HERE), str(_HERE.parents[1]), str(_HERE.parents[2])):
 
 import review_carry  # noqa: E402
 import review_delta  # noqa: E402
+import review_rounds  # noqa: E402
 import review_scope  # noqa: E402
 import swarm_dispatch as sd  # noqa: E402
 from review_panel import lens_by_name  # noqa: E402
@@ -63,7 +64,7 @@ def _comment(i: int, lens: str, head: str, verdict: str = "SIGNED_OFF", finding:
         "id": i,
         "created_at": f"2026-09-29T10:{i:02d}:00Z",
         "html_url": f"https://github.com/o/r/pull/1#issuecomment-{i}",
-        "user": {"login": "swarm-lens-account"},
+        "user": {"login": "swarm-lens-account", "type": "User"},
         "body": _body(lens, head, verdict, finding),
     }
 
@@ -100,6 +101,35 @@ def _agent_prompts_come_from_this_checkout(monkeypatch):
 
 
 class TestSelection:
+    @pytest.mark.parametrize("bad_time", [None, "not-a-timestamp"])
+    def test_later_arch_objection_cannot_carry_an_earlier_clear(self, bad_time):
+        h1, h2 = "1" * 40, "2" * 40
+        comments = [_comment(1, "arch", h1),
+                    _comment(2, "arch", h2, "BLOCKED", "[BLOCKING] ordering: unresolved")]
+        comments[-1]["created_at"] = bad_time
+        records = sd.lens_records(comments)
+        assert [record.head for record in records["arch"]] == [h1, h2]
+        assert review_carry.carry_candidate(records["arch"], NEW) is None
+        assert review_rounds.round_status(records, NEW).indeterminate_head == h2
+        selection = review_carry.select_rerun(
+            ["arch"], records, NEW, {h1: _delta(DOC_FILE), h2: _delta(DOC_FILE)}
+        )
+        assert selection.rerun == {"arch"} and selection.carried == {}
+
+    def test_later_clear_after_objection_carries_when_arch_area_untouched(self):
+        h1, h2 = "1" * 40, "2" * 40
+        comments = [_comment(1, "arch", h1, "BLOCKED"), _comment(2, "arch", h2)]
+        records = sd.lens_records(comments)
+        assert review_carry.carry_candidate(records["arch"], NEW).head == h2
+        selection = review_carry.select_rerun(
+            ["arch"], records, NEW, {h2: _delta(DOC_FILE)}
+        )
+        assert selection.carried["arch"].head == h2
+
+    def test_unknown_position_and_timestamp_refuse_carry(self):
+        record = review_carry.LensRecord("arch", OLD, True)
+        assert review_carry.carry_candidate([record], NEW) is None
+
     def test_a_security_blocker_fixed_in_a_test_reruns_security_and_qa_only(self):
         sel = _select(_round(OLD, blocked=("security",)), _delta(TEST_FILE))
         assert sel.rerun == {"security", "qa"}

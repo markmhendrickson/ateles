@@ -175,7 +175,7 @@ class _ExpClient(_Client):
 
             def json(s):
                 return [{"id": 7, "body": _ExpClient.HEADER + "\n- [ ] a",
-                         "user": {"login": "swarm-lens-account"}}]
+                         "user": {"login": "swarm-lens-account", "type": "User"}}]
 
         return _R()
 
@@ -973,12 +973,12 @@ def test_a_posted_pm_review_naming_another_lens_class_is_read_back():
     cases = ((pm_app, pm_app_scope), ("ateles-agent", shared_scope))
     for login, scope in cases:
         authors = ScopedAuthors({login, arch_app}, scope)
-        comment = {"user": {"login": login}, "body": posted}
+        comment = {"user": {"login": login, "type": "Bot" if str(login).endswith("[bot]") else "User"}, "body": posted}
         assert scope_lens_comments([comment], authors) == [comment], login
 
     # A real arch marker in the same pm comment is still refused for both.
     foreign = posted + f"\n<!-- review:arch commit={HEAD} -->"
     for login, scope in cases:
         authors = ScopedAuthors({login, arch_app}, scope)
-        comment = {"user": {"login": login}, "body": foreign}
+        comment = {"user": {"login": login, "type": "Bot" if str(login).endswith("[bot]") else "User"}, "body": foreign}
         assert scope_lens_comments([comment], authors) == [], login

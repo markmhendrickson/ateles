@@ -10,9 +10,8 @@ before it parses anything.
 
 Design basis: docs/foundation/principles.md#5-fail-closed-on-the-field-that-carries-the-safety-meaning
 The field that carries the safety meaning here is the comment's author. A
-comment with no readable author, an author outside the set, or a set that
-cannot be established at all is NOT a lens verdict: the lens then has no
-verdict, which every consumer already treats as "not cleared".
+marked comment with an incomplete author makes approval history unknown;
+an author outside the set is not admitted as a lens verdict.
 
 Where the identities come from (never a login typed into this repo, so a fork
 supplies its own accounts):
@@ -152,6 +151,51 @@ _RETIREMENT_BANNER_RE = re.compile(
     r"(?=<!--\s*review:[a-z0-9_]+-superseded\s+by=[0-9a-f]{40}\s*-->)",
     re.IGNORECASE,
 )
+
+# A verdict is an exact-head marker on the first line, optionally following
+# the poster's own complete retirement banner. Keep this parser shared by the
+# author guard, round counter, presence readers, and retry paths.
+_HEAD_VERDICT_RE = re.compile(
+    r"\A<!--[ \t]*review:(?P<lens>[a-z0-9_-]+)[ \t]+commit=(?P<head>[0-9a-f]{40})[ \t]*-->[ \t]*(?:\r?\n|\Z)",
+    re.IGNORECASE,
+)
+_POSTER_RETIREMENT_RE = re.compile(
+    r"\A> ⚠️ Superseded by commit `[0-9a-f]{7}` — this verdict no longer reflects "
+    r"the current head\. See the latest review below\.\r?\n"
+    r"<!--\s*review:(?P<lens>[a-z0-9_-]+)-superseded\s+by=[0-9a-f]{40}\s*-->\r?\n\r?\n",
+    re.IGNORECASE,
+)
+_ANY_RETIRED_VERDICT_RE = re.compile(
+    r"<!--\s*review:[a-z0-9_-]+-superseded\s+by=[0-9a-f]{40}\s*-->",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class VerdictMarker:
+    lens: str
+    head: str
+    body: str
+    retired: bool = False
+
+
+def verdict_marker(body: object) -> VerdictMarker | None:
+    """Parse the one leading marker shape that enters lens verdict history."""
+    raw = str(body or "")
+    retired = _POSTER_RETIREMENT_RE.match(raw)
+    original = raw[retired.end():] if retired else raw
+    marker = _HEAD_VERDICT_RE.match(original)
+    if marker is None:
+        return None
+    lens = marker.group("lens").lower()
+    if retired and retired.group("lens").lower() != lens:
+        return None
+    return VerdictMarker(lens, marker.group("head").lower(), original, retired is not None)
+
+
+def has_retired_verdict_marker(body: object) -> bool:
+    """Conservatively reject a body containing any retirement marker."""
+    return bool(_ANY_RETIRED_VERDICT_RE.search(str(body or "")))
 
 
 def claimed_lenses(body: object) -> frozenset[str]:
@@ -600,7 +644,18 @@ def comment_author(comment: dict) -> str:
     user = comment.get("user") if isinstance(comment, dict) else None
     if not isinstance(user, dict):
         return ""
-    return _norm(user.get("login"))
+    login = user.get("login")
+    author_type = user.get("type")
+    if (not isinstance(login, str) or not _LOGIN_RE.fullmatch(login.casefold())
+            or author_type not in {"User", "Bot"}):
+        return ""
+    return _norm(login)
+
+
+def require_marked_author(comment: dict) -> None:
+    """Refuse marked history whose author cannot be established."""
+    if verdict_marker(comment.get("body")) and not comment_author(comment):
+        raise ValueError(f"lens verdict comment {comment.get('id')!r} has unresolved author; history unknown")
 
 
 def is_swarm_comment(comment: dict, authors: frozenset[str] | set[str]) -> bool:
@@ -632,10 +687,12 @@ def scope_lens_comments(
 ) -> list[dict]:
     """`comments` without any lens-shaped comment a swarm identity did not write.
 
-    A comment that is not lens-shaped is returned untouched: this narrows what
-    a lens reader can see, nothing else. With no `authors` every lens-shaped
-    comment is dropped.
+    A comment that is not lens-shaped is returned untouched. A marked comment
+    with an unreadable author refuses the history before scoping. With no
+    `authors` every otherwise valid lens-shaped comment is dropped.
     """
+    for comment in comments:
+        require_marked_author(comment)
     return [
         c
         for c in comments
@@ -647,6 +704,8 @@ def ignored_lens_comments(
     comments: list[dict], authors: frozenset[str] | set[str]
 ) -> list[dict]:
     """The lens-shaped comments `scope_lens_comments` drops (for reporting)."""
+    for comment in comments:
+        require_marked_author(comment)
     return [
         c
         for c in comments
