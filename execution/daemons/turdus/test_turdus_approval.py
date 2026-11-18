@@ -1022,6 +1022,30 @@ def test_malformed_reply_state_holds(monkeypatch, tmp_path, contents):
     assert any("reply state is unreadable" in message for message in notices.sent)
 
 
+def test_unreadable_state_notice_names_safe_recovery_and_scope(monkeypatch, tmp_path):
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps({"last_message_id": "private-state-value",
+                                      "processed_count": 1,
+                                      "processed_ids": [42]}))
+    monkeypatch.setattr(turdus, "_STATE_FILE", state_path)
+    monkeypatch.setattr(email_channel, "read_replies_with_status",
+                        lambda *_a, **_k: pytest.fail("reader must not run"))
+    monkeypatch.setattr(turdus, "_poll_gmail_messages",
+                        lambda *_: pytest.fail("triage must not run"))
+    notices = _StubNotifier()
+    _run(turdus.poll_once(notices, {}))
+    assert len(notices.sent) == 1
+    notice = notices.sent[0]
+    assert str(state_path) in notice
+    assert str(state_path) + ".initialized" in notice
+    assert "malformed: processed_ids" in notice
+    assert "ALL Turdus triage" in notice
+    assert "backup" in notice and "safe" in notice
+    assert "deleting or resetting" in notice and "replays consumed approvals" in notice
+    assert "private-state-value" not in notice
+    assert "42" not in notice
+
+
 def _full_reply_state():
     return {"last_message_id": None, "processed_count": 0,
             "processed_ids": [], "unreadable_notice_ids": [],

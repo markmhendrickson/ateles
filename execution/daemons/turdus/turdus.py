@@ -1295,10 +1295,13 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
     except StateUnreadableError as exc:
         log.error("[%s] %s", DAEMON_NAME, exc)
         if not _state_hold_notified:
+            failure_code = str(exc).removeprefix("Turdus reply state ")
             _state_hold_notified = bool(notifier.send(
-                "Turdus reply state is unreadable; approval routing is held. "
-                "The consumed-reply state file must be restored or reset by the "
-                "operator before email approvals resume.",
+                f"Turdus reply state is unreadable ({failure_code}); "
+                "ALL Turdus triage is held, including invoice and approval routing. "
+                f"State file: {_STATE_FILE}; initialized marker: {_state_marker_file()}. "
+                "Restoring the state file from a backup is safe; deleting or resetting "
+                "it is not safe because it replays consumed approvals.",
                 priority=Priority.BLOCKER, handler=DAEMON_NAME,
                 email_eligible=False,
             ))
