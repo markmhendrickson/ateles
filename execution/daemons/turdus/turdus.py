@@ -920,8 +920,8 @@ async def _maybe_handle_swarm_approval(msg: dict, notifier: Notifier) -> bool:
         target = f"{token[0]}#{token[1]}" if token else "this PR"
         delivered = notifier.send(
             f"{DAEMON_NAME}: email approval for {target} could not be accepted "
-            "because the reply's sender could not be verified. Approve through "
-            "the existing Telegram approval path.",
+            "because the reply's sender could not be verified. To approve in "
+            "Telegram, send exactly `approve`.",
             priority=Priority.BLOCKER, handler=DAEMON_NAME, email_eligible=False,
         )
         if delivered:
@@ -1058,8 +1058,8 @@ async def _maybe_handle_release_approval(msg: dict, notifier: Notifier) -> bool:
             version = match.group(1) if match else "this release"
         delivered = notifier.send(
             f"{DAEMON_NAME}: email approval for {version} could not be accepted "
-            "because the reply's sender could not be verified. Approve through "
-            "the existing Telegram approval path.",
+            "because the reply's sender could not be verified. To approve in "
+            f"Telegram, send exactly `approve {version}`.",
             priority=Priority.BLOCKER, handler=DAEMON_NAME, email_eligible=False,
         )
         if delivered:
@@ -1143,6 +1143,8 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
     outcome = email_channel.read_replies_with_status(
         [_RELEASE_APPROVE_TOKEN_PREFIX, _APPROVE_TOKEN_PREFIX],
         max_msgs=MAX_MESSAGES, require_enabled=False,
+        correction_queries=[_MERGE_READY_SUBJECT_MARKER,
+                            _RELEASE_READY_SUBJECT_MARKER],
     )
     for reply in outcome.unreadable_replies:
         mid = reply.message_id
@@ -1176,6 +1178,34 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         _save_state(state)
     approval_count = 0
     if outcome.kind in ("ok", "transport_error"):
+        for reply in outcome.correction_only_replies:
+            mid = reply.message_id
+            if mid in correction_id_set or mid in processed_id_set:
+                continue
+            subject = reply.subject
+            release = _RELEASE_READY_SUBJECT_MARKER.lower() in subject.lower()
+            if release:
+                match = re.search(r"\bRelease\s+(v[0-9][\w.+-]*)", subject, re.IGNORECASE)
+                target = match.group(1) if match else None
+            elif _MERGE_READY_SUBJECT_MARKER in subject:
+                match = re.search(r"\bPR\s+([A-Za-z0-9._-]+/[A-Za-z0-9._-]+#\d+)", subject)
+                target = match.group(1) if match else None
+            else:
+                target = None
+            if not target:
+                continue
+            exact_form = f"approve {target}" if release else "approve"
+            delivered = notifier.send(
+                f"{DAEMON_NAME}: no approval was recorded for {target}. "
+                "This email reply did not contain the request's correlation token. "
+                "An email reply must quote the request so its token is present. "
+                f"To approve in Telegram, send exactly `{exact_form}`.",
+                priority=Priority.BLOCKER, handler=DAEMON_NAME,
+                email_eligible=False,
+            )
+            if delivered:
+                correction_id_set.add(mid)
+                correction_ids.append(mid)
         # A partial read cannot approve anything; rejected metadata can still
         # be reported once, using only the subject for the target name.
         candidates = list(outcome.rejected_replies) + list(outcome.replies)
@@ -1194,10 +1224,13 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
                     _mark_handled(reply.message_id)
                 held_target = msg.get("held_approval_target")
                 if held_target and reply.message_id not in held_notice_set:
+                    exact_form = (f"approve {held_target}" if
+                                  _RELEASE_READY_SUBJECT_MARKER.lower() in
+                                  reply.subject.lower() else "approve")
                     delivered = notifier.send(
                         f"{DAEMON_NAME}: exact email approval for {held_target} is held "
                         "because another reply in this sweep could not be read. "
-                        "Approve through Telegram instead.",
+                        f"To approve in Telegram, send exactly `{exact_form}`.",
                         priority=Priority.BLOCKER, handler=DAEMON_NAME,
                         email_eligible=False,
                     )

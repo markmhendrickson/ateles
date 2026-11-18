@@ -598,7 +598,10 @@ def test_prefixed_writers_refuse_protected_targets(prefix, target, writer):
     "sed -i s/a/b/ src/output", "install source src/output", "cd src",
 ))
 def test_prefixed_writers_allow_ordinary_literal_targets(prefix, writer):
-    assert_allowed(f"{prefix} {writer}")
+    if writer.startswith("cd ") and prefix in {"env", "command", "builtin", "exec", "nice", "nohup", "time"}:
+        assert_refused(f"{prefix} {writer}")
+    else:
+        assert_allowed(f"{prefix} {writer}")
 
 
 # A wrapper's own options and operands, and wrappers the guard does not list,
@@ -626,7 +629,8 @@ def test_writers_behind_wrapper_options_refuse_protected_targets(prefix, target,
     "sed -i s/a/b/ src/output", "install source src/output", "cd src",
 ))
 def test_writers_behind_wrapper_options_allow_ordinary_targets(prefix, writer):
-    if prefix == "command -p" or prefix.split()[0] in _guard._DENIED_WRAPPERS:
+    if (prefix == "command -p" or prefix.split()[0] in _guard._DENIED_WRAPPERS
+            or writer.startswith("cd ")):
         assert_refused(f"{prefix} {writer}")
     else:
         assert_allowed(f"{prefix} {writer}")
@@ -1012,6 +1016,45 @@ def test_entering_protected_directory_refused(command):
 ))
 def test_ordinary_copy_and_cd_allowed(command):
     assert_allowed(command)
+
+
+@pytest.mark.parametrize("prefix", (
+    "env -C docs", "env --chdir docs", "env -Cdocs",
+    "env --chdir=docs", "env -C .. --chdir docs",
+))
+def test_directory_changing_wrapper_option_is_refused(prefix):
+    assert_refused(f"{prefix} tee ../.git/config")
+    assert_refused(f"{prefix} tee notes.txt")
+
+
+@pytest.mark.parametrize("command", (
+    "cd docs && tee ../.git/config",
+    "cd docs && cd .. && tee .git/config",
+    "cd docs && cp source ../.git/hooks/pre-commit",
+    "cd docs && printf x > ../.husky/pre-commit",
+    "cd docs && sh -c 'tee ../.git/config'",
+))
+def test_literal_directory_change_checks_effective_relative_path(command):
+    assert_refused(command)
+
+
+@pytest.mark.parametrize("command", (
+    "cd docs && tee notes.txt",
+    "cd docs && cd .. && tee notes.txt",
+    "cd docs && printf x > notes.txt",
+))
+def test_literal_directory_change_keeps_ordinary_relative_write(command):
+    assert_allowed(command)
+
+
+@pytest.mark.parametrize("prefix", (
+    "pushd docs", "make -C docs", "gmake -C docs", "tmux -c docs",
+    "screen -D -m -c docs", "nsenter -w docs", "runuser --chdir docs",
+    "su -l", "sudo -D docs", "chroot docs", "find docs -execdir",
+))
+def test_other_directory_changers_are_refused(prefix):
+    assert_refused(f"{prefix} tee .git/config")
+    assert_refused(f"{prefix} tee notes.txt")
 
 
 def test_non_bash_tool_ignored():

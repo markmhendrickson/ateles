@@ -966,9 +966,10 @@ def _build_agent_prompt(last_tag: str, commit_count: int) -> str:
 
     If the gws send fails, log it and add this exact sentence to the Telegram
     notification: "Email approval unavailable because the RC email failed to
-    send; approve through Telegram instead." Do NOT abort the run."""
+    send; in Telegram send exactly `approve <TAG>`." Replace <TAG> with the
+    actual version. Do NOT abort the run."""
         if email_available
-        else "11. Email notification skipped: email approval unavailable because the separate swarm mailbox is not configured. Do not run gws. Add this sentence to Telegram: \"Email approval unavailable; approve through Telegram instead.\""
+        else "11. Email notification skipped: email approval unavailable because the separate swarm mailbox is not configured. Do not run gws. Add this sentence to Telegram, replacing <TAG> with the actual version: \"Email approval unavailable; in Telegram send exactly `approve <TAG>`.\""
     )
     return f"""You are Phoenicurus, the Neotoma release-preparation agent.
 

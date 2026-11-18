@@ -1844,6 +1844,10 @@ def main() -> bool:
                 on_unauthenticated_reply=lambda msg, key: _notify_unauthenticated_reply(
                     msg, key, handler_names=handler_names, yesterday_str=yesterday_str
                 ),
+                on_missing_token_reply=lambda msg, key: _notify(
+                    msg, priority="blocker", dedupe_key=key,
+                    email_eligible=False,
+                ),
             )
         if consent.reason_code != REASON_NEEDS_SWARM_MAILBOX:
             _clear_notify_dedupe(_NEEDS_SWARM_MAILBOX_DEDUPE_KEY)

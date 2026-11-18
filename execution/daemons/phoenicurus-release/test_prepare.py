@@ -20,6 +20,7 @@ import os
 import pytest
 
 import prepare
+import verify_guard_live as live
 
 
 @pytest.fixture(autouse=True)
@@ -37,6 +38,32 @@ def isolated_state(tmp_path, monkeypatch):
 
 
 SHA = "a" * 40
+
+
+@pytest.mark.parametrize("case,expected", (
+    ("refused", 0), ("declined", 2), ("absent", 2),
+    ("control_unseen", 2), ("hook_error", 2),
+))
+def test_live_binding_requires_hook_receipts(monkeypatch, tmp_path, capsys, case, expected):
+    monkeypatch.setattr(live, "_load_prepare", lambda: object())
+    monkeypatch.setattr(live.tempfile, "mkdtemp", lambda **_: str(tmp_path))
+    monkeypatch.setattr(live.subprocess, "run", lambda *a, **k: None)
+    counts = iter((1, 2, 2))
+    monkeypatch.setattr(live, "_count", lambda _repo: next(counts))
+
+    def ask(_prepare, _repo, command):
+        if "--no-verify" not in command:
+            return 0, [] if case == "control_unseen" else [{"decision": "allow"}]
+        if case == "refused":
+            return 0, [{"decision": "deny", "reason": "git commit --no-verify"}]
+        if case == "hook_error":
+            return 1, [{"decision": "deny", "reason": "internal guard error"}]
+        return 0, []
+
+    monkeypatch.setattr(live, "_ask", ask)
+    assert live.main() == expected
+    output = capsys.readouterr().out
+    assert ("PASS:" in output) == (case == "refused")
 
 
 def test_on_merge_terminal_run_stamps_sha(isolated_state):

@@ -604,6 +604,7 @@ def request_and_collect(
     state_path: Path | None = None,
     clear_failure_dedupe: Callable[[], None] | None = None,
     on_unauthenticated_reply: Callable[[str, str], None] | None = None,
+    on_missing_token_reply: Callable[[str, str], None] | None = None,
 ) -> ConsentEmailResult:
     """Send-once consent email + statusful reply sweep for the pending set.
 
@@ -737,11 +738,34 @@ def request_and_collect(
         unauthenticated["n"] += 1
         log.warning(REASON_REPLY_UNAUTHENTICATED)
 
+    request_variants = [build_request_body(items, superseded=value,
+                                          settled=settled, unknown=unknown)[1]
+                        for value in (False, True)]
+    original_lines = "\n".join(request_variants)
     outcome: ReadRepliesOutcome = read_replies_with_status(
         tokens,
         on_sender_rejected=_on_rejected,
         on_unauthenticated_operator_reply=_on_unauthenticated,
+        correction_queries=[f"[Ateles] Monedula consent {items[0].payment_date}"],
+        request_bodies={token: original_lines for token in tokens},
     )
+
+    if on_missing_token_reply is not None:
+        forms = "; ".join(
+            f"`{'attended' if item.is_calendar else 'yes'} {item.handler_name}`"
+            for item in items)
+        for reply in outcome.correction_only_replies:
+            try:
+                on_missing_token_reply(
+                    f"monedula: no payment was approved for {items[0].payment_date}. "
+                    "Your email reply did not include a payment code. Reply to "
+                    "the current request and quote it so its code is present. "
+                    f"For Telegram consent, send exactly {forms} for the "
+                    "payment(s) you attended or approved.",
+                    f"monedula:missing_token:{reply.message_id}",
+                )
+            except Exception as exc:  # noqa: BLE001 — a failed notice cannot approve
+                log.warning(f"consent missing-token notice failed: {exc}")
 
     if outcome.kind in ("transport_error", "disabled"):
         log.error(

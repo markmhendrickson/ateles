@@ -1502,3 +1502,88 @@ def test_near_white_or_transparent_text_is_not_authored_even_without_a_matching_
 def test_ordinary_text_colours_stay_readable(color):
     text, _boundary = ec._extract_authored_html(f'<body><p style="color:{color}">approve</p></body>')
     assert "approve" in text.lower()
+
+
+@pytest.mark.parametrize("body", ("yes", "Can you clarify?", "approve v1.2.3"))
+def test_subject_discovery_without_body_token_is_correction_only(monkeypatch, body):
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+    seen = []
+
+    def fake_gws(args, timeout=45):
+        if "+triage" in args:
+            query = args[args.index("--query") + 1]
+            rows = ([{"id": "reply-1", "from": "op@example.com",
+                      "subject": "RE: Release v1.2.3 ready to approve"}]
+                    if "subject:" in query else [])
+            return {"complete": True, "messages": rows}
+        return {"body_text": body}
+
+    with _mock_inbox(side_effect=fake_gws):
+        outcome = ec.read_replies_with_status(
+            ["release-approve:"], correction_queries=["ready to approve"],
+            on_reply_message=lambda *_: seen.append(True))
+    assert outcome.kind == "ok"
+    assert outcome.texts == [] and seen == []
+    assert [reply.message_id for reply in outcome.correction_only_replies] == ["reply-1"]
+
+
+def test_subject_discovery_still_requires_sender_authentication(monkeypatch):
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+
+    def fake_gws(args, timeout=45):
+        if "+triage" in args:
+            return {"complete": True, "messages": [
+                {"id": "reply-1", "from": "op@example.com",
+                 "subject": "RE: Release v1.2.3 ready to approve"}]}
+        return {"body_text": "yes"}
+
+    with _mock_inbox(side_effect=fake_gws), \
+         patch.object(ec, "_fetch_auth_results", return_value=[]):
+        outcome = ec.read_replies_with_status(
+            ["release-approve:"], correction_queries=["ready to approve"])
+    assert outcome.rejected_replies
+    assert outcome.correction_only_replies == () and outcome.texts == []
+
+
+@pytest.mark.parametrize("container", (
+    "<blockquote>{}</blockquote>",
+    '<div class="gmail_quote">{}</div>',
+    "<blockquote><blockquote>{}</blockquote></blockquote>",
+))
+def test_unproven_html_quote_holds_the_whole_reply(monkeypatch, container):
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+    quoted = "<p>release-approve: v1.2.3</p><p>I withdraw</p>"
+    html = "<p>approve v1.2.3</p>" + container.format(quoted)
+
+    def fake_gws(args, timeout=45):
+        if "+triage" in args:
+            return {"complete": True, "messages": [
+                {"id": "reply-1", "from": "op@example.com",
+                 "subject": "RE: Release v1.2.3 ready to approve"}]}
+        return {"body_html": html}
+
+    with _mock_inbox(side_effect=fake_gws):
+        outcome = ec.read_replies_with_status(["release-approve:"])
+    assert outcome.kind == "transport_error"
+    assert outcome.texts == []
+    assert [reply.message_id for reply in outcome.unreadable_replies] == ["reply-1"]
+
+
+def test_known_quoted_request_remains_readable(monkeypatch):
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+
+    def fake_gws(args, timeout=45):
+        if "+triage" in args:
+            return {"complete": True, "messages": [
+                {"id": "reply-1", "from": "op@example.com",
+                 "subject": "RE: Release v1.2.3 ready to approve"}]}
+        return {"body_html": ("<p>approve v1.2.3</p><blockquote>"
+                              "<p>release-approve: v1.2.3</p></blockquote>")}
+
+    with _mock_inbox(side_effect=fake_gws):
+        outcome = ec.read_replies_with_status(["release-approve:"])
+    assert outcome.kind == "ok" and len(outcome.texts) == 1

@@ -49,6 +49,13 @@ missing command or file path, and an internal judgement error are refused with
 exit 2 and a fixed denial reason. Other tool names pass through; the prepare
 daemon's `--settings` matcher invokes the guard only for those four tools.
 
+Directory-changing wrapper options are refused during preparation. A literal
+`cd` remains available; subsequent relative writes are checked against its
+effective directory. Other shell directory changes are refused.
+The live binding check requires a hook-side refusal receipt for the guarded
+attempt and an allow receipt for the control command. A declined command or
+an absent hook is inconclusive even when no guarded commit lands.
+
 The agent's cwd is the Neotoma checkout, so this repository's own
 `.claude/settings.json` does not reach it; `--settings` is the only way the
 guard is loaded. If the guard file is missing, prepare refuses to spawn the
@@ -205,13 +212,20 @@ first sends the same notes via `gws gmail +send` (subject `🚀 Release <TAG> re
 to approve`) from the swarm mailbox. When that email is delivered, the
 Telegram notification offers approval by email reply or through Telegram.
 When any mailbox prerequisite is missing or invalid, or delivery fails, the notification says
-email approval is unavailable and offers Telegram only. The release is never
+email approval is unavailable and gives the exact Telegram command,
+`approve <version>`. The release is never
 blocked on email.
 
 ## Approval routing — two channels
 
 A prepared release can be approved on Telegram. Email reply approval is offered
 only after the RC email was sent from the configured swarm mailbox.
+Email approval requires the reply to retain the request's correlation token.
+A reply that retains the subject but omits the quoted token cannot approve;
+the operator receives one correction notice per reply with `approve <version>`
+for Telegram and an instruction to quote the request on any new email reply.
+An HTML quote region containing text that cannot be established as part of
+the original request remains unreadable and holds email approval.
 
 **Telegram** — the operator replies `approve <version>`; Ateles flips the
 `release_result` to `approved` and runs `python3 publish.py --version <version>`.

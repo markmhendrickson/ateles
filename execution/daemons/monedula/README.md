@@ -27,6 +27,14 @@ to those. To enable the default channel, follow "Enabling checklist".
 > at all, holds every payment, and raises one deduped blocker,
 > `consent_email_needs_swarm_mailbox`, naming the variable to fix.
 
+For legacy email consent, a reply whose subject matches the current request
+but omits its approval code cannot authorize a payment. Monedula sends one
+correction notice per authenticated reply: quote the current request so the
+code is present, or use the exact named `attended <handler>` / `yes <handler>`
+Telegram form when that break-glass channel is active. Unproven text inside an
+HTML quote makes the reply unreadable and holds the payment until a fresh
+request is issued.
+
 ## Payment consent: per-payment approval record (default)
 
 Payment consent no longer travels over Telegram or email replies (operator

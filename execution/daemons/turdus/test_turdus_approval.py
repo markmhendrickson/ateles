@@ -730,7 +730,8 @@ def test_unreadable_authenticated_reply_notices_once_then_routes_once(
 
 
 def _poll_authored_reply(monkeypatch, tmp_path, kind, body_data, *, polls=1,
-                         include_token=True, triage_response=None):
+                         include_token=True, triage_response=None,
+                         authenticated=True):
     """Exercise the real shared reader and both Turdus POST routes with fake gws."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
@@ -741,7 +742,8 @@ def _poll_authored_reply(monkeypatch, tmp_path, kind, body_data, *, polls=1,
     monkeypatch.setattr(turdus, "DRY_RUN", False)
     monkeypatch.setattr(turdus, "_poll_gmail_messages", lambda *_: [])
     monkeypatch.setattr(email_channel, "_gws", lambda: "/synthetic/gws")
-    monkeypatch.setattr(email_channel, "_fetch_auth_results", lambda _mid: [_AUTH_PASS])
+    monkeypatch.setattr(email_channel, "_fetch_auth_results",
+                        lambda _mid: [_AUTH_PASS] if authenticated else [])
     subject = ("Re: Release v1.2.3 ready to approve" if kind == "release" else
                "Re: [Ateles] PR o/r#7 is READY TO MERGE")
     token_text = ("release-approve: v1.2.3" if kind == "release" else
@@ -783,6 +785,77 @@ def _poll_authored_reply(monkeypatch, tmp_path, kind, body_data, *, polls=1,
         state = _run(turdus.poll_once(notifier, state))
         notices.sent.extend(notifier.sent)
     return posts, state, notices
+
+
+@pytest.mark.parametrize("kind", ("pr", "release"))
+@pytest.mark.parametrize("reply", ("yes", "Can you clarify?", "approve"))
+def test_subject_only_reply_never_routes_and_notifies_once(
+        monkeypatch, tmp_path, kind, reply):
+    def subject_only(query, base):
+        if "subject:" not in query:
+            return {"complete": True, "messages": []}
+        subject = ("Re: Release v1.2.3 ready to approve" if kind == "release" else
+                   "Re: [Ateles] PR o/r#7 is READY TO MERGE")
+        return {"complete": True, "messages": [
+            {"id": "approval-1", "from": "Op <op@example.com>", "subject": subject}]}
+
+    posts, state, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind, {"body_text": reply}, polls=2,
+        include_token=False, triage_response=subject_only)
+    target = "v1.2.3" if kind == "release" else "o/r#7"
+    command = "approve v1.2.3" if kind == "release" else "approve"
+    corrections = [message for message in notices.sent if "did not contain" in message]
+    assert posts == [] and "approval-1" not in state.get("processed_ids", [])
+    assert len(corrections) == 1
+    assert target in corrections[0] and f"`{command}`" in corrections[0]
+    assert "quote the request" in corrections[0]
+
+
+@pytest.mark.parametrize("kind", ("pr", "release"))
+def test_unauthenticated_subject_only_reply_gets_auth_notice(
+        monkeypatch, tmp_path, kind):
+    def subject_only(query, base):
+        if "subject:" not in query:
+            return {"complete": True, "messages": []}
+        subject = ("Re: Release v1.2.3 ready to approve" if kind == "release" else
+                   "Re: [Ateles] PR o/r#7 is READY TO MERGE")
+        return {"complete": True, "messages": [
+            {"id": "approval-1", "from": "Op <op@example.com>", "subject": subject}]}
+
+    posts, _, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind, {"body_text": "yes"},
+        include_token=False, triage_response=subject_only,
+        authenticated=False)
+    command = "approve v1.2.3" if kind == "release" else "approve"
+    assert posts == []
+    assert any("sender could not be verified" in message and
+               f"`{command}`" in message for message in notices.sent)
+
+
+@pytest.mark.parametrize("kind", ("pr", "release"))
+@pytest.mark.parametrize("container", (
+    "<blockquote>{}</blockquote>", '<div class="gmail_quote">{}</div>',
+    "<blockquote><blockquote>{}</blockquote></blockquote>",
+))
+def test_unproven_quote_with_withdrawal_holds_consumer(
+        monkeypatch, tmp_path, kind, container):
+    approval = "approve v1.2.3" if kind == "release" else "approve"
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    html = f"<p>{approval}</p>" + container.format(f"<p>{token}</p><p>I withdraw</p>")
+    posts, _, notices = _poll_authored_reply(
+        monkeypatch, tmp_path, kind, {"body_html": html})
+    assert posts == []
+    assert any("could not be read yet" in message for message in notices.sent)
+
+
+@pytest.mark.parametrize("kind", ("pr", "release"))
+def test_known_quote_still_routes_consumer(monkeypatch, tmp_path, kind):
+    approval = "approve v1.2.3" if kind == "release" else "approve"
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    posts, _, _ = _poll_authored_reply(
+        monkeypatch, tmp_path, kind,
+        {"body_html": f"<p>{approval}</p><blockquote><p>{token}</p></blockquote>"})
+    assert len(posts) == 1
 
 
 @pytest.mark.parametrize("kind", ("pr", "release"))
@@ -1117,6 +1190,9 @@ def test_approval_notices_use_real_notifier_and_retry_failed_delivery(
             assert "missing correlation token" in transport.sent[0]
         if case == "unreadable":
             assert state.get("unreadable_notice_ids") == ["synthetic-1"]
+            assert f"`{approval}`" in transport.sent[0]
+        elif case == "unauthenticated":
+            assert f"`{approval}`" in transport.sent[0]
         elif case != "unauthenticated":
             assert state.get("approval_correction_ids") == ["synthetic-1"]
 

@@ -86,6 +86,7 @@ denies with exit 2. Tools outside the prepare agent's guarded matcher pass.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import sys
@@ -244,6 +245,10 @@ _WRAPPERS = frozenset(_WRAPPER_GRAMMAR)
 # preparation has no documented use for them. Keep their grammar entries so
 # an attempted invocation is recognized and refused before generic handling.
 _DENIED_WRAPPERS = frozenset({"script", "parallel", "watch", "chroot", "doas", "sudo"})
+_DENIED_DIRECTORY_PROGRAMS = frozenset({
+    "pushd", "popd", "make", "gmake", "tmux", "screen", "nsenter",
+    "runuser", "su",
+})
 # Every wrapper has an explicit write-operand decision. Values name options
 # whose operand is opened for writing; True means a leading positional operand
 # is created or modified. All other declared operands are read-only or data.
@@ -946,10 +951,17 @@ _GIT_WORD_READERS = frozenset({"echo", "printf", "which", "type", "whereis", "gr
                                "rg", "egrep", "fgrep", "man", "gh", "brew", "test",
                                "[", "[[", "cat", "ls", "head", "tail", "wc", "sed"})
 
+_EFFECTIVE_CWD: Path | None = None
+
+
+def _effective_path(path: str) -> Path:
+    expanded = Path(os.path.expanduser(path))
+    return expanded if expanded.is_absolute() else (_EFFECTIVE_CWD or Path.cwd()) / expanded
+
 
 def _path_forms(path: str) -> tuple[tuple[str, ...], bool]:
     """Check both spelling and destination; resolve existing symlink components."""
-    expanded = os.path.expanduser(path)
+    expanded = str(_effective_path(path))
     literal = os.path.normpath(expanded).casefold()
     try:
         # strict=False may retain a loop in the spelling instead of raising.
@@ -1119,8 +1131,9 @@ def _archive_violation(base: str, args: list[str], destinations: list[str]) -> s
 def _tree_write_target(path: str) -> bool:
     """A tree writer can replace a protected file below this destination."""
     forms, unresolved = _path_forms(path)
-    protected = [Path.cwd() / ".git/config", Path.cwd() / ".git/hooks",
-                 Path.cwd() / ".husky", Path.home() / ".gitconfig",
+    protected = [(_EFFECTIVE_CWD or Path.cwd()) / ".git/config",
+                 (_EFFECTIVE_CWD or Path.cwd()) / ".git/hooks",
+                 (_EFFECTIVE_CWD or Path.cwd()) / ".husky", Path.home() / ".gitconfig",
                  Path.home() / ".config/git", Path.home() / ".config/husky"]
     protected_paths = [str(p.resolve(strict=False)).casefold() for p in protected]
     for form in forms:
@@ -1366,6 +1379,8 @@ def _wrapped_executable(words: list[Word], write_targets: list[Word] | None = No
             if not ended and option in values:
                 if i + 1 >= len(rest) or rest[i + 1].text == "--":
                     return None
+                if base == "env" and option in {"-C", "--chdir"}:
+                    return None
                 if option in writable_options and write_targets is not None:
                     write_targets.append(rest[i + 1])
                 i += 2
@@ -1374,6 +1389,8 @@ def _wrapped_executable(words: list[Word], write_targets: list[Word] | None = No
                 option.startswith(name + "=") if name.startswith("--") else
                 option.startswith(name) and len(option) > len(name))), None)
             if not ended and attached:
+                if base == "env" and attached in {"-C", "--chdir"}:
+                    return None
                 if attached in writable_options and write_targets is not None:
                     value = option[len(attached):].lstrip("=")
                     write_targets.append(Word(value, expanded=word.expanded,
@@ -1477,12 +1494,12 @@ def _program_file_violation(runner: str, script: Word, depth: int,
     if _protected_path(script.text):
         return f"{runner} program file names a protected path"
     try:
-        text = Path(os.path.expanduser(script.text)).read_text()
+        text = _effective_path(script.text).read_text()
     except (OSError, UnicodeError):
         return f"{runner} program file cannot be read"
     if _interpreter_family(runner) == "awk":
         for include in re.findall(r'@include\s+["\']([^"\']+)["\']', text):
-            child = Path(script.text).parent / include
+            child = _effective_path(script.text).parent / include
             hit = _program_file_violation(runner, Word(str(child)), depth + 1)
             if hit:
                 return hit
@@ -1550,9 +1567,14 @@ def _multi_program_violation(runner: str, tail: list[Word], depth: int) -> str |
 
 
 def _judge_program_body(body: str, depth: int) -> str | None:
+    global _EFFECTIVE_CWD
     if body.strip() != "git status" and _code_mentions_git(body, depth + 1):
         return "nested program invokes git outside the allowed status inspection"
-    return _judge(body, depth + 1, False)
+    prior_cwd = _EFFECTIVE_CWD
+    try:
+        return _judge(body, depth + 1, False)
+    finally:
+        _EFFECTIVE_CWD = prior_cwd
 
 
 def _nested_program_violation(cmd: SimpleCommand, rest: list[Word], depth: int) -> tuple[bool, str | None]:
@@ -1566,7 +1588,7 @@ def _nested_program_violation(cmd: SimpleCommand, rest: list[Word], depth: int) 
         script = rest[1]
         if script.expanded or script.globbed or script.braced:
             return True, "sourced script assembled by the shell"
-        path = Path(script.text)
+        path = _effective_path(script.text)
         if path.name.startswith(".env") or path.suffix in {".key", ".pem"}:
             return True, "sourced credential or environment file"
         try:
@@ -1645,6 +1667,11 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int =
         return None
     head = rest[0]
     base = os.path.basename(head.text)
+    if base in _DENIED_DIRECTORY_PROGRAMS:
+        return f"{base} may change the working directory during release preparation"
+    if base == "cd" and (len(rest) > 2 or
+                          (len(rest) > 1 and rest[1].text == "-")):
+        return "cd working directory cannot be resolved literally"
     own_mentions = _words_mention_git(rest[1:], cmd.stdin)
     any_expanded = any(w.expanded for w in rest[1:])
 
@@ -1705,6 +1732,8 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int =
         executable = _wrapped_executable(rest, write_targets)
         if executable is None:
             return f"{base} executable name cannot be resolved literally"
+        if os.path.basename(executable[0].text) in _DENIED_DIRECTORY_PROGRAMS | {"cd"}:
+            return "wrapped directory change is not allowed during release preparation"
         if any(os.path.basename(w.text) in _DENIED_WRAPPERS for w in rest[1:]):
             return "a disallowed wrapper is not allowed during release preparation"
         for target in write_targets:
@@ -1734,7 +1763,9 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int =
         if (own_mentions and not nested_checked) or (any_expanded and whole_mentions_git and not nested_checked):
             return f"{base} wrapping git (run plain git instead)"
         return None
-    if base == "find" and any(w.text in ("-exec", "-execdir", "-ok", "-okdir") for w in rest):
+    if base == "find" and any(w.text in ("-execdir", "-okdir") for w in rest):
+        return "find directory-changing execution is not allowed during release preparation"
+    if base == "find" and any(w.text in ("-exec", "-ok") for w in rest):
         if any(w.expanded or w.braced or w.globbed or w.concatenated for w in rest[1:]):
             return "find -exec executable name cannot be resolved literally"
         if own_mentions and not nested_checked:
@@ -1792,6 +1823,7 @@ _UNREADABLE_RUNNER = re.compile(
 
 
 def _judge(command: str, depth: int, in_substitution: bool) -> str | None:
+    global _EFFECTIVE_CWD
     lexer = _Lexer(command)
     try:
         commands = lexer.lex()
@@ -1812,7 +1844,9 @@ def _judge(command: str, depth: int, in_substitution: bool) -> str | None:
             if mentions_git(body):
                 return "command or process substitution around git"
             continue
+        prior_cwd = _EFFECTIVE_CWD
         hit = _judge(body, depth + 1, True)
+        _EFFECTIVE_CWD = prior_cwd
         if hit:
             return hit
     written_files: set[str] = set()
@@ -1832,7 +1866,7 @@ def _judge(command: str, depth: int, in_substitution: bool) -> str | None:
             else:
                 script = None
             if script:
-                script_path = os.path.abspath(os.path.expanduser(script.text))
+                script_path = str(_effective_path(script.text).resolve(strict=False))
                 if script_path in written_files or any(
                     script_path == tree or script_path.startswith(tree.rstrip("/") + "/")
                     for tree in written_trees
@@ -1845,31 +1879,34 @@ def _judge(command: str, depth: int, in_substitution: bool) -> str | None:
             return hit
         for op, target in cmd.redirects:
             if ">" in op:
-                written_files.add(os.path.abspath(os.path.expanduser(target.text)))
+                written_files.add(str(_effective_path(target.text).resolve(strict=False)))
         if stripped:
             writer = os.path.basename(stripped[0].text)
             args = [w.text for w in stripped[1:]]
             if writer in {"tee", "cp", "mv", "install", "ln", "rsync", "touch", "truncate"}:
                 for target in args:
                     if not target.startswith("-"):
-                        written_files.add(os.path.abspath(os.path.expanduser(target)))
+                        written_files.add(str(_effective_path(target).resolve(strict=False)))
             if _interpreter_family(writer) == "sed" and any(a == "-i" or a.startswith("--in-place") for a in args):
                 for target in args:
                     if not target.startswith("-"):
-                        written_files.add(os.path.abspath(os.path.expanduser(target)))
+                        written_files.add(str(_effective_path(target).resolve(strict=False)))
             if writer == "dd":
                 for arg in args:
                     if arg.startswith("of="):
-                        written_files.add(os.path.abspath(os.path.expanduser(arg[3:])))
+                        written_files.add(str(_effective_path(arg[3:]).resolve(strict=False)))
             if writer in {"curl", "wget"}:
                 files, directories = _download_destinations(writer, args)
-                written_files.update(os.path.abspath(os.path.expanduser(target))
+                written_files.update(str(_effective_path(target).resolve(strict=False))
                                      for target in files)
-                written_trees.update(os.path.abspath(os.path.expanduser(target))
+                written_trees.update(str(_effective_path(target).resolve(strict=False))
                                      for target in directories)
             if writer in _ARCHIVE_TOOLS:
                 for target in _tree_destinations(writer, args):
-                    written_trees.add(os.path.abspath(os.path.expanduser(target)))
+                    written_trees.add(str(_effective_path(target).resolve(strict=False)))
+            if writer == "cd":
+                directory = args[0] if args else str(Path.home())
+                _EFFECTIVE_CWD = _effective_path(directory).resolve(strict=False)
     return None
 
 
@@ -1894,7 +1931,13 @@ def _literal_pipe_program(cmd: SimpleCommand) -> str | None:
 
 def find_violation(command: str) -> str | None:
     """Return a refusal label for the command, or None when it is allowed."""
-    return _judge(command, 0, False)
+    global _EFFECTIVE_CWD
+    prior_cwd = _EFFECTIVE_CWD
+    _EFFECTIVE_CWD = Path.cwd()
+    try:
+        return _judge(command, 0, False)
+    finally:
+        _EFFECTIVE_CWD = prior_cwd
 
 
 # --- hook entry point -------------------------------------------------------
@@ -1935,6 +1978,22 @@ def guidance(label: str) -> str:
     )
 
 
+def _record_live_probe(command: str, decision: str, reason: str = "") -> None:
+    """Emit a local, opt-in receipt for the pre-deploy hook binding check."""
+    path = os.environ.get("ATELES_GUARD_LIVE_AUDIT")
+    if not path:
+        return
+    record = {"command_sha256": hashlib.sha256(command.encode()).hexdigest(),
+              "decision": decision, "reason": reason}
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "a") as stream:
+            stream.write(json.dumps(record, sort_keys=True) + "\n")
+    except OSError:
+        # The live verifier fails inconclusive when the receipt is absent.
+        pass
+
+
 def main() -> int:
     try:
         payload = read_hook_input()
@@ -1968,8 +2027,10 @@ def main() -> int:
     except Exception:  # noqa: BLE001 — an unjudged Bash command denies
         return deny(guidance("internal guard error while judging Bash command"))
     if label is None:
+        _record_live_probe(command, "allow")
         return 0
     log(f"blocking: {label}")
+    _record_live_probe(command, "deny", label)
     return deny(guidance(label))
 
 
