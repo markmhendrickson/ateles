@@ -347,6 +347,7 @@ DAEMON_CONFIG_NAMES: frozenset[str] = frozenset(
         "PHOENICURUS_PREPARE_TIMEOUT_S",
         "PHOENICURUS_PUBLISHING_RECONCILE_GRACE_MINUTES",
         "PHOENICURUS_PUBLISH_TIMEOUT_S",
+        "PHOENICURUS_RC_GITHUB_LOGIN",  # GitHub login the prepare agent's token must resolve to (default ateles-agent)
         "PHOENICURUS_RELEASE_BRANCH",
         "PHOENICURUS_RELEASE_REPO",
         "PHOENICURUS_STALE_RELEASE_BLOCK_DAYS",
