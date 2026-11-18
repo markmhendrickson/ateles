@@ -984,6 +984,7 @@ class TestNeotomaProxyJob:
 def _job_with_secret(secret: str):
     return run_job.Job(
         run_id="r", role="lanius", provider="claude", repository="o/r", timeout_seconds=5,
+        origin_cap_bytes=300 * 1024 * 1024,
         argv=["claude"], stdin=None, secrets={"GITHUB_TOKEN": secret},
         child_credential_names=("GITHUB_TOKEN",), neotoma_token_name="",
         neotoma_jwk_name="", neotoma_base_url="https://neotoma.example.test",

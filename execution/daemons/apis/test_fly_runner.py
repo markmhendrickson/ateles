@@ -456,7 +456,7 @@ def _files(body: dict) -> dict[str, bytes]:
 
 
 def test_origin_cap_is_selected_from_apiss_repository_allowlist(fly_env, monkeypatch):
-    assert fly_runner.origin_cap_for_repository("markmhendrickson/markmhendrickson") == 600 * 1024 * 1024
+    assert fly_runner.origin_cap_for_repository("markmhendrickson/markmhendrickson") == 512 * 1024 * 1024
     assert fly_runner.origin_cap_for_repository("owner/repo") == fly_runner.DEFAULT_ORIGIN_CAP_BYTES
     monkeypatch.setitem(fly_runner.REPOSITORY_ORIGIN_CAPS, "bad/repo", "999999999")
     assert fly_runner.origin_cap_for_repository("bad/repo") == fly_runner.DEFAULT_ORIGIN_CAP_BYTES
@@ -466,6 +466,38 @@ def test_origin_cap_is_selected_from_apiss_repository_allowlist(fly_env, monkeyp
     spec = json.loads(next(base64.b64decode(f["raw_value"]) for f in files
                            if f["guest_path"].endswith("/job.json")))
     assert spec["origin_cap_bytes"] == fly_runner.DEFAULT_ORIGIN_CAP_BYTES
+
+
+def test_failed_delivery_diagnostics_are_fixed_vocabulary():
+    got = fly_runner.delivery_result_from_record({
+        "delivery_status": "not_delivered", "stop_elapsed_ms": 1000,
+        "cli_exit_state": "exited_nonzero:2", "stop_commit_count": 3,
+        "last_tool_class": "unknown"})
+    assert (got["stop_elapsed_ms"], got["cli_exit_state"], got["stop_commit_count"],
+            got["last_tool_class"]) == (1000, "exited_nonzero:2", 3, "unknown")
+    bad = fly_runner.delivery_result_from_record({
+        "delivery_status": "not_delivered", "stop_elapsed_ms": "agent says 1000",
+        "cli_exit_state": "agent output", "stop_commit_count": -1,
+        "last_tool_class": {"agent": "text"}})
+    assert all(bad[k] == "unknown" for k in ("stop_elapsed_ms", "cli_exit_state",
+                                             "stop_commit_count", "last_tool_class"))
+    fallback = fly_runner.delivery_result_from_record({
+        "delivery_status": "not_delivered",
+        "probe_report": json.dumps({"delivery_stop": {
+            "stop_elapsed_ms": 1000, "cli_exit_state": "exited_nonzero:2",
+            "stop_commit_count": 3, "last_tool_class": "unknown"}})})
+    assert fallback["stop_commit_count"] == 3 and fallback["cli_exit_state"] == "exited_nonzero:2"
+
+
+def test_operator_delivery_notice_includes_bounded_stop_facts():
+    import build_delivery
+    result = skill_runner.SkillResult(
+        "cicada", False, 1, "", "", fly_delivery_status="not_delivered",
+        remote_run_id="fly-inert", fly_stop_elapsed_ms=1200,
+        fly_cli_exit_state="exited_nonzero:1", fly_stop_commit_count=2,
+        fly_last_tool_class="unknown")
+    text = build_delivery.fly_delivery_summary(result)
+    assert "elapsed_ms=1200; cli=exited_nonzero:1; commits=2; last_tool=unknown" in text
 
 
 def _all_request_text(fake: FakeFly) -> str:

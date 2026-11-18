@@ -146,6 +146,8 @@ def test_a_clone_larger_than_the_cap_is_refused(tmp_path, world):
 
 
 def test_origin_cap_boundary_and_absolute_ceiling(tmp_path, world, monkeypatch):
+    assert (3 * rd.ABSOLUTE_ORIGIN_CEILING_BYTES + 2 * rd.MAX_BUNDLE_BYTES
+            < 2_000_000_000)
     size = rd._size(world["work"].origin)
     for name, cap, expected in (("equal", size, True), ("over", size - 1, False),
                                 ("ceiling", rd.ABSOLUTE_ORIGIN_CEILING_BYTES + 1, False)):

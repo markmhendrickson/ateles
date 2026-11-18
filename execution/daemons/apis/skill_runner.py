@@ -1911,6 +1911,10 @@ class SkillResult:
     # retried or re-run locally.
     fly_delivery_status: str = ""
     fly_delivery_reason: str = ""
+    fly_stop_elapsed_ms: int | str = "unknown"
+    fly_cli_exit_state: str = "unknown"
+    fly_stop_commit_count: int | str = "unknown"
+    fly_last_tool_class: str = "unknown"
     fly_delivery_branch: str = ""
     fly_delivery_commit: str = ""
     fly_pr_number: int | None = None
@@ -2021,6 +2025,10 @@ def _fly_delivery_fields(job, *, unknown: bool) -> dict:
     return {
         "fly_delivery_status": got["delivery_status"],
         "fly_delivery_reason": got.get("delivery_reason") or "",
+        "fly_stop_elapsed_ms": got.get("stop_elapsed_ms", "unknown"),
+        "fly_cli_exit_state": got.get("cli_exit_state", "unknown"),
+        "fly_stop_commit_count": got.get("stop_commit_count", "unknown"),
+        "fly_last_tool_class": got.get("last_tool_class", "unknown"),
         "fly_delivery_branch": got.get("delivery_branch") or branch,
         "fly_delivery_commit": got.get("delivery_commit") or "",
         "fly_pr_number": got.get("pr_number"),

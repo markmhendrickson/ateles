@@ -259,6 +259,8 @@ class DeliveryRun:
     pr_description: str = ""
     work: Any = None
     base: str = ""
+    cli_ran: bool = False
+    stop_commit_count: int | str = "unknown"
 
 
 def _neotoma_proxy():
@@ -415,7 +417,8 @@ def load_job(job_dir: Path) -> Job:
         provider=spec["provider"],
         repository=str(spec.get("repository") or ""),
         timeout_seconds=timeout_seconds,
-        origin_cap_bytes=spec.get("origin_cap_bytes", _repo_delivery().MAX_ORIGIN_BYTES),
+        origin_cap_bytes=(spec["origin_cap_bytes"] if "origin_cap_bytes" in spec
+                          else _repo_delivery().MAX_ORIGIN_BYTES),
         argv=list(argv),
         stdin=stdin,
         secrets=secrets,
@@ -1077,6 +1080,24 @@ def build_record(
             record["pr_number"] = delivery.pr_number
         if delivery.pr_description:
             record["pr_description"] = delivery.pr_description
+        if delivery.status not in {"opened", "updated"}:
+            if timed_out:
+                state = "timed_out"
+            elif not delivery.cli_ran:
+                state = "unknown"
+            elif exit_code < 0:
+                state = "killed"
+            elif exit_code > 0:
+                state = f"exited_nonzero:{min(exit_code, 255)}"
+            else:
+                state = "exited_zero"
+            stop = {"stop_elapsed_ms": wall_ms, "cli_exit_state": state,
+                    "stop_commit_count": delivery.stop_commit_count,
+                    "last_tool_class": "unknown"}
+            record.update(stop)
+            # probe_report is an existing declared record field, so the stop
+            # facts survive stores that discard undeclared top-level fields.
+            record["probe_report"] = json.dumps({**probe, "delivery_stop": stop}, sort_keys=True)
     return record
 
 
@@ -1502,8 +1523,15 @@ def _run_delivering_job(job: Job, delivery: DeliveryRun, runner, argv: list[str]
     if not budget >= 1:
         delivery.status, delivery.reason = "no_time", "no time was left for the CLI"
         return EXIT_TIMEOUT, b"", delivery.reason.encode(), True, delivery.reason
+    delivery.cli_ran = True
     rc, out, err, timed_out = runner(run_argv, child_env, run_stdin, budget, checkout, ident,
                                      deadline)  # fmt: skip
+    with rd.bounded_by(deadline - RECORD_RESERVE_SECONDS):
+        try:
+            delivery.stop_commit_count = rd.count_new_commits(
+                delivery.work, spec.branch, delivery.base)
+        except Exception:  # noqa: BLE001 — untrusted checkout; unknown is safe
+            pass
     _deliver(job, delivery, rc, timed_out, ident, deadline)
     return rc, out, err, timed_out, ""
 

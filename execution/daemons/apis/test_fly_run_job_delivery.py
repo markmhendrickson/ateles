@@ -410,6 +410,11 @@ def test_a_failed_cli_delivers_nothing(world):
     rc, record = _run(_job(world["tmp"]), _agent(world, rc=1))
     assert rc == 1 and record["delivery_status"] == "not_delivered"
     assert _remote_ref(world) is None and world["api"]["calls"] == []
+    assert record["cli_exit_state"] == "exited_nonzero:1"
+    assert record["stop_commit_count"] == 1
+    assert type(record["stop_elapsed_ms"]) is int and record["stop_elapsed_ms"] >= 0
+    assert record["last_tool_class"] == "unknown"
+    assert json.loads(record["probe_report"])["delivery_stop"]["stop_commit_count"] == 1
 
 
 def test_a_failed_clone_never_runs_the_cli(world, monkeypatch):
@@ -419,7 +424,22 @@ def test_a_failed_clone_never_runs_the_cli(world, monkeypatch):
     assert rc == run_job.EXIT_DELIVERY_FAILED
     assert record["delivery_status"] == "clone_failed"
     assert record["delivery_reason"].startswith("clone_failed: ")
+    assert record["cli_exit_state"] == "unknown"
+    assert record["stop_commit_count"] == "unknown"
     _no_secret_anywhere(record, world)
+
+
+@pytest.mark.parametrize("code,timed_out,state", [(124, True, "timed_out"),
+                                                   (-9, False, "killed"),
+                                                   (7, False, "exited_nonzero:7")])
+def test_failed_cli_exit_state_has_only_fixed_values(world, code, timed_out, state):
+    def runner(argv, env, stdin, timeout, cwd, ident=None, collect_by=None):
+        return code, b"agent text stays out of diagnostic", b"", timed_out
+    _, record = _run(_job(world["tmp"]), runner)
+    assert record["cli_exit_state"] == state
+    assert record["stop_commit_count"] == 0
+    assert "agent text" not in json.dumps({k: record[k] for k in (
+        "stop_elapsed_ms", "cli_exit_state", "stop_commit_count", "last_tool_class")})
 
 
 def test_a_rejected_push_never_forces_and_opens_no_pull_request(world):

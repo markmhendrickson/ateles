@@ -108,9 +108,13 @@ BASE_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", re.ASCII)
 _OID_RE = re.compile(rb"[0-9a-f]{40}")
 
 MAX_ORIGIN_BYTES = 300 * 1024 * 1024
-# 2 GiB rootfs: 2 * 640 MiB (bare origin plus checkout) + 50 MiB
-# export bundle = 1330 MiB, leaving 718 MiB for the runner and transient work.
-ABSOLUTE_ORIGIN_CEILING_BYTES = 640 * 1024 * 1024
+# A conservative 2 GB decimal rootfs is 1907 MiB. At this ceiling,
+# 3 * 512 MiB (bare origin, checkout Git objects, checkout files) plus
+# 2 * 50 MiB (export and private import bundles) = 1636 MiB, leaving
+# 271 MiB for the runner and transient work. This is a planning bound:
+# a checkout with unusually high decompression can still exhaust disk and
+# fail the job safely.
+ABSOLUTE_ORIGIN_CEILING_BYTES = 512 * 1024 * 1024
 MAX_BUNDLE_BYTES = 50 * 1024 * 1024
 MAX_BLOB_BYTES = 10 * 1024 * 1024
 MAX_COMMITS = 50
