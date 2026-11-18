@@ -293,6 +293,12 @@ A byte count is a weak signal, since an equal-length edit leaves it unchanged; a
 
 Note on credentials: a hub on a client instance is usually owned by that instance's shared-graph user. A token scoped to a different user gets `RESOURCE_NOT_FOUND` on an entity that renders perfectly at its guest URL — that is a scope problem, not a missing entity, and writes require the owning identity.
 
+### Periodic reconciliation
+
+Run `execution/scripts/hub_reconcile.py check --hub <hub id> [--exempt ent_...]` and act on its exit code. `check` verifies the STORED hub markup against explicit rules, not browser rendering. Result `OK` (exit 0) means every non-exempt listed `rendered_page` is linked by a qualifying hub card or a qualifying anchor in a carded page, within two clicks. Exit 1 reports orphan IDs; exit 2 is `INCONCLUSIVE`; exit 3 is a tool error. Use `--exempt` for pages deliberately left without a card or two-click link.
+
+A qualifying anchor has exactly one `href`, no duplicate attribute of any name, and a same-origin `/entities/<id>/html` destination at the configured base URL origin. The base URL must be a bare origin (https, or http only for localhost and 127.0.0.1; no path prefix or IPv6 host). The optional query is exactly one nonempty `access_token` whose characters are letters, digits, `_`, `.`, or `-`. `add` accepts only that token grammar and writes the same link shape `check` recognizes. `check` applies only the HTML parser's single entity decoding; it does not percent-decode or recursively decode links. Neither the anchor nor any open ancestor may have `style`, `download`, `hidden`, `inert`, or `aria-hidden`, regardless of value. The anchor cannot be inside `template`, `noscript`, `script`, `style`, `iframe`, `object`, `svg`, or `math`. A self-closing `template` counts as open. Any `<base>` element anywhere in the hub or a carded page, and any markup whose end tags do not nest cleanly (so the parser cannot prove which container a link sits in), makes the whole result `INCONCLUSIVE`; a hub or carded-page snapshot that is malformed in any layer does too. Every other excluded link leaves the page an orphan. A false orphan is the accepted cost; a false `OK` is a defect.
+
 
 ## Rendered-page short links (required publication preference)
 
