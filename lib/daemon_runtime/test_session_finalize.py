@@ -612,6 +612,18 @@ def test_provenance_store_deadline_workers_are_bounded_and_reclaimed(monkeypatch
     assert sf.create_run_session(task_id="ent_task", agent="cicada", run_key="created-0") is not None
 
 
+def test_readback_trickle_cannot_extend_complete_run_session_deadline(monkeypatch):
+    monkeypatch.setattr(sf, "_request_client_factory", sf.httpx.Client)
+    monkeypatch.setattr(sf, "RUN_SESSION_TOTAL_SECONDS", 0.4)
+    with _trickling_server(trickle_post=False) as (server, url):
+        monkeypatch.setattr(sf, "NEOTOMA_BASE_URL", url)
+        started = time.monotonic()
+        assert sf.create_run_session(task_id="ent_task", agent="cicada", run_key="created-0") is None
+        assert time.monotonic() - started < 1.5
+        assert server.calls >= 1
+    _wait_for_workers_to_end()
+
+
 def test_expired_scopes_close_clients_and_reclaim_all_permits(monkeypatch):
     capacity = 4
     clients = []
@@ -652,4 +664,38 @@ def test_expired_scopes_close_clients_and_reclaim_all_permits(monkeypatch):
             caller.join(timeout=2)
         assert results == [None] * capacity
         _wait_for_workers_to_end()
+    assert all(client.closed.is_set() for client in clients)
+
+
+def test_blocked_readback_is_aborted_by_complete_deadline(monkeypatch):
+    response = _run_session_fakes(monkeypatch, lambda *_a, **_k: response({"entities": [
+        {"entity_type": "conversation", "entity_id": "ent_conv99"},
+        {"entity_type": "agent_session", "entity_id": "ent_session99"},
+    ]}))
+    clients = []
+    class ReadbackClient:
+        def __init__(self):
+            self.closed = threading.Event()
+            clients.append(self)
+
+        def post(self, *args, **kwargs):
+            return sf.httpx.post(*args, **kwargs)
+
+        def get(self, *_args, **_kwargs):
+            self.closed.wait(3)
+            raise sf.httpx.ReadTimeout("readback client closed")
+
+        def close(self):
+            self.closed.set()
+
+    monkeypatch.setattr(sf, "_request_client_factory", ReadbackClient, raising=False)
+    def old_blocked_get(*_args, **_kwargs):
+        time.sleep(0.8)
+        raise ValueError("old readback escaped the deadline")
+    monkeypatch.setattr(sf.httpx, "get", old_blocked_get)
+    monkeypatch.setattr(sf, "RUN_SESSION_TOTAL_SECONDS", 0.3, raising=False)
+    started = time.monotonic()
+    assert sf.create_run_session(task_id="ent_task", agent="cicada", run_key="created-0") is None
+    assert time.monotonic() - started < 0.6
+    _wait_for_workers_to_end()
     assert all(client.closed.is_set() for client in clients)
