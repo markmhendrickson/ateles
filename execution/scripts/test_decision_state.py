@@ -711,6 +711,19 @@ class TestRenderCleanly(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertIn("unknown status", err)
 
+    def test_a_row_after_a_blank_line_is_validated_like_any_other(self):
+        """The projection reads every numbered row; the check must validate the same set."""
+        text = register(**{"1": "**open**"}) + "\n" + "| 2 | later row | `doc.md#q` | \u2014 | **rulled** |\n"
+        code, err = self._check_error(text)
+        self.assertEqual(code, 1)
+        self.assertIn("unknown status", err)
+
+    def test_a_duplicate_number_after_a_blank_line_fails(self):
+        text = register(**{"1": "**open**"}) + "\n" + "| 1 | again | `doc.md#q` | \u2014 | **open** |\n"
+        code, err = self._check_error(text)
+        self.assertEqual(code, 1)
+        self.assertIn("duplicate register row 1", err)
+
     def test_every_declared_status_passes_the_clean_render(self):
         rows = {str(i + 1): f"**{status}**" for i, status in enumerate(ds.STATUS_ORDER)}
         code, err = self._check_error(register(**rows))

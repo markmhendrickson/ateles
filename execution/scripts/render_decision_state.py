@@ -187,6 +187,28 @@ def validate_register(text: str) -> None:
         count += 1
     if not count:
         raise ValueError("register table has no numbered rows")
+    # The projection (`parse_rows`) reads EVERY numbered row of the document, not only the
+    # contiguous table above: a row after a blank line is projected too. Validate that same
+    # set, so no row can reach the projection without passing the status vocabulary and
+    # the one-row-per-number rule.
+    projected: set[str] = set()
+    for line in lines:
+        match = ROW_RE.match(line)
+        if not match:
+            continue
+        cells = [cell.strip() for cell in match.group(2).split("|")]
+        lead = STATUS_LEAD_RE.match(cells[-1]) if len(cells) >= 4 else None
+        if not lead:
+            continue
+        status = lead.group(1).strip().lower()
+        if status not in STATUS_ORDER:
+            raise ValueError(
+                f"unknown status {status!r} in register row {match.group(1)}; "
+                f"allowed: {', '.join(STATUS_ORDER)}"
+            )
+        if match.group(1) in projected:
+            raise ValueError(f"duplicate register row {match.group(1)}")
+        projected.add(match.group(1))
 
 
 def requalify(text: str) -> str:

@@ -38,7 +38,7 @@ def numbers(kind: str, content: str) -> list[int]:
             raise ValueError("decision register table is missing")
         content = content.split(header, 1)[1]
     found: list[int] = []
-    for match in re.finditer(r"^\|\s*(\d+)(?:\s*[\u2013-]\s*(\d+))?\s*\|", content, re.M):
+    for match in re.finditer(r"^ {0,3}\|\s*(\d+)(?:\s*[\u2013-]\s*(\d+))?\s*\|", content, re.M):
         low = int(match.group(1))
         high = int(match.group(2)) if match.group(2) else low
         # The register carries range rows ("1-12"); every number in a range is
@@ -57,7 +57,7 @@ def table_counts(content: str) -> Counter[tuple[str, int]]:
     counts: Counter[tuple[str, int]] = Counter()
     for section in re.split(r"^## ", content, flags=re.M)[1:]:
         title = section.split("\n", 1)[0].strip()
-        for match in re.finditer(r"^\|\s*(\d+)\s*\|", section, re.M):
+        for match in re.finditer(r"^ {0,3}\|\s*(\d+)\s*\|", section, re.M):
             counts[(title, int(match.group(1)))] += 1
     return counts
 

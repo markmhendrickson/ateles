@@ -229,3 +229,15 @@ def test_in_table_repeats_already_on_the_base_are_history_not_a_failure(clones: 
     git(first, "commit", "-m", "historical doubled row on main")
     git(first, "push", "origin", "main")
     assert run(first, "check", "revision").returncode == 0
+
+
+def test_an_indented_table_row_still_needs_a_reservation(clones: tuple[Path, Path, Path]) -> None:
+    """Markdown renders a row indented by up to three spaces as part of the table."""
+    _, first, _ = clones
+    revisions = first / "docs" / "foundation" / "revisions.md"
+    revisions.write_text(revisions.read_text() + "   | 18 | pass | indented row |\n")
+    missing = run(first, "check", "revision")
+    assert missing.returncode == 1
+    assert "revision 18 has no reservation" in missing.stderr
+    assert run(first, "reserve", "revision").stdout.strip() == "18"
+    assert run(first, "check", "revision").returncode == 0
