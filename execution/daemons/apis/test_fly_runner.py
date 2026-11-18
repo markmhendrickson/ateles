@@ -455,6 +455,19 @@ def _files(body: dict) -> dict[str, bytes]:
     }
 
 
+def test_origin_cap_is_selected_from_apiss_repository_allowlist(fly_env, monkeypatch):
+    assert fly_runner.origin_cap_for_repository("markmhendrickson/markmhendrickson") == 600 * 1024 * 1024
+    assert fly_runner.origin_cap_for_repository("owner/repo") == fly_runner.DEFAULT_ORIGIN_CAP_BYTES
+    monkeypatch.setitem(fly_runner.REPOSITORY_ORIGIN_CAPS, "bad/repo", "999999999")
+    assert fly_runner.origin_cap_for_repository("bad/repo") == fly_runner.DEFAULT_ORIGIN_CAP_BYTES
+    job = _job()
+    job.origin_cap_bytes = 999999999  # a caller's mutable job object is not the policy source
+    files = fly_runner.job_files(job, fly_runner.FlyConfig.from_env())
+    spec = json.loads(next(base64.b64decode(f["raw_value"]) for f in files
+                           if f["guest_path"].endswith("/job.json")))
+    assert spec["origin_cap_bytes"] == fly_runner.DEFAULT_ORIGIN_CAP_BYTES
+
+
 def _all_request_text(fake: FakeFly) -> str:
     return "\n".join(
         (r.content or b"").decode() + json.dumps(_decoded_files(r)) for r in fake.requests

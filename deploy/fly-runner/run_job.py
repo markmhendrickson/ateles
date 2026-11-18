@@ -210,6 +210,7 @@ class Job:
     provider: str
     repository: str
     timeout_seconds: int
+    origin_cap_bytes: int
     argv: list[str]
     stdin: bytes | None
     secrets: dict[str, str]
@@ -414,6 +415,7 @@ def load_job(job_dir: Path) -> Job:
         provider=spec["provider"],
         repository=str(spec.get("repository") or ""),
         timeout_seconds=timeout_seconds,
+        origin_cap_bytes=spec.get("origin_cap_bytes", _repo_delivery().MAX_ORIGIN_BYTES),
         argv=list(argv),
         stdin=stdin,
         secrets=secrets,
@@ -1474,6 +1476,7 @@ def _run_delivering_job(job: Job, delivery: DeliveryRun, runner, argv: list[str]
                 delivery.work, url=rd.GITHUB_REMOTE.format(repository=job.repository),
                 base_branch=spec.branch if spec.pr_number else spec.base_branch, token=token,
                 allow=rd.GITHUB_REMOTE_TRANSPORT,
+                max_bytes=job.origin_cap_bytes,
                 **({"expected_head": spec.head_sha} if spec.pr_number else {}))
             rd.make_checkout(delivery.work, branch=spec.branch,
                              base_branch=spec.branch if spec.pr_number else spec.base_branch,

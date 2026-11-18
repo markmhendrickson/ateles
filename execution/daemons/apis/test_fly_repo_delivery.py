@@ -145,6 +145,31 @@ def test_a_clone_larger_than_the_cap_is_refused(tmp_path, world):
                         allow="file", max_bytes=10)
 
 
+def test_origin_cap_boundary_and_absolute_ceiling(tmp_path, world, monkeypatch):
+    size = rd._size(world["work"].origin)
+    for name, cap, expected in (("equal", size, True), ("over", size - 1, False),
+                                ("ceiling", rd.ABSOLUTE_ORIGIN_CEILING_BYTES + 1, False)):
+        work = rd.prepare_work(tmp_path / name, run_id=name)
+        if name == "ceiling":
+            monkeypatch.setattr(rd, "_size", lambda _path: rd.ABSOLUTE_ORIGIN_CEILING_BYTES + 1)
+        if expected:
+            rd.clone_origin(work, url=f"file://{world['remote']}", base_branch="main",
+                            token=TOKEN, allow="file", max_bytes=cap)
+        else:
+            with pytest.raises(rd.RepoWorkError, match="clone_refused: the clone is larger"):
+                rd.clone_origin(work, url=f"file://{world['remote']}", base_branch="main",
+                                token=TOKEN, allow="file", max_bytes=cap)
+
+
+@pytest.mark.parametrize("cap", [0, -1, True, "999999999"])
+def test_invalid_runner_origin_caps_use_default(tmp_path, world, monkeypatch, cap):
+    monkeypatch.setattr(rd, "_size", lambda _path: rd.MAX_ORIGIN_BYTES + 1)
+    work = rd.prepare_work(tmp_path / "invalid", run_id="invalid")
+    with pytest.raises(rd.RepoWorkError, match="clone_refused: the clone is larger"):
+        rd.clone_origin(work, url=f"file://{world['remote']}", base_branch="main",
+                        token=TOKEN, allow="file", max_bytes=cap)
+
+
 def test_a_failed_clone_names_no_credential(tmp_path, world):
     work = rd.prepare_work(tmp_path / "other-root", run_id="r3")
     with pytest.raises(rd.RepoWorkError) as exc:

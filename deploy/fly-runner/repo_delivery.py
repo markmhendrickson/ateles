@@ -108,6 +108,9 @@ BASE_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", re.ASCII)
 _OID_RE = re.compile(rb"[0-9a-f]{40}")
 
 MAX_ORIGIN_BYTES = 300 * 1024 * 1024
+# 2 GiB rootfs: 2 * 640 MiB (bare origin plus checkout) + 50 MiB
+# export bundle = 1330 MiB, leaving 718 MiB for the runner and transient work.
+ABSOLUTE_ORIGIN_CEILING_BYTES = 640 * 1024 * 1024
 MAX_BUNDLE_BYTES = 50 * 1024 * 1024
 MAX_BLOB_BYTES = 10 * 1024 * 1024
 MAX_COMMITS = 50
@@ -464,6 +467,9 @@ def clone_origin(work: Work, *, url: str, base_branch: str, token: str,
                  expected_head: str = "") -> str:  # fmt: skip
     """Fetch the base branch (depth 1) into a fresh root-owned ``origin.git``
     and return its commit. The token reaches only the fetching process."""
+    if type(max_bytes) is not int or max_bytes <= 0:
+        max_bytes = MAX_ORIGIN_BYTES
+    max_bytes = min(max_bytes, ABSOLUTE_ORIGIN_CEILING_BYTES)
     _check_work(work)
     if expected_head:
         if not isinstance(expected_head, str) or not _OID_RE.fullmatch(expected_head.encode("ascii", "replace")):

@@ -531,6 +531,18 @@ DELIVERY_SPEC_KEYS = ("branch", "base_branch", "author_name", "author_email")
 DELIVERY_RESULT_FIELDS = ("delivery_status", "delivery_reason", "delivery_branch",
                           "delivery_commit", "pr_number", "pr_url")  # fmt: skip
 
+# Chosen by Apis from the admitted repository, never from task or prompt text.
+DEFAULT_ORIGIN_CAP_BYTES = 300 * 1024 * 1024
+REPOSITORY_ORIGIN_CAPS = {"markmhendrickson/markmhendrickson": 600 * 1024 * 1024}
+
+
+def origin_cap_for_repository(repository: str) -> int:
+    value = REPOSITORY_ORIGIN_CAPS.get(repository, DEFAULT_ORIGIN_CAP_BYTES)
+    if type(value) is not int or not 0 < value <= 640 * 1024 * 1024:
+        log.warning("[fly] invalid origin cap for repository %s; using default", repository)
+        return DEFAULT_ORIGIN_CAP_BYTES
+    return value
+
 
 def runner_classes() -> frozenset[str]:
     """The dispatch classes (``action_class`` values) opted onto Fly: those
@@ -2673,6 +2685,7 @@ def job_files(job: FlyJob, config: FlyConfig) -> list[dict]:
         "provider": job.provider,
         "repository": job.repository,
         "timeout_seconds": job.timeout,
+        "origin_cap_bytes": origin_cap_for_repository(job.repository),
         "credential_names": sorted(job.secrets),
         "child_credential_names": list(job.child_credential_names),
         "neotoma_token_name": job.neotoma_token_name,
