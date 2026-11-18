@@ -91,6 +91,25 @@ def test_email_send_skips_when_operator_email_unset(monkeypatch):
         assert not which.called
 
 
+@pytest.mark.parametrize("missing", (
+    "OPERATOR_EMAIL", "ATELES_SWARM_EMAIL", "ATELES_SWARM_GWS_CONFIG_DIR"))
+def test_email_skip_log_names_missing_setting(monkeypatch, tmp_path, caplog, missing):
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setattr(prepare, "SWARM_EMAIL", "swarm@example.net")
+    monkeypatch.delenv(missing)
+    if missing == "OPERATOR_EMAIL":
+        monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "")
+    elif missing == "ATELES_SWARM_EMAIL":
+        monkeypatch.setattr(prepare, "SWARM_EMAIL", "")
+    assert prepare.email_send("Synthetic release", "notice") is False
+    assert missing in caplog.text
+    assert "op@example.com" not in caplog.text
+    assert "swarm@example.net" not in caplog.text
+
+
 def test_email_send_returns_false_when_gws_missing(monkeypatch):
     monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
     with patch("shutil.which", return_value=None):

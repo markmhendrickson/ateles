@@ -523,7 +523,8 @@ def email_send(subject: str, body: str) -> bool:
     import shutil
 
     if not email_channel.swarm_mailbox_configured():
-        log.info("swarm mailbox unavailable — skipping release email (Telegram only)")
+        missing = ", ".join(email_channel.swarm_mailbox_problems())
+        log.info(f"swarm mailbox unavailable ({missing}) — skipping release email (Telegram only)")
         return False
     swarm_gws = (gws_config_dir_env(require_existing=True)
                  if email_channel.swarm_mailbox_configured() else {})

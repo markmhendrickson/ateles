@@ -131,7 +131,8 @@ and re-running it would be redundant or unsafe.
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram push (via shared `send.mjs`). |
 | `TELEGRAM_TOPIC_PHOENICURUS` | Optional Telegram topic/thread id for release messages. |
 | `OPERATOR_EMAIL` | Where release RC notifications are emailed (in addition to Telegram). Unset → email is skipped, Telegram only. |
-| `ATELES_SWARM_EMAIL` | Optional `From:` for release email (the shared swarm address, matching the other daemons). |
+| `ATELES_SWARM_EMAIL` | Required swarm `From:` address for release email; it must differ from `OPERATOR_EMAIL`. |
+| `ATELES_SWARM_GWS_CONFIG_DIR` | Required existing gws configuration directory signed in to the separate swarm mailbox. |
 
 ## Notification channels
 
@@ -139,10 +140,11 @@ A prepared release candidate is sent to the operator on **both Telegram and
 email**. The spawned prepare agent (step 11–12 of its prompt) posts the full
 rendered notes + RC PR link + `approve/skip` instruction to Telegram, and emails
 the same via `gws gmail +send` (subject `🚀 Release <TAG> ready to approve`) using
-the same `OPERATOR_EMAIL`/`ATELES_SWARM_EMAIL` the shared `lib/notify` Notifier
-uses — so release mail matches every other swarm daemon. Email is **fail-open**:
-if `OPERATOR_EMAIL` is unset or the send fails, the run logs it and continues;
-Telegram is the guaranteed channel and the release is never blocked on email.
+the separate swarm mailbox. Release email requires all three values:
+`OPERATOR_EMAIL`, `ATELES_SWARM_EMAIL`, and `ATELES_SWARM_GWS_CONFIG_DIR`.
+It never falls back to the ambient gws configuration or the operator mailbox.
+If any value is missing or invalid, or sending fails, email is skipped and
+Telegram stays available. Configure the separate swarm mailbox to restore email.
 
 ## Approval routing — two channels
 
@@ -182,6 +184,24 @@ Safety properties (match the PR-approve flow + one extra):
 
 Config: set `APIS_APPROVE_EMAIL_SECRET` (shared, Turdus + Apis) and
 `APIS_APPROVE_RELEASE_URL` (default `http://127.0.0.1:8742/approve-release`).
+
+Turdus also keeps a local consumed-reply state file, `.turdus_state.json`, and
+an `.initialized` marker beside it. An unreadable or malformed state, or a
+missing state after initialization, holds all email approval routing and sends
+one Telegram blocker notice. Restore both files from a known-good backup, or
+explicitly reset the consumed-reply state by stopping Turdus, moving both
+files aside, and starting Turdus again. A reset loses consumed-reply history:
+before restarting, inspect recent approval replies and resolve any outstanding
+PR or release approvals through Telegram. The first clean poll recreates the
+state and marker. A fresh installation with neither file starts with empty state.
+If both files are lost before the first successful write, that loss cannot be
+distinguished from first use.
+
+An `approval_route_pending` entry means Turdus saved a reply before attempting
+the Apis POST, but cannot prove its final routing outcome. It will not replay
+that email approval. Resolve the target through Telegram, then clear the entry
+only after checking the current PR or release state; leave other state fields
+and consumed IDs intact.
 
 ## Troubleshooting
 
