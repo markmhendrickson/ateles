@@ -762,6 +762,20 @@ class TestRenderCleanly(unittest.TestCase):
                     self.assertEqual(code, 1, output[:200])
                     self.assertIn("malformed register row", output)
 
+    def test_out_mode_rejects_a_malformed_register_and_writes_nothing(self):
+        """`--out` is a documented way to read the projection: it validates like the others."""
+        target = self.foundation / "projection_out.md"
+        for bad_row in (
+            "| 999 | question | `x#q` | \u2014 | plain open |",
+            "| **999** | question | `x#q` | \u2014 | **ruled** |",
+        ):
+            with self.subTest(row=bad_row):
+                text = register(**{"1": "**open**"}) + "\n" + bad_row + "\n"
+                code, output = self._run_mode(text, "--out", str(target))
+                self.assertEqual(code, 1, output[:200])
+                self.assertIn("malformed register row", output)
+                self.assertFalse(target.exists())
+
     def test_a_well_formed_register_still_renders_in_every_mode(self):
         text = register(**{"1": "**open**", "2": "**ruled**"})
         for flags in (("--check",), ("--json",), ("--stdout",)):
