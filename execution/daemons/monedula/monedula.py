@@ -68,6 +68,33 @@ _notifier: Any = None
 _notify_undeliverable = False
 
 
+def _payment_journal_alert(detail: str) -> str:
+    """Use fixed alert text; journal errors may contain private path details."""
+    from payment_journal import MISSING_AFTER_FIRST_USE
+
+    if detail == MISSING_AFTER_FIRST_USE:
+        return (
+            "monedula: payment journal missing after first use "
+            "(payment_journal_unreadable). No payment will execute. "
+            "Reconcile against the chain and wallet before restoring the journal."
+        )
+    return (
+        "monedula: payment journal could not be read or written "
+        "(payment_journal_unreadable). No further payment will execute "
+        "until it is readable. Inspect the journal before anything is paid."
+    )
+
+
+def _payment_journal_alert_key(detail: str) -> str:
+    from payment_journal import MISSING_AFTER_FIRST_USE
+
+    return (
+        "monedula:payment_journal_missing"
+        if detail == MISSING_AFTER_FIRST_USE
+        else _CONSENT_CHANNEL_DEDUPE_KEY
+    )
+
+
 def _get_notifier() -> Any:
     """Return the Notifier, building it now if a prior attempt failed."""
     global _notifier
@@ -1716,11 +1743,9 @@ def main() -> bool:
     except _SessionJournalError as exc:
         log.error(f"payment_journal_unreadable — payments held: {exc}")
         _notify(
-            "monedula: payment journal could not be read or written "
-            "(payment_journal_unreadable). No further payment will execute "
-            "until it is readable. Inspect the journal before anything is paid.",
+            _payment_journal_alert(str(exc)),
             priority="blocker",
-            dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
+            dedupe_key=_payment_journal_alert_key(str(exc)),
             email_eligible=True,
         )
         return False
@@ -1898,11 +1923,9 @@ def main() -> bool:
         def _journal_failure(detail: str) -> bool:
             log.error(f"payment_journal_unreadable — payments held: {detail}")
             _notify(
-                "monedula: payment journal could not be read or written "
-                "(payment_journal_unreadable). No further payment will execute "
-                "until it is readable. Inspect the journal before anything is paid.",
+                _payment_journal_alert(detail),
                 priority="blocker",
-                dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
+                dedupe_key=_payment_journal_alert_key(detail),
                 email_eligible=True,
             )
             return False
@@ -2092,11 +2115,9 @@ def main() -> bool:
     def _telegram_journal_failure(detail: str) -> bool:
         log.error(f"payment_journal_unreadable — payments held: {detail}")
         _notify(
-            "monedula: payment journal could not be read or written "
-            "(payment_journal_unreadable). No further payment will execute "
-            "until it is readable. Inspect the journal before anything is paid.",
+            _payment_journal_alert(detail),
             priority="blocker",
-            dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
+            dedupe_key=_payment_journal_alert_key(detail),
             email_eligible=True,
         )
         return False

@@ -188,6 +188,53 @@ def test_telegram_credit_refusal_holds_and_alerts_on_later_tick(env, monkeypatch
     assert any("payment outcome UNKNOWN" in message for message, _ in alerts)
 
 
+@pytest.mark.parametrize("channel", ["payment_approval", "telegram"])
+def test_lost_journal_after_unknown_outcome_holds_each_route(env, monkeypatch, channel):
+    import monedula
+    import consent_email
+
+    w, neo = env
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda message, **k: alerts.append(message))
+    monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", channel)
+    if channel == "telegram":
+        monkeypatch.setattr(
+            monedula,
+            "telegram_poll_approval",
+            lambda **k: monedula.TelegramPollResult(kind="reply", text="attended yoga"),
+        )
+        monkeypatch.setattr(monedula, "telegram_send", lambda *a, **k: None)
+    else:
+        w.tick()
+        neo.resolve(neo.only["payment_key"], "approved", "attended yoga")
+
+    def unknown(match):
+        w.handler.execute_calls.append(match)
+        raise btc_transfer.PaymentOutcomeUnknown("synthetic unknown outcome")
+
+    monkeypatch.setattr(w.handler, "execute", unknown)
+    with pytest.raises(btc_transfer.PaymentOutcomeUnknown):
+        w.tick(minutes=15)
+    path = consent_email.journal_path()
+    marker = path.with_name(".monedula_payment_journal.initialized")
+    assert marker.is_file()
+    saved = path.read_bytes()
+    assert len(w.handler.execute_calls) == 1
+
+    path.unlink()
+    alerts.clear()
+    assert w.tick(minutes=15) is False
+    assert len(w.handler.execute_calls) == 1
+    assert any("payment journal missing after first use" in a for a in alerts)
+    assert all("synthetic unknown outcome" not in a for a in alerts)
+
+    path.write_bytes(saved)
+    alerts.clear()
+    assert w.tick(minutes=15) is False
+    assert len(w.handler.execute_calls) == 1
+    assert any("payment outcome UNKNOWN" in a for a in alerts)
+
+
 def test_payment_result_wins_over_credit_balance_text(fake_cli):
     _, reply = fake_cli
     reply["stdout"] = 'PAYMENT_RESULT: {"status": "failed", "error": "synthetic"}\n'

@@ -273,6 +273,76 @@ def test_attended_session_pays_exactly_once(env):
     assert len(w.handler.execute_calls) == 1
 
 
+def test_journal_first_use_and_loss_marker_hold(tmp_path):
+    path = tmp_path / payment_journal.JOURNAL_NAME
+    marker = tmp_path / ".monedula_payment_journal.initialized"
+    assert payment_journal.load(path)["obligations"] == {}
+    assert not marker.exists()
+
+    payment_journal.record_intent(path, "first", "token-1", generation=0)
+    assert marker.is_file()
+    saved = path.read_bytes()
+    path.unlink()
+    with pytest.raises(payment_journal.JournalError, match="payment journal missing after first use"):
+        payment_journal.load(path)
+    with pytest.raises(payment_journal.JournalError, match="payment journal missing after first use"):
+        payment_journal.record_intent(path, "second", "token-2", generation=0)
+    assert not path.exists()
+
+    path.write_bytes(saved)
+    assert payment_journal.obligation_state(payment_journal.load(path), "first") == "intent"
+    payment_journal.record_intent(path, "second", "token-2", generation=0)
+    assert payment_journal.obligation_state(payment_journal.load(path), "second") == "intent"
+
+
+def test_existing_journal_without_marker_adds_marker_and_malformed_still_holds(tmp_path):
+    path = tmp_path / payment_journal.JOURNAL_NAME
+    marker = tmp_path / ".monedula_payment_journal.initialized"
+    path.write_text('{"generation": 0, "obligations": {}, "consumed_tokens": {}}')
+    assert payment_journal.load(path)["generation"] == 0
+    assert marker.is_file()
+    path.write_text("{broken")
+    with pytest.raises(payment_journal.JournalError, match="payment journal unreadable"):
+        payment_journal.load(path)
+    path.unlink()
+    with pytest.raises(payment_journal.JournalError, match="payment journal missing after first use"):
+        payment_journal.load(path)
+
+
+def test_marker_with_unreadable_type_holds_when_journal_missing(tmp_path):
+    path = tmp_path / payment_journal.JOURNAL_NAME
+    (tmp_path / ".monedula_payment_journal.initialized").mkdir()
+    with pytest.raises(payment_journal.JournalError, match="payment journal missing after first use"):
+        payment_journal.load(path)
+
+
+def test_marker_write_failure_blocks_first_journal_write(tmp_path, monkeypatch):
+    path = tmp_path / payment_journal.JOURNAL_NAME
+
+    def fail_marker(*args, **kwargs):
+        raise payment_journal.JournalError("synthetic marker write failure")
+
+    monkeypatch.setattr(payment_journal, "_atomic_write", fail_marker)
+    with pytest.raises(payment_journal.JournalError, match="marker write failure"):
+        payment_journal.record_intent(path, "first", "token-1", generation=0)
+    assert not path.exists()
+
+
+def test_legacy_journal_read_survives_marker_failure_but_write_holds(tmp_path, monkeypatch):
+    path = tmp_path / payment_journal.JOURNAL_NAME
+    path.write_text('{"generation": 0, "obligations": {}, "consumed_tokens": {}}')
+    original = path.read_bytes()
+
+    def fail_marker(*args, **kwargs):
+        raise payment_journal.JournalError("synthetic marker write failure")
+
+    monkeypatch.setattr(payment_journal, "_atomic_write", fail_marker)
+    assert payment_journal.load(path)["generation"] == 0
+    with pytest.raises(payment_journal.JournalError, match="marker write failure"):
+        payment_journal.next_generation(path)
+    assert path.read_bytes() == original
+
+
 def test_yes_with_the_name_also_approves(env):
     w, neo = env
     w.tick()
