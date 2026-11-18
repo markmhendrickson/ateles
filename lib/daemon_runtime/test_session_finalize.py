@@ -388,3 +388,68 @@ def test_provenance_store_attempt_allows_a_slow_hosted_write(monkeypatch):
 
 def test_other_stores_keep_the_short_limit(monkeypatch):
     assert _capture_post_timeout(monkeypatch) == 20.0
+
+
+
+def _run_session_fakes(monkeypatch, post):
+    """The same readback fakes as the success test above, with a caller-supplied POST."""
+    class _Response:
+        def __init__(self, data): self.data = data
+        def raise_for_status(self): pass
+        def json(self): return self.data
+
+    def fake_get(url, **_kwargs):
+        if url.endswith("/entities/ent_conv99"):
+            return _Response({"entity_id": "ent_conv99", "entity_type": "conversation",
+                              "snapshot": {"conversation_id": "ent_task:created-0",
+                                           "session_id": "ent_task:created-0"}})
+        if url.endswith("/entities/ent_session99"):
+            return _Response({"entity_id": "ent_session99", "entity_type": "agent_session",
+                              "snapshot": {"harness": "ateles-swarm",
+                                           "native_session_id": "ent_task:created-0"}})
+        source = url.split("/entities/", 1)[1].split("/", 1)[0]
+        targets = {"ent_conv99": ["ent_task", "ent_session99"], "ent_session99": ["ent_task"]}
+        return _Response({"relationships": [
+            {"source_entity_id": source, "target_entity_id": target, "relationship_type": "REFERS_TO"}
+            for target in targets[source]]})
+
+    monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "tok")
+    monkeypatch.setattr(sf.httpx, "post", post)
+    monkeypatch.setattr(sf.httpx, "get", fake_get)
+    monkeypatch.setattr("lib.daemon_runtime.neotoma_transient._sleep", lambda _s: None)
+    return _Response
+
+
+def test_a_healthy_but_slow_provenance_write_still_opens_the_run_session(monkeypatch):
+    """End to end through create_run_session (what Apis calls before it spawns): a write that
+    needs 20 to 60s is rejected by a 20s limit and accepted at 60s, and then passes the
+    record and relationship readbacks, so the run session opens and the spawn path is reached."""
+    calls = []
+
+    def slow_post(*_a, **kwargs):
+        calls.append(kwargs.get("timeout"))
+        if kwargs.get("timeout", 0) < 30:  # the server needs about 30s to accept this write
+            raise sf.httpx.ReadTimeout("write not accepted within the limit")
+        return response({"entities": [
+            {"entity_type": "conversation", "entity_id": "ent_conv99"},
+            {"entity_type": "agent_session", "entity_id": "ent_session99"}]})
+
+    response = _run_session_fakes(monkeypatch, slow_post)
+    run = sf.create_run_session(task_id="ent_task", plan_id="ent_plan", agent="cicada", run_key="created-0")
+    assert run == sf.RunSession("ent_conv99", "ent_session99", "ent_task:created-0")
+    assert calls[0] == 60.0 and len(calls) == 1  # one attempt, at the provenance limit
+
+
+def test_the_refusal_stays_when_the_provenance_write_never_succeeds(monkeypatch):
+    """The requirement is unchanged: if the store keeps timing out the run session is NOT opened
+    (Apis then refuses to spawn). The bound is three attempts."""
+    calls = []
+
+    def always_slow(*_a, **kwargs):
+        calls.append(kwargs.get("timeout"))
+        raise sf.httpx.ReadTimeout("write not accepted within the limit")
+
+    _run_session_fakes(monkeypatch, always_slow)
+    run = sf.create_run_session(task_id="ent_task", plan_id="ent_plan", agent="cicada", run_key="created-0")
+    assert run is None
+    assert calls == [60.0, 60.0, 60.0]

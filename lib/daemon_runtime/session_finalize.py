@@ -403,7 +403,9 @@ def build_turn_payload(
 # fast. The refusal stays: provenance is still required. This only stops a slow, healthy
 # write from reading as a failed one, the same limit other Apis stores already use
 # (NEOTOMA_STORE_ATTEMPT_TIMEOUT_SECONDS in swarm_dispatch). Worst case with the bounded
-# retries is about three attempts plus the pauses.
+# retries is three attempts of up to 60s plus the 2s and 5s pauses, about 187s before Apis
+# refuses to spawn (the HTTP client's per-phase timeouts can stretch one attempt a little).
+# That is the dispatch-latency bound when the store is failing; a healthy store answers at once.
 PROVENANCE_STORE_ATTEMPT_TIMEOUT_SECONDS = 60.0
 DEFAULT_STORE_ATTEMPT_TIMEOUT_SECONDS = 20.0
 
