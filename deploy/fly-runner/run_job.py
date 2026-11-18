@@ -99,6 +99,10 @@ MAX_TOKEN_FILE_BYTES = 4096
 # The longest timeout a job may carry (fly_runner.MAX_JOB_TIMEOUT_SECONDS).
 MAX_JOB_TIMEOUT_SECONDS = 6 * 3600
 EXIT_TIMEOUT = 124
+# What ``run_cli`` returns when the process could not be started at all; the
+# prefix marks it so a start failure is never reported as a CLI exit.
+EXIT_CLI_NOT_STARTED = 127
+CLI_NOT_STARTED_PREFIX = "runner: could not start "
 EXIT_DEADLINE = 98
 # The entrypoint raised, or was asked to exit, before finishing normally.
 EXIT_ABORTED = 99
@@ -894,6 +898,10 @@ def arm_hard_deadline(deadline: float, *, clock=time.time, hard_exit=os._exit,
     return timer
 
 
+def cli_not_started(exit_code: int, stderr: bytes) -> bool:
+    return exit_code == EXIT_CLI_NOT_STARTED and stderr.startswith(CLI_NOT_STARTED_PREFIX.encode())
+
+
 def run_cli(
     argv: list[str],
     env: dict[str, str],
@@ -924,7 +932,7 @@ def run_cli(
             **drop,
         )
     except OSError as exc:
-        return 127, b"", f"runner: could not start {argv[0]}: {exc}".encode(), False
+        return EXIT_CLI_NOT_STARTED, b"", f"{CLI_NOT_STARTED_PREFIX}{argv[0]}: {exc}".encode(), False
     _JOB_PROCESSES["pgid"] = proc.pid
     _JOB_PROCESSES["proc"] = proc
     _JOB_PROCESSES["uid"] = ident[0] if ident is not None else None
@@ -1081,10 +1089,12 @@ def build_record(
         if delivery.pr_description:
             record["pr_description"] = delivery.pr_description
         if delivery.status not in {"opened", "updated"}:
-            if timed_out:
-                state = "timed_out"
-            elif not delivery.cli_ran:
+            if not delivery.cli_ran:
+                # No CLI process was started (refused, no time left, or the
+                # spawn failed), so there is no exit to describe.
                 state = "unknown"
+            elif timed_out:
+                state = "timed_out"
             elif exit_code < 0:
                 state = "killed"
             elif exit_code > 0:
@@ -1526,6 +1536,8 @@ def _run_delivering_job(job: Job, delivery: DeliveryRun, runner, argv: list[str]
     delivery.cli_ran = True
     rc, out, err, timed_out = runner(run_argv, child_env, run_stdin, budget, checkout, ident,
                                      deadline)  # fmt: skip
+    if cli_not_started(rc, err):
+        delivery.cli_ran = False  # the spawn failed: 127 is not a CLI exit
     with rd.bounded_by(deadline - RECORD_RESERVE_SECONDS):
         try:
             delivery.stop_commit_count = rd.count_new_commits(

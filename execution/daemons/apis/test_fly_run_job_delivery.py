@@ -324,6 +324,8 @@ def test_a_deadline_too_short_for_any_cli_refuses_without_cloning(world, monkeyp
     _assert_cleanup(world, absent=True)
     assert world["api"]["calls"] == []
     assert _remote_ref(world) is None
+    # No CLI was started, so its exit state is unknown, never "timed_out".
+    assert record["cli_exit_state"] == "unknown"
 
 
 def test_a_slow_clone_shrinks_the_cli_budget(world, monkeypatch):
@@ -440,6 +442,32 @@ def test_failed_cli_exit_state_has_only_fixed_values(world, code, timed_out, sta
     assert record["stop_commit_count"] == 0
     assert "agent text" not in json.dumps({k: record[k] for k in (
         "stop_elapsed_ms", "cli_exit_state", "stop_commit_count", "last_tool_class")})
+
+
+def test_a_cli_that_cannot_be_started_is_unknown_not_an_exit(world):
+    # The real run_cli, with an executable that does not exist: it returns its
+    # start-failure code, which must not be presented as the CLI's own exit.
+    def runner(argv, env, stdin, timeout, cwd, ident=None, collect_by=None):
+        return run_job.run_cli(["definitely-not-an-installed-cli", *argv[1:]], env, stdin, timeout,
+                               cwd, ident, collect_by)
+    _, record = _run(_job(world["tmp"]), runner)
+    assert record["delivery_status"] == "not_delivered"
+    assert record["cli_exit_state"] == "unknown"
+    assert "exited_nonzero" not in json.dumps(record["probe_report"])
+
+
+def test_a_real_cli_exit_127_is_still_reported_as_an_exit(world):
+    def runner(argv, env, stdin, timeout, cwd, ident=None, collect_by=None):
+        return 127, b"", b"the agent's own message", False
+    _, record = _run(_job(world["tmp"]), runner)
+    assert record["cli_exit_state"] == "exited_nonzero:127"
+
+
+def test_no_time_for_the_cli_after_the_clone_is_unknown_not_timed_out(world, monkeypatch):
+    monkeypatch.setattr(run_job, "DELIVERY_RESERVE_SECONDS", 10_000.0)
+    rc, record = _run(_job(world["tmp"]), lambda *a, **k: pytest.fail("the CLI must not run"))
+    assert record["delivery_status"] == "no_time"
+    assert record["cli_exit_state"] == "unknown"
 
 
 def test_a_rejected_push_never_forces_and_opens_no_pull_request(world):
