@@ -492,6 +492,7 @@ class TestPushToMainBindsDecisionState(unittest.TestCase):
 
     def test_pull_request_trigger_covers_register_and_allocator(self) -> None:
         self.assertIn('"docs/foundation/**"', self.on_block)
+        self.assertIn('"execution/scripts/reserve_register_number.py"', self.on_block)
 
 
 class TestBindingsNamedInProse(unittest.TestCase):

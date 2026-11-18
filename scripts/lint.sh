@@ -161,6 +161,14 @@ python3 execution/scripts/render_reading_projection.py --check || ERRORS=$((ERRO
 echo "  - Checking decision state renders cleanly..."
 python3 execution/scripts/render_decision_state.py --check --source worktree || ERRORS=$((ERRORS + 1))
 
+if git ls-remote origin 'refs/reservations/decision/*' >/dev/null 2>&1; then
+  echo "  - Checking added register numbers have origin reservations..."
+  python3 execution/scripts/reserve_register_number.py check decision || ERRORS=$((ERRORS + 1))
+  python3 execution/scripts/reserve_register_number.py check revision || ERRORS=$((ERRORS + 1))
+else
+  echo "  - Skipping register reservations (origin is offline; CI check remains required)"
+fi
+
 # Skill inventory: docs/foundation/skill_inventory.md is stage 0 of the skill
 # migration (migration.md stage 11 migrates skills BY CLASS, so an
 # uninventoried skill is never classified and never migrated). Generated, never

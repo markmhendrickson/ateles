@@ -26,6 +26,8 @@ EXEMPT, no line needed: a PR whose every changed file is either
   - a markdown file under docs/ outside docs/foundation/ (docs-only).
 Hand-authored docs/foundation/ files are NOT exempt.
 
+For new decision or revision rows, reserve each number with
+`python3 execution/scripts/reserve_register_number.py reserve <decision|revision>`.
 
 Editing the PR body re-runs the check.
 -->

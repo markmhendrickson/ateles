@@ -10,9 +10,9 @@ naming which rows are open goes stale the moment the next pass rules one, and a
 "next free number is N" line was found wrong on five consecutive passes, each
 pass correcting it and the next finding it stale again.
 
-That last line is now fixed the right way — it states the *sweep* that finds the
-number and writes no number at all (principle 9: a number written in prose is a
-second source for something the table already answers). This check makes the
+That last line is now fixed the right way — it names the reservation command
+and writes no number at all (principle 9: a number written in prose is a
+second source for something the table and origin refs already answer). This check makes the
 same discipline mechanical for the shapes that keep recurring.
 
 What it reports:
@@ -25,8 +25,8 @@ What it reports:
 
 ``next-free-number``
     any prose stating a *next free number* as a value. There is no correct value
-    to state: the number is established by sweeping every branch's copy of the
-    table, and a concurrent branch can take it between the write and the read.
+    to state: the number is established by an atomic reservation on origin,
+    and a concurrent branch can take an unreserved number between reads.
     Reported unconditionally, right or wrong.
 
 ``status-contradiction``
@@ -184,9 +184,8 @@ def check(root: Path) -> list[str]:
             problems.append(
                 f"{path}:{lineno}: next-free-number — prose states the next free "
                 f"number is {m.group(1)}. No value is correct here: the number is "
-                f"established by sweeping every branch's copy of the table, and a "
-                f"concurrent branch can take it between the write and the read. "
-                f"State the sweep, not a number (principle 9)."
+                f"established by reserve_register_number.py on origin. "
+                f"State the command, not a number (principle 9)."
             )
 
         # --- present-tense open-row lists ---

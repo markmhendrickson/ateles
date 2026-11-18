@@ -32,10 +32,10 @@ index; this table says only that the document moved and why.
 Rows are append-only and chronological. A revision number is never reused. A pass that amends several
 documents adds a row to each document's table, under one number.
 
-**The next free revision number is established by a sweep, never by reading this file.** The sweep is over
-the remotes — the maximum `revision N` on any open branch's copy of any document here — for the same reason
-`conformance.md`'s decision numbering states it: concurrent branches assign numbers the file on your own
-branch cannot see. As of 2026-09-07 that sweep over all 92 open pull-request branches gives 68, so the next
+**The next revision number comes from `python3 execution/scripts/reserve_register_number.py next revision`.**
+Before authoring, run `python3 execution/scripts/reserve_register_number.py reserve revision` and use
+the printed number. Its create-only origin ref is permanent, so an abandoned reservation leaves a gap.
+Historical sweeps below describe the earlier process. As of 2026-09-07 that sweep over all 92 open pull-request branches gives 68, so the next
 free number is 69, which the front-matter rollout takes; a later sweep the same day gives 69, and the
 several-instances pass takes 70. A sweep over the remotes on 2026-09-07 gives 72, so the decisions 76
 and 77 pass takes 73 — one number across all four documents it amends, per the rule above.

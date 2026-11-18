@@ -693,17 +693,27 @@ pass rules a row, which is how this sentence came to name two rows while the tab
 `migration.md`, where the migration they bear on is designed, and 33 in `workflows.md`, where the Stages
 lines it concerns are written; the register rows above point at them.
 
+### Reserving register numbers
+
+Use `python3 execution/scripts/reserve_register_number.py next decision` to inspect the next
+candidate, then `python3 execution/scripts/reserve_register_number.py reserve decision` before writing
+a row. For a revision, use `next revision` and `reserve revision`. The printed reservation number is
+the one to write. The ref on origin is created atomically and remains there permanently; an abandoned
+reservation leaves a gap. CI checks that each new row has its reservation.
+
 **19 and 22 were never assigned, and the numbers stay unused.** Neither appears in any revision of any
 foundation document. They are the gaps left by several documents opening decisions concurrently on this
 branch and renumbering around each other, and they are recorded as gaps rather than closed up: renumbering
 would break every cross-reference the documents already carry, and silence would invite the next author to
-reuse the number for something unrelated. **Do not assign 19 or 22 to a new decision.** The next free
-number is established by sweeping every branch's copy of this table, and never by reading a number written
-here. This line stated a stale number on
+reuse the number for something unrelated. **Do not assign 19 or 22 to a new decision.** The next
+decision number comes from `python3 execution/scripts/reserve_register_number.py next decision`.
+Before authoring, run `python3 execution/scripts/reserve_register_number.py reserve decision` and use
+the printed number. This line stated a stale number on
 five consecutive passes, each pass correcting it and the next finding it stale again, because a number
 written down goes out of date the moment a concurrent branch takes it: on 2026-09-08 this branch's own
-table stopped at 69 while 88 was already assigned elsewhere. The sweep is the mechanism; a number in this
-paragraph would be a second source for it (principle 9), so none is stated.
+table stopped at 69 while 88 was already assigned elsewhere. Permanent origin refs under
+`refs/reservations/decision/` make an abandoned reservation a gap. A number in this paragraph would
+be a second source for it (principle 9), so none is stated.
 
 **20 and 21 were assigned, then renumbered, and two pointers were left behind.** Both were opened in
 `payments.md` and renumbered to 27 and 28 before that document was committed, to avoid colliding with 23

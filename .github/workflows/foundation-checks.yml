@@ -38,6 +38,8 @@ on:
       - "execution/scripts/link_vocabulary_terms.py"
       - "execution/scripts/render_reading_projection.py"
       - "execution/scripts/render_decision_state.py"
+      - "execution/scripts/reserve_register_number.py"
+      - "execution/scripts/test_reserve_register_number.py"
       - "execution/scripts/check_plan_decision_citations.py"
       - "execution/scripts/test_decision_state.py"
       - "execution/scripts/test_check_foundation_*.py"
@@ -198,6 +200,11 @@ jobs:
           name: decision-state
           path: ${{ runner.temp }}/decision_state.md
           if-no-files-found: error
+      - name: Register numbers — added rows hold reservations
+        if: github.event_name == 'pull_request' && steps.corpus.outputs.present == 'true'
+        run: |
+          python3 execution/scripts/reserve_register_number.py check decision
+          python3 execution/scripts/reserve_register_number.py check revision
       # Register narrative: the decision register's prose held to its own table.
       # The rule-coverage contract binds a decision opened in a DOCUMENT to a
       # register row; nothing read the narrative around the table, so the prose
