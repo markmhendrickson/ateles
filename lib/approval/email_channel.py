@@ -1109,23 +1109,33 @@ def read_replies_with_status(
                              r"swarm-approve:\s*([A-Za-z0-9._-]+/[A-Za-z0-9._-]+#\d+)")
             targets = set(re.findall(token_pattern, raw_source, re.IGNORECASE))
             correlation_target = next(iter(targets)) if len(targets) == 1 else None
+            known = tuple(
+                f"{prefix}: {target}" for prefix, target in
+                (("release-approve", correlation_target),
+                 ("swarm-approve", correlation_target)) if target
+            )
+            known += tuple(f"[APPROVE-{candidate}]" for candidate in tokens
+                           if re.fullmatch(r"[0-9A-F]{8}", candidate, re.IGNORECASE))
+            if callable(request_bodies):
+                try:
+                    original_request = request_bodies(token, subject)
+                except Exception:  # noqa: BLE001 — missing proof cannot approve
+                    original_request = None
+            else:
+                original_request = (request_bodies or {}).get(token)
+            def normalize(line: str) -> str:
+                return " ".join(line.split()).casefold()
+            originals = {normalize(line) for line in
+                         (original_request or "").splitlines() if line.strip()}
+            originals.update(normalize(line) for line in known)
+            quoted_plain = [normalize(line.lstrip()[1:].strip()) for line in
+                            plain.splitlines() if line.lstrip().startswith(">")
+                            and line.lstrip()[1:].strip()]
+            if any(line not in originals for line in quoted_plain):
+                plain_safe = False
             html_body = ""
             html_present = "body_html" in body_data
             if isinstance(raw_html, str) and html_present:
-                known = tuple(
-                    f"{prefix}: {target}" for prefix, target in
-                    (("release-approve", correlation_target),
-                     ("swarm-approve", correlation_target)) if target
-                )
-                known += tuple(f"[APPROVE-{candidate}]" for candidate in tokens
-                               if re.fullmatch(r"[0-9A-F]{8}", candidate, re.IGNORECASE))
-                if callable(request_bodies):
-                    try:
-                        original_request = request_bodies(token, subject)
-                    except Exception:  # noqa: BLE001 — missing proof cannot approve
-                        original_request = None
-                else:
-                    original_request = (request_bodies or {}).get(token)
                 html_body, boundary_seen = _extract_authored_html(
                     raw_html, original_request=original_request,
                     known_quote_lines=known, verify_quote=True)

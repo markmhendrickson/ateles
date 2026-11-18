@@ -52,6 +52,32 @@ def triage_contract_response(shape: str, fault: str, row: dict, max_msgs: int = 
     return result
 
 
+def test_correction_query_failure_holds_tokened_approval(monkeypatch):
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "swarm@example.net")
+    monkeypatch.setenv("ATELES_SWARM_GWS_CONFIG_DIR", "/private/tmp")
+    monkeypatch.setattr(ec, "_gws", lambda: "/synthetic/gws")
+    monkeypatch.setattr(ec, "_fetch_auth_results", lambda _mid: [
+        "mx.google.com; dmarc=pass header.from=example.com"])
+
+    def fake(args, timeout=45):
+        if "+triage" in args:
+            query = args[args.index("--query") + 1]
+            if "subject:" in query:
+                return None
+            return {"complete": True, "messages": [{
+                "id": "m1", "subject": "RE: READY TOKEN", "from": "op@example.com"}]}
+        if "+read" in args:
+            return {"body_text": "APPROVE"}
+        raise AssertionError(args)
+
+    monkeypatch.setattr(ec, "gws_json", fake)
+    result = ec.read_replies_with_status(
+        ["TOKEN"], correction_queries=["READY"], require_enabled=False)
+    assert result.kind == "transport_error"
+    assert result.texts == []
+
+
 @pytest.mark.parametrize("shape,fault", (
     *((shape, fault) for shape in ("real_object", "array", "results")
       for fault in ("none", "full_page", "invalid_row", "invalid_date")),

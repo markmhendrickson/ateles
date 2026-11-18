@@ -1508,8 +1508,10 @@ def test_authored_withdrawal_never_routes(monkeypatch, tmp_path, kind, tail):
 ))
 def test_proven_bottom_quote_still_routes(monkeypatch, tmp_path, kind, quote):
     approval = "approve v1.2.3" if kind == "release" else "approve"
+    token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
     posts, _, _ = _poll_authored_reply(
-        monkeypatch, tmp_path, kind, {"body_text": f"{approval}\n{quote}"})
+        monkeypatch, tmp_path, kind, {"body_text": f"{approval}\n{quote}"},
+        sent_body=f"original\n{token}")
     assert len(posts) == 1
 
 
@@ -1785,12 +1787,16 @@ def test_complete_sent_notice_quote_routes_approval(monkeypatch, tmp_path, kind,
 
 
 @pytest.mark.parametrize("kind", ("pr", "release"))
-def test_quote_not_in_sent_notice_is_unreadable(monkeypatch, tmp_path, kind):
+@pytest.mark.parametrize("format", ("plain", "html"))
+def test_quote_not_in_sent_notice_is_unreadable(monkeypatch, tmp_path, kind, format):
     approval = "approve v1.2.3" if kind == "release" else "APPROVE"
     token = "release-approve: v1.2.3" if kind == "release" else "swarm-approve: o/r#7"
+    body = ({"body_text": f"{approval}\n> Other notice\n> {token}"}
+            if format == "plain" else
+            {"body_html": f"<p>{approval}</p><blockquote>Other notice<br>{token}</blockquote>"})
     posts, _, notices = _poll_authored_reply(
         monkeypatch, tmp_path, kind,
-        {"body_html": f"<p>{approval}</p><blockquote>Other notice<br>{token}</blockquote>"},
+        body,
         sent_body=f"Ready for review.\n{token}")
     assert posts == []
     assert any("could not be read yet" in note for note in notices.sent)

@@ -885,6 +885,20 @@ def test_unproven_payment_quote_holds_all_items(
     assert result.reason_code == "consent_reply_read_failed"
 
 
+def test_plain_payment_quote_outside_sent_request_holds(monkeypatch, tmp_path):
+    handler = _Handler("session", label="Example", amount=60)
+    item = consent_email.build_pending_items([(handler, [{}])], "2026-09-22")[0]
+    _arm_email(monkeypatch)
+    monkeypatch.setattr(_ec, "gws_json", _fake_gws(
+        item.token, auth_by_id={"m1": [_GOOGLE_PASS]},
+        body_by_id={"m1": {"body_text": (
+            f"ATTENDED\n> Different notice\n> {subject_marker(item.token)}")}}))
+    result = consent_email.request_and_collect(
+        [(handler, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
+    assert result.approved == set()
+    assert result.reason_code == "consent_reply_read_failed"
+
+
 def test_consent_unmarked_html_request_is_unreadable(monkeypatch, tmp_path):
     h = _Handler("oneoff", label="Example", amount=60)
     items = consent_email.build_pending_items([(h, [{}])], "2026-09-22")
@@ -1122,8 +1136,8 @@ def test_authored_withdrawal_holds_payment(monkeypatch, tmp_path, calendar, tail
 
 @pytest.mark.parametrize("calendar", (True, False))
 @pytest.mark.parametrize("quote", (
-    "On Tuesday Example wrote:\n> old request",
-    "-----Original Message-----\nFrom: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\n> old request",
+    "On Tuesday Example wrote:\n> Pending payment(s) — reply to approve or skip. No payment moves until you reply.",
+    "-----Original Message-----\nFrom: Example\nSent: Tuesday\nTo: Operator\nSubject: Request\n> Pending payment(s) — reply to approve or skip. No payment moves until you reply.",
 ))
 def test_proven_bottom_quote_can_approve_payment(monkeypatch, tmp_path, calendar, quote):
     h = _Handler("therapy" if calendar else "oneoff", label="Example", amount=60,
@@ -1167,9 +1181,11 @@ def test_consent_parts_and_quote_boundaries(
     if shape == "unquoted_tail":
         payload["body_text"] += f"\n-----Original Message-----\n{headers}\nI withdraw"
     elif shape == "quoted_tail":
-        payload["body_text"] += f"\n-----Original Message-----\n{headers}\n> old"
+        payload["body_text"] += (f"\n-----Original Message-----\n{headers}\n"
+                                 "> Pending payment(s) — reply to approve or skip. No payment moves until you reply.")
     elif shape == "unseparated_headers":
-        payload["body_text"] += f"\n{headers}\n> old"
+        payload["body_text"] += (f"\n{headers}\n"
+                                 "> Pending payment(s) — reply to approve or skip. No payment moves until you reply.")
     elif shape == "plain_approves":
         payload["body_html"] = "<p>hold</p>"
     elif shape == "html_approves":
