@@ -1059,8 +1059,9 @@ def test_malformed_reply_state_holds(monkeypatch, tmp_path, contents):
 
 
 def test_unreadable_state_notice_names_conditional_recovery_and_scope(monkeypatch, tmp_path):
+    state_value_sentinel = "secret-9c03fe14d772a0be4f63e01d985bf7ad"
     state_path = tmp_path / "state.json"
-    state_path.write_text(json.dumps({"last_message_id": "private-state-value",
+    state_path.write_text(json.dumps({"last_message_id": state_value_sentinel,
                                       "processed_count": 1,
                                       "processed_ids": [42]}))
     monkeypatch.setattr(turdus, "_STATE_FILE", state_path)
@@ -1081,8 +1082,7 @@ def test_unreadable_state_notice_names_conditional_recovery_and_scope(monkeypatc
     assert "cannot confirm" in notice and "leave Turdus held" in notice
     assert "Telegram" in notice and "wait until the three-day reply window has passed" in notice
     assert "deleting or resetting" in notice and "replays consumed approvals" in notice
-    assert "private-state-value" not in notice
-    assert "42" not in notice
+    assert state_value_sentinel not in notice
 
 
 def _full_reply_state():
