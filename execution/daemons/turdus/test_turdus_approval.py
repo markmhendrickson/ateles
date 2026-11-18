@@ -1819,7 +1819,9 @@ def test_tokenless_reply_holds_matching_approval_sweep(
     def fake_gws(args, timeout=45):
         if "+triage" in args:
             query = args[args.index("--query") + 1]
-            active = ("release-approve:" in query) == (kind == "release")
+            active = (("release-approve:" in query or
+                       "ready to approve" in query) if kind == "release" else
+                      ("swarm-approve:" in query or "READY TO MERGE" in query))
             mids = (["m1"] if "subject:" not in query else order) if active else []
             return {"complete": True, "messages": [
                 {"id": mid, "subject": subject, "from": "op@example.com"}

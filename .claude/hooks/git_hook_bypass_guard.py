@@ -1288,27 +1288,14 @@ def _direct_write_violation(cmd: SimpleCommand, words: list[Word]) -> str | None
                 arg.startswith("-") and not arg.startswith("--") and "s" in arg[1:]
             ) for arg in args
         ):
-            # A later command can traverse a newly created link before it
-            # exists on disk for path resolution. Refuse link creation here.
-            return f"{base} creating a link whose later destination is unknown"
+            if any(_tree_write_target(source) for source in sources):
+                return f"{base} linking an ancestor of protected hook or git config path"
         if base == "ln" and any(_protected_path(source) for source in sources):
             return "ln linking a protected hook or git config path"
         if base == "cp" and any(arg in {"-l", "--link"} or
                                  (arg.startswith("-") and not arg.startswith("--")
                                   and "l" in arg[1:]) for arg in args):
             return "cp creating a link whose later destination is unknown"
-        if base == "cp" and any(
-            arg in {"-R", "-r", "-a", "--recursive", "--archive"} or
-            (arg.startswith("-") and not arg.startswith("--") and
-             any(flag in arg[1:] for flag in "Rra")) for arg in args
-        ):
-            return "cp tree may contain a link whose later destination is unknown"
-        if base == "rsync" and any(
-            arg in {"-a", "-l", "--archive", "--links", "--copy-links"}
-            or (arg.startswith("-") and not arg.startswith("--") and
-                any(flag in arg[1:] for flag in "alL")) for arg in args
-        ):
-            return "rsync may create a link whose later destination is unknown"
         # A directory target writes each source under its own name, so
         # `cp config .git/` lands on .git/config.
         targets += [os.path.join(target, os.path.basename(os.path.normpath(source)))
@@ -1877,7 +1864,15 @@ def _judge(command: str, depth: int, in_substitution: bool) -> str | None:
             return hit
     written_files: set[str] = set()
     written_trees: set[str] = set()
+    created_link_paths: set[str] = set()
+    copied_tree_paths: set[str] = set()
     for index, cmd in enumerate(commands):
+        if created_link_paths or copied_tree_paths:
+            for word in [*cmd.words, *(target for _, target in cmd.redirects)]:
+                candidate = os.path.normpath(str(_effective_path(word.text))).casefold()
+                if any(candidate == link or candidate.startswith(link + "/")
+                       for link in created_link_paths | copied_tree_paths):
+                    return "path may pass through a link created earlier in this command"
         if in_substitution and _is_git_invocation(cmd):
             return "command or process substitution around git"
         stripped = _strip_command_prefix(cmd.words)
@@ -1909,6 +1904,25 @@ def _judge(command: str, depth: int, in_substitution: bool) -> str | None:
         if stripped:
             writer = os.path.basename(stripped[0].text)
             args = [w.text for w in stripped[1:]]
+            if writer in {"ln", "cp"} and any(
+                arg in {"-s", "--symbolic", "--symbolic-link"} or
+                (arg.startswith("-") and not arg.startswith("--") and
+                 "s" in arg[1:]) for arg in args
+            ) and args:
+                created_link_paths.add(
+                    os.path.normpath(str(_effective_path(args[-1]))).casefold())
+            if writer == "cp" and any(
+                arg in {"-R", "-r", "-a", "--recursive", "--archive"} or
+                (arg.startswith("-") and not arg.startswith("--") and
+                 any(flag in arg[1:] for flag in "Rra")) for arg in args
+            ) or writer == "rsync" and any(
+                arg in {"-a", "-l", "--archive", "--links", "--copy-links"}
+                or (arg.startswith("-") and not arg.startswith("--") and
+                    any(flag in arg[1:] for flag in "alL")) for arg in args
+            ):
+                if args:
+                    copied_tree_paths.add(
+                        os.path.normpath(str(_effective_path(args[-1]))).casefold())
             if writer in {"tee", "cp", "mv", "install", "ln", "rsync", "touch", "truncate"}:
                 for target in args:
                     if not target.startswith("-"):
