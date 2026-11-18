@@ -494,6 +494,23 @@ class TestPushToMainBindsDecisionState(unittest.TestCase):
         self.assertIn('"docs/foundation/**"', self.on_block)
         self.assertIn('"execution/scripts/reserve_register_number.py"', self.on_block)
 
+    def test_reservation_check_is_pull_request_only_and_binding(self) -> None:
+        job = self.job_blocks["checkers"]
+        marker = "- name: Register numbers — added rows hold reservations"
+        self.assertIn(marker, job)
+        step = job.split(marker, 1)[1].split("      # Register narrative:", 1)[0]
+        self.assertIn("github.event_name == 'pull_request'", step)
+        self.assertIn("reserve_register_number.py check decision", step)
+        self.assertIn("reserve_register_number.py check revision", step)
+        self.assertNotIn("continue-on-error:", step)
+
+    def test_lint_skips_only_when_explicitly_offline(self) -> None:
+        lint = (REPO_ROOT / "scripts" / "lint.sh").read_text(encoding="utf-8")
+        self.assertIn('if [ "${ATELES_OFFLINE:-0}" = "1" ]; then', lint)
+        self.assertIn("Skipping register reservations", lint)
+        self.assertIn("reserve_register_number.py check decision || ERRORS=", lint)
+        self.assertIn("reserve_register_number.py check revision || ERRORS=", lint)
+
 
 class TestBindingsNamedInProse(unittest.TestCase):
     def test_claims_match_render_model(self) -> None:

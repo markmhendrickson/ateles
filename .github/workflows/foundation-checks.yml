@@ -50,10 +50,8 @@ on:
     # Synchronize only re-runs when a matching path is in the push delta;
     # empty commits skip this filter (ateles#802 — head 392aee1a missed the lane).
   # ateles#1138: push to main carries NO paths filter, deliberately, and binds
-  # the decision-state step (the rest of this job's checkers are read
-  # against the checked-out tree the same as on a PR, so they still run here,
-  # but the defect #1138 exists for is specific to decision-state: the
-  # rendered projection must remain readable for every commit on main.
+  # every checker against the checked-out tree. The rendered projection
+  # remains readable for every commit on main.
   push:
     branches:
       - main

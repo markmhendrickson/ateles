@@ -674,18 +674,36 @@ class TestRenderCleanly(unittest.TestCase):
         self.assertFalse((self.foundation / "decision_state.md").exists())
 
     def test_malformed_row_fails(self):
+        import contextlib
+        import io
+
         self.register.write_text(register(**{"1": "**open**"}) + "| 2 | malformed |\n")
-        self.assertEqual(ds.main(["--check", "--source", "worktree"]), 1)
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            self.assertEqual(ds.main(["--check", "--source", "worktree"]), 1)
+        self.assertIn("malformed register row 2", error.getvalue())
 
     def test_broken_row_prefix_fails(self):
+        import contextlib
+        import io
+
         self.register.write_text(register(**{"1": "**open**"}) +
                                  "2 | broken prefix | `doc.md#q` | — | **open** |\n")
-        self.assertEqual(ds.main(["--check", "--source", "worktree"]), 1)
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            self.assertEqual(ds.main(["--check", "--source", "worktree"]), 1)
+        self.assertIn("malformed register row", error.getvalue())
 
     def test_duplicate_row_fails(self):
+        import contextlib
+        import io
+
         self.register.write_text(register(**{"1": "**open**", "2": "**ruled**"}) +
                                  "| 2 | another question | `doc.md#other` | — | **open** |\n")
-        self.assertEqual(ds.main(["--check", "--source", "worktree"]), 1)
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            self.assertEqual(ds.main(["--check", "--source", "worktree"]), 1)
+        self.assertIn("duplicate register row 2", error.getvalue())
 
     def test_deterministic_stdout(self):
         import contextlib
@@ -706,8 +724,10 @@ class TestRenderCleanly(unittest.TestCase):
 
     def test_incomplete_projection_fails(self):
         self.register.write_text(register(**{"1": "**open**"}))
+        output = self.foundation / "decision_state.md"
+        output.write_text("")
         with unittest.mock.patch.object(ds, "render", return_value=""):
-            self.assertEqual(ds.main(["--check", "--source", "worktree"]), 1)
+            self.assertEqual(ds.main(["--check", "--source", "worktree", "--out", str(output)]), 1)
 
 
 if __name__ == "__main__":
