@@ -17,6 +17,8 @@ import sys
 import uuid
 from collections import Counter
 
+from foundation_register_rows import decision_rows, revision_rows
+
 KINDS = {"decision": "docs/foundation/conformance.md", "revision": "docs/foundation/revisions.md"}
 REF_ROOT = "refs/reservations"
 MAX_ATTEMPTS = 20
@@ -33,14 +35,14 @@ def git(*args: str) -> str:
 def numbers(kind: str, content: str) -> list[int]:
     """Read numbered table rows; a revision may occur in several document tables."""
     if kind == "decision":
-        header = "| # | The question |"
-        if header not in content:
-            raise ValueError("decision register table is missing")
-        content = content.split(header, 1)[1]
+        number_cells = decision_rows(content)
+    else:
+        number_cells = [row.number for row in revision_rows(content)]
     found: list[int] = []
-    for match in re.finditer(r"^ {0,3}\|\s*[*_`]*\s*(\d+)(?:\s*[\u2013-]\s*(\d+))?[*_`]*\s*\|", content, re.M):
-        low = int(match.group(1))
-        high = int(match.group(2)) if match.group(2) else low
+    for cell in number_cells:
+        endpoints = re.split("[–-]", cell)
+        low = int(endpoints[0])
+        high = int(endpoints[1]) if len(endpoints) == 2 else low
         # The register carries range rows ("1-12"); every number in a range is
         # occupied, and a new range must reserve every number it covers.
         if high < low or high - low > MAX_RANGE:
@@ -55,11 +57,26 @@ def table_counts(content: str) -> Counter[tuple[str, int]]:
     """Revision rows per (document table, number). A document's table sits under its own
     `## ` heading; one revision legitimately appears once in EACH document its pass amends."""
     counts: Counter[tuple[str, int]] = Counter()
-    for section in re.split(r"^## ", content, flags=re.M)[1:]:
-        title = section.split("\n", 1)[0].strip()
-        for match in re.finditer(r"^ {0,3}\|\s*[*_`]*\s*(\d+)[*_`]*\s*\|", section, re.M):
-            counts[(title, int(match.group(1)))] += 1
+    titles: dict[int, str] = {}
+    current = ""
+    for index, line in enumerate(content.splitlines(), 1):
+        if line.startswith("## "):
+            current = line[3:].strip()
+        titles[index] = current
+    for row in revision_rows(content):
+        if titles[row.line]:
+            for number in numbers_from_cell(row.number):
+                counts[(titles[row.line], number)] += 1
     return counts
+
+
+def numbers_from_cell(cell: str) -> range:
+    endpoints = re.split("[–-]", cell)
+    low = int(endpoints[0])
+    high = int(endpoints[1]) if len(endpoints) == 2 else low
+    if high < low or high - low > MAX_RANGE:
+        raise ValueError(f"revision row range {low}-{high} is not a valid range")
+    return range(low, high + 1)
 
 
 def reservations(kind: str, remote: str) -> set[int]:

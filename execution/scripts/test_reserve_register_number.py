@@ -30,6 +30,7 @@ def clones(tmp_path: Path) -> tuple[Path, Path, Path]:
     git(tmp_path, "init", "-b", "main", str(first))
     git(first, "config", "user.name", "Synthetic Tester")
     git(first, "config", "user.email", "synthetic@example.invalid")
+    git(first, "config", "commit.gpgsign", "false")
     foundation = first / "docs" / "foundation"
     foundation.mkdir(parents=True)
     (foundation / "conformance.md").write_text(
@@ -45,6 +46,7 @@ def clones(tmp_path: Path) -> tuple[Path, Path, Path]:
     git(first, "remote", "add", "origin", str(origin))
     git(first, "push", "-u", "origin", "main")
     git(tmp_path, "clone", "-b", "main", str(origin), str(second))
+    git(second, "config", "commit.gpgsign", "false")
     return origin, first, second
 
 
@@ -138,7 +140,7 @@ def test_added_row_requires_reservation_and_duplicate_fails(clones: tuple[Path, 
                         "| 41 | duplicate | `doc.md#duplicate` | — | **open** |\n")
     duplicate = run(first, "check", "decision")
     assert duplicate.returncode == 1
-    assert "duplicate decision" in duplicate.stderr
+    assert "duplicate register row 41" in duplicate.stderr
 
 
 def test_remote_read_failure_is_not_a_pass(clones: tuple[Path, Path, Path]) -> None:
@@ -243,13 +245,13 @@ def test_an_indented_table_row_still_needs_a_reservation(clones: tuple[Path, Pat
     assert run(first, "check", "revision").returncode == 0
 
 
-def test_a_bold_or_backticked_number_cell_still_needs_a_reservation(clones: tuple[Path, Path, Path]) -> None:
+def test_a_bold_or_backticked_number_cell_is_rejected(clones: tuple[Path, Path, Path]) -> None:
     _, first, _ = clones
     register = first / "docs" / "foundation" / "conformance.md"
     register.write_text(register.read_text() + "| **41** | q | `d#a` | \u2014 | **ruled** |\n")
     missing = run(first, "check", "decision")
     assert missing.returncode == 1
-    assert "decision 41 has no reservation" in missing.stderr
+    assert "malformed register row" in missing.stderr
     revisions = first / "docs" / "foundation" / "revisions.md"
     revisions.write_text(revisions.read_text() + "| `18` | pass | backticked |\n")
-    assert "revision 18 has no reservation" in run(first, "check", "revision").stderr
+    assert "malformed revision row" in run(first, "check", "revision").stderr

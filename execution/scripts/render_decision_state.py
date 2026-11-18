@@ -32,6 +32,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from foundation_register_rows import decision_rows
+
 FOUNDATION_DIR = Path("docs/foundation")
 REGISTER_DOC = "conformance.md"
 DEFAULT_OUT = FOUNDATION_DIR / "decision_state.md"
@@ -42,16 +44,6 @@ MAIN_REF = "origin/main"
 # for the single-source projection -- see `collect_main` for why a row-adding PR
 # cannot regenerate correctly against `origin/main` alone.
 WORKTREE_SOURCE = "WORKTREE"
-
-# A register row: "| 73 | question | pointer | blocks | **open** (date) |", or
-# the combined "| 1–12 |" row. The status is the LAST cell.
-ROW_RE = re.compile(r"^\|\s*(\d+(?:[–-]\d+)?)\s*\|(.*)\|\s*$")
-
-# The status is the BOLD LEAD of the last cell, never a word appearing later in
-# that cell's prose. Matching by containment reads "never reopened" and "before
-# the step opens" as statuses and mislabels ruled rows; the table is the
-# authority, so parsing it loosely would be the same defect one layer down.
-STATUS_LEAD_RE = re.compile(r"^\s*\*\*([^*]+?)\*\*")
 
 # Longest-first: "ruled in part" must beat "ruled". "reopened" is a status of
 # its own -- a question ruled and then unsettled is NOT ruled.
@@ -125,118 +117,13 @@ def run(args: list[str]) -> tuple[int, str]:
     return proc.returncode, proc.stdout
 
 
-REGISTER_HEADING = "## The register of open design decisions"
-
-
-# A line that LOOKS like a numbered register row: optional indentation, an optional leading
-# pipe, a number (optionally decorated with bold, backticks or underscores, optionally a
-# range) and then a pipe. One test, used for rows inside the register section and for
-# register-shaped rows outside it, so no reader can disagree with another about what a row is.
-ROW_LIKE_RE = re.compile(r"^\s*\|?\s*[*_`]*\s*\d+(?:\s*[\u2013-]\s*\d+)?[*_`]*\s*\|")
-
-
-def row_like_cells(line: str) -> list[str] | None:
-    """The cells of a row-like line, or None when the line is not row-like."""
-    if not ROW_LIKE_RE.match(line):
-        return None
-    return [cell.strip() for cell in line.strip().strip("|").split("|")]
-
-
-def register_section(text: str) -> str:
-    """The text the register's rows are read from: the register section, up to the next
-    `## ` heading. A text with no such heading (a bare table) is read whole. Validation and
-    projection both read ONLY this text, so no row can be projected that was not validated
-    and none can be skipped silently."""
-    start = text.find(REGISTER_HEADING)
-    if start < 0:
-        return text
-    end = text.find("\n## ", start + len(REGISTER_HEADING))
-    return text[start:] if end < 0 else text[start:end]
-
-
 def parse_rows(text: str) -> dict[str, dict[str, str]]:
     """Return {row number as written: {question, argued_in, blocks, status, cell}}."""
-    rows: dict[str, dict[str, str]] = {}
-    for line in register_section(text).split("\n"):
-        m = ROW_RE.match(line)
-        if not m:
-            continue
-        cells = [c.strip() for c in m.group(2).split("|")]
-        if len(cells) < 4:
-            continue
-        lead = STATUS_LEAD_RE.match(cells[-1])
-        if not lead:
-            continue
-        # Exact match only. A prefix match let "**ruled-ish**" or "**ruled out**"
-        # project as ruled; an unknown value stays as written (and the clean-render
-        # check rejects it) rather than being read as the nearest status.
-        status = lead.group(1)
-        rows[m.group(1)] = {
-            "question": cells[0],
-            "argued_in": cells[1],
-            "blocks": cells[2],
-            "status": status,
-            "status_cell": cells[-1],
-        }
-    return rows
+    return decision_rows(text)
 
 
 def validate_register(text: str) -> None:
-    """Reject a malformed register: every numbered row in the register section must be a
-    well-formed row with an EXACT declared status and a number used once.
-
-    This reads the same text the projection reads (`register_section`), so a row cannot be
-    projected unvalidated, and a malformed numbered row - after a blank line or anywhere in
-    the section - is an error, never a silent omission.
-    """
-    section = register_section(text)
-    if "| # | The question |" not in section:
-        raise ValueError("register table header is missing")
-    # Completeness: the section must hold the WHOLE register. A level-two heading inserted
-    # among the rows ends the section early, which would drop every later row from the
-    # projection while the check still passed. Any register-shaped row (a numbered row whose
-    # last cell opens with a bold status) outside the section is therefore an error.
-    outside = text.replace(section, "", 1) if section is not text else ""
-    for line in outside.splitlines():
-        cells = row_like_cells(line)
-        if cells is None:
-            continue
-        # ANY numbered table row outside the register section is an error, whatever its status
-        # cell or column count: the real document has none (checked), so a numbered row there is
-        # either a register row cut off by an inserted heading or a table that must not use
-        # the register's row shape. The register's boundaries are explicit and exclusive.
-        raise ValueError(
-            f"numbered table row {cells[0][:20]!r} lies outside the register section "
-            f"({REGISTER_HEADING!r} up to the next level-two heading); a heading "
-            "inside the register would drop later rows from the projection"
-        )
-    seen: set[str] = set()
-    for line in section.splitlines():
-        # A line that looks like a numbered table row - with or without its leading pipe,
-        # indented or not - is a row the projection must either read or reject. Markdown
-        # renders an indented or pipe-less row as part of the table, so skipping it here would
-        # omit it from the projection silently.
-        if row_like_cells(line) is None:
-            continue  # header, separator, prose
-        match = ROW_RE.match(line)
-        if not match:
-            raise ValueError(f"malformed register row: {line[:100]}")
-        number = match.group(1)
-        cells = [cell.strip() for cell in match.group(2).split("|")]
-        lead = STATUS_LEAD_RE.match(cells[-1]) if len(cells) >= 4 else None
-        if len(cells) < 4 or not all(cells[:3]) or not lead:
-            raise ValueError(f"malformed register row {number}")
-        status = lead.group(1)
-        if status not in STATUS_ORDER:
-            raise ValueError(
-                f"unknown status {status!r} in register row {number}; "
-                f"allowed exactly: {', '.join(STATUS_ORDER)}"
-            )
-        if number in seen:
-            raise ValueError(f"duplicate register row {number}")
-        seen.add(number)
-    if not seen:
-        raise ValueError("register table has no numbered rows")
+    decision_rows(text)
 
 
 def requalify(text: str) -> str:

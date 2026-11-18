@@ -714,7 +714,7 @@ class TestRenderCleanly(unittest.TestCase):
         error = io.StringIO()
         with contextlib.redirect_stderr(error):
             self.assertEqual(ds.main(["--check", "--source", "worktree"]), 1)
-        self.assertIn("malformed register row 2", error.getvalue())
+        self.assertIn("malformed register row", error.getvalue())
 
     def test_broken_row_prefix_fails(self):
         import contextlib
@@ -762,7 +762,6 @@ class TestRenderCleanly(unittest.TestCase):
         for bad_row in (
             "| 999 | question | `x#q` | \u2014 | plain open |",      # no bold status
             "999 | question | `x#q` | \u2014 | **open** |",          # no leading pipe
-            "   | 999 | question | `x#q` | \u2014 | **open** |",     # indented table row
             "| 999 | question | `x#q` | **open** |",                 # a cell short
         ):
             with self.subTest(row=bad_row):
@@ -893,10 +892,9 @@ class TestRenderCleanly(unittest.TestCase):
     def test_validation_and_projection_select_the_same_rows(self):
         text = register(**{"1": "**open**", "2": "**ruled**"})
         self.assertEqual(sorted(ds.parse_rows(text)), ["1", "2"])
-        with_prose_table = text + "\n## Another section\n| 5 | q | `a#b` | \u2014 | **open** |\n"
-        # a numbered row outside the register section is neither projected nor validated
-        self.assertEqual(sorted(ds.parse_rows("## The register of open design decisions\n" + text + "\n## Another section\n| 5 | q | `a#b` | \u2014 | **open** |\n")), ["1", "2"])
-        self.assertEqual(sorted(ds.parse_rows(with_prose_table)), ["1", "2", "5"])  # bare text: no heading, read whole
+        with_prose_table = "## The register of open design decisions\n" + text + "\n## Another section\n| 5 | q | `a#b` | \u2014 | **open** |\n"
+        with self.assertRaisesRegex(ValueError, "outside the register section"):
+            ds.parse_rows(with_prose_table)
 
     def test_every_declared_status_passes_the_clean_render(self):
         rows = {str(i + 1): f"**{status}**" for i, status in enumerate(ds.STATUS_ORDER)}
@@ -904,9 +902,8 @@ class TestRenderCleanly(unittest.TestCase):
         self.assertEqual((code, err), (0, ""))
 
     def test_a_prefixed_status_is_never_read_as_ruled(self):
-        parsed = ds.parse_rows(register(**{"1": "**ruled out**", "2": "**ruled**"}))
-        self.assertEqual(parsed["2"]["status"], "ruled")
-        self.assertNotEqual(parsed["1"]["status"], "ruled")
+        with self.assertRaisesRegex(ValueError, "unknown status"):
+            ds.parse_rows(register(**{"1": "**ruled out**", "2": "**ruled**"}))
 
     def test_duplicate_row_fails(self):
         import contextlib
