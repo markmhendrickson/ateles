@@ -722,6 +722,10 @@ def test_unreadable_authenticated_reply_notices_once_then_routes_once(
     assert len(notices) == 1
     assert ("v1.2.3" if kind == "release" else "o/r#7") in notices[0]
     assert "Telegram" in notices[0]
+    assert "retries the read on its next poll" in notices[0]
+    assert "Another email reply cannot approve" in notices[0]
+    assert f"`{'approve v1.2.3' if kind == 'release' else 'approve'}`" in notices[0]
+    assert "To retry by email" not in notices[0]
     assert len(posts) == 1
 
 
@@ -1634,6 +1638,11 @@ def test_partial_sweep_corrects_readable_but_never_approves(monkeypatch, tmp_pat
     assert posts == []
     assert "readable" not in state.get("processed_ids", [])
     assert len([note for note in notices if "could not be read yet" in note]) == 1
+    notice = next(note for note in notices if "could not be read yet" in note)
+    assert "retries the read on its next poll" in notice
+    assert "Another email reply cannot approve" in notice
+    assert "Telegram" in notice
+    assert "To retry by email" not in notice
     if readable == "approval":
         assert state.get("approval_correction_ids", []) == []
         assert state.get("held_approval_notice_ids") == ["readable"]

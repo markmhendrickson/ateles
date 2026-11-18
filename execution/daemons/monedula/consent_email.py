@@ -753,11 +753,31 @@ def request_and_collect(
             result.blocked.add(key)
         result.reason_code = "consent_reply_read_failed"
         result.channel_ok = False
-        if outcome.detail == "reply_quote_boundary_unknown" and outcome.unreadable_replies:
-            _maybe_send_correction(
-                items, ["Unreadable operator reply"], path.parent,
-                no_reply_needed=settled | unknown,
+        if outcome.unreadable_replies:
+            # The old token remains held by the shared reader's complete-sweep
+            # rule. Issue a new journal generation for the same obligations;
+            # only the fresh token can authorize them on the next poll.
+            try:
+                new_generation = payment_journal.next_generation(jpath)
+            except payment_journal.JournalError as exc:
+                log.error(f"consent_reissue_failed — payments held: {exc}")
+                return result
+            fresh_items = build_pending_items(triggered, yesterday_str, new_generation)
+            subject, body = build_request_body(
+                fresh_items, superseded=True, settled=settled, unknown=unknown,
             )
+            body = (
+                "A reply to the previous consent request could not be read. "
+                "No payment was made. That request remains held; replying to "
+                "it again will not approve a payment. This is a fresh consent "
+                "request with new codes. Only a reply to this new request "
+                "using its new codes can count.\n\n" + body
+            )
+            if send_request(subject, body):
+                _save_mark(path, fp, time.time(), generation=new_generation)
+                result.send_count += 1
+            else:
+                log.error("consent_reissue_send_failed — payments held")
         return result
 
     # kind == ok

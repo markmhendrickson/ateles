@@ -192,9 +192,53 @@ _RESERVED_START = frozenset({"if", "then", "else", "elif", "do", "while", "until
                              "!", "{", "}", "fi", "done", "esac"})
 _EXPORTERS = frozenset({"export", "declare", "typeset", "local", "readonly"})
 # Commands whose arguments are themselves a command.
-_WRAPPERS = frozenset({"env", "command", "exec", "builtin", "xargs", "nice", "timeout",
-                       "gtimeout", "nohup", "time", "sudo", "doas", "stdbuf",
-                       "caffeinate", "unbuffer", "watch", "parallel", "script", "flock"})
+# Each entry is (flags, options with a separate or attached value, leading
+# positional operands, environment assignments, opaque command options).
+# An unlisted option is indeterminate, so it cannot locate an executable.
+_WRAPPER_GRAMMAR = {
+    "env": ({"-i", "-0", "-v", "--ignore-environment", "--null", "--debug"},
+            {"-u", "--unset", "-C", "--chdir"}, 0, True, {"-S", "--split-string"}),
+    "command": ({"-p", "-v", "-V"}, set(), 0, False, set()),
+    "exec": ({"-c", "-l"}, {"-a"}, 0, False, set()),
+    "builtin": (set(), set(), 0, False, set()),
+    "xargs": ({"-0", "-r", "-t", "-p", "-x", "--null", "--no-run-if-empty",
+               "--verbose", "--interactive", "--exit"},
+              {"-a", "-d", "-E", "-e", "-I", "-i", "-L", "-l", "-n", "-P", "-s",
+               "--arg-file", "--delimiter", "--eof", "--replace", "--max-lines",
+               "--max-args", "--max-procs", "--max-chars"}, 0, False, set()),
+    "nice": (set(), {"-n", "--adjustment"}, 0, False, set()),
+    "timeout": ({"--foreground", "--preserve-status", "-v", "--verbose"},
+                {"-s", "--signal", "-k", "--kill-after"}, 1, False, set()),
+    "gtimeout": ({"--foreground", "--preserve-status", "-v", "--verbose"},
+                 {"-s", "--signal", "-k", "--kill-after"}, 1, False, set()),
+    "nohup": (set(), set(), 0, False, set()),
+    "time": ({"-p", "-l"}, {"-f", "--format", "-o", "--output"}, 0, False, set()),
+    "sudo": ({"-A", "-b", "-E", "-H", "-K", "-k", "-n", "-S", "-v", "-V", "-l",
+              "--non-interactive", "--preserve-env"},
+             {"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt",
+              "-C", "--close-from", "-D", "--chdir", "-R", "--chroot", "-t", "--type"},
+             0, False, set()),
+    "doas": ({"-n", "-s"}, {"-u"}, 0, False, set()),
+    "stdbuf": (set(), {"-i", "-o", "-e"}, 0, False, set()),
+    "caffeinate": ({"-d", "-i", "-m", "-s", "-u"}, {"-t", "-w"}, 0, False, set()),
+    "unbuffer": ({"-p"}, set(), 0, False, set()),
+    "watch": ({"-b", "-c", "-d", "-e", "-g", "-t", "-x"},
+              {"-n", "--interval"}, 0, False, set()),
+    "parallel": ({"-k", "--keep-order", "--halt-on-error"},
+                 {"-j", "--jobs", "-N", "--max-args", "-S", "--sshlogin"},
+                 0, False, set()),
+    "script": ({"-q", "-f", "-e"}, {"-a", "-o", "-O", "-I", "-t"},
+               0, False, {"-c", "--command"}),
+    "flock": ({"-s", "-x", "-u", "-n", "-o", "--shared", "--exclusive",
+               "--unlock", "--nonblock", "--close"},
+              {"-w", "--timeout", "-E", "--conflict-exit-code"}, 1, False, set()),
+    "setsid": ({"-c", "-f", "-w", "--ctty", "--fork", "--wait"},
+               set(), 0, False, set()),
+    "ionice": ({"-t", "--ignore"}, {"-c", "--class", "-n", "--classdata"},
+               0, False, set()),
+    "chroot": ({"--skip-chdir"}, {"--userspec", "--groups"}, 1, False, set()),
+}
+_WRAPPERS = frozenset(_WRAPPER_GRAMMAR)
 _SHELLS = re.compile(r"^(?:sh|bash|zsh|dash|ksh|mksh|fish|tcsh|csh|busybox)$")
 _INTERPRETERS = re.compile(
     r"^(?:python|pypy|node|nodejs|deno|bun|perl|ruby|php|osascript|lua|tclsh|"
@@ -1213,49 +1257,65 @@ def _strip_command_prefix(words: list[Word], *, wrappers: bool = False,
     return rest
 
 
-def _unresolved_wrapped_executable(words: list[Word]) -> bool:
-    """Locate each executable after a wrapper without treating data as code."""
+def _wrapped_executable(words: list[Word]) -> list[Word] | None:
+    """Return the literal executable and tail, or deny an indeterminate wrapper."""
     rest = words
-    value_options = {
-        "env": {"-u", "--unset", "-C", "--chdir"},
-        "sudo": {"-u", "--user", "-g", "--group", "-h", "--host"},
-        "doas": {"-u"},
-        "nice": {"-n", "--adjustment"},
-        "xargs": {"-I", "-L", "-n", "-P", "-s", "-E", "-d"},
-        "stdbuf": {"-i", "-o", "-e"},
-        "flock": {"-w", "-E"},
-    }
     while rest and os.path.basename(rest[0].text) in _WRAPPERS:
         base = os.path.basename(rest[0].text)
+        flags, values, positionals, assignments, opaque = _WRAPPER_GRAMMAR[base]
         i = 1
+        ended = False
         while i < len(rest):
             word = rest[i]
-            if word.text == "--":
+            option = word.text
+            if not ended and option == "--":
+                ended = True
                 i += 1
                 break
-            if base == "env" and _ASSIGNMENT.match(word.text):
+            if not ended and (option in opaque or any(
+                option.startswith(name + "=") or (name.startswith("-") and
+                not name.startswith("--") and option.startswith(name) and len(option) > len(name))
+                for name in opaque
+            )):
+                return None
+            if not ended and option in flags:
                 i += 1
                 continue
-            if word.text in value_options.get(base, set()):
+            if base == "env" and not ended and re.fullmatch(r"-[i0v]+u", option):
+                if i + 1 >= len(rest) or rest[i + 1].text == "--":
+                    return None
                 i += 2
                 continue
-            if word.text.startswith("-"):
+            if not ended and option in values:
+                if i + 1 >= len(rest) or rest[i + 1].text == "--":
+                    return None
+                i += 2
+                continue
+            attached = next((name for name in values if (
+                option.startswith(name + "=") if name.startswith("--") else
+                option.startswith(name) and len(option) > len(name))), None)
+            if not ended and attached:
                 i += 1
                 continue
-            if base in {"timeout", "gtimeout"} and i == 1:
-                i += 1  # duration before the command
-                continue
-            if base == "flock" and i == 1:
-                i += 1  # lock file or descriptor before the command
+            if not ended and option.startswith("-"):
+                return None
+            if not ended and assignments and _ASSIGNMENT.match(option):
+                i += 1
                 continue
             break
-        if i >= len(rest):
-            return False
+        if len(rest) - i <= positionals:
+            return None
+        i += positionals
         executable = rest[i]
-        if executable.expanded or executable.braced or executable.globbed or executable.concatenated:
-            return True
+        if (executable.expanded or executable.braced or executable.globbed or
+                executable.concatenated):
+            return None
         rest = rest[i:]
-    return False
+    return rest if rest else None
+
+
+def _unresolved_wrapped_executable(words: list[Word]) -> bool:
+    return _wrapped_executable(words) is None
 
 
 def _is_git_binary_word(text: str) -> bool:
@@ -1443,7 +1503,12 @@ def _nested_program_violation(cmd: SimpleCommand, rest: list[Word], depth: int) 
             return True, "eval body assembled by the shell"
         return True, _judge_program_body(" ".join(w.text for w in body), depth)
     starts = [0]
-    if base in _WRAPPERS or base == "find":
+    if base in _WRAPPERS:
+        executable = _wrapped_executable(rest)
+        if executable is None:
+            return True, "wrapper executable cannot be resolved literally"
+        starts.append(len(rest) - len(executable))
+    elif base == "find":
         starts += [i for i, w in enumerate(rest[1:], 1)
                    if _SHELLS.match(os.path.basename(w.text)) or
                    _INTERPRETERS.match(os.path.basename(w.text)) or
@@ -1669,7 +1734,9 @@ def _judge(command: str, depth: int, in_substitution: bool) -> str | None:
     for index, cmd in enumerate(commands):
         if in_substitution and _is_git_invocation(cmd):
             return "command or process substitution around git"
-        stripped = _strip_command_prefix(cmd.words, wrappers=True)
+        stripped = _strip_command_prefix(cmd.words)
+        if stripped and os.path.basename(stripped[0].text) in _WRAPPERS:
+            stripped = _wrapped_executable(stripped) or []
         if stripped:
             runner = os.path.basename(stripped[0].text)
             if runner in _EVALUATORS and len(stripped) > 1:

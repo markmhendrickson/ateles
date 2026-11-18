@@ -753,6 +753,8 @@ _GOOGLE_PASS = (
 def _fake_gws(tok: str, *, auth_by_id: dict, body_by_id: dict):
     def fake(args, timeout=45):
         if "+triage" in args:
+            if tok not in args[args.index("--query") + 1]:
+                return {"complete": True, "messages": []}
             return {"complete": True, "messages": [
                 {"id": mid, "subject": f"RE: [ATELES] {subject_marker(tok)}",
                  "from": "Op <op@example.com>"}
@@ -1119,10 +1121,15 @@ def test_consent_parts_and_quote_boundaries(
     assert result.approved == ({consent_email.match_key(item) for item in items} if approved else set())
     if unreadable:
         assert result.reason_code == "consent_reply_read_failed"
-        corrections = [body for subject, body in sends if "correction" in subject]
-        assert len(corrections) == 1
-        for item in items:
-            assert consent_email.accepted_reply_form(item) in corrections[0]
+        assert len(sends) == 2
+        assert "No payment was made" in sends[1][1]
+        assert "Only a reply to this new request" in sends[1][1]
+        fresh = consent_email.build_pending_items(triggered, "2026-09-22", 2)
+        for item in fresh:
+            if len(fresh) > 1:
+                assert consent_email.accepted_reply_form(item) in sends[1][1]
+            else:
+                assert subject_marker(item.token) in sends[1][0]
     elif shape == "unseparated_headers":
         assert result.reason_code == "consent_reply_unrecognized"
 
@@ -1168,7 +1175,8 @@ def test_unaccounted_or_empty_html_holds_payment_consent(monkeypatch, tmp_path, 
     assert result.approved == set()
     assert result.reason_code == "consent_reply_read_failed"
     assert all(result.states[consent_email.match_key(item)] == "blocked" for item in items)
-    assert len([body for subject, body in sends if "correction" in subject]) == 1
+    assert len(sends) == 2
+    assert "Only a reply to this new request" in sends[1][1]
 
 
 @pytest.mark.parametrize("calendar", (True, False))
@@ -1201,7 +1209,7 @@ def test_unsafe_font_holds_payment(monkeypatch, tmp_path, calendar, markup):
     assert result.reason_code == "consent_reply_read_failed"
 
 
-def test_unreadable_payment_reply_gets_one_correction_and_no_payment(monkeypatch, tmp_path):
+def test_unreadable_payment_reply_gets_fresh_request_and_no_payment(monkeypatch, tmp_path):
     h = _Handler("therapy", label="Example", amount=60)
     item = consent_email.build_pending_items([(h, [{}])], "2026-09-22")[0]
     _arm_email(monkeypatch)
@@ -1209,12 +1217,57 @@ def test_unreadable_payment_reply_gets_one_correction_and_no_payment(monkeypatch
     monkeypatch.setattr(consent_email, "send_request", lambda *args: sent.append(args) or True)
     monkeypatch.setattr(_ec, "gws_json", _fake_gws(
         item.token, auth_by_id={"m1": [_GOOGLE_PASS]},
-        body_by_id={"m1": {"body_text": "ATTENDED\n-- \nI withdraw"}}))
+        body_by_id={"m1": {"body_text": "ATTENDED", "body_html": "<p>SKIP</p>"}}))
     for _ in range(2):
         result = consent_email.request_and_collect(
             [(h, [{}])], "2026-09-22", state_path=tmp_path / "m.json")
         assert result.approved == set()
-    assert len(sent) == 2  # one request, one correction; the second poll retries the held reply
+    assert len(sent) == 2  # the second poll reads only the fresh token
+    assert "previous consent request could not be read" in sent[1][1]
+    assert "Only a reply to this new request" in sent[1][1]
+
+
+def test_unreadable_reply_holds_old_sweep_and_fresh_token_can_approve(monkeypatch, tmp_path):
+    h = _Handler("therapy", label="Example", amount=60)
+    triggered = [(h, [{}])]
+    old = consent_email.build_pending_items(triggered, "2026-09-22", 1)[0]
+    fresh = consent_email.build_pending_items(triggered, "2026-09-22", 2)[0]
+    _arm_email(monkeypatch)
+    sends = []
+    monkeypatch.setattr(consent_email, "send_request", lambda *a: sends.append(a) or True)
+    monkeypatch.setattr(_ec, "_fetch_auth_results", lambda _mid: [_GOOGLE_PASS])
+
+    def fake_gws(args, timeout=45):
+        if "+triage" in args:
+            query = args[args.index("--query") + 1]
+            mids = ["old-unreadable", "old-valid"] if old.token in query else ["fresh-valid"]
+            return {"complete": True, "messages": [
+                {"id": mid, "subject": f"RE: [ATELES] {subject_marker(old.token if mid.startswith('old') else fresh.token)}",
+                 "from": "Op <op@example.com>"} for mid in mids]}
+        if "+read" in args:
+            mid = args[args.index("--id") + 1]
+            if mid == "old-unreadable":
+                return {"body_text": "ATTENDED", "body_html": "<p>SKIP</p>"}
+            item = old if mid == "old-valid" else fresh
+            return {"body_text": f"ATTENDED {subject_marker(item.token)}"}
+        raise AssertionError(args)
+
+    monkeypatch.setattr(_ec, "gws_json", fake_gws)
+    first = consent_email.request_and_collect(triggered, "2026-09-22",
+                                               state_path=tmp_path / "m.json")
+    assert first.reason_code == "consent_reply_read_failed"
+    assert first.approved == set()
+    assert h.execute_calls == []
+    assert len(sends) == 2
+    assert "request remains held" in sends[1][1]
+    assert "Only a reply to this new request" in sends[1][1]
+    assert subject_marker(fresh.token) in sends[1][0]
+
+    second = consent_email.request_and_collect(triggered, "2026-09-22",
+                                                state_path=tmp_path / "m.json")
+    assert second.approved == {fresh.token}
+    assert old.token not in second.approved
+    assert len(sends) == 2
 
 
 @pytest.mark.parametrize("format", ("plain", "html"))

@@ -7,6 +7,7 @@ CLI runs it under prepare's --settings.
 """
 import json
 import io
+import importlib.util
 import os
 import subprocess
 import sys
@@ -17,6 +18,11 @@ from pathlib import Path
 import pytest
 
 HOOK = Path(__file__).resolve().parent / "git_hook_bypass_guard.py"
+
+_guard_spec = importlib.util.spec_from_file_location("git_hook_bypass_guard", HOOK)
+_guard = importlib.util.module_from_spec(_guard_spec)
+sys.modules[_guard_spec.name] = _guard
+_guard_spec.loader.exec_module(_guard)
 
 
 def run_hook(payload) -> subprocess.CompletedProcess:
@@ -644,6 +650,58 @@ def test_assembled_command_name_with_ordinary_path_refused(name):
                                     "xargs", "time", "nice", "builtin"))
 def test_wrapper_cannot_resolve_expanded_executable(prefix):
     assert_refused(f"{prefix} $EXECUTABLE status")
+
+
+WRAPPER_FORMS = {
+    "env": "-u NAME -i NAME=1", "command": "-v", "exec": "-l",
+    "builtin": "", "xargs": "-n 2", "nice": "-n 5",
+    "timeout": "-s TERM 5", "gtimeout": "-k 2 5", "nohup": "",
+    "time": "-p", "sudo": "-u someone", "doas": "-u someone",
+    "stdbuf": "-o L", "caffeinate": "-t 5", "unbuffer": "-p",
+    "watch": "-n 2", "parallel": "-j 2", "script": "-q",
+    "flock": "-w 2 /tmp/lockfile", "setsid": "-f",
+    "ionice": "-c 2", "chroot": "--userspec=1:1 /",
+}
+
+
+def test_wrapper_grammar_covers_every_recognized_wrapper():
+    assert set(WRAPPER_FORMS) == set(_guard._WRAPPERS)
+    assert set(_guard._WRAPPER_GRAMMAR) == set(_guard._WRAPPERS)
+
+
+@pytest.mark.parametrize("wrapper,operands", WRAPPER_FORMS.items())
+def test_wrapper_executable_rule_after_its_operands(wrapper, operands):
+    prefix = f"{wrapper} {operands}".strip()
+    assert_refused(f"{prefix} $EXECUTABLE ok")
+    assert_allowed(f"{prefix} echo ok")
+    assert_refused(f"{wrapper} --unknown-option {operands} echo ok")
+
+
+@pytest.mark.parametrize("wrapper,operands", WRAPPER_FORMS.items())
+def test_wrapper_terminator_locates_literal_executable(wrapper, operands):
+    prefix = f"{wrapper} {operands}".strip()
+    # The terminator belongs before leading operands for these wrappers.
+    if wrapper in {"timeout", "gtimeout", "flock", "chroot"}:
+        bare = {"timeout": "5", "gtimeout": "5", "flock": "/tmp/lockfile",
+                "chroot": "/"}[wrapper]
+        prefix = f"{wrapper} -- {bare}"
+    else:
+        prefix += " --"
+    assert_refused(f"{prefix} $EXECUTABLE ok")
+    assert_allowed(f"{prefix} echo ok")
+
+
+@pytest.mark.parametrize("command", (
+    "env -u NAME -i NAME=1 $EXECUTABLE ok",
+    "sudo -u someone -g group $EXECUTABLE ok",
+    "xargs -n 2 -P 3 $EXECUTABLE ok",
+    "timeout -s TERM -k 2 5 $EXECUTABLE ok",
+    "flock -w 2 -E 1 /tmp/lockfile $EXECUTABLE ok",
+    "ionice -c 2 -n 3 $EXECUTABLE ok",
+    "chroot --userspec=1:1 / $EXECUTABLE ok",
+))
+def test_wrapper_multiple_operands_locate_executable(command):
+    assert_refused(command)
 
 
 @pytest.mark.parametrize("command", (
