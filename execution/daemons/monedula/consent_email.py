@@ -761,10 +761,13 @@ def request_and_collect(
 
     notified_ids = set(mark.get("notified_reply_ids") or []) if already_sent else set()
     held_ids = set(mark.get("held_reply_ids") or []) if already_sent else set()
+    unnotified_corrections = [reply for reply in outcome.correction_only_replies
+                              if reply.message_id not in notified_ids]
     fresh_corrections = [reply for reply in outcome.correction_only_replies
-                         if reply.message_id not in notified_ids]
+                         if reply.message_id not in held_ids]
     correction_holds = bool(fresh_corrections)
     if correction_holds:
+        held_ids.update(reply.message_id for reply in fresh_corrections)
         held_ids.update(reply.message_id for reply in outcome.replies)
         try:
             _save_mark(path, fp, float(mark.get("sent_at") or time.time()),
@@ -778,7 +781,7 @@ def request_and_collect(
         forms = "; ".join(
             f"`{'attended' if item.is_calendar else 'yes'} {item.handler_name}`"
             for item in items)
-        for reply in fresh_corrections:
+        for reply in unnotified_corrections:
             try:
                 delivered = on_missing_token_reply(
                     f"monedula: payment consent for {items[0].payment_date} is held. "
