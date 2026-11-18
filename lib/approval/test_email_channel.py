@@ -18,6 +18,59 @@ import pytest
 from lib.approval import email_channel as ec
 
 
+def triage_contract_response(shape: str, fault: str, row: dict, max_msgs: int = 2):
+    """Mirror the installed CLI's object output and its documented array form.
+
+    The real read-only output has messages, query, resultSizeEstimate; each row
+    has date, from, id, subject. All values below are synthetic.
+    """
+    rows = [dict(row)]
+    if fault == "invalid_row":
+        rows[0]["id"] = []
+    if fault == "invalid_date":
+        rows[0]["date"] = []
+    if fault == "full_page":
+        rows.extend({**row, "id": f"synthetic-{index}"}
+                    for index in range(1, max_msgs))
+    if shape == "array":
+        return rows
+    if shape == "real_object":
+        result = {"messages": rows, "query": "synthetic-query",
+                  "resultSizeEstimate": len(rows)}
+    elif shape == "results":
+        result = {"results": rows, "totalCount": len(rows)}
+    else:
+        raise AssertionError(shape)
+    if fault == "continuation":
+        result["nextPageToken"] = "synthetic-next"
+    if fault == "estimate":
+        result["resultSizeEstimate"] = len(rows) + 1
+    if fault == "invalid_envelope":
+        result.pop("messages" if shape == "real_object" else "results")
+    if fault == "invalid_token":
+        result["nextPageToken"] = 42
+    return result
+
+
+@pytest.mark.parametrize("shape,fault", (
+    *((shape, fault) for shape in ("real_object", "array", "results")
+      for fault in ("none", "full_page", "invalid_row", "invalid_date")),
+    *((shape, fault) for shape in ("real_object", "results")
+      for fault in ("continuation", "estimate", "invalid_envelope", "invalid_token")),
+))
+def test_triage_cli_shape_and_completeness_contract(shape, fault):
+    row = {"date": "2026-11-18T10:00:00Z", "from": "Op <op@example.com>",
+           "id": "synthetic-one", "subject": "RE: synthetic approval"}
+    response = triage_contract_response(shape, fault, row)
+    rows, detail = ec._complete_triage_rows(response, 2)
+    if fault == "none":
+        assert rows == [row] and detail == ""
+    else:
+        assert rows is None
+        assert detail == ("gws_triage_invalid_response" if fault.startswith("invalid")
+                          else "gws_triage_truncated")
+
+
 @pytest.mark.parametrize("colour", (
     "#0000", "#fff0", "hsla(0,0%,0%,0)", "hwb(0 0% 0% / 0)",
     "lab(0 0 0 / 0)", "lch(0 0 0 / 0)", "color(srgb 0 0 0 / 0)",
@@ -568,6 +621,13 @@ class TestGwsJson:
              patch.object(ec.subprocess, "run", return_value=_ok(out)):
             assert ec.gws_json(["gmail", "+triage"]) == {"ok": True}
 
+    def test_bracketed_banner_before_array(self, monkeypatch):
+        monkeypatch.setenv("OPERATOR_EMAIL", "op@example.com")
+        out = '[gws keyring]\n[{"id":"synthetic-one"}]'
+        with patch.object(ec.shutil, "which", return_value="/bin/gws"), \
+             patch.object(ec.subprocess, "run", return_value=_ok(out)):
+            assert ec.gws_json(["gmail", "+triage"]) == [{"id": "synthetic-one"}]
+
     def test_missing_gws_returns_none(self):
         with patch.object(ec.shutil, "which", return_value=None):
             assert ec.gws_json(["gmail", "+triage"]) is None
@@ -994,6 +1054,7 @@ class TestSenderDomainAuthentication:
             assert outcome.rejected_replies == ()
 
     @pytest.mark.parametrize("auth", (
+        {"id": "m1", "payload": {}},  # Partial Gmail metadata is a failed read.
         {"id": "other", "payload": {"headers": [
             {"name": "Authentication-Results", "value": _GOOGLE_DMARC_PASS}]}},
         {"id": "m1", "payload": {"headers": [
@@ -1112,7 +1173,7 @@ class TestPartialReadFailsClosed:
 
     @pytest.mark.parametrize("collection,expected", (
         ({"complete": True, "messages": []}, "ok"),
-        ({"messages": []}, "transport_error"),
+        ({"messages": []}, "ok"),
         ({"complete": True, "messages": [], "nextPageToken": "next"}, "transport_error"),
         ({"complete": True, "messages": [], "resultSizeEstimate": 2}, "transport_error"),
         ({"complete": True, "messages": [], "has_more": True}, "transport_error"),

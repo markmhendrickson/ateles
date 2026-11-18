@@ -236,8 +236,11 @@ including a different PR or version in a correlation line, is not approval.
 Only text in known rendered prose elements inside the HTML body counts as
 authored text; unknown elements make the body unreadable. Head, title,
 script, style, template, form values and other non-rendered elements do not
-count. A substantive plain-text part takes precedence over HTML. For HTML-only
-replies, every element in the text's ancestor chain must have only allowed inline
+count. When both plain-text and HTML parts are present, each must yield the same
+authored text; disagreement or a present-but-empty counterpart is unreadable,
+held, and recoverable through the named Telegram approval path. A single
+plain-text part is read as plain text, and a single HTML part is read as HTML.
+For HTML-only replies, every element in the text's ancestor chain must have only allowed inline
 style properties: an allowlisted font family, safe font size and line height, font weight/style,
 text alignment/decoration, bounded margins and padding, white space, wrapping,
 `text-transform:none`, `direction:ltr`, `unicode-bidi:normal`, and inert borders.

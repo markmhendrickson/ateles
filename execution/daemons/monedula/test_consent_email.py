@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import sys
 import types
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,6 +23,7 @@ import payment_journal  # noqa: E402
 import monedula  # noqa: E402
 from lib.approval.email_channel import ReadRepliesOutcome
 from lib.approval.tokens import subject_marker, token_for
+from lib.approval.test_email_channel import triage_contract_response
 
 
 @pytest.fixture(autouse=True)
@@ -1347,6 +1349,47 @@ def test_real_reader_bad_collection_or_part_never_executes(monkeypatch, tmp_path
     assert result.reason_code == "consent_reply_read_failed"
     monedula.main()
     assert h.execute_calls == []
+
+
+@pytest.mark.parametrize("batch", (False, True))
+@pytest.mark.parametrize("shape", ("real_object", "array", "results"))
+@pytest.mark.parametrize("fault", ("none", "full_page", "invalid_row"))
+def test_cli_triage_contract_controls_payment_execution(
+        monkeypatch, tmp_path, batch, shape, fault):
+    handlers = [_Handler("session_a", label="Synthetic A", amount=60)]
+    if batch:
+        handlers.append(_Handler("session_b", label="Synthetic B", amount=40))
+    _email_env(monkeypatch)
+    _install(monkeypatch, handlers, tmp_path)
+    _quiet_main(monkeypatch)
+    monkeypatch.setattr(consent_email, "send_request", lambda *args: True)
+    monkeypatch.setattr(_ec, "_gws", lambda: "/synthetic/gws")
+    monkeypatch.setattr(monedula, "_yesterday", lambda: date(2026, 9, 22))
+
+    def fake(args, timeout=45):
+        if "+triage" in args:
+            row = {"date": "2026-11-18T10:00:00Z", "from": "Op <operator@example.com>",
+                   "id": "synthetic-reply", "subject": "RE: synthetic consent"}
+            return triage_contract_response(shape, fault, row, 40)
+        if args[:4] == ["gmail", "users", "messages", "get"]:
+            return {"id": "synthetic-reply", "payload": {"headers": [
+                {"name": "Authentication-Results", "value": _GOOGLE_PASS}]}}
+        if "+read" in args:
+            items = consent_email.build_pending_items(
+                [(h, h.matches([{}])) for h in handlers], "2026-09-22", 1)
+            return {"body_text": "\n".join(
+                f"ATTENDED {subject_marker(item.token)}" for item in items)}
+        raise AssertionError(args)
+
+    monkeypatch.setattr(_ec, "gws_json", fake)
+    triggered = [(h, h.matches([{}])) for h in handlers]
+    result = consent_email.request_and_collect(
+        triggered, "2026-09-22", state_path=tmp_path / "consent.json")
+    assert len(result.approved) == (len(handlers) if fault == "none" else 0)
+    if fault != "none":
+        assert result.reason_code == "consent_reply_read_failed"
+    monedula.main()
+    assert all(len(h.execute_calls) == (1 if fault == "none" else 0) for h in handlers)
 
 
 def test_consent_multi_item_reply_is_atomic_and_valid_reply_approves_both():

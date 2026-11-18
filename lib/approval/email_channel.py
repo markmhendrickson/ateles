@@ -580,8 +580,9 @@ def _gws() -> str | None:
 def gws_json(args: list[str], timeout: int = 45) -> Any:
     """Run a `gws` command and parse its JSON, tolerating the banner preamble.
 
-    gws prints a keyring/format banner before the JSON, so we start parsing at
-    the first '{' or '['. Returns None on any failure (fail-open).
+    gws can print a keyring/format banner before the JSON, including a banner
+    beginning with '['. Parse only a complete JSON value at a line start.
+    Returns None on any failure (fail-open).
     """
     gws = _gws()
     if not gws:
@@ -599,10 +600,12 @@ def gws_json(args: list[str], timeout: int = 45) -> Any:
         if len(out.encode("utf-8")) > 1048576:
             log.warning(f"gws {args[:2]} response exceeds approval read limit")
             return None
-        start = min([i for i in (out.find("{"), out.find("[")) if i >= 0] or [-1])
-        if start < 0:
-            return None
-        return json.loads(out[start:])
+        for match in re.finditer(r"(?m)^[ \t]*[\[{]", out):
+            try:
+                return json.loads(out[match.start():])
+            except json.JSONDecodeError:
+                continue
+        return None
     except Exception as exc:  # noqa: BLE001
         log.warning(f"gws json error: {exc}")
         return None
@@ -804,8 +807,6 @@ def _fetch_auth_results(message_id: str) -> list[str] | None:
     if not isinstance(payload, dict):
         return None
     headers = payload.get("headers")
-    if headers is None:
-        headers = []
     if not isinstance(headers, list):
         return None
     values: list[str] = []
@@ -839,27 +840,34 @@ def sender_domain_authenticated(auth_results: list[str]) -> bool:
 
 def _complete_triage_rows(data: Any, max_msgs: int) -> tuple[list[dict] | None, str]:
     """Accept only a complete, structurally valid mailbox collection."""
-    if not isinstance(data, dict):
+    if not isinstance(data, (dict, list)):
         return None, "gws_triage_invalid_response"
     if len(json.dumps(data).encode("utf-8")) > 1048576:
         return None, "gws_triage_oversized"
-    if "messages" in data and "results" in data:
+    if isinstance(data, dict) and "messages" in data and "results" in data:
         return None, "gws_triage_invalid_response"
-    rows = data.get("messages", data.get("results"))
+    rows = data if isinstance(data, list) else data.get("messages", data.get("results"))
     if not isinstance(rows, list):
         return None, "gws_triage_invalid_response"
     if any(not isinstance(row, dict) or
            not isinstance(row.get("id"), str) or not row["id"] or
            not isinstance(row.get("subject"), str) or
+           ("date" in row and not isinstance(row["date"], str)) or
            not isinstance(row.get("from", row.get("sender", row.get("From"))), str)
            for row in rows):
         return None, "gws_triage_invalid_response"
+    if isinstance(data, list):
+        return (rows, "") if len(rows) < max_msgs else (None, "gws_triage_truncated")
+    if "query" in data and not isinstance(data["query"], str):
+        return None, "gws_triage_invalid_response"
     if "complete" in data and not isinstance(data["complete"], bool):
         return None, "gws_triage_invalid_response"
-    if data.get("complete") is False or len(rows) > max_msgs:
+    if data.get("complete") is False or len(rows) >= max_msgs:
         return None, "gws_triage_truncated"
     for key in ("nextPageToken", "next_page_token", "nextPage", "next_page",
                 "continuation", "continuationToken"):
+        if key in data and data[key] is not None and not isinstance(data[key], str):
+            return None, "gws_triage_invalid_response"
         if key in data and data[key] not in (None, ""):
             return None, "gws_triage_truncated"
     for key in ("has_more", "hasMore", "truncated"):
@@ -873,7 +881,7 @@ def _complete_triage_rows(data: Any, max_msgs: int) -> tuple[list[dict] | None, 
                 return None, "gws_triage_invalid_response"
             if data[key] > len(rows):
                 return None, "gws_triage_truncated"
-    complete = (data.get("complete") is True or
+    complete = (len(rows) < max_msgs or data.get("complete") is True or
                 data.get("has_more") is False or data.get("hasMore") is False or
                 data.get("truncated") is False or
                 any(key in data and data[key] in (None, "") for key in

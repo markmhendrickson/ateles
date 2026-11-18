@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "phoenicurus-rel
 import turdus  # noqa: E402
 import prepare  # noqa: E402
 from lib.approval import email_channel  # noqa: E402
+from lib.approval.test_email_channel import triage_contract_response  # noqa: E402
 from lib.notify import Notifier, Priority  # noqa: E402
 from lib.notify import neotoma_sink  # noqa: E402
 
@@ -778,6 +779,26 @@ def _poll_authored_reply(monkeypatch, tmp_path, kind, body_data, *, polls=1,
         state = _run(turdus.poll_once(notifier, state))
         notices.sent.extend(notifier.sent)
     return posts, state, notices
+
+
+@pytest.mark.parametrize("kind", ("pr", "release"))
+@pytest.mark.parametrize("shape", ("real_object", "array", "results"))
+@pytest.mark.parametrize("fault", ("none", "full_page", "invalid_row"))
+def test_cli_triage_contract_routes_only_complete_approval(
+        monkeypatch, tmp_path, kind, shape, fault):
+    approval = "APPROVE" if kind == "pr" else "approve v1.2.3"
+
+    def response(token, base):
+        if not base["messages"]:
+            return base
+        return triage_contract_response(
+            shape, fault, {**base["messages"][0], "date": "2026-11-18T10:00:00Z"}, 40)
+
+    posts, state, _ = _poll_authored_reply(
+        monkeypatch, tmp_path, kind, {"body_text": approval},
+        triage_response=response)
+    assert len(posts) == (1 if fault == "none" else 0)
+    assert ("approval-1" in state.get("processed_ids", [])) == (fault == "none")
 
 
 _PLAIN_QUOTES = (

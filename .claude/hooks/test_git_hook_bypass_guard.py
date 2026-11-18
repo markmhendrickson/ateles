@@ -452,8 +452,6 @@ NON_GIT = [
     "git diff | python3 -c 'import sys; print(len(sys.stdin.read()))'",
     "python3 <script> --version v1.2.3 --status pending_approval",
     "node -e 'console.log(require(\"./package.json\").version)'",
-    "\"$PYTHON\" scripts/report.py -n",
-    "$EDITOR notes.md",
     "env -iu FOO ls",
     "command -v git",
     "which git",
@@ -634,9 +632,41 @@ def test_assembled_command_name_may_not_take_protected_path(name, target):
     assert_refused(f"{name} {target}")
 
 
-@pytest.mark.parametrize("name", ("$WRITER", '"$WRITER"'))
-def test_assembled_command_name_with_ordinary_path_allowed(name):
-    assert_allowed(f"{name} src/output")
+@pytest.mark.parametrize("name", ("$WRITER", '"$WRITER"', "${WRITER:-tee}",
+                                  "$(printf tee)", "`printf tee`", "t\"ee\"",
+                                  '"te"e', "$'te'e",
+                                  "{tee,cat}", "te*"))
+def test_assembled_command_name_with_ordinary_path_refused(name):
+    assert_refused(f"{name} src/output")
+
+
+@pytest.mark.parametrize("prefix", ("env", "command", "exec", "sudo", "nohup",
+                                    "xargs", "time", "nice", "builtin"))
+def test_wrapper_cannot_resolve_expanded_executable(prefix):
+    assert_refused(f"{prefix} $EXECUTABLE status")
+
+
+@pytest.mark.parametrize("command", (
+    "g=git; $g commit -n",
+    "g=gi; ${g}t commit -n",
+    "$(printf git) commit -n",
+    "`printf git` commit -n",
+    "g\"it\" commit -n",
+    "eval \"$COMMAND\"",
+    "sh -c \"$COMMAND\"",
+    '"$PYTHON" scripts/report.py -n',
+    "$EDITOR notes.md",
+    "printf x | $EXECUTABLE status",
+    "alias safe='git commit -n'; safe",
+))
+def test_whole_command_assembly_is_refused(command):
+    assert_refused(command)
+
+
+@pytest.mark.parametrize("command", ("cat src/output", "env echo ready",
+                                     "printf ready | cat", "'cat' src/output"))
+def test_literal_executables_remain_allowed(command):
+    assert_allowed(command)
 
 
 @pytest.mark.parametrize("reader", ("cat", "grep x", "head -1", "ls"))

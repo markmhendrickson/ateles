@@ -36,8 +36,9 @@ The rule. The command is lexed as shell (quotes, escapes, ``$'...'``,
 expansions, substitutions, heredocs, comments) and split into simple commands
 on ``;``, ``&&``, ``||``, ``|``, ``&`` and newlines. Every git invocation must:
   - be a plain ``git`` as the command itself: no path-qualified or dashed
-    binary, no command name the shell assembles (variable, brace expansion,
-    glob), and no other command carrying git as an argument (``env``,
+    binary, no executable name the shell assembles (variable, substitution,
+    brace expansion, glob or concatenated quotes), and no other command
+    carrying git as an argument (``env``,
     ``command``, ``exec``, ``xargs``, ``nice``, ``timeout``, ``setsid``,
     ``find -exec`` and any wrapper not named here); commands that only print,
     search or locate the word are exempt
@@ -66,7 +67,8 @@ substitution, an inline interpreter program (``python -c``, ``perl -e``,
 ``ruby -e``, ``node -e``, ``sh|bash|zsh -c``, ``eval``, ``source``) or a
 heredoc or here-string feeding a shell, whose body is judged by this guard.
 Tree writes into protected directories or their ancestors are refused.
-Commands that neither invoke git nor write protected paths are allowed;
+Commands with literal executables that neither invoke git nor write protected
+paths are allowed;
 text that merely mentions a flag (a
 commit message, PR body, grep pattern, a heredoc written to a file) is data.
 
@@ -234,6 +236,7 @@ class Word:
     unquoted: str = ""            # the unquoted characters, for brace and glob checks
     write_glob: bool = False  # glob met outside single quotes, even within double quotes
     quoted: bool = False
+    concatenated: bool = False  # adjacent quoted and unquoted executable fragments
 
     @property
     def braced(self) -> bool:
@@ -460,11 +463,14 @@ class _Lexer:
                 word.text += s[i + 1] if i + 1 < len(s) else ""
                 i += 2
             elif c == "'":
+                word.concatenated |= bool(word.text) or word.quoted
                 word.quoted = True
                 end = _skip_single(s, i + 1)
                 word.text += s[i + 1:end - 1]
                 i = end
             elif c == "$" and i + 1 < len(s) and s[i + 1] == "'":
+                word.concatenated |= bool(word.text) or word.quoted
+                word.quoted = True
                 j = i + 2
                 while j < len(s) and s[j] != "'":
                     j += 2 if s[j] == "\\" else 1
@@ -473,6 +479,7 @@ class _Lexer:
                 word.text += _decode_ansi_c(s[i + 2:j])
                 i = j + 1
             elif c == '"':
+                word.concatenated |= bool(word.text) or word.quoted
                 word.quoted = True
                 i += 1
                 while True:
@@ -500,6 +507,7 @@ class _Lexer:
             elif c == "`":
                 i = self._backtick(word, i)
             else:
+                word.concatenated |= word.quoted
                 word.text += c
                 word.unquoted += c
                 if c in "*?[":
@@ -1489,10 +1497,10 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int =
     if nested_hit:
         return nested_hit
 
-    if head.expanded or head.braced or head.globbed:
-        if whole_mentions_git or _looks_like_git(head, rest[1:]):
-            return "a command name assembled by the shell, around git"
-        return None
+    if head.expanded or head.braced or head.globbed or head.concatenated:
+        return "executable name assembled by the shell"
+    if base in {"alias", "unalias"}:
+        return "shell aliases cannot be inspected as literal executables"
     if base in _EXPORTERS:
         for w in rest[1:]:
             name = w.text.split("=", 1)[0].rstrip("+")
@@ -1505,6 +1513,11 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int =
             return f"{head.text} (only a plain `git` is allowed)"
         return git_violation(rest[1:])
     if base in _WRAPPERS:
+        # A wrapper can execute any later word. Until its full option grammar
+        # proves which one is data, an expanded word cannot be trusted as a
+        # literal executable name.
+        if any(w.expanded or w.braced or w.globbed or w.concatenated for w in rest[1:]):
+            return f"{base} executable name cannot be resolved literally"
         hit = _assignment_violation(rest[1:], command_mentions_git=whole_mentions_git)
         if hit:
             return f"{base} {hit}"
@@ -1530,6 +1543,8 @@ def command_violation(cmd: SimpleCommand, whole_mentions_git: bool, depth: int =
             return f"{base} wrapping git (run plain git instead)"
         return None
     if base == "find" and any(w.text in ("-exec", "-execdir", "-ok", "-okdir") for w in rest):
+        if any(w.expanded or w.braced or w.globbed or w.concatenated for w in rest[1:]):
+            return "find -exec executable name cannot be resolved literally"
         if own_mentions and not nested_checked:
             return "find -exec running git"
         return None

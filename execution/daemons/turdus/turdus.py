@@ -291,8 +291,9 @@ def _poll_gmail_messages(max_count: int) -> list[dict]:
 
     Returns a list of dicts with: id, sender, subject, snippet, date_iso.
 
-    Uses `gws gmail +triage --format json` which returns:
-      {"messages": [{"id", "from", "subject", "date"}, ...], ...}
+    Uses `gws gmail +triage --format json`, which can return an array of
+    rows or an object containing `messages`. Rows include id, from, subject,
+    and date.
 
     Fields are normalised to the internal shape:
       id, sender (from "from"), subject, snippet (empty), date_iso (from "date").
@@ -802,12 +803,14 @@ def _read_message_body(message_id: str) -> str:
         data = json.loads(_strip_keyring_preamble(result.stdout))
         # gws returns the body under a few possible keys depending on version.
         # Current gws `+read` uses `body_text` (plaintext) / `body_html`. The
-        # older names are kept as fallbacks. `body_text` MUST be checked — its
+        # older names are kept as fallbacks for general mail triage. Approval
+        # replies use email_channel, which requires both present parts to
+        # agree. `body_text` MUST be checked here — its
         # absence here silently returned "" and made the release/PR approval
         # handlers see no body, so an operator `approve <version>` reply matched
         # the subject but "carried no token" and was never routed (observed on
         # the first live release-approval, 2026-07-27). Prefer plaintext; fall
-        # back to HTML only if that's all that's present.
+        # back to HTML only if that's all that's present in this triage read.
         for key in ("body_text", "body", "text", "plain", "body_html", "snippet"):
             val = data.get(key)
             if isinstance(val, str) and val:
