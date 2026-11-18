@@ -88,6 +88,12 @@ def test_spawn_count_survives_unreadable_file(isolated_state, monkeypatch):
     assert prepare._spawn_count(SHA) == 0
 
 
+def test_scheduled_snapshot_without_count_is_valid_for_merge(isolated_state):
+    (isolated_state / ".spawns").write_text(
+        '{"head": "' + SHA + '", "guard_snapshot": {"git hooks": "digest"}}')
+    assert prepare._spawn_count(SHA) == 0
+
+
 # ---------------------------------------------------------------------------
 # The lock itself — the actual #78dbcbefe regression
 # ---------------------------------------------------------------------------

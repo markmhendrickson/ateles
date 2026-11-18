@@ -335,7 +335,7 @@ def _spawn_count(head: str) -> int:
         raw = SPAWN_COUNT_FILE.read_text().strip()
         if raw.startswith("{"):
             saved = json.loads(raw)
-            return int(saved["count"]) if saved["head"] == head else 0
+            return int(saved.get("count") or 0) if saved.get("head") == head else 0
         sha, _, n = raw.partition(" ")
         return int(n) if sha == head else 0
     except (ValueError, OSError):

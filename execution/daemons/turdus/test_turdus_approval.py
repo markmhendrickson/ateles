@@ -1882,6 +1882,9 @@ def test_notified_tokenless_reply_does_not_hold_new_bound_reply(monkeypatch, tmp
             query = args[args.index("--query") + 1]
             if "in:sent" in query:
                 return {"complete": True, "messages": []}
+            if "subject:" not in query and (
+                    ("release-approve:" in query) != (kind == "release")):
+                return {"complete": True, "messages": []}
             mids = (["bound-old"] if "subject:" not in query else
                     ["correction", "bound-old"])
             if sweep["number"] == 2:
