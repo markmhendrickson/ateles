@@ -1227,8 +1227,6 @@ def spawn_prepare_agent(
         )
         return False
 
-    prepared_head = head or _head_sha()
-    prompt = _build_agent_prompt(last_tag, commit_count, prepared_head)
     if not HOOK_BYPASS_GUARD.is_file():
         # Fail closed: without the guard the agent can skip the release
         # checkout's hooks, which is the failure the guard exists to stop.
@@ -1238,6 +1236,8 @@ def spawn_prepare_agent(
             "from the deployment checkout — not preparing the release."
         )
         return False
+    prepared_head = head or _head_sha()
+    prompt = _build_agent_prompt(last_tag, commit_count, prepared_head)
     if dry_run:
         log.info("[dry-run] would spawn prepare agent with prompt:")
         log.info(prompt)

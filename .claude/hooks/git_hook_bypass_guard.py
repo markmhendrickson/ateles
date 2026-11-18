@@ -245,7 +245,7 @@ _WRAPPERS = frozenset(_WRAPPER_GRAMMAR)
 # These runners add authority or interpret an opaque command, and release
 # preparation has no documented use for them. Keep their grammar entries so
 # an attempted invocation is recognized and refused before generic handling.
-_DENIED_WRAPPERS = frozenset({"script", "parallel", "watch", "chroot", "doas", "sudo", "xargs"})
+_DENIED_WRAPPERS = frozenset({"script", "parallel", "watch", "chroot", "doas", "sudo", "xargs", "exec"})
 _DENIED_DIRECTORY_PROGRAMS = frozenset({
     "pushd", "popd", "mount", "umount", "tmux", "screen", "nsenter",
     "runuser", "su",
@@ -1468,6 +1468,11 @@ _RUNTIME_EVAL_TEXT = re.compile(
     r"\b(?:eval|exec|execfile|compile|__import__|importlib|marshal|codecs|b64decode|"
     r"base64|decode_base64|atob|unhexlify|fromhex|fromCharCode)\b|Buffer\s*\.\s*from")
 
+# The prepare prompt invokes this reviewed recorder. Pin its bytes so an edited
+# script cannot inherit the exception merely by keeping the same path.
+_RELEASE_RECORDER = Path(__file__).resolve().parents[2] / "execution/daemons/phoenicurus-release/store_release_result.py"
+_RELEASE_RECORDER_SHA256 = "743d88fcb716c26670ab07b1c8451531d0ef631783eadf79b718c86c438048d5"
+
 
 def _stdin_program_violation(runner: str, body: str, depth: int) -> str | None:
     """A program read from standard input: a shell parses it as shell, an
@@ -1480,9 +1485,13 @@ def _stdin_program_violation(runner: str, body: str, depth: int) -> str | None:
 def _inline_program_violation(runner: str, body: str, depth: int) -> str | None:
     refusal = (f"{runner} program cannot be proven free of process creation or "
                "dynamic program construction; use plain git and plain file edits")
+    if _mentions_protected_text(body) or _HOOK_BYPASS_TEXT.search(body) or mentions_git(body):
+        return refusal
     if _SHELLS.match(runner):
         # Only shell builtins with literal operands are reviewable as inline code.
-        return None if re.fullmatch(r"\s*(?:(?:echo|printf)\s+[A-Za-z0-9 ._-]+|true|:)\s*", body) else refusal
+        return None if re.fullmatch(
+            r"\s*(?:(?:echo|printf)\s+(?:[A-Za-z0-9 ._-]|'[^'`$]*'|\"[^\"`$]*\")+|true|:)\s*",
+            body) else refusal
     family = _interpreter_family(runner)
     if family == "python":
         try:
@@ -1501,7 +1510,8 @@ def _inline_program_violation(runner: str, body: str, depth: int) -> str | None:
             return None
     if family == "awk" and re.fullmatch(r"\s*\{\s*print(?:\s+\$[0-9]+)?\s*\}\s*", body):
         return None
-    if family == "sed" and re.fullmatch(r"s/[^/\\\n]+/[^/\\\n]*/g?", body):
+    if family == "sed" and (re.fullmatch(r"s/[^/\\\n]+/[^/\\\n]*/g?", body) or
+                            re.fullmatch(r"[0-9]+(?:,[0-9]+)?p", body)):
         return None
     return refusal
 
@@ -1515,9 +1525,13 @@ def _program_file_violation(runner: str, script: Word, depth: int,
     if _protected_path(script.text):
         return f"{runner} program file names a protected path"
     try:
-        text = _effective_path(script.text).read_text()
+        path = _effective_path(script.text)
+        text = path.read_text()
     except (OSError, UnicodeError):
         return f"{runner} program file cannot be read"
+    if (_interpreter_family(runner) == "python" and path.resolve() == _RELEASE_RECORDER and
+            hashlib.sha256(text.encode()).hexdigest() == _RELEASE_RECORDER_SHA256):
+        return None
     if _interpreter_family(runner) == "awk":
         for include in re.findall(r'@include\s+["\']([^"\']+)["\']', text):
             child = _effective_path(script.text).parent / include
@@ -1629,11 +1643,21 @@ def _nested_program_violation(cmd: SimpleCommand, rest: list[Word], depth: int) 
         if hit:
             return True, hit
         if _interpreter_family(runner) == "sed":
+            if any(w.text in {"-e", "--expression", "-f", "--file"} or
+                   w.text.startswith(("-e", "--expression=", "-f", "--file="))
+                   for w in tail):
+                continue  # every program operand was checked above
             script = next((w for w in tail if not w.text.startswith("-")), None)
             if script is None or script.expanded or script.globbed or script.braced or \
                     _inline_program_violation(runner, script.text, depth):
                 return True, f"{runner} program cannot be proven safe; use plain git and plain file edits"
             continue
+        if _interpreter_family(runner) == "awk" and any(
+            w.text in {"-e", "--source", "-f", "--file"} or
+            w.text.startswith(("-e", "--source=", "-f", "--file="))
+            for w in tail
+        ):
+            continue  # inputs after checked program options are data files
         for i, option in enumerate(tail):
             name = option.text
             # A shell's only program option is -c (alone or bundled); its -e
