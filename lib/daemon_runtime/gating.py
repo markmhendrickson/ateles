@@ -1996,6 +1996,7 @@ def query_entities(
     snapshot_filters: dict,
     offset: int = 0,
     limit: int | None = None,
+    updated_since: str | None = None,
 ) -> dict | None:
     """One page of a filtered ``POST /entities/query``; ``None`` when it failed.
 
@@ -2020,6 +2021,8 @@ def query_entities(
     }
     if offset > 0:
         body["offset"] = offset
+    if updated_since:
+        body["updated_since"] = updated_since
     try:
         resp = httpx.post(
             f"{NEOTOMA_BASE_URL.rstrip('/')}/entities/query",

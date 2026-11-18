@@ -15,6 +15,15 @@ for p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
 
 
 @pytest.fixture(autouse=True)
+def _short_gate_hold_retry_for_fakes(monkeypatch):
+    """Keep a fake that never publishes its hold from sleeping for a minute."""
+    import apis
+
+    monkeypatch.setattr(apis, "GATE_HOLD_PROOF_SECONDS", 0.05, raising=False)
+    monkeypatch.setattr(apis, "GATE_HOLD_PROOF_INTERVAL_SECONDS", 0.001, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_operator_profile(monkeypatch):
     """Ownership tests never read the host's live operator profile.
 
