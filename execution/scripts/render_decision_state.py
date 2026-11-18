@@ -128,6 +128,20 @@ def run(args: list[str]) -> tuple[int, str]:
 REGISTER_HEADING = "## The register of open design decisions"
 
 
+# A line that LOOKS like a numbered register row: optional indentation, an optional leading
+# pipe, a number (optionally decorated with bold, backticks or underscores, optionally a
+# range) and then a pipe. One test, used for rows inside the register section and for
+# register-shaped rows outside it, so no reader can disagree with another about what a row is.
+ROW_LIKE_RE = re.compile(r"^\s*\|?\s*[*_`]*\s*\d+(?:\s*[\u2013-]\s*\d+)?[*_`]*\s*\|")
+
+
+def row_like_cells(line: str) -> list[str] | None:
+    """The cells of a row-like line, or None when the line is not row-like."""
+    if not ROW_LIKE_RE.match(line):
+        return None
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
 def register_section(text: str) -> str:
     """The text the register's rows are read from: the register section, up to the next
     `## ` heading. A text with no such heading (a bare table) is read whole. Validation and
@@ -184,13 +198,12 @@ def validate_register(text: str) -> None:
     # last cell opens with a bold status) outside the section is therefore an error.
     outside = text.replace(section, "", 1) if section is not text else ""
     for line in outside.splitlines():
-        match = ROW_RE.match(line)
-        if not match:
+        cells = row_like_cells(line)
+        if cells is None:
             continue
-        cells = [cell.strip() for cell in match.group(2).split("|")]
-        if len(cells) >= 4 and STATUS_LEAD_RE.match(cells[-1]):
+        if len(cells) >= 5 and STATUS_LEAD_RE.match(cells[-1]):
             raise ValueError(
-                f"register row {match.group(1)} lies outside the register section "
+                f"register-shaped row {cells[0][:20]!r} lies outside the register section "
                 f"({REGISTER_HEADING!r} up to the next level-two heading); a heading "
                 "inside the register would drop later rows from the projection"
             )
@@ -200,7 +213,7 @@ def validate_register(text: str) -> None:
         # indented or not - is a row the projection must either read or reject. Markdown
         # renders an indented or pipe-less row as part of the table, so skipping it here would
         # omit it from the projection silently.
-        if not re.match(r"^\s*\|?\s*[*_`]*\s*\d+(?:\s*[\u2013-]\s*\d+)?[*_`]*\s*\|", line):
+        if row_like_cells(line) is None:
             continue  # header, separator, prose
         match = ROW_RE.match(line)
         if not match:
@@ -564,7 +577,7 @@ def collect_branches(
     Returns (rows with ``ruled_on_branches``/``implemented`` populated, refs
     read and current, refs read but superseded, collisions found).
     """
-    main_rows = register_at(MAIN_REF)
+    main_rows = register_at(MAIN_REF, strict=True)
     if main_rows is None:
         raise SystemExit(
             f"decision state: no register table at {MAIN_REF}:"
@@ -587,7 +600,10 @@ def collect_branches(
     stale: list[str] = []
     collisions: list[Collision] = []
     for ref in refs_scanned:
-        branch_rows = register_at(ref)
+        try:
+            branch_rows = register_at(ref, strict=True)
+        except ValueError as exc:
+            raise ValueError(f"{ref}: {exc}") from exc
         if branch_rows is None:
             continue
         read.append(ref)
@@ -996,7 +1012,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.branches:
         refs = remote_branches()
-        rows, refs_read, refs_stale, collisions = collect_branches(refs)
+        try:
+            rows, refs_read, refs_stale, collisions = collect_branches(refs)
+        except ValueError as exc:
+            print(f"decision state: cannot read a register: {exc}", file=sys.stderr)
+            return 1
         if args.json:
             sys.stdout.write(as_json_branches(rows, refs_read, refs_stale, collisions))
         else:

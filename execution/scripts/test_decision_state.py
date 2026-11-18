@@ -383,6 +383,39 @@ class FakeGit:
         raise AssertionError(f"unmocked git call in FakeGit: {args!r}")
 
 
+
+class TestBranchRegistersAreReadStrictly(unittest.TestCase):
+    """`--branches` must not silently omit a malformed numbered row of a branch copy."""
+
+    GOOD = register(**{"1": "**open**", "2": "**open**"})
+
+    def test_a_malformed_branch_row_is_an_error_naming_the_ref(self):
+        bad = self.GOOD + "\n| 999 | question | `x#q` | \u2014 | plain open |\n"
+        fake = FakeGit({ds.MAIN_REF: self.GOOD, "origin/feature": bad}, ["origin/feature"])
+        with unittest.mock.patch.object(ds, "run", fake):
+            with self.assertRaises(ValueError) as ctx:
+                ds.collect_branches(["origin/feature"])
+        self.assertIn("origin/feature", str(ctx.exception))
+        self.assertIn("malformed register row", str(ctx.exception))
+
+    def test_a_well_formed_branch_register_is_still_read(self):
+        fake = FakeGit({ds.MAIN_REF: self.GOOD, "origin/feature": self.GOOD}, ["origin/feature"])
+        with unittest.mock.patch.object(ds, "run", fake):
+            rows, read, stale, collisions = ds.collect_branches(["origin/feature"])
+        self.assertEqual(read, ["origin/feature"])
+
+    def test_branches_mode_exits_nonzero_on_a_malformed_branch_row(self):
+        import contextlib
+        import io
+
+        bad = self.GOOD + "\n| **999** | question | `x#q` | \u2014 | **ruled** |\n"
+        fake = FakeGit({ds.MAIN_REF: self.GOOD, "origin/feature": bad}, ["origin/feature"])
+        err = io.StringIO()
+        with unittest.mock.patch.object(ds, "run", fake), contextlib.redirect_stderr(err):
+            code = ds.main(["--branches"])
+        self.assertEqual(code, 1)
+        self.assertIn("origin/feature", err.getvalue())
+
 class TestCommittedProjectionIsBranchIndependent(unittest.TestCase):
     """An open PR's --check result must not move when an unrelated branch does.
 
@@ -795,6 +828,22 @@ class TestRenderCleanly(unittest.TestCase):
                 code, output = self._run_mode(broken, *flags)
                 self.assertEqual(code, 1, output[:200])
                 self.assertIn("outside the register section", output)
+
+    def test_a_decorated_register_row_after_a_heading_is_not_silently_omitted(self):
+        """The outside-the-section scan uses the same row-like test as the in-section one."""
+        head = "## The register of open design decisions\n\n"
+        rows = register(**{"1": "**open**"})
+        for after in (
+            "| **999** | question | `x#q` | \u2014 | **open** |",
+            "| `999` | question | `x#q` | \u2014 | **ruled** |",
+            "   | 999 | question | `x#q` | \u2014 | **open** |",
+        ):
+            text = head + rows + "\n## An inserted heading\n\n" + after + "\n"
+            for flags in (("--check",), ("--json",), ("--stdout",)):
+                with self.subTest(row=after, mode=flags[0]):
+                    code, output = self._run_mode(text, *flags)
+                    self.assertEqual(code, 1, output[:200])
+                    self.assertIn("outside the register section", output)
 
     def test_other_sections_with_non_register_tables_are_not_flagged(self):
         head = "## The register of open design decisions\n\n"
