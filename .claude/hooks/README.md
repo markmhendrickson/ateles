@@ -212,6 +212,8 @@ daemons hold operator notices that are waiting undelivered (queue totals come fr
 `lib/notify/held_view.py`, loaded by file path). It prints only when the total
 is non-zero and differs from the last total shown in the session, and the line
 carries integers and regex-validated handler names only — never notice text,
-which can embed attacker-influenced strings. Fail-open: any error prints
+which can embed attacker-influenced strings. An unreadable usage snapshot also
+adds a fixed source label and repair command, derived from its keyed queue item
+without copying its message into model context. Fail-open: any error prints
 nothing and exits 0. Show the notices with `python3 lib/notify/held_view.py`;
 clear them (after a backup) with `--clear`.

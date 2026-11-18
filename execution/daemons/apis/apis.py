@@ -6302,6 +6302,9 @@ async def _deferred_review_sweep_steps(dispatcher: SwarmDispatcher) -> None:
 async def main() -> None:
     denial_store = _require_checkpoint_denial_store()
     log.info(f"[{DAEMON_NAME}] Starting up...")
+    # Every dispatch this process makes is attributed to the daemon on the tier
+    # ledger (provider spend attribution, ent_e5259618cae6cafd4be120e0).
+    model_tiering.set_process_caller(model_tiering.CALLER_KIND_DAEMON, DAEMON_NAME)
     log.info(f"[{DAEMON_NAME}] checkpoint_denial_store={denial_store}")
     log.info(f"[{DAEMON_NAME}] ateles_repo={ATELES_REPO}")
     log.info(

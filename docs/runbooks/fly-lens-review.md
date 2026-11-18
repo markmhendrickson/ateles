@@ -109,14 +109,17 @@ that rather than re-implementing it.
 
 ## Known limitations
 
-- Every job so far routed to the claude provider. `--provider claude` is
-  refused as not pinnable, codex is refused because the Fly runner cannot give
-  it Neotoma tools, and cursor has no headroom.
+- Claude and Codex can run on Fly with Neotoma MCP access through the loopback
+  signing proxy when the role has an admitted AAuth key and the required tool
+  grant. Codex receives the proxy URL through CLI MCP overrides; no static
+  bearer is supplied. A seated read-only review may run without Neotoma tools.
+  Cursor remains unavailable on Fly because its CLI cannot deny one MCP tool.
+  Provider headroom and role admission can still refuse an individual job.
 - Roughly a third of first runs ended with "no result recorded for run ..."
   (unknown outcome, 70 to 170 seconds); the one retry usually clears it.
-- Fly jobs cannot read Neotoma. Each lens uses the repository prompt mirror
-  `.claude/skills/<role>/SKILL.md`, so a lens prompt that exists only in
-  Neotoma is not seen until it is mirrored.
+- Seated Fly reviews without a role's Neotoma tool grant use the repository
+  prompt mirror `.claude/skills/<role>/SKILL.md`; changes present only in
+  Neotoma are not visible to those jobs until mirrored.
 - The Fly job holds a read-only GitHub token for `--repo`; it cannot comment or
   approve, which is why posting is a separate step.
 - It needs the Neotoma env pair in the environment and a Neotoma task id (the

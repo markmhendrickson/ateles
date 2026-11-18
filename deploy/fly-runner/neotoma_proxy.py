@@ -58,7 +58,6 @@ TOOL_GRANT_RPC_METHODS = frozenset({
     "tools/list",
     "tools/call",
     "notifications/initialized",
-    "notifications/cancelled",
 })
 DEFAULT_CONTENT_TYPE = "application/json"
 
@@ -290,7 +289,7 @@ def health_check(
 
 
 class NeotomaSigningProxy:
-    """Forward ``/mcp`` (and ``GET /sources/<id>/content``) on a loopback port to ``upstream_base``."""
+    """Forward tool-scoped MCP requests on a loopback port to ``upstream_base``."""
 
     def __init__(
         self,
@@ -312,6 +311,7 @@ class NeotomaSigningProxy:
         self.upstream_url = upstream_base + MCP_PATH
         self._sign = sign
         self.allowed_peer_uid = allowed_peer_uid
+        # None means every TOOL name; request-method checks still bind.
         self.allowed_tools = None if allow_all_tools else frozenset(allowed_tools)
         if connect is None:
             host, port = parts.hostname, parts.port
@@ -407,18 +407,10 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 return self._reject(400, method, path)
             if method not in ALLOWED_METHODS:
                 return self._reject(405, method, path, extra={"Allow": ", ".join(ALLOWED_METHODS)})
-            if self.proxy.allowed_tools is not None:
-                # GET opens an unscoped server event stream. DELETE is only needed
-                # to terminate a session that the client can identify.
-                if method == "GET" or (method == "DELETE" and not self.headers.get("Mcp-Session-Id")):
-                    return self._reject_rpc(method, path, None, 0)
-        elif SOURCE_CONTENT_PATH.fullmatch(path) and not sep and method == SOURCE_CONTENT_METHOD:
-            if self.proxy.allowed_tools is not None:
-                # An uploaded file's bytes are a data read that no tool grant
-                # covers, so a tool-scoped job does not get them.
+            if method != "POST":
                 return self._reject_rpc(method, path, None, 0)
-            upstream_path = path
-            upstream_url = self.proxy.upstream_base + path
+        elif SOURCE_CONTENT_PATH.fullmatch(path) and not sep and method == SOURCE_CONTENT_METHOD:
+            return self._reject_rpc(method, path, None, 0)
         else:
             # Unknown paths, and a source path with a query string or any
             # other method, look the same as a missing route.
@@ -442,7 +434,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             if len(body) != length:
                 return self._reject(400, method, path)
 
-        if method == "POST" and self.proxy.allowed_tools is not None:
+        if method == "POST":
             try:
                 request = json.loads(body, parse_constant=_invalid_json_constant)
             except (ValueError, UnicodeDecodeError):
@@ -450,12 +442,16 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             if not isinstance(request, dict):
                 return self._reject_rpc(method, path, None, len(body))
             rpc_method = request.get("method")
-            if not isinstance(rpc_method, str) or rpc_method not in TOOL_GRANT_RPC_METHODS:
+            raw_method = re.search(rb'"method"\s*:\s*"([^"\\]*)"', body)
+            if (request.get("jsonrpc") != "2.0" or not isinstance(rpc_method, str)
+                    or rpc_method not in TOOL_GRANT_RPC_METHODS or raw_method is None
+                    or raw_method.group(1).decode("ascii", errors="ignore") != rpc_method):
                 return self._reject_rpc(method, path, request.get("id"), len(body))
             if rpc_method == "tools/call":
                 params = request.get("params")
                 name = params.get("name") if isinstance(params, dict) else None
-                if not isinstance(name, str) or name not in self.proxy.allowed_tools:
+                if (not isinstance(name, str) or (self.proxy.allowed_tools is not None
+                                                    and name not in self.proxy.allowed_tools)):
                     return self._reject_rpc(method, path, request.get("id"), len(body))
 
         headers = {}

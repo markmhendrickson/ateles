@@ -671,6 +671,7 @@ def _assert_role_signed(request: dict, jwk: dict, authority: str) -> None:
 class TestNeotomaProxyJob:
     @pytest.mark.parametrize("grant,expected", [
         (["retrieve_entities", "store"], ("retrieve_entities", "store")),
+        ("tools_only", None),
         ("all", None),
     ])
     def test_job_grant_is_carried_to_proxy_constructor(self, tmp_path, monkeypatch, grant, expected):
@@ -686,7 +687,7 @@ class TestNeotomaProxyJob:
         proxy, port, problem = run_job.start_neotoma_proxy(job, _CHILD_IDENT)
         assert problem == "" and port == module.port and proxy is not None
         assert module.allowed_tools == [expected]
-        assert module.allow_all_tools == [grant == "all"]
+        assert module.allow_all_tools == [grant in ("all", "tools_only")]
         proxy.stop()
 
     def test_codex_proxy_job_without_grant_is_refused_before_proxy_start(self, tmp_path, monkeypatch):

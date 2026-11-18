@@ -2609,7 +2609,7 @@ def build_job(
         neotoma_tools_unavailable=bool(neotoma_tools_granted and not own_token
                                        and not neotoma_mcp),
         neotoma_mcp=neotoma_mcp,
-        neotoma_tool_allowlist=(codex_tools if codex_tools is not None else "all"
+        neotoma_tool_allowlist=(codex_tools if codex_tools is not None else "tools_only"
                                ) if codex_proxy else None,
         probe_env_names=probe,
         system_prompt=system_prompt,

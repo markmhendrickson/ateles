@@ -79,14 +79,19 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import math
 import os
+import re
 import tempfile
 import time
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from lib.notify.held_view import canonical_window_name
+
+log = logging.getLogger(__name__)
 
 FRONTIER_PROVIDERS = ("claude", "codex", "cursor")
 LOCAL_PROVIDERS = ("claude-local",)
@@ -135,11 +140,14 @@ def _wall_from_iso(raw: object) -> float | None:
         return None
     try:
         parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
-    except ValueError:
+    except (ValueError, OverflowError, OSError):
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.timestamp()
+    try:
+        return parsed.timestamp()
+    except (ValueError, OverflowError, OSError):
+        return None
 
 
 def _iso_from_wall(wall: float) -> str:
@@ -149,7 +157,7 @@ def _iso_from_wall(wall: float) -> str:
 def _clamp(value: object) -> float | None:
     try:
         return min(1.0, max(0.0, float(value)))  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -160,6 +168,63 @@ def _read_json_object(path: Path) -> dict[str, object]:
     except (OSError, TypeError, ValueError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+_USAGE_ENTRY_FIELDS = frozenset({
+    "observed_at", "windows", "probe", "last_probe_failure", "cooling",
+    "model_cooling", "exhausted_until",
+})
+
+
+def _usage_entry_problem(entry: object) -> bool:
+    """One shape contract for entries written by every usage recorder."""
+    return (
+        not isinstance(entry, dict)
+        or not _USAGE_ENTRY_FIELDS.intersection(entry)
+        or ("windows" in entry and (
+            not isinstance(entry["windows"], list)
+            or any(
+                _window_problem(window) is not None
+                for window in entry["windows"]
+            )
+        ))
+        or ("model_cooling" in entry and not isinstance(entry["model_cooling"], dict))
+        or any(field in entry and not isinstance(entry[field], dict)
+               for field in ("probe", "last_probe_failure", "cooling"))
+        or ("observed_at" in entry and _wall_from_iso(entry["observed_at"]) is None)
+        or ("exhausted_until" in entry and entry["exhausted_until"] is not None
+            and not isinstance(entry["exhausted_until"], str))
+    )
+
+
+def usage_snapshot_problem(path: Path, *, provider: str | None = None) -> str | None:
+    """Describe an unreadable snapshot or malformed provider entry.
+
+    A malformed sibling entry does not invalidate a readable provider.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError) as exc:
+        return f"cannot read ({type(exc).__name__})"
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return "invalid JSON"
+    if not isinstance(parsed, dict) or not parsed:
+        return "not a usage object"
+    entries = (parsed.get(provider),) if provider in parsed else (() if provider else parsed.values())
+    if any(_usage_entry_problem(entry) for entry in entries):
+        return "not a usage object"
+    return None
+
+
+def _read_usage_object() -> dict[str, dict[str, object]]:
+    """Read only provider entries that obey the writer's shape contract."""
+    parsed = _read_json_object(_usage_path())
+    return {name: entry for name, entry in parsed.items()
+            if isinstance(name, str) and not _usage_entry_problem(entry)}
 
 
 def _override_values() -> tuple[Mapping[str, object], float | None]:
@@ -261,7 +326,16 @@ def usage_reading(provider: str, *, now_wall: float | None = None) -> UsageReadi
     """
     moment = time.time() if now_wall is None else now_wall
     max_age = usage_max_age_seconds()
-    entry = _read_json_object(_usage_path()).get(provider)
+    raw_entry = _read_json_object(_usage_path()).get(provider)
+    if raw_entry is not None and _usage_entry_problem(raw_entry):
+        observed = (_wall_from_iso(raw_entry.get("observed_at"))
+                    if isinstance(raw_entry, dict) else None)
+        return UsageReading(
+            provider, READING_UNKNOWN, observed,
+            max(0.0, moment - observed) if observed is not None else None,
+            max_age, "usage report incomplete or malformed",
+        )
+    entry = _read_usage_object().get(provider)
     if not isinstance(entry, dict):
         return UsageReading(
             provider, READING_NONE, None, None, max_age, "never observed"
@@ -344,7 +418,7 @@ def live_headroom(provider: str, *, now_wall: float | None = None) -> float | No
     have not yet reset.
     """
     moment = time.time() if now_wall is None else now_wall
-    entry = _read_json_object(_usage_path()).get(provider)
+    entry = _read_usage_object().get(provider)
     if not isinstance(entry, dict):
         return None
     exhausted_until = _wall_from_iso(entry.get("exhausted_until"))
@@ -409,7 +483,7 @@ def _percent(value: object) -> float | None:
         return None
     try:
         percent = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if not math.isfinite(percent) or percent < 0.0 or percent > 100.0:
         return None
@@ -423,15 +497,40 @@ def _window_problem(window: object) -> str | None:
     name = window.get("name")
     if not isinstance(name, str) or not name.strip():
         return "window has no name"
+    if len(name) > 64:
+        return "window name exceeds 64 characters"
+    if canonical_window_name(name) == "unavailable":
+        return "window name cannot be canonicalized"
+    if name.startswith("window_") and name.endswith("m"):
+        minutes = name[7:-1]
+        if minutes.isdigit() and (len(minutes) > 6 or not 1 <= int(minutes) <= 525600):
+            return "window span exceeds one year"
     if _percent(window.get("used_percent")) is None:
         return f"window {name!r} has no valid used_percent (need a finite 0-100)"
-    if window.get("resets_at") is not None and _wall_from_iso(window["resets_at"]) is None:
-        return f"window {name!r} has an unparseable resets_at"
+    if window.get("resets_at") is not None:
+        reset = _wall_from_iso(window["resets_at"])
+        now = time.time()
+        if reset is None or not now - 366 * 86400 <= reset <= now + 366 * 86400:
+            return f"window {name!r} has an invalid or out-of-range resets_at"
     return None
 
 
+def normalize_usage_window(window: object) -> dict[str, object] | None:
+    """Validate one provider window before it can enter the shared snapshot."""
+    if _window_problem(window) is not None:
+        return None
+    assert isinstance(window, dict)
+    item: dict[str, object] = {
+        "name": window["name"].strip(),
+        "used_percent": float(window["used_percent"]),
+    }
+    if window.get("resets_at") is not None:
+        item["resets_at"] = window["resets_at"]
+    return item
+
+
 def _live_observed_at(provider: str) -> float | None:
-    entry = _read_json_object(_usage_path()).get(provider)
+    entry = _read_usage_object().get(provider)
     if not isinstance(entry, dict):
         return None
     return _wall_from_iso(entry.get("observed_at"))
@@ -441,7 +540,7 @@ def _probe_evidence(
     provider: str, *, now_wall: float | None = None
 ) -> dict[str, object] | None:
     """Return a current provider-native probe observation, or ``None``."""
-    entry = _read_json_object(_usage_path()).get(provider)
+    entry = _read_usage_object().get(provider)
     probe = entry.get("probe") if isinstance(entry, dict) else None
     if not isinstance(probe, dict) or probe.get("status") not in {
         "available", "exhausted", "unknown",
@@ -642,6 +741,20 @@ def _write_usage_entry(
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path.with_name(f".{path.name}.lock"), "a", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        problem = usage_snapshot_problem(path)
+        if problem is not None:
+            # Record the failure while the original is still present. A failed
+            # backup leaves the original untouched rather than erasing evidence.
+            from usage_alerts import _notice_unreadable_snapshot
+
+            _notice_unreadable_snapshot(
+                path, problem, datetime.now(timezone.utc),
+                notifier=None, notifier_factory=None, journal_factory=None,
+            )
+            raw = path.read_bytes()
+            from lib.notify.held_view import preserve_unreadable
+
+            preserve_unreadable(path, raw)
         existing = _read_json_object(path)
         current = existing.get(provider)
         current = current if isinstance(current, dict) else {}
@@ -657,6 +770,8 @@ def _write_usage_entry(
             merged[key] = {**(base if isinstance(base, dict) else {}), **dict(additions)}
         for key in clear_keys:
             merged.pop(key, None)
+        if _usage_entry_problem(merged):
+            raise ValueError("invalid usage entry")
         existing[provider] = merged
         fd, tmp_name = tempfile.mkstemp(
             dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
@@ -681,6 +796,7 @@ def record_usage(
     observed_at: float | None = None,
     provider_probe: bool = False,
     probe_source: str = "provider_usage_report",
+    probe_detail: str | None = None,
 ) -> None:
     """Record a live plan-usage observation for one provider.
 
@@ -692,31 +808,36 @@ def record_usage(
     if normalized not in PROVIDERS:
         raise ValueError(f"unsupported provider: {provider!r}")
     rendered = []
+    unreadable = 0
     for window in windows:
         problem = _window_problem(window)
         if problem is not None:
-            raise ValueError(f"refusing to record a malformed usage window: {problem}")
-        item: dict[str, object] = {
-            "name": str(window["name"]).strip(),
-            "used_percent": float(window["used_percent"]),  # type: ignore[arg-type]
-        }
-        if window.get("resets_at") is not None:
-            item["resets_at"] = window["resets_at"]
+            log.warning("refusing malformed usage window: %s", problem)
+            unreadable += 1
+            continue
+        item = normalize_usage_window(window)
+        assert item is not None
         rendered.append(item)
     if not rendered:
         raise ValueError("refusing to record a usage observation with no windows")
+    if unreadable:
+        prior = re.fullmatch(r"(\d{1,9}) unreadable provider windows", probe_detail or "")
+        count = unreadable + (int(prior.group(1)) if prior else 0)
+        probe_detail = f"{count} unreadable provider windows"
     at = time.time() if observed_at is None else observed_at
+    if not isinstance(at, (int, float)) or not math.isfinite(at) or not 946684800 <= at <= 4102444800:
+        raise ValueError("refusing to record an out-of-range observation time")
     entry: dict[str, object] = {
         "observed_at": _iso_from_wall(at),
         "windows": rendered,
         "exhausted_until": None,
     }
-    if provider_probe:
+    if provider_probe or unreadable:
         entry["probe"] = {
             "status": "available",
             "observed_at": _iso_from_wall(at),
             "source": probe_source,
-            "detail": None,
+            "detail": probe_detail,
         }
     _write_usage_entry(
         normalized,
@@ -951,7 +1072,7 @@ def persisted_model_cooling(
     wanted = _model_family(model)
     if not wanted:
         return None
-    entry = _read_json_object(_usage_path()).get(provider)
+    entry = _read_usage_object().get(provider)
     windows = entry.get("model_cooling") if isinstance(entry, dict) else None
     if not isinstance(windows, dict):
         return None
@@ -1059,7 +1180,7 @@ def persisted_cooling(
     any edit.  Keys: ``until`` (epoch), ``until_iso``, ``reason``.
     """
     moment = time.time() if now_wall is None else now_wall
-    entry = _read_json_object(_usage_path()).get(provider)
+    entry = _read_usage_object().get(provider)
     cooling = entry.get("cooling") if isinstance(entry, dict) else None
     if not isinstance(cooling, dict):
         return None
@@ -1074,10 +1195,10 @@ def persisted_cooling(
 
 
 def usage_windows(provider: str) -> list[dict[str, object]]:
-    """Return the recorded usage windows (session, weekly, ...) for a provider."""
+    """Return individually valid windows, including from an incomplete report."""
     entry = _read_json_object(_usage_path()).get(provider)
     windows = entry.get("windows") if isinstance(entry, dict) else None
-    return [dict(w) for w in windows if isinstance(w, dict)] if isinstance(windows, list) else []
+    return [item for w in windows if (item := normalize_usage_window(w)) is not None] if isinstance(windows, list) else []
 
 
 def render_wall(wall: float) -> str:
@@ -1262,7 +1383,15 @@ def usage_gate(provider: str, *, now_wall: float | None = None) -> UsageGate | N
     common: dict[str, object] = {
         "max_age_seconds": max_age, "ceiling_percent": ceiling, "burst_percent": burst,
     }
-    entry = _read_json_object(_usage_path()).get(normalized)
+    raw_entry = _read_json_object(_usage_path()).get(normalized)
+    if raw_entry is not None and _usage_entry_problem(raw_entry):
+        return _refused(
+            normalized, GATE_MALFORMED,
+            f"usage reading malformed for {normalized}; refusing new frontier "
+            "dispatch until a valid one is recorded",
+            moment, entry=raw_entry, **common,
+        )
+    entry = _read_usage_object().get(normalized)
     if not isinstance(entry, dict) or (
         "observed_at" not in entry and "windows" not in entry
         and "exhausted_until" not in entry and "probe" not in entry
@@ -1339,6 +1468,10 @@ def usage_gate(provider: str, *, now_wall: float | None = None) -> UsageGate | N
         problem = "no usage windows"
     else:
         problem = next((p for p in map(_window_problem, windows) if p), None)
+        if problem is None:
+            names = [canonical_window_name(w["name"]) for w in windows]
+            if len(names) != len(set(names)):
+                problem = "duplicate canonical window name"
     if problem is not None:
         return _refused(
             normalized, GATE_MALFORMED,
@@ -1347,6 +1480,17 @@ def usage_gate(provider: str, *, now_wall: float | None = None) -> UsageGate | N
             moment, entry=entry, observed_at=observed_at, **common,
         )
     assert observed_at is not None and isinstance(windows, list)
+    probe_detail = raw_probe.get("detail") if isinstance(raw_probe, dict) else None
+    if isinstance(probe_detail, str) and (
+        re.fullmatch(r"[1-9]\d* unreadable provider windows", probe_detail)
+        or "ordinary usage not allowed" in probe_detail
+    ):
+        return _refused(
+            normalized, GATE_MALFORMED,
+            f"usage reading incomplete for {normalized} ({probe_detail}); refusing new "
+            "frontier dispatch until a complete reading is recorded",
+            moment, entry=entry, observed_at=observed_at, **common,
+        )
     age = max(0.0, moment - observed_at)
     common.update(observed_at=observed_at, age_seconds=age)
     if age > max_age:
