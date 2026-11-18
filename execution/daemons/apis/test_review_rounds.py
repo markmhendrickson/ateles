@@ -313,6 +313,13 @@ def test_source_order_keeps_later_objection_after_clearance(timestamp):
     assert known and [r.head for r in ordered] == [H1, H2]
 
 
+def test_panel_completion_uses_each_lens_latest_comment():
+    clear = _verdict("arch", H1, n=1)
+    unreadable = _verdict("arch", H1, verdict="unreadable", n=2)
+    assert not swarm_dispatch.panel_finished_at_head([clear, unreadable], H1, {"arch"})
+    assert swarm_dispatch.panel_finished_at_head([unreadable, clear], H1, {"arch"})
+
+
 def test_missing_comment_id_with_unique_timestamp_still_has_known_order():
     comments = [_verdict("pm", H1, verdict="BLOCKED", n=1),
                 _verdict("pm", H2, n=2)]

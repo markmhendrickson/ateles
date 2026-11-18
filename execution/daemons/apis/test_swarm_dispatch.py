@@ -10535,6 +10535,13 @@ def _posted_aggregation(verdict_line, *, created_at="2999-01-01T00:00:00Z"):
     return {"id": 7, "body": body, "created_at": created_at, "updated_at": created_at}
 
 
+def test_latest_aggregation_uses_comment_list_order_with_missing_timestamp():
+    old_clear = _posted_aggregation("**APPROVE**")
+    later_block = _posted_aggregation("**REQUEST_CHANGES**", created_at=None)
+    later_block["id"] = 8
+    assert swarm_dispatch.latest_aggregation_comment([old_clear, later_block]) is later_block
+
+
 _SUMMARY_STDOUT = (
     "Posted the roll-up comment on the PR. The blocking finding is that the "
     "client hits the rate limit and retries before the usage limit resets."
