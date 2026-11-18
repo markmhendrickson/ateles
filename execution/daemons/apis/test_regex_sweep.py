@@ -902,7 +902,7 @@ def _entry_points():
         comment = {
             "id": 1,
             "body": body,
-            "user": {"login": OTHER_LOGIN},
+            "user": {"login": OTHER_LOGIN, "type": "Bot" if str(OTHER_LOGIN).endswith("[bot]") else "User"},
             "html_url": "https://github.com/o/r/pull/1#issuecomment-1",
         }
         return approve_pr_as_app.find_unadmitted_objections(

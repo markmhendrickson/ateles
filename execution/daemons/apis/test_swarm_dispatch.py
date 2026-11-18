@@ -999,7 +999,7 @@ def test_reviewed_head_blocker_recovery_ignores_stale_webhook_head(monkeypatch):
     async def fake_comments(self, repository, number, client):
         return [
             {
-                "user": {"login": "swarm-lens-account"},
+                "user": {"login": "swarm-lens-account", "type": "User"},
                 "body": (
                     f"<!-- review:security commit={stale_head} -->\n"
                     "review:security\n**REQUEST_CHANGES**\n"
@@ -1007,7 +1007,7 @@ def test_reviewed_head_blocker_recovery_ignores_stale_webhook_head(monkeypatch):
                 )
             },
             {
-                "user": {"login": "swarm-lens-account"},
+                "user": {"login": "swarm-lens-account", "type": "User"},
                 "body": (
                     f"<!-- review:security commit={reviewed_head} -->\n"
                     "review:security\n**REQUEST_CHANGES**\n"
@@ -2692,7 +2692,7 @@ class TestLiveBlockingVerdictOutsidePanel:
         async def fake_comments(self, repository, number, client):
             return [
                 {
-                    "user": {"login": "swarm-lens-account"},
+                    "user": {"login": "swarm-lens-account", "type": "User"},
                     "body": _outside_lens_comment_body(
                         "arch", "waxwing", head=head, verdict="REQUEST_CHANGES"
                     ),
@@ -2719,7 +2719,10 @@ class TestLiveBlockingVerdictOutsidePanel:
 
         async def fake_comments(self, repository, number, client):
             return [
-                {"body": _outside_lens_comment_body("arch", "waxwing", head=head)}
+                {"id": 1, "created_at": "2026-10-14T10:01:00Z",
+                 "html_url": "https://github.com/owner/repo/pull/87#issuecomment-1",
+                 "user": {"login": "swarm-lens-account", "type": "User"},
+                 "body": _outside_lens_comment_body("arch", "waxwing", head=head)}
             ]
 
         monkeypatch.setattr(SwarmDispatcher, "_all_issue_comments", fake_comments)
@@ -2758,6 +2761,10 @@ class TestLiveBlockingVerdictOutsidePanel:
         async def fake_comments(self, repository, number, client):
             return [
                 {
+                    "id": 1,
+                    "created_at": "2026-10-14T10:01:00Z",
+                    "html_url": "https://github.com/owner/repo/pull/87#issuecomment-1",
+                    "user": {"login": "swarm-lens-account", "type": "User"},
                     "body": _outside_lens_comment_body(
                         "arch", "waxwing", head=old_head, verdict="REQUEST_CHANGES"
                     )
@@ -2784,6 +2791,10 @@ class TestLiveBlockingVerdictOutsidePanel:
         async def fake_comments(self, repository, number, client):
             return [
                 {
+                    "id": 1,
+                    "created_at": "2026-10-14T10:01:00Z",
+                    "html_url": "https://github.com/owner/repo/pull/87#issuecomment-1",
+                    "user": {"login": "swarm-lens-account", "type": "User"},
                     "body": _outside_lens_comment_body(
                         "qa", "phoenicurus", head=head, verdict="REQUEST_CHANGES"
                     )
@@ -2806,13 +2817,13 @@ class TestLiveBlockingVerdictOutsidePanel:
         async def fake_comments(self, repository, number, client):
             return [
                 {
-                    "user": {"login": "swarm-lens-account"},
+                    "user": {"login": "swarm-lens-account", "type": "User"},
                     "body": _outside_lens_comment_body(
                         "arch", "waxwing", head=head, verdict="REQUEST_CHANGES"
                     )
                 },
                 {
-                    "user": {"login": "swarm-lens-account"},
+                    "user": {"login": "swarm-lens-account", "type": "User"},
                     "body": _outside_lens_comment_body(
                         "arch", "waxwing", head=head, verdict="SIGNED_OFF"
                     )
@@ -2878,7 +2889,7 @@ class TestGateMergeReadinessRefusesOnOutsidePanelBlock:
         async def fake_comments(self, repository, number, client):
             return [
                 {
-                    "user": {"login": "swarm-lens-account"},
+                    "user": {"login": "swarm-lens-account", "type": "User"},
                     "body": _outside_lens_comment_body(
                         "arch", "waxwing", head=head, verdict="REQUEST_CHANGES"
                     ),
@@ -2936,7 +2947,10 @@ class TestGateMergeReadinessRefusesOnOutsidePanelBlock:
 
         async def fake_comments(self, repository, number, client):
             return [
-                {"body": _outside_lens_comment_body("arch", "waxwing", head=head)}
+                {"id": 1, "created_at": "2026-10-14T10:01:00Z",
+                 "html_url": "https://github.com/owner/repo/pull/87#issuecomment-1",
+                 "user": {"login": "swarm-lens-account", "type": "User"},
+                 "body": _outside_lens_comment_body("arch", "waxwing", head=head)}
             ]
 
         monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
@@ -3842,13 +3856,13 @@ def test_pr_review_is_clear_reads_newest_first(monkeypatch):
             rows = [
                 {
                     "id": 1,
-                    "user": {"login": "swarm-lens-account"},
+                    "user": {"login": "swarm-lens-account", "type": "User"},
                     "created_at": "2026-08-10T09:00:00Z",
                     "body": "<!-- vanellus-aggregation -->\n**REQUEST_CHANGES**\nold",
                 },
                 {
                     "id": 2,
-                    "user": {"login": "swarm-lens-account"},
+                    "user": {"login": "swarm-lens-account", "type": "User"},
                     "created_at": "2026-08-19T09:00:00Z",
                     "body": "<!-- vanellus-aggregation -->\n**APPROVE**\nlgtm",
                 },
@@ -4282,7 +4296,7 @@ def test_post_bypass_comment_fail_closed_when_duplicate_patch_errors(monkeypatch
             return [
                 {
                     "id": 5,
-                    "user": {"login": "swarm-lens-account"},
+                    "user": {"login": "swarm-lens-account", "type": "User"},
                     "body": "<!-- pipeline-bypass-notice -->",
                 }
             ]
@@ -6438,7 +6452,7 @@ def test_post_swarm_run_comment_edits_existing_when_marker_found(monkeypatch):
     existing_comments = [
         {
             "id": 999,
-            "user": {"login": "swarm-lens-account"},
+            "user": {"login": "swarm-lens-account", "type": "User"},
             "body": f"{_CONFIRMATION_MARKER}\nOld confirmation text.",
         },
     ]
@@ -7613,7 +7627,7 @@ class _FakeHttpxClientForVanellus:
         class _Resp:
             def raise_for_status(self): pass
             def json(inner_self):
-                return [{"user": {"login": "swarm-lens-account"}, "body": b} for b in self.existing_bodies]
+                return [{"user": {"login": "swarm-lens-account", "type": "User"}, "body": b} for b in self.existing_bodies]
         return _Resp()
 
     async def post(self, url, **kwargs):
@@ -9504,7 +9518,7 @@ def test_resume_sweep_reruns_pipelines_with_inflight_marker(monkeypatch):
 
     async def fake_scan(self, repository):
         assert repository == "owner/repo"
-        return [{"number": 230, "title": "stranded", "body": "b", "user": {"login": "x"},
+        return [{"number": 230, "title": "stranded", "body": "b", "user": {"login": "x", "type": "User"},
                  "html_url": "u", "labels": [{"name": "enhancement"}]}]
 
     async def fake_handle(self, trigger):
@@ -9550,7 +9564,7 @@ def test_resume_sweep_survives_a_repo_that_fails_to_scan(monkeypatch):
     async def fake_scan(self, repository):
         if repository == "owner/broken":
             raise RuntimeError("GitHub 500")
-        return [{"number": 7, "title": "t", "body": "", "user": {"login": "x"},
+        return [{"number": 7, "title": "t", "body": "", "user": {"login": "x", "type": "User"},
                  "html_url": "u", "labels": []}]
 
     async def fake_handle(self, trigger):
@@ -9569,7 +9583,7 @@ def test_resume_sweep_counts_a_failed_resume_without_raising(monkeypatch):
     d = SwarmDispatcher(_StubNotifier(), _config())
 
     async def fake_scan(self, repository):
-        return [{"number": 9, "title": "t", "body": "", "user": {"login": "x"},
+        return [{"number": 9, "title": "t", "body": "", "user": {"login": "x", "type": "User"},
                  "html_url": "u", "labels": []}]
 
     async def fake_handle(self, trigger):
@@ -9720,7 +9734,7 @@ def test_queued_marker_survives_restart_and_sweep_dispatches_it(monkeypatch):
                 "number": 999,
                 "title": "queued issue",
                 "body": "b",
-                "user": {"login": "x"},
+                "user": {"login": "x", "type": "User"},
                 "html_url": "u",
                 "labels": [],
                 "_marker_stage": _stage_of(999),
@@ -9771,7 +9785,7 @@ def test_resumed_inflight_pipeline_that_never_advances_is_escalated_not_requeued
                 "number": 555,
                 "title": "stuck issue",
                 "body": "b",
-                "user": {"login": "x"},
+                "user": {"login": "x", "type": "User"},
                 "html_url": "u",
                 "labels": [],
                 "_marker_stage": "inflight",
@@ -10843,7 +10857,7 @@ def test_deferred_review_sweep_redispatches_matured_pr(monkeypatch):
     async def fake_scan(self, repository, now):
         return {
             "due": [{"number": 254, "title": "evidence bar", "body": "b",
-                     "user": {"login": "x"}, "html_url": "u",
+                     "user": {"login": "x", "type": "User"}, "html_url": "u",
                      "head": {"ref": "feat/x"}, "base": {"ref": "main"}}],
             "scanned": 1, "not_yet": 0,
         }
@@ -10947,7 +10961,7 @@ def _run_deferral_scan(monkeypatch, prs, comments, now):
 def _defer(iso):
     return {
         "id": 1,
-        "user": {"login": "swarm-lens-account"},
+        "user": {"login": "swarm-lens-account", "type": "User"},
         "body": f"<!-- review-deferred-until:{iso} -->\ndeferred",
     }
 
@@ -10955,7 +10969,7 @@ def _defer(iso):
 def _verdict():
     return {
         "id": 2,
-        "user": {"login": "swarm-lens-account"},
+        "user": {"login": "swarm-lens-account", "type": "User"},
         "body": "<!-- vanellus-aggregation -->\n**APPROVE**",
     }
 
@@ -11189,7 +11203,7 @@ def _comments_client(monkeypatch, bodies, *, calls=None, raises=None):
                     return [
                         {
                             "id": i + 1,
-                            "user": {"login": "swarm-lens-account"},
+                            "user": {"login": "swarm-lens-account", "type": "User"},
                             "created_at": f"2026-08-{10 + i:02d}T09:00:00Z",
                             "updated_at": datetime.now(timezone.utc).isoformat(),
                             "body": b if "Reviewed commit:" in b else b + "\nReviewed commit: " + "a" * 40,
@@ -11593,7 +11607,7 @@ def _emit_binding_review(
                         "state": pr_state,
                         "merged_at": None,
                         "head": {"sha": live_head},
-                        "user": {"login": author},
+                        "user": {"login": author, "type": "Bot" if str(author).endswith("[bot]") else "User"},
                     },
                 )
             if url.endswith("/installation"):
@@ -11751,7 +11765,7 @@ def test_binding_review_422_closed_is_pr_closed(monkeypatch, caplog):
                     {
                         "state": "open",
                         "head": {"sha": "a" * 40},
-                        "user": {"login": "octo-author"},
+                        "user": {"login": "octo-author", "type": "User"},
                     },
                 )
             if "/issues/87/comments" in url:
@@ -11973,7 +11987,7 @@ def test_binding_review_app_installation_id_from_env_or_api(monkeypatch, caplog)
                     {
                         "state": "open",
                         "head": {"sha": "a" * 40},
-                        "user": {"login": "octo-author"},
+                        "user": {"login": "octo-author", "type": "User"},
                     },
                 )
             if "/issues/87/comments" in url:
@@ -12409,14 +12423,14 @@ def test_ci_receipt_reconstruction_requires_latest_exact_head_approval(monkeypat
                 [
                     {
                         "id": 1,
-                        "user": {"login": reviewer},
+                        "user": {"login": reviewer, "type": "Bot" if str(reviewer).endswith("[bot]") else "User"},
                         "commit_id": head,
                         "state": "APPROVED",
                         "submitted_at": "2026-09-23T00:00:00Z",
                     },
                     {
                         "id": 2,
-                        "user": {"login": reviewer},
+                        "user": {"login": reviewer, "type": "Bot" if str(reviewer).endswith("[bot]") else "User"},
                         "commit_id": head,
                         "state": "CHANGES_REQUESTED",
                         "submitted_at": "2026-09-23T00:01:00Z",
@@ -12495,7 +12509,7 @@ def test_ci_receipt_reconstruction_rejects_missing_or_invalid_review_id(
                 [
                     {
                         "id": review_id,
-                        "user": {"login": reviewer},
+                        "user": {"login": reviewer, "type": "Bot" if str(reviewer).endswith("[bot]") else "User"},
                         "commit_id": head,
                         "state": "APPROVED",
                         "submitted_at": "2026-09-23T00:00:00Z",
@@ -12973,7 +12987,7 @@ def test_same_head_historical_comment_is_not_from_current_run(monkeypatch):
     d = _resolver(monkeypatch)
     async def comments(*args):
         return [{"id": 1, "created_at":"2026-09-01T00:00:00Z", "updated_at":"2026-09-01T00:00:00Z",
-                 "user": {"login": "swarm-lens-account"},
+                 "user": {"login": "swarm-lens-account", "type": "User"},
                  "body":f"{compose_aggregation_marker('a' * 40)}\n**APPROVE**"}]
     monkeypatch.setattr(d, "_all_issue_comments", comments)
     assert asyncio.run(d._resolve_review_verdict(
@@ -12986,7 +13000,7 @@ def test_fresh_comment_at_current_head_is_recovered(monkeypatch):
     d = _resolver(monkeypatch)
     async def comments(*args):
         return [{"id": 1, "created_at":"2026-09-14T01:00:00Z", "updated_at":"2026-09-14T01:00:00Z",
-                 "user": {"login": "swarm-lens-account"},
+                 "user": {"login": "swarm-lens-account", "type": "User"},
                  "body":f"{compose_aggregation_marker('a' * 40)}\n**APPROVE**"}]
     monkeypatch.setattr(d, "_all_issue_comments", comments)
     assert asyncio.run(d._resolve_review_verdict(
@@ -14177,13 +14191,13 @@ def _carry_comment(lens, head, cid, verdict="**SIGNED_OFF**"):
         f"{verdict}\n\nNo blocking findings."
     )
     return {"id": cid, "created_at": f"2026-11-06T00:00:{cid:02d}Z",
-            "user": {"login": "ateles-agent"}, "body": body,
+            "user": {"login": "ateles-agent", "type": "User"}, "body": body,
             "html_url": f"https://github.com/owner/repo/pull/87#issuecomment-{cid}"}
 
 
 def _carry_aggregation(head):
     return {"id": 99, "created_at": "2026-11-06T00:00:59Z",
-            "user": {"login": "ateles-agent"},
+            "user": {"login": "ateles-agent", "type": "User"},
             "body": (f"<!-- vanellus-aggregation commit={head} -->\n"
                      "**🤖 Vanellus — Ateles swarm, PR steward**\n**APPROVE**\n\n"
                      "Blocking: 0")}
@@ -14252,7 +14266,7 @@ def _carry_client(delta_files, *, scope_status=200, prs=()):
 
 def _carry_pr():
     return {"number": 87, "draft": False, "state": "open", "title": "t", "body": "",
-            "user": {"login": "x"}, "html_url": "https://github.com/owner/repo/pull/87",
+            "user": {"login": "x", "type": "User"}, "html_url": "https://github.com/owner/repo/pull/87",
             "head": {"sha": _CARRY_NEW, "ref": "f"}, "base": {"ref": "main"}}
 
 

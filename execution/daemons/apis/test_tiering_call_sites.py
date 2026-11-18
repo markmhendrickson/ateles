@@ -341,7 +341,7 @@ def _pr_dict():
         "number": 87,
         "title": "PR",
         "body": "Closes #80.",
-        "user": {"login": "someone"},
+        "user": {"login": "someone", "type": "User"},
         "html_url": "https://github.com/owner/repo/pull/87",
         "head": {"ref": "feature", "sha": "a" * 40},
         "base": {"ref": "main"},
@@ -429,7 +429,7 @@ def _run_revision_sweep(
                 "title": "t",
                 "body": "Closes #80.",
                 "html_url": "https://github.com/o/r/pull/163",
-                "user": {"login": "someone"},
+                "user": {"login": "someone", "type": "User"},
                 "head": {"ref": "f", "sha": "b" * 40},
                 "base": {"ref": "main"},
                 "labels": [],
@@ -711,7 +711,7 @@ def test_entity_backfill_triage_runs_mid(monkeypatch, world):
         return _State(seen["n"] > 1)
 
     async def fake_fetch(self, repo, n):
-        return {"title": "t", "body": "b", "user": {"login": "u"}, "html_url": ""}
+        return {"title": "t", "body": "b", "user": {"login": "u", "type": "User"}, "html_url": ""}
 
     monkeypatch.setattr(swarm_dispatch.IssueGateStore, "load", fake_load)
     monkeypatch.setattr(SwarmDispatcher, "_fetch_issue", fake_fetch)
@@ -923,7 +923,7 @@ def _lens_comment(lens: str, sha_char: str, when: str, findings: list[str]) -> d
     body = f"<!-- review:{lens} commit={sha_char * 40} -->\n**REQUEST_CHANGES**\n" + "\n".join(
         f"[BLOCKING] {f}\ndetail" for f in findings
     )
-    return {"body": body, "created_at": when, "user": {"login": "swarm-lens-account"}}
+    return {"body": body, "created_at": when, "user": {"login": "swarm-lens-account", "type": "User"}}
 
 
 def test_a_finding_repeated_on_the_next_head_is_not_new():
@@ -1017,9 +1017,11 @@ def _lens_marker(lens: str, sha: str, blocking: tuple[str, ...] = ()) -> dict:
         f"[BLOCKING] {b}\ndetail" for b in blocking
     )
     return {
+        "id": int(sha[0], 16) + 1,
         "body": body,
         "created_at": f"2026-09-29T0{int(sha[0])}:00:00Z",
-        "user": {"login": "swarm-lens-account"},
+        "html_url": f"https://github.com/owner/repo/pull/87#issuecomment-{int(sha[0], 16) + 1}",
+        "user": {"login": "swarm-lens-account", "type": "User"},
     }
 
 
