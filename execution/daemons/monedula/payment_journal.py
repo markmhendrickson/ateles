@@ -126,13 +126,18 @@ def load(path: Path) -> dict[str, Any]:
             attempts = entry.get("attempts", [])
             if not isinstance(attempts, list) or any(
                 not isinstance(prior, dict)
-                or prior.get("failure_status") not in ("funds_refunded", "cancelled")
-                or not isinstance(prior.get("transfer_id"), int)
+                or prior.get("failure_status") not in ("funds_refunded", "cancelled", "not_submitted")
+                or (prior.get("failure_status") != "not_submitted"
+                    and not isinstance(prior.get("transfer_id"), int))
+                or (prior.get("failure_status") == "not_submitted"
+                    and prior.get("transfer_id") is not None)
                 for prior in attempts
             ):
                 raise JournalError("payment journal Wise attempt history malformed")
             transfer_id = entry.get("transfer_id")
-            if entry["state"] in (STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED) and (
+            if entry["state"] in (STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED) and not (
+                entry["state"] == STATE_FAILED and entry.get("failure_status") == "not_submitted"
+            ) and (
                 not isinstance(transfer_id, int) or isinstance(transfer_id, bool)
                 or transfer_id <= 0
             ):
@@ -300,7 +305,7 @@ def obligation_state(data: dict[str, Any], obligation: str) -> str | None:
     state = entry.get("state")
     if state not in (STATE_INTENT, STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED):
         raise JournalError("payment journal obligation state malformed")
-    if state == STATE_DONE and entry.get("outcome_status") != "sent":
+    if state == STATE_DONE and entry.get("rail") == "wise" and entry.get("outcome_status") != "sent":
         return STATE_FAILED  # legacy non-sent outcomes were stored as done
     return state
 
@@ -375,6 +380,22 @@ def record_transfer_created(path: Path, obligation: str, transfer_id: int) -> No
         raise JournalError("Wise transfer id did not persist")
 
 
+def record_wise_not_submitted(path: Path, obligation: str) -> None:
+    """Close an attempt only when transfer creation was never entered."""
+    data = load(path)
+    entry = data["obligations"].get(obligation)
+    if (not isinstance(entry, dict) or entry.get("rail") != "wise"
+            or entry.get("state") != STATE_INTENT or entry.get("transfer_id") is not None):
+        raise JournalError("Wise not-submitted transition refused")
+    entry["state"] = STATE_FAILED
+    entry["outcome_status"] = "failed"
+    entry["failure_status"] = "not_submitted"
+    _write(path, data)
+    back = load(path)["obligations"][obligation]
+    if (back.get("state"), back.get("failure_status")) != (STATE_FAILED, "not_submitted"):
+        raise JournalError("Wise not-submitted transition did not persist")
+
+
 def record_funding_pending(
     path: Path, obligation: str, transfer_id: int, funding_status: str
 ) -> None:
@@ -415,8 +436,10 @@ def record_wise_status(
         or not occurred_at
     ):
         raise JournalError("Wise status transition refused")
+    from wise_reconcile import _stamp
+    current_stamp = _stamp(occurred_at)
     previous = entry.get("last_occurred_at")
-    if previous and occurred_at < previous:
+    if previous and current_stamp < _stamp(previous):
         return False  # an older observation must never roll current state back
     first_paid = status == "outgoing_payment_sent" and entry.get("outcome_status") != "sent"
     entry["last_status"] = status[:64]
@@ -426,12 +449,15 @@ def record_wise_status(
         entry["state"] = STATE_DONE
         entry["outcome_status"] = "sent"
         entry["outcome_at"] = time.time()
+        entry.pop("discrepancy_status", None)
     elif status in ("funds_refunded", "cancelled") and entry.get("outcome_status") != "sent":
         entry["state"] = STATE_FAILED
         entry["outcome_status"] = "failed"
         entry["failure_status"] = status
     elif entry.get("state") == STATE_DONE and status != "outgoing_payment_sent":
         entry["discrepancy_status"] = status[:64]
+    elif entry.get("state") == STATE_DONE:
+        entry.pop("discrepancy_status", None)
     elif entry.get("state") == STATE_INTENT:
         entry["state"] = STATE_FUNDING_PENDING
     _write(path, data)
@@ -486,12 +512,12 @@ def record_approved_replacement_intent(
         not isinstance(entry, dict)
         or entry.get("rail") != "wise"
         or entry.get("state") != STATE_FAILED
-        or entry.get("failure_status") not in ("funds_refunded", "cancelled")
+        or entry.get("failure_status") not in ("funds_refunded", "cancelled", "not_submitted")
         or token in data["consumed_tokens"]
         or token == entry.get("token")
         or generation <= entry.get("generation", 0)
     ):
-        raise JournalError("Wise replacement requires terminal failure and fresh approval")
+        raise JournalError("Wise replacement requires terminal failure or no submission and fresh approval")
     attempt = entry.get("attempt")
     if not isinstance(attempt, int) or attempt < 1:
         raise JournalError("Wise attempt number malformed")

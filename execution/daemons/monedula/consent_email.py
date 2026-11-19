@@ -258,6 +258,32 @@ def obligation_key(
     return hashlib.sha256(basis.encode()).hexdigest()[:32]
 
 
+def journal_entry_for_item(journal: dict, item: PendingItem) -> dict | None:
+    """Find an existing Wise attempt, including one written with an old one-off key.
+
+    A profile may have only one unresolved invoice at a time. If an old key
+    cannot be reconstructed, its journaled handler identity still holds it.
+    """
+    entry = journal["obligations"].get(item.obligation)
+    if entry is not None:
+        return entry
+    if item.is_calendar:
+        return None
+    candidates = [row for row in journal["obligations"].values()
+                  if row.get("rail") == "wise"
+                  and row.get("handler_name") == item.handler_name]
+    return candidates[0] if candidates else None
+
+
+def journal_state_for_item(journal: dict, item: PendingItem) -> str | None:
+    entry = journal_entry_for_item(journal, item)
+    if entry is None:
+        return None
+    return payment_journal.obligation_state(
+        {"obligations": {item.obligation: entry}}, item.obligation
+    )
+
+
 def _profile_fields(handler: Any) -> tuple[str, int, bool]:
     profile = getattr(handler, "profile", None)
     label = str(getattr(profile, "label", None) or handler.name)
@@ -351,7 +377,11 @@ def build_pending_items(
                     or (match or {}).get("id")
                     or idx
                 )
-            session_date = event_session_date(match) or yesterday_str
+            one_off_due = (
+                (match or {}).get("due_date") or getattr(handler.profile, "due_date", "")
+                if isinstance(match, dict) and not is_calendar else ""
+            )
+            session_date = event_session_date(match) or one_off_due or yesterday_str
             session = session_date if not match_id else f"{session_date}:{match_id}"
             obligation = obligation_key(handler, session_date, match_id)
             token = token_for(
@@ -382,6 +412,7 @@ def build_request_body(
     superseded: bool,
     settled: set[str] | None = None,
     unknown: set[str] | None = None,
+    held_notes: dict[str, str] | None = None,
 ) -> tuple[str, str]:
     """Plain-text subject + body per Design copy. Never instructs PAID."""
     first_marker = subject_marker(items[0].token) if items else ""
@@ -397,13 +428,16 @@ def build_request_body(
     lines.append("")
     settled = settled or set()
     unknown = unknown or set()
+    held_notes = held_notes or {}
     for item in items:
         marker = subject_marker(item.token)
         note = ""
         if item.obligation in settled:
             note = " | already paid — no reply needed"
         elif item.obligation in unknown:
-            note = " | submitted; not confirmed; do not pay again"
+            note = " | " + held_notes.get(
+                item.obligation, "outcome unknown; do not pay again"
+            )
         lines.append(
             f"- {item.handler_name} | {item.payment_date} | {item.label} | "
             f"{CURRENCY} {item.amount_eur} | {marker}{note}"
@@ -721,16 +755,39 @@ def request_and_collect(
     settled = {
         i.obligation
         for i in probe
-        if payment_journal.obligation_state(journal, i.obligation)
+        if journal_state_for_item(journal, i)
         == payment_journal.STATE_DONE
     }
     unknown = {
         i.obligation
         for i in probe
-        if payment_journal.obligation_state(journal, i.obligation)
+        if journal_state_for_item(journal, i)
         in (payment_journal.STATE_INTENT, payment_journal.STATE_FUNDING_PENDING,
             payment_journal.STATE_FAILED)
     }
+    held_notes = {}
+    for item in probe:
+        if item.obligation not in unknown:
+            continue
+        entry = journal_entry_for_item(journal, item) or {}
+        if entry.get("state") == payment_journal.STATE_FUNDING_PENDING:
+            note = "submitted, not confirmed; Monedula is checking; do not pay again"
+        elif entry.get("failure_status") == "not_submitted":
+            note = "not submitted; no payment was made; new approval required"
+        elif entry.get("state") == payment_journal.STATE_FAILED:
+            note = "returned or cancelled; new approval required before paying again"
+        elif entry.get("transfer_id"):
+            note = "transfer exists, outcome unknown; Monedula is checking; do not pay again"
+        else:
+            note = "submission outcome unknown; check the rail; do not pay again"
+        held_notes[item.obligation] = note
+
+    if len(settled | unknown) == len(probe):
+        result.pending_items = probe
+        for item in probe:
+            result.blocked.add(match_key(item))
+            result.states[match_key(item)] = "blocked"
+        return result
 
     if already_sent:
         generation = mark_gen
@@ -755,6 +812,7 @@ def request_and_collect(
             superseded=bool(prior_fp),
             settled=settled,
             unknown=unknown,
+            held_notes=held_notes,
         )
         ok = send_request(subject, body)
         result.send_count = 1
@@ -867,6 +925,7 @@ def request_and_collect(
             fresh_items = build_pending_items(triggered, yesterday_str, new_generation)
             subject, body = build_request_body(
                 fresh_items, superseded=True, settled=settled, unknown=unknown,
+                held_notes=held_notes,
             )
             body = (
                 "A reply to the previous consent request could not be read. "

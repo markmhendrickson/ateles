@@ -47,6 +47,53 @@ Use mocked Wise GET/POST responses only. Parametrize funding `CREATED`, `COMPLET
 
 For existing `done/sent` rows, produce a **read-only discrepancy report**: enumerate the journal's hashed obligations and any available Wise transfer identifiers from associated task notes or other existing records; cross-check against Wise statements over a documented complete window. The current journal does **not** store a Wise transfer ID, so a row without a defensible match must be reported `unmatched`, not assumed paid. Report `confirmed sent`, `returned/bounced`, `still pending`, and `unmatched` with evidence and statement coverage, without editing the journal or first-use marker. The operator reviews discrepancies against Wise's own statement and the obligation, decides whether any manual payment is needed, and authorizes any replacement separately. A report alone never unlocks a retry.
 
+## Recovery and compatibility
+
+### Recovery after a failure before transfer creation
+
+The journal records `failed/not_submitted` only when transfer creation was never
+entered. The operator alert and consent copy say “not submitted; no payment was
+made.” That row remains held on ordinary ticks. A fresh, independently verified
+operator approval may reserve attempt 2 on the **same obligation** through
+`record_approved_replacement_intent`, preserving the first attempt and consuming
+the new approval token. The live consent adapters do not yet issue or execute a
+replacement attempt; the Finances lead must complete and verify that adapter
+before a retry is available. A create call that was entered, even if it raised,
+remains `intent` with unknown outcome and cannot take this release path. A
+rejected funding response leaves an existing transfer ID held for reconciliation;
+it is never represented as “not submitted.”
+
+One-off obligations use the invoice due date and profile terms, not the tick
+date. An unresolved row written under the old tick-date key is found by its
+journaled handler name and held; the old row is never re-keyed or discarded.
+After confirmed settlement, the profile is reloaded so an archived one-off is
+not offered again in that tick.
+
+### Behaviour on other rails
+
+`obligation_state` maps a legacy `done` row with an outcome other than `sent`
+to `failed` only for Wise rows. BTC retains its previous `done` result, so this
+change does not turn old BTC non-sent rows into a new held
+`payment_outcome_unknown` alert. This is intentional: the Wise migration needs
+the fail-closed mapping, while changing BTC's historical contract is outside
+this payment-state repair.
+
+### Known limits
+
+- The approved-replacement reservation exists in the journal, but neither live
+  consent adapter can yet produce an attempt-specific replacement approval.
+  Terminal failures and `not_submitted` attempts stay held until that route is
+  built and verified.
+- A Wise transfer still unresolved after two calendar days raises a deduped
+  alert. This is a wall-clock threshold, not a business-day calculation.
+- Terminally failed transfers are not read on every tick. Any later vendor
+  status change needs a separate operator-initiated review.
+- A new invoice reusing a handler name with an unmatched old journal row can
+  be conservatively held until the old row is reconciled. The handler-name
+  cutover guard favors avoiding a duplicate payment over automatic reuse.
+- Routine confirmed-transfer monitoring ends after the existing 30-day window;
+  a later return requires a separate statement or transfer read.
+
 ## Risks and decisions
 
 - **Wise status contract and lookup coverage:** verify the transfer-status endpoint, exact terminal values, pagination, and statement retention with primary Wise documentation before coding. Until verified, classify unfamiliar values as unresolved and hold.
