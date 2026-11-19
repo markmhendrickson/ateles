@@ -34,7 +34,17 @@ def main(argv: list[str]) -> int:
     if len(argv) != 2:
         print(__doc__)
         return 2
-    data = json.loads(Path(argv[1]).read_text(encoding="utf-8"))
+    try:
+        data = json.loads(Path(argv[1]).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        print("the daemon would REFUSE to load this journal: unreadable or invalid JSON")
+        print("all payments would hold")
+        return 1
+    problems = payment_journal.validate_journal_data(data)
+    if problems:
+        print("the daemon would REFUSE to load this journal: " + ", ".join(problems))
+        print("all payments would hold")
+        return 1
     rows = data.get("obligations") or {}
     kinds = Counter()
     held_profiles = Counter()

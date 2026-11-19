@@ -86,6 +86,55 @@ def _empty() -> dict[str, Any]:
     }
 
 
+def validate_journal_data(data: object) -> list[str]:
+    """Return value-free problem categories without changing the journal data."""
+    if not isinstance(data, dict):
+        return ["top-level shape"]
+    problems = []
+    if type(data.get("generation")) is not int or data["generation"] < 0:
+        problems.append("generation")
+    if not isinstance(data.get("obligations"), dict):
+        problems.append("obligations map")
+    if not isinstance(data.get("consumed_tokens"), dict):
+        problems.append("consumed-token map")
+    if "sessions" in data and not isinstance(data["sessions"], dict):
+        problems.append("sessions map")
+    if problems:
+        return problems
+    obligations = data["obligations"]
+    tokens = data["consumed_tokens"]
+    classification_data = data if "sessions" in data else {**data, "sessions": {}}
+    for token, obligation in tokens.items():
+        if (not _text(token) or not isinstance(obligation, str)
+                or obligation not in obligations):
+            problems.append("consumed-token reference")
+            break
+        entry = obligations[obligation]
+        if (isinstance(entry, dict)
+                and classify_journal_row(entry, classification_data)[0] != "invalid"):
+            attempts = entry.get("attempts", [])
+            bound_tokens = [entry.get("token")]
+            if isinstance(attempts, list):
+                bound_tokens.extend(prior.get("token") for prior in attempts
+                                    if isinstance(prior, dict))
+            if token not in bound_tokens:
+                problems.append("consumed-token identity")
+                break
+    for obligation, entry in obligations.items():
+        if not isinstance(obligation, str) or not isinstance(entry, dict):
+            problems.append("obligation malformed")
+            continue
+        if entry.get("state") not in (STATE_INTENT, STATE_FUNDING_PENDING,
+                                       STATE_DONE, STATE_FAILED):
+            problems.append("obligation state malformed")
+            continue
+        kind, _ = classify_journal_row(entry, classification_data)
+        if (kind.startswith("wise_modern")
+                and tokens.get(entry["token"]) != obligation):
+            problems.append("Wise consumed-token binding")
+    return list(dict.fromkeys(problems))
+
+
 def load(path: Path) -> dict[str, Any]:
     """Return the journal; absence is never interpreted as a fresh start.
 
@@ -106,27 +155,13 @@ def load(path: Path) -> dict[str, Any]:
         data = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
         raise JournalError(f"payment journal unreadable: {type(exc).__name__}") from exc
-    if (
-        not isinstance(data, dict)
-        or not isinstance(data.get("generation"), int)
-        or not isinstance(data.get("obligations"), dict)
-        or not isinstance(data.get("consumed_tokens"), dict)
-    ):
-        raise JournalError("payment journal malformed")
-    # ``sessions`` was added after the first journals were written: absent is
-    # an empty map, present-but-wrong-shape is malformed (fail closed).
-    if "sessions" not in data:
-        data["sessions"] = {}
-    elif not isinstance(data["sessions"], dict):
-        raise JournalError("payment journal malformed")
+    problems = validate_journal_data(data)
+    if problems:
+        raise JournalError(f"payment journal malformed: {', '.join(problems)}")
+    # A valid legacy journal may have no sessions map.
+    data.setdefault("sessions", {})
     for obligation, entry in data["obligations"].items():
-        if not isinstance(obligation, str) or not isinstance(entry, dict):
-            raise JournalError("payment journal obligation malformed")
-        if entry.get("state") not in (STATE_INTENT, STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED):
-            raise JournalError("payment journal obligation state malformed")
         kind, reason = classify_journal_row(entry, data)
-        if kind.startswith("wise_modern") and data["consumed_tokens"].get(entry["token"]) != obligation:
-            raise JournalError(f"payment journal Wise attempt {obligation} malformed")
         if kind == "invalid":
             log.warning("payment journal attempt %s invalid (%s); held", obligation, reason)
     try:

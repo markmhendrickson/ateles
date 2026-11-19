@@ -139,9 +139,11 @@ def _report_command() -> int:
     args = parser.parse_args()
     # Deliberately avoid payment_journal.load: it may create the first-use marker.
     journal = json.loads(args.journal.read_text())
+    import payment_journal
+    problems = payment_journal.validate_journal_data(journal)
+    if problems:
+        parser.error("journal is malformed: " + ", ".join(problems))
     source = json.loads(args.transfer_snapshots.read_text())
-    if not isinstance(journal, dict) or not isinstance(journal.get("obligations"), dict):
-        parser.error("journal is malformed")
     if not isinstance(source, dict) or not isinstance(source.get("transfers"), dict):
         parser.error("transfer snapshots are malformed")
     reads = {int(key): value for key, value in source["transfers"].items()}

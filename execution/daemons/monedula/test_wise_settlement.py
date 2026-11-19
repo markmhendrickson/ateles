@@ -748,6 +748,25 @@ def test_report_command_does_not_edit_journal_or_marker(attempt, tmp_path, monke
     assert (attempt.read_bytes(), marker.read_bytes()) == before
 
 
+def test_discrepancy_command_refuses_invalid_journal_binding(
+    attempt, tmp_path, monkeypatch, capsys
+):
+    data = journal.load(attempt)
+    data["consumed_tokens"].clear()
+    journal._write(attempt, data)
+    marker = attempt.with_name(journal.MARKER_NAME)
+    before = (attempt.read_bytes(), marker.read_bytes())
+    snapshots = tmp_path / "transfer_snapshots.json"
+    snapshots.write_text(json.dumps({"transfers": {}}))
+    monkeypatch.setattr(sys, "argv", ["wise_reconcile.py", "report", "--journal",
+                                     str(attempt), "--transfer-snapshots", str(snapshots)])
+    with pytest.raises(SystemExit) as exc:
+        wise_reconcile._report_command()
+    assert exc.value.code == 2
+    assert "Wise consumed-token binding" in capsys.readouterr().err
+    assert (attempt.read_bytes(), marker.read_bytes()) == before
+
+
 def test_email_copy_for_pending_transfer_forbids_another_payment():
     import consent_email
 
@@ -2086,6 +2105,55 @@ def test_wise_hold_census_matches_journal_for_synthetic_rows(tmp_path, capsys):
     assert "wise_new_UNRESOLVED_with_profile_id: 1" in output
     assert "unclassified_UNRESOLVED_all_profiles: 1" in output
     assert "legacy_settled_sent: 1" in output
+
+
+@pytest.mark.parametrize("mutation,category", [
+    (lambda data: data.update(generation="1"), "generation"),
+    (lambda data: data.update(generation=-1), "generation"),
+    (lambda data: data.update(obligations=[]), "obligations map"),
+    (lambda data: data.update(consumed_tokens=[]), "consumed-token map"),
+    (lambda data: data.update(sessions=[]), "sessions map"),
+    (lambda data: data["consumed_tokens"].clear(), "Wise consumed-token binding"),
+    (lambda data: data["consumed_tokens"].update(extra="absent"),
+     "consumed-token reference"),
+    (lambda data: data["consumed_tokens"].update(extra="obligation"),
+     "consumed-token identity"),
+    (lambda data: data["obligations"].update(obligation=[]), "obligation malformed"),
+    (lambda data: data["obligations"]["obligation"].update(state="other"),
+     "obligation state malformed"),
+])
+def test_census_refuses_every_journal_level_violation(
+    attempt, capsys, mutation, category
+):
+    import wise_journal_hold_census as census
+
+    data = journal.load(attempt)
+    mutation(data)
+    journal._write(attempt, data)
+    before = attempt.read_bytes()
+    marker = attempt.with_name(journal.MARKER_NAME)
+    marker_before = marker.read_bytes()
+    with pytest.raises(journal.JournalError):
+        journal.load(attempt)
+    assert census.main(["census", str(attempt)]) == 1
+    output = capsys.readouterr().out
+    assert output.startswith("the daemon would REFUSE to load this journal:")
+    assert category in output
+    assert "all payments would hold" in output
+    assert "synthetic-profile" not in output
+    assert attempt.read_bytes() == before
+    assert marker.read_bytes() == marker_before
+
+
+def test_census_reports_valid_journal_without_writing(attempt, capsys):
+    import wise_journal_hold_census as census
+
+    before = attempt.read_bytes()
+    assert census.main(["census", str(attempt)]) == 0
+    output = capsys.readouterr().out
+    assert "wise_new_UNRESOLVED_with_profile_id: 1" in output
+    assert "the daemon would REFUSE" not in output
+    assert attempt.read_bytes() == before
 
 
 @pytest.mark.parametrize("shape", ["legacy", "unknown_rail", "stripped_modern"])
