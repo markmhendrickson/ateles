@@ -1679,7 +1679,7 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                 if entry is not None and (
                     entry.get("rail") == "wise"
                     or (isinstance(handler, WiseTransferHandler)
-                        and not item.is_calendar and "rail" not in entry)
+                        and "rail" not in entry and "handler_name" not in entry)
                 ):
                     state = journal_state_for_item(
                         {"obligations": {item.obligation: entry}}, item

@@ -297,10 +297,9 @@ def journal_entry_for_item(journal: dict, item: PendingItem) -> dict | None:
             candidates.append(row)
     if candidates:
         return candidates[0]
-    if item.is_calendar:
-        return entry
     # Old rows without a date or profile identity cannot safely be ruled out
-    # as this invoice. Keep the existing conservative one-off cutover guard.
+    # as this obligation, including a calendar session. The old writer stored
+    # only a hashed key, so changed terms cannot recover its event identity.
     candidates = [row for row in journal["obligations"].values()
                   if row.get("rail") == "wise"
                   and row.get("handler_name") == item.handler_name
