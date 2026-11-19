@@ -66,6 +66,23 @@ def test_missing_gate_checkpoint_is_raised_once_and_read_back(recovery):
     assert state["reads"] >= 3
 
 
+@pytest.mark.parametrize("status", ["awaiting_operator", "rejected"])
+def test_existing_brief_for_hold_is_skipped_even_with_different_summary(recovery, status):
+    state, _, _ = recovery
+    state["checkpoints"] = [{
+        "entity_id": "ent_live_brief", "created_at": "2026-01-01T00:01:00Z",
+        "snapshot": {
+            "status": status, "task_entity_id": "ent_task",
+            "plan_summary": "Live gate: scorer's explanation and trigger",
+        },
+    }]
+
+    outcome = apis._reconcile_missing_checkpoint("ent_task", apply=True)
+
+    assert outcome == ("held_with_checkpoint" if status == "awaiting_operator" else "skipped_by_reason")
+    assert state["writes"] == 0
+
+
 def test_fresh_hold_is_skipped_and_old_hold_is_raised(recovery):
     state, _, _ = recovery
     now = datetime(2026, 11, 18, tzinfo=timezone.utc)

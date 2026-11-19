@@ -148,6 +148,11 @@ def test_gate_and_sweep_share_one_signed_checkpoint_identity(monkeypatch):
     monkeypatch.setattr(apis, "fetch_task_record", lambda _id: held)
     monkeypatch.setattr(apis, "write_" + "checkpoint" + "_brief", getattr(gating, "write_" + "checkpoint" + "_brief"))
     monkeypatch.setattr(apis, "checkpoints_for_task", lambda _id, strict: [])
+    monkeypatch.setattr(gating, "checkpoints_for_task", lambda task_id, *, strict: [
+        server.fetch_entity(entity_id)
+        for entity_id, item in server.entities.items()
+        if item["fields"]["task_entity_id"] == task_id
+    ])
     monkeypatch.setattr(apis, "fetch_checkpoint_record", server.fetch_entity)
     monkeypatch.setattr(apis, "_checkpoint_authority_state", lambda _id, _record: "current")
 
@@ -160,6 +165,9 @@ def test_gate_and_sweep_share_one_signed_checkpoint_identity(monkeypatch):
     first, second = (entry["body"] for entry in server.stores)
     assert first["idempotency_key"] == second["idempotency_key"]
     assert first["entities"][0]["title"] == second["entities"][0]["title"]
+    assert first["entities"][0]["plan_summary"] != second["entities"][0]["plan_summary"]
+    assert "Trigger: created." in first["entities"][0]["plan_summary"]
+    assert "Gate hold for cicada." in second["entities"][0]["plan_summary"]
     for field in ("body", "task_entity_id", "reason", "policy_entity_id", "gate_action"):
         assert first["entities"][0][field] == second["entities"][0][field]
 

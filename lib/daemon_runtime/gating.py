@@ -1403,37 +1403,27 @@ def write_checkpoint_brief(
     # the relationship write stays within the producer's grant per security
     # review.  Only the legacy bearer-only path below still carries its edge, as
     # before.
-    if idempotency_context:
-        body["idempotency_key"] += f"-{idempotency_context}"
-    # Neotoma resolves a checkpoint_brief's identity from its title.  A title
-    # unique per task is not enough: a changed hold of the same task would
-    # resolve to the SAME entity, so a replacement would be the checkpoint it is
-    # meant to replace.  A digest of the hold's content makes the identity
-    # per-hold: an exact retry keeps it (same entity), a changed hold gets a
-    # new one (a distinct checkpoint), and earlier holds are preserved.
     _entity = body["entities"][0]
-    # The replacement context (which brief a fresh checkpoint replaces) is part
-    # of the identity: a replacement whose content is otherwise identical to the
-    # brief it replaces must still be a different entity, or retiring the prior
-    # brief would retire the replacement.
-    _hold_identity = hashlib.sha256(
-        _canonical_json(
-            {
-                "entity": {k: v for k, v in _entity.items() if k != "title"},
-                "context": idempotency_context or "",
-            }
-        ).encode()
-    ).hexdigest()[:12]
-    _entity["title"] = f"{_entity['title']} #{_hold_identity}"
-    # Neotoma refuses an idempotency key reused with different content (HTTP
-    # 400 ERR_IDEMPOTENCY_MISMATCH).  A task held a second time carries a new
-    # revision and reason, so a content-blind key made every re-hold a 400
-    # (97 of them in the 2026-09 log, each on a task that had already been
-    # checkpointed once).  Binding the key to the content keeps an exact retry
-    # an idempotent replay while a changed hold becomes a new checkpoint.
-    body["idempotency_key"] += "-" + hashlib.sha256(
-        _canonical_json(body["entities"]).encode()
-    ).hexdigest()[:16]
+    if idempotency_context:
+        # A live gate and its recovery can describe one hold differently. The
+        # observation context, not either description, names that hold.
+        hold_identity = hashlib.sha256(_canonical_json({
+            "handler": handler, "task": task_entity_id,
+            "context": idempotency_context,
+        }).encode()).hexdigest()[:16]
+        body["idempotency_key"] += f"-{hold_identity}"
+        _entity["title"] = f"PLAN checkpoint: {task_entity_id} #{hold_identity}"
+    else:
+        # Legacy callers have no hold observation. Retain content-based
+        # identity so a changed task receives a distinct checkpoint.
+        hold_identity = hashlib.sha256(_canonical_json({
+            "entity": {k: v for k, v in _entity.items() if k != "title"},
+            "context": "",
+        }).encode()).hexdigest()[:12]
+        _entity["title"] = f"{_entity['title']} #{hold_identity}"
+        body["idempotency_key"] += "-" + hashlib.sha256(
+            _canonical_json(body["entities"]).encode()
+        ).hexdigest()[:16]
     try:
         signer = None
         encoded_request_body: bytes | None = None
@@ -1450,8 +1440,7 @@ def write_checkpoint_brief(
 
         def _post_checkpoint():
             # Each attempt is signed afresh (a signature may carry its own
-            # timestamp/nonce) but posts the SAME body, and so the same
-            # content-bound idempotency key.
+            # timestamp/nonce) but posts the same body and idempotency key.
             headers = {"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}
             if signer is None:
                 return httpx.post(
@@ -1476,7 +1465,49 @@ def write_checkpoint_brief(
         resp = call_with_transient_retry(
             _post_checkpoint, label="checkpoint_brief store"
         )
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError:
+            # A concurrent write for this hold may have won with a different
+            # summary. Neotoma rejects the reused key; prove the existing
+            # signed checkpoint before treating that rejection as a replay.
+            if not (idempotency_context and authorization_expected
+                    and "ERR_IDEMPOTENCY_MISMATCH" in resp.text):
+                raise
+            rows = checkpoints_for_task(task_entity_id, strict=True)
+            valid_statuses = (
+                {CHECKPOINT_AWAITING_OPERATOR, CHECKPOINT_SUPERSEDED,
+                 CHECKPOINT_APPROVED_NO_RELEASE, CHECKPOINT_REQUIRES_FRESH_APPROVAL}
+                | CHECKPOINT_APPROVED_STATES | CHECKPOINT_REJECTED_STATES
+            )
+            if rows is None or any(
+                not isinstance(row, dict)
+                or not isinstance(row.get("entity_id"), str)
+                or not isinstance(row.get("snapshot"), dict)
+                or row["snapshot"].get("task_entity_id") != task_entity_id
+                or row["snapshot"].get("status") not in valid_statuses
+                for row in rows
+            ):
+                return None
+            matches = [row for row in rows if (
+                row["snapshot"].get("title") == _entity["title"]
+                and row["snapshot"].get("handler") == handler
+            )]
+            if len(matches) != 1:
+                return None
+            existing_id = matches[0].get("entity_id")
+            existing = _fetch_entity(existing_id) if isinstance(existing_id, str) else None
+            existing_snapshot = existing.get("snapshot") if isinstance(existing, dict) else None
+            if (not isinstance(existing, dict)
+                    or not isinstance(existing_snapshot, dict)
+                    or existing_snapshot.get("title") != _entity["title"]
+                    or existing_snapshot.get("task_entity_id") != task_entity_id
+                    or existing_snapshot.get("handler") != handler
+                    or existing_snapshot.get("status") not in valid_statuses
+                    or read_authenticated_checkpoint_authorization(existing_id, existing)
+                    != expected_authorization):
+                return None
+            return existing_id
         data = resp.json()
         ents = data.get("entities") or []
         entity_id = ents[0].get("entity_id") if ents else None
