@@ -28,9 +28,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from ..handler_base import PaymentHandler, STATUS_FUNDING_PENDING
+    from ..handler_base import PaymentHandler, STATUS_FUNDING_PENDING, STATUS_SUBMISSION_UNKNOWN
 except ImportError:
-    from handler_base import PaymentHandler, STATUS_FUNDING_PENDING  # type: ignore[no-redef]
+    from handler_base import PaymentHandler, STATUS_FUNDING_PENDING, STATUS_SUBMISSION_UNKNOWN  # type: ignore[no-redef]
 from . import task_writes
 from .payment_profile import PaymentProfile
 
@@ -290,10 +290,20 @@ class WiseTransferHandler(PaymentHandler):
             # Once intent is durable, an exception may follow a successful
             # create or funding POST. Never suggest a second manual payment.
             if journal_context is not None:
+                import payment_journal
+                try:
+                    entry = payment_journal.load(journal_context[0])["obligations"].get(
+                        journal_context[1], {}
+                    )
+                    transfer_id = entry.get("transfer_id")
+                except payment_journal.JournalError:
+                    transfer_id = None
                 return {
-                    "status": STATUS_FUNDING_PENDING,
+                    "status": (STATUS_FUNDING_PENDING if transfer_id
+                               else STATUS_SUBMISSION_UNKNOWN),
                     "handler": self.name,
-                    "error": "Wise outcome unknown; reconcile the existing attempt",
+                    "transfer_id": transfer_id,
+                    "error": "Wise outcome unknown; do not pay again",
                 }
             result = {
                 "status": "manual_required",
@@ -330,6 +340,12 @@ class WiseTransferHandler(PaymentHandler):
             return (
                 f"⏳ {self.profile.label} submitted; not confirmed; do not pay again.\n"
                 f"  Transfer ID: {result.get('transfer_id', 'not yet known')}"
+            )
+        elif status == STATUS_SUBMISSION_UNKNOWN:
+            return (
+                f"⚠️ {self.profile.label}: Wise submission outcome unknown; do not pay again. "
+                "Check Wise Activity for this payment by date, amount and reference. "
+                "Monedula cannot check it automatically without a transfer ID."
             )
         elif status in ("not_submitted", "funds_refunded", "cancelled"):
             import payment_journal

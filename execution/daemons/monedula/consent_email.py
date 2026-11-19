@@ -807,7 +807,9 @@ def request_and_collect(
         elif entry.get("transfer_id"):
             note = "transfer exists, outcome unknown; Monedula is checking; do not pay again"
         else:
-            note = "submission outcome unknown; check the rail; do not pay again"
+            note = ("Wise submission outcome unknown; check Wise Activity by date, "
+                    "amount and reference; do not pay again. Monedula cannot check "
+                    "automatically without a transfer ID")
         held_notes[item.obligation] = note
 
     if len(settled | unknown) == len(probe):

@@ -443,11 +443,15 @@ by the consent flow. Keyed on a hash of the obligation (handler, session,
 payee, amount, currency; for Wise also profile, task and reference). Wise order:
 record intent and attempt key (fsynced)
 → create transfer → record transfer ID and read back → fund → record
-`funding_pending` → read transfer status on later ticks → record `done/sent`
+`funding_pending` (only with a saved transfer ID) → read transfer status on later ticks → record `done/sent`
 only for `outgoing_payment_sent`. `funds_refunded` and `cancelled` are confirmed
 failure states that remain held until a replacement route is verified. `bounced_back` is
 nonterminal and is checked again the next day. A lost create or funding response
-leaves `intent` or `funding_pending`, never a retry. The daemon serializes ticks
+leaves `intent` or `funding_pending`, never a retry. A lost create response with
+no saved transfer ID returns `submission_unknown`: the journal remains at
+`intent`, and the operator checks Wise Activity by date, amount and reference.
+Monedula cannot automatically reconcile that attempt without a transfer ID.
+The daemon serializes ticks
 with a lock on the existing first-use marker. BTC `sent` remains its existing
 final handler result. The journal also issues the monotonically
 increasing request generation. A missing journal and marker hold every payment

@@ -16,7 +16,7 @@ The foundation design explicitly requires a rail read at the declared terminal s
 
 ## Consumer sweep and required behavior
 
-The proposed handler status is **`funding_pending`**. It means a Wise transfer exists or funding may have started, but payment has not been confirmed. A new journal `funding_pending` state must be distinct from both `intent` (unknown submission outcome) and `done` (confirmed terminal result). Every reader below must treat either unresolved state as **no new payment authorized**.
+The handler status **`funding_pending`** requires a persisted Wise transfer ID. It means that transfer can be checked on later ticks, but payment has not been confirmed. The distinct handler status **`submission_unknown`** means transfer creation was entered but no ID was saved; the journal stays at `intent`, the operator must check Wise Activity by date, amount and reference, and Monedula cannot reconcile it automatically. Journal `funding_pending` remains distinct from both `intent` and `done` (confirmed terminal result). Every reader treats either unresolved state as **no new payment authorized**.
 
 | Consumer | Current `sent` behavior | Risk if only the handler changes; required `funding_pending` behavior |
 | --- | --- | --- |

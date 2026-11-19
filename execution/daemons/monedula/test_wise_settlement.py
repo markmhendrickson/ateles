@@ -612,6 +612,9 @@ def test_default_approval_pending_then_confirmed_updates_session_once(
         "status": "outgoing_payment_sent", "updated": datetime.now(timezone.utc).isoformat()
     })
     effects = []
+    alerts = []
+    import monedula
+    monkeypatch.setattr(monedula, "_notify", lambda text, **kw: alerts.append(text))
     monkeypatch.setattr(wise, "_update_task", lambda p, r: effects.append(r) or True)
     world.tick()
     _approve(approvals)
@@ -623,11 +626,17 @@ def test_default_approval_pending_then_confirmed_updates_session_once(
     assert journal.session_state(world.journal, "yoga:evt-1") == "pending"
     expected_calls = ["create"] if lost_response == "create" else ["create", "fund"]
     assert calls == expected_calls and effects == []
+    if lost_response == "create":
+        assert any("submission outcome unknown" in text and "Wise Activity" in text
+                   and "cannot check automatically" in text and "do not pay again" in text
+                   for text in alerts)
     world.tick(minutes=15)
     if lost_response == "create":
         assert journal.obligation_state(world.journal, key) == "intent"
         assert journal.session_state(world.journal, "yoga:evt-1") == "pending"
         assert calls == ["create"] and effects == []
+        assert any("submission outcome unknown" in text and "Wise Activity" in text
+                   and "cannot check automatically" in text for text in alerts)
         return
     assert journal.obligation_state(world.journal, key) == "done"
     assert journal.session_state(world.journal, "yoga:evt-1") == "settled"
@@ -679,6 +688,50 @@ def test_telegram_pending_confirmation_never_closes_session_or_resends(
     assert not any("result was never recorded" in text for text in alerts)
     assert calls == ["create", "fund"]
     assert journal.session_state(journal.load(path), "synthetic:evt-1") == "pending"
+
+
+def test_telegram_lost_create_response_warns_without_promising_reconciliation(
+    sent_messages, monkeypatch
+):
+    import consent_email
+    import monedula
+    from handlers.payment_profile import PaymentProfile
+
+    handler = wise.WiseTransferHandler(PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", calendar_keywords=["synthetic"],
+        payment_type="wise", amount_eur=1, wise_reference="ref",
+        wise_recipient_id=5, wise_recipient_name="Synthetic",
+    ))
+    handler.recipient_status_lookup = lambda token, rid: {"id": rid, "active": True}
+    _install_handlers(monkeypatch, [handler])
+    event = _event("evt-1", summary="synthetic",
+                   end=datetime.now(timezone.utc) - timedelta(hours=1))
+    monkeypatch.setattr(monedula, "fetch_yesterday_events", lambda: [event])
+    monkeypatch.setattr(monedula, "telegram_poll_approval", lambda *a, **k:
+                        monedula.TelegramPollResult(kind="reply", text="attended synthetic"))
+    monkeypatch.setenv("WISE_API_TOKEN", "synthetic-token")
+    monkeypatch.setattr(wise, "_get_wise_profile_id", lambda *_: 1)
+    monkeypatch.setattr(wise, "_create_quote", lambda *_: "quote")
+    calls = []
+    monkeypatch.setattr(wise, "_create_transfer", lambda *a: (
+        calls.append("create"), (_ for _ in ()).throw(TimeoutError("lost response"))
+    )[1])
+    monkeypatch.setattr(wise, "_fund_transfer", lambda *a: pytest.fail("funded without ID"))
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda text, **kw: alerts.append(text))
+
+    assert monedula.main() is True
+    path = consent_email.journal_path()
+    entry = next(iter(journal.load(path)["obligations"].values()))
+    assert entry["state"] == "intent" and entry.get("transfer_id") is None
+    assert calls == ["create"]
+    assert any("submission outcome unknown" in msg and "Wise Activity" in msg
+               and "cannot check it automatically" in msg and "do not pay again" in msg
+               for msg in sent_messages)
+    assert monedula.main() is False
+    assert calls == ["create"]
+    assert any("submission outcome unknown" in msg and "Wise Activity" in msg
+               and "cannot check automatically" in msg for msg in alerts)
 
 
 @pytest.mark.parametrize("rail_status", ["incoming_payment_waiting", "funds_refunded", "cancelled"])
@@ -870,9 +923,13 @@ def test_wise_submission_boundary_and_alert(attempt, monkeypatch, failure):
         assert "not submitted" in alert and "no payment was made" in alert
         assert calls == []
     elif failure == "create":
-        assert result["status"] == "funding_pending"
+        assert result["status"] == "submission_unknown"
         assert entry["state"] == "intent" and entry.get("transfer_id") is None
-        assert "submitted" in alert and "do not pay again" in alert
+        assert "submission outcome unknown" in alert and "do not pay again" in alert
+        assert "cannot check automatically" in alert and "Wise Activity" in alert
+        confirmation = handler.format_confirmation(result)
+        assert "submission outcome unknown" in confirmation
+        assert "cannot check it automatically" in confirmation
         assert calls == ["create"]
     else:
         assert result["status"] == "funding_rejected"

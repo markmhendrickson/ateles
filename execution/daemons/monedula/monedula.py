@@ -56,7 +56,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from lib.daemon_runtime.logging_setup import configure_daemon_logging  # noqa: E402
 from handlers.wise_transfer import WiseTransferHandler  # noqa: E402
-from handler_base import STATUS_FUNDING_PENDING  # noqa: E402
+from handler_base import STATUS_FUNDING_PENDING, STATUS_SUBMISSION_UNKNOWN  # noqa: E402
 
 # The notifier is built lazily and RETRIED on every use while it is missing.
 # It used to be built once at import with the failure swallowed, so a Neotoma
@@ -255,7 +255,8 @@ def _notify(
 # The lowest priority the Notifier actually delivers is WARN: INFO is dropped
 # there unconditionally (lib/notify/notifier.py, _send_locked), so the "payment
 # sent" confirmation is sent as WARN, not INFO.
-_OUTCOME_CATEGORIES = {"sent", STATUS_FUNDING_PENDING, "manual_required", "failed",
+_OUTCOME_CATEGORIES = {"sent", STATUS_FUNDING_PENDING, STATUS_SUBMISSION_UNKNOWN,
+                       "manual_required", "failed",
                        "not_submitted", "funding_rejected", "funds_refunded", "cancelled"}
 
 
@@ -287,6 +288,13 @@ def _outcome_alert(item: Any, result: Any) -> tuple[str, str]:
             "blocker",
             f"monedula: payment submitted; not confirmed; do not pay again for {who}. "
             "The existing Wise transfer will be checked on later ticks.",
+        )
+    if category == STATUS_SUBMISSION_UNKNOWN:
+        return (
+            "blocker",
+            f"monedula: Wise submission outcome unknown for {who}; do not pay again. "
+            "Check Wise Activity by date, amount and reference. Monedula cannot "
+            "check automatically without a transfer ID.",
         )
     if category == "not_submitted":
         import payment_journal
@@ -1425,7 +1433,9 @@ def _wise_hold_text(entry: dict) -> str:
         return "The transfer was returned or cancelled. " + payment_journal.REPLACEMENT_HOLD_MESSAGE
     if entry.get("transfer_id"):
         return "A transfer exists, but its outcome is unknown. Monedula is checking it; do not pay again."
-    return "Submission outcome unknown. Check the payment rail; do not pay again."
+    return ("Wise submission outcome unknown. Check Wise Activity by date, amount "
+            "and reference; do not pay again. Monedula cannot check automatically "
+            "without a transfer ID.")
 
 
 def _notify_wise_hold(entry: dict, obligation: str) -> None:
@@ -2451,7 +2461,8 @@ def main() -> bool:
                 else "unreported"
             )
             if wise:
-                if status not in (STATUS_FUNDING_PENDING, "not_submitted", "funding_rejected"):
+                if status not in (STATUS_FUNDING_PENDING, STATUS_SUBMISSION_UNKNOWN,
+                                  "not_submitted", "funding_rejected"):
                     unknown.append(label)
                     _notify_unknown_outcome(unknown, yesterday_str)
                     return _journal_failure("Wise handler returned without pending settlement")
@@ -2465,7 +2476,7 @@ def main() -> bool:
             all_results.append((handler, result))
             if not wise:
                 newly_executed.add(key)
-            if status not in ("sent", STATUS_FUNDING_PENDING):
+            if status not in ("sent", STATUS_FUNDING_PENDING, STATUS_SUBMISSION_UNKNOWN):
                 log.error(f"payment_not_completed {label}: {result}")
             _outcome_priority, _outcome_body = _outcome_alert(item, result)
             _notify(
@@ -2742,7 +2753,8 @@ def main() -> bool:
                 else "unreported"
             )
             if wise:
-                if status not in (STATUS_FUNDING_PENDING, "not_submitted", "funding_rejected"):
+                if status not in (STATUS_FUNDING_PENDING, STATUS_SUBMISSION_UNKNOWN,
+                                  "not_submitted", "funding_rejected"):
                     _notify_unknown_outcome([label], yesterday_str)
                     return _telegram_journal_failure("Wise handler returned without pending settlement")
             else:
