@@ -1438,9 +1438,12 @@ def _wise_hold_text(entry: dict) -> str:
             "without a transfer ID.")
 
 
-def _notify_wise_hold(entry: dict, obligation: str) -> None:
+def _notify_wise_hold(entry: dict, obligation: str, item=None) -> None:
+    from consent_email import missing_wise_identity_note
+
+    identity_note = missing_wise_identity_note(item, entry) if item is not None else ""
     _notify(
-        f"monedula: payment held [{obligation[:12]}]. {_wise_hold_text(entry)}",
+        f"monedula: payment held [{obligation[:12]}]. {_wise_hold_text(entry)}{identity_note}",
         priority="blocker", dedupe_key=f"monedula:wise_hold:{obligation}",
         email_eligible=True,
     )
@@ -1692,7 +1695,7 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                             payment_journal.set_session_state(jpath, key, payment_journal.SESSION_SETTLED)
                     else:
                         if entry.get("rail") == "wise":
-                            _notify_wise_hold(entry, item.obligation)
+                            _notify_wise_hold(entry, item.obligation, item)
                         else:
                             _notify_unknown_outcome([handler.name], item.payment_date)
                         if eid:
@@ -2391,7 +2394,7 @@ def main() -> bool:
                          payment_journal.STATE_FAILED):
                 entry = journal_entry_for_item(journal, item) or {}
                 if entry.get("rail") == "wise":
-                    _notify_wise_hold(entry, item.obligation)
+                    _notify_wise_hold(entry, item.obligation, item)
                     continue
                 log.error(
                     f"payment_outcome_unknown {label} — a transfer was attempted "
@@ -2585,7 +2588,7 @@ def main() -> bool:
                            payment_journal.STATE_FAILED):
                 entry = journal_entry_for_item(journal, item) or {}
                 if entry.get("rail") == "wise":
-                    _notify_wise_hold(entry, item.obligation)
+                    _notify_wise_hold(entry, item.obligation, item)
                 else:
                     held_unknown.append(f"{handler.name}:{item.match_id or 'solo'}")
             else:
@@ -2709,7 +2712,7 @@ def main() -> bool:
                          payment_journal.STATE_FAILED):
                 entry = journal_entry_for_item(journal, item) or {}
                 if entry.get("rail") == "wise":
-                    _notify_wise_hold(entry, obligation)
+                    _notify_wise_hold(entry, obligation, item)
                     continue
                 log.error(f"payment_outcome_unknown {label} — holding, not retrying.")
                 unknown.append(label)

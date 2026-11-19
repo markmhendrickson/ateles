@@ -272,31 +272,47 @@ def obligation_key(handler: Any, payment_date: str, match_id: str) -> str:
 
 
 def journal_entry_for_item(journal: dict, item: PendingItem) -> dict | None:
-    """Find an attempt by terms, then hold the same session across edited terms.
+    """Find an attempt by terms or stable invoice/session identity.
 
-    The approval key remains tied to the displayed terms. The replay hold uses
-    the calendar event ID or the one-off due date plus profile identity.
+    Approval still binds the displayed terms. An edited obligation cannot
+    bypass an attempt tied to the same profile and task or calendar event.
+    Missing identity metadata is ambiguous and holds conservatively.
     """
     entry = journal["obligations"].get(item.obligation)
-    if entry is not None and entry.get("state") != payment_journal.STATE_DONE:
+    if entry is not None:
         return entry
     profile = getattr(item.handler, "profile", None)
     profile_id = str(getattr(profile, "entity_id", "") or "")
+    task_id = str(getattr(profile, "neotoma_task_id", "") or "")
     candidates = []
     for row in journal["obligations"].values():
-        if row.get("rail") != "wise" or row.get("state") == payment_journal.STATE_DONE:
+        if row.get("rail") != "wise":
+            continue
+        same_profile = (not profile_id or not row.get("profile_entity_id")
+                        or row["profile_entity_id"] == profile_id)
+        if not same_profile or (
+            (not profile_id or not row.get("profile_entity_id"))
+            and row.get("handler_name") != item.handler_name
+        ):
             continue
         if item.is_calendar:
-            if (item.match_id and row.get("match_id") == item.match_id
-                    and row.get("handler_name") == item.handler_name):
+            if item.match_id and row.get("match_id"):
+                same_occurrence = row["match_id"] == item.match_id
+            else:
+                # An event without an ID cannot be tracked across time edits.
+                same_occurrence = (row.get("state") != payment_journal.STATE_DONE
+                                   or row.get("payment_date") == item.payment_date)
+            if same_occurrence:
                 candidates.append(row)
-        elif (row.get("payment_date") == item.payment_date
-              and row.get("handler_name") == item.handler_name
-              and (not profile_id or not row.get("profile_entity_id")
-                   or row.get("profile_entity_id") == profile_id)):
-            candidates.append(row)
+        elif (not task_id or not row.get("task_id") or row["task_id"] == task_id):
+            # A one-off invoice is its profile and task, not its due date.
+            if row.get("state") != payment_journal.STATE_DONE or row.get("task_id"):
+                candidates.append(row)
     if candidates:
-        return candidates[0]
+        return next((row for row in candidates
+                     if row.get("state") != payment_journal.STATE_DONE
+                     or row.get("last_status") not in (None, "outgoing_payment_sent")),
+                    candidates[0])
     # Old rows without a date or profile identity cannot safely be ruled out
     # as this obligation, including a calendar session. The old writer stored
     # only a hashed key, so changed terms cannot recover its event identity.
@@ -327,6 +343,16 @@ def journal_state_for_item(journal: dict, item: PendingItem) -> str | None:
     return payment_journal.obligation_state(
         {"obligations": {item.obligation: entry}}, item.obligation
     )
+
+
+def missing_wise_identity_note(item: PendingItem, entry: dict) -> str:
+    """Explain which missing stable identity makes an unresolved hold broad."""
+    if item.is_calendar and (not item.match_id or not entry.get("match_id")):
+        return " Calendar event ID missing; this transfer is held across event edits."
+    if not item.is_calendar and (not entry.get("profile_entity_id")
+                                 or not entry.get("task_id")):
+        return " Invoice profile or task ID missing; this transfer is held across invoice edits."
+    return ""
 
 
 def _profile_fields(handler: Any) -> tuple[str, int, bool]:
@@ -827,7 +853,7 @@ def request_and_collect(
             note = ("Wise submission outcome unknown; check Wise Activity by date, "
                     "amount and reference; do not pay again. Monedula cannot check "
                     "automatically without a transfer ID")
-        held_notes[item.obligation] = note
+        held_notes[item.obligation] = note + missing_wise_identity_note(item, entry)
 
     if len(settled | unknown) == len(probe):
         result.pending_items = probe
