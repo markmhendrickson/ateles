@@ -701,6 +701,8 @@ def _require_wise_intent(
         raise payment_journal.JournalError("Wise intent unavailable before submission")
     if transfer_id is None and entry.get("transfer_id") is not None:
         raise payment_journal.JournalError("Wise transfer already created")
+    if transfer_id is None and entry.get("create_entered") is not None:
+        raise payment_journal.JournalError("Wise transfer creation outcome unknown; do not pay again")
     if transfer_id is not None and entry.get("transfer_id") != transfer_id:
         raise payment_journal.JournalError("Wise transfer id not durable before funding")
     return entry
@@ -713,6 +715,9 @@ def _create_transfer(
     entry = _require_wise_intent(journal_context)
     if customer_transaction_id != entry["customer_transaction_id"]:
         raise RuntimeError("Wise customer transaction ID does not match journal intent")
+
+    import payment_journal
+    payment_journal.mark_wise_create_entered(*journal_context)
 
     body = {
         "targetAccount": target_account_id,

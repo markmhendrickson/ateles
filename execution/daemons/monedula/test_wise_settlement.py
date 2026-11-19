@@ -106,6 +106,56 @@ def test_wise_same_journal_context_cannot_submit_twice(attempt, monkeypatch):
     assert len([path for path in writes if path.endswith("/payments")]) == 1
 
 
+@pytest.mark.parametrize("create_result", ["raises", "no_id"])
+def test_wise_create_unknown_response_never_replays_same_intent(attempt, monkeypatch, create_result):
+    from handlers.payment_profile import PaymentProfile
+
+    handler = wise.WiseTransferHandler(PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", calendar_keywords=[],
+        payment_type="wise", amount_eur=1, wise_recipient_id=5,
+        wise_recipient_name="Synthetic", entity_id="synthetic-profile",
+    ))
+    handler.recipient_status_lookup = lambda token, rid: {"id": rid, "active": True}
+    monkeypatch.setenv("WISE_API_TOKEN", "synthetic-token")
+    monkeypatch.setattr(wise, "_get_wise_profile_id", lambda token: 1)
+    calls = []
+
+    def post(token, path, body):
+        calls.append(path)
+        if path.endswith("/quotes"):
+            return {"id": "quote"}
+        if path == "/v1/transfers":
+            if create_result == "raises":
+                raise RuntimeError("mocked lost response")
+            return {}
+        pytest.fail("funding reached after unknown create")
+
+    monkeypatch.setattr(wise, "_wise_post", post)
+    for _ in range(2):
+        result = handler.execute({"_wise_journal": (attempt, "obligation")})
+        assert result["status"] == "submission_unknown"
+        assert "do not pay again" in result["error"]
+    assert calls.count("/v1/transfers") == 1
+    assert journal.load(attempt)["obligations"]["obligation"]["create_entered"] is True
+
+
+def test_wise_create_marker_write_failure_prevents_create(attempt, monkeypatch):
+    monkeypatch.setattr(wise, "_wise_post", lambda *a, **kw: pytest.fail("Wise POST reached"))
+    original = journal._write
+
+    def fail_marker(path, data):
+        if data["obligations"]["obligation"].get("create_entered"):
+            raise journal.JournalError("mocked marker write failure")
+        return original(path, data)
+
+    monkeypatch.setattr(journal, "_write", fail_marker)
+    entry = journal.load(attempt)["obligations"]["obligation"]
+    with pytest.raises(journal.JournalError, match="marker write failure"):
+        wise._create_transfer("token", 2, "quote", "ref", (attempt, "obligation"),
+                              entry["customer_transaction_id"])
+    assert journal.load(attempt)["obligations"]["obligation"].get("create_entered") is None
+
+
 def test_wise_write_helpers_only_called_inside_guarded_flow():
     import ast
 

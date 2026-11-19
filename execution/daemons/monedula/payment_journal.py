@@ -489,13 +489,27 @@ def record_transfer_created(path: Path, obligation: str, transfer_id: int) -> No
         raise JournalError("Wise transfer id did not persist")
 
 
+def mark_wise_create_entered(path: Path, obligation: str) -> None:
+    """Durably mark an entered transfer POST before it can be sent."""
+    data = load(path)
+    entry = data["obligations"].get(obligation)
+    if (not isinstance(entry, dict) or entry.get("rail") != "wise"
+            or entry.get("state") != STATE_INTENT or entry.get("transfer_id") is not None
+            or entry.get("create_entered") is not None):
+        raise JournalError("Wise create cannot be entered")
+    entry["create_entered"] = True
+    _write(path, data)
+    if load(path)["obligations"][obligation].get("create_entered") is not True:
+        raise JournalError("Wise create entry did not persist")
+
+
 def record_wise_not_submitted(path: Path, obligation: str) -> None:
     """Close an attempt only when transfer creation was never entered."""
     data = load(path)
     entry = data["obligations"].get(obligation)
     if (not isinstance(entry, dict) or entry.get("rail") != "wise"
             or entry.get("state") != STATE_INTENT or entry.get("transfer_id") is not None
-            ):
+            or entry.get("create_entered") is not None):
         raise JournalError("Wise not-submitted transition refused")
     entry["state"] = STATE_FAILED
     entry["outcome_status"] = "failed"
