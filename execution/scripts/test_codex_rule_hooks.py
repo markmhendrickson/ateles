@@ -694,6 +694,41 @@ class TestCodexGuardEffect(unittest.TestCase):
                     }, env={"HOME": os.fspath(home)})
                     self.assertEqual(allowed.returncode, 0, allowed.stderr)
 
+    def test_credential_guard_judges_the_script_after_the_c_flag_not_the_last_argument(self) -> None:
+        script = REPO_ROOT / ".claude" / "hooks" / "credential_read_guard.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            credential = home / ".config" / "neotoma" / ".env"
+            credential.parent.mkdir(parents=True)
+            credential.write_text("SYNTHETIC_KEY=not_a_secret\n", encoding="utf-8")
+            path = os.fspath(credential)
+            refused = {
+                "trailing_dollar_zero": ["bash", "-lc", f"cat {path}", "ignored0"],
+                "trailing_positionals": ["bash", "-c", f"cat {path}", "a", "b"],
+                "login_interactive": ["zsh", "-lic", f"cat {path}", "x"],
+                "path_through_dollar_zero": ["bash", "-lc", 'cat "$0"', path],
+                "path_through_dollar_one": ["sh", "-c", 'cat "$1"', "name", path],
+                "path_through_all_args": ["bash", "-c", 'cat "$@"', "name", path],
+            }
+            for name, command in refused.items():
+                with self.subTest(refused=name):
+                    result = _run(f"python3 {shlex.quote(os.fspath(script))}", {
+                        "hook_event_name": "PreToolUse", "tool_name": "local_shell",
+                        "tool_input": {"command": command}, "cwd": os.fspath(home),
+                    }, env={"HOME": os.fspath(home)})
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertTrue(result.stderr.strip())
+            for name, command in {
+                "benign_with_positionals": ["bash", "-lc", "printf safe", "a", "b"],
+                "benign_dollar_zero": ["bash", "-c", 'printf "%s" "$0"', "label"],
+            }.items():
+                with self.subTest(allowed=name):
+                    result = _run(f"python3 {shlex.quote(os.fspath(script))}", {
+                        "hook_event_name": "PreToolUse", "tool_name": "local_shell",
+                        "tool_input": {"command": command}, "cwd": os.fspath(home),
+                    }, env={"HOME": os.fspath(home)})
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_credential_guard_budget_refusal_carries_a_reason_on_stderr_for_codex(self) -> None:
         # Codex honours a refusal only when stderr carries a reason: exit 2 with an empty stderr is a FAILED hook
         # and the tool call still runs. The inspection-budget refusal must therefore also write its reason.

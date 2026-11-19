@@ -329,12 +329,23 @@ def _arguments_as_command(arguments: list) -> str | None:
     parts = [str(a) for a in arguments]
     if not parts:
         return None
-    if (
-        len(parts) >= 3
-        and os.path.basename(parts[0]) in _SHELL_NAMES
-        and any(flag.startswith("-") and flag.endswith("c") for flag in parts[1:-1])
-    ):
-        return parts[-1]
+    if len(parts) >= 3 and os.path.basename(parts[0]) in _SHELL_NAMES:
+        for index in range(1, len(parts) - 1):
+            flag = parts[index]
+            if flag.startswith("-") and not flag.startswith("--") and flag.endswith("c"):
+                # The shell runs the element right after the flag; what follows becomes $0, $1, ...
+                script, rest = parts[index + 1], parts[index + 2:]
+                judged = script
+                if rest:
+                    substituted = script
+                    for position, value in enumerate(rest):
+                        quoted = shlex.quote(value)
+                        substituted = substituted.replace("${%d}" % position, quoted).replace("$%d" % position, quoted)
+                    joined = shlex.join(rest)
+                    substituted = substituted.replace("$@", joined).replace("$*", joined)
+                    # judge the script as written, with the positional arguments substituted, and the full list
+                    judged = "\n".join([script, substituted, shlex.join(parts)])
+                return judged
     return shlex.join(parts)
 
 
