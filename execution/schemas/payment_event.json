@@ -1,8 +1,10 @@
 {
   "entity_type": "payment_event",
-  "schema_version": "2.0",
+  "schema_version": "2.1",
   "schema_definition": {
     "canonical_name_fields": [
+      {"composite": ["approval_id", "obligation_key", "payment_date"]},
+      {"composite": ["primary_session_key", "obligation_key", "payment_date"]},
       {"composite": ["approval_id", "payment_date"]},
       {"composite": ["primary_session_key", "payment_date"]}
     ],
@@ -21,6 +23,7 @@
       "fee_sats": {"type": "number", "description": "Network fee in satoshis."},
       "notes": {"type": "string", "description": "Free-text notes."},
       "approval_id": {"type": "string", "description": "Entity id of the payment_approval record that authorized this payment. Primary identity with payment_date."},
+      "obligation_key": {"type": "string", "description": "Journal dedup key for the approved terms. Included in identity whenever known."},
       "session_keys": {"type": "array", "description": "Calendar session keys (handler:event_id) this payment covers."},
       "primary_session_key": {"type": "string", "description": "First entry of session_keys. Scalar copy so it can sit in the fallback identity rule with payment_date when there is no approval_id."}
     }
@@ -40,6 +43,7 @@
       "fee_sats": {"strategy": "last_write"},
       "notes": {"strategy": "last_write"},
       "approval_id": {"strategy": "last_write"},
+      "obligation_key": {"strategy": "last_write"},
       "session_keys": {"strategy": "last_write"},
       "primary_session_key": {"strategy": "last_write"}
     }

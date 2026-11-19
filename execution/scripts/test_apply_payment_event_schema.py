@@ -63,7 +63,13 @@ def test_definition_never_uses_btc_address_as_identity():
         assert rule["composite"] != ["btc_address"]
     assert "identity_opt_out" not in sd
     assert sd["canonical_name_strict"] is True
-    assert rules[0] == {"composite": ["approval_id", "payment_date"]}
+    # 2.1: the obligation key leads, so two approved outcomes for one session
+    # and date get two identities; the 2.0 rules stay for records written
+    # without an obligation key.
+    assert rules[0] == {"composite": ["approval_id", "obligation_key", "payment_date"]}
+    assert {"composite": ["approval_id", "payment_date"]} in rules
+    assert {"composite": ["primary_session_key", "payment_date"]} in rules
+    assert DEF["schema_definition"]["fields"]["obligation_key"]["type"] == "string"
 
 
 def test_definition_keeps_existing_fields_and_adds_the_new_ones():

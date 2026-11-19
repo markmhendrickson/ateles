@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 import subprocess
 import sys
 import time
@@ -1692,6 +1693,303 @@ def _resolve_item_session(item: Any, state: str) -> None:
         log.error(f"could not record session {state}: {exc}")
 
 
+# Result keys copied onto a payment_event: fields its schema declares that a
+# handler result may carry. Identity fields come from the queued item, never
+# the result, and free text such as ``error`` is not copied.
+_PAYMENT_EVENT_RESULT_FIELDS = (
+    "payment_type",
+    "amount_eur",
+    "amount_btc",
+    "btc_address",
+    "txid",
+    "memo_policy",
+    "network",
+    "fee_sats",
+)
+
+
+PAYMENT_EVENT_PENDING_FILE: Path | None = None
+_PAYMENT_EVENT_HALT_KEY = "monedula:payment_event_unrecorded"
+
+
+def _pending_payment_events_path() -> Path:
+    from consent_email import journal_path
+
+    return PAYMENT_EVENT_PENDING_FILE or journal_path().with_name(
+        ".monedula_payment_events_pending.json"
+    )
+
+
+def _load_pending_payment_events() -> dict[str, Any]:
+    path = _pending_payment_events_path()
+    if not path.exists():
+        return {"entries": [], "halted": False}
+    data = json.loads(path.read_text())
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("entries"), list)
+        or not isinstance(data.get("halted"), bool)
+        or any(not isinstance(entry, dict) for entry in data["entries"])
+    ):
+        raise ValueError("pending payment events malformed")
+    return data
+
+
+def _save_pending_payment_events(data: dict[str, Any]) -> None:
+    path = _pending_payment_events_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".payment-events-", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(data, fh, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def _announce_payment_event_halt(data: dict[str, Any]) -> None:
+    if data["halted"]:
+        return
+    data["halted"] = True
+    _save_pending_payment_events(data)
+    # Re-arm the "cleared" alert: its dedupe key stays open until released, so
+    # without this only the first halt of the daemon's life would announce
+    # its own recovery.
+    _clear_notify_dedupe(f"{_PAYMENT_EVENT_HALT_KEY}:cleared")
+    _notify_unrecorded_payment_event()
+
+
+def _notify_unrecorded_payment_event() -> None:
+    _notify(
+        "monedula: payment outcome could not be recorded and verified; "
+        "no further payment or approval request until recording succeeds.",
+        priority="blocker",
+        dedupe_key=_PAYMENT_EVENT_HALT_KEY,
+        email_eligible=True,
+    )
+
+
+def _retry_pending_payment_events() -> bool:
+    import payment_event
+    import payment_journal
+    from consent_email import journal_path
+
+    try:
+        data = _load_pending_payment_events()
+        recovered_unrecorded = False
+        journal = payment_journal.load(journal_path())
+        for obligation, outcome in journal["obligations"].items():
+            if (
+                not isinstance(outcome, dict)
+                or outcome.get("state") != payment_journal.STATE_DONE
+                or outcome.get("payment_event_state") != "unrecorded"
+            ):
+                continue
+            entry = outcome.get("payment_event_entry")
+            if (
+                not isinstance(entry, dict)
+                or entry.get("obligation") != obligation
+                or not isinstance(entry.get("fields"), dict)
+                or not isinstance(entry.get("identity"), dict)
+            ):
+                log.error("payment_event_journal_unrecorded: missing or malformed entry")
+                _notify_unrecorded_payment_event()
+                return False
+            queued = [
+                pending for pending in data["entries"]
+                if pending.get("obligation") == obligation
+            ]
+            if queued:
+                if len(queued) != 1 or queued[0] != entry:
+                    log.error("payment_event_journal_unrecorded: pending entry mismatch")
+                    _notify_unrecorded_payment_event()
+                    return False
+            elif not _queue_payment_event(entry):
+                _notify_unrecorded_payment_event()
+                return False
+            else:
+                data = _load_pending_payment_events()
+            payment_journal.mark_payment_event_queued(journal_path(), obligation)
+            recovered_unrecorded = True
+        while data["entries"]:
+            entry = data["entries"][0]
+            try:
+                payment_event.store(entry["fields"], **entry["identity"])
+            except Exception as exc:  # noqa: BLE001 - keep the durable outcome queued
+                log.error(f"payment_event_retry_failed: {type(exc).__name__}")
+                _announce_payment_event_halt(data)
+                return False
+            obligation = entry.get("obligation")
+            if obligation:
+                journal = payment_journal.load(journal_path())
+                if payment_journal.obligation_state(journal, obligation) == payment_journal.STATE_DONE:
+                    recovered_unrecorded |= (
+                        journal["obligations"][obligation].get("payment_event_state")
+                        == "unrecorded"
+                    )
+                    payment_journal.mark_payment_event_stored(journal_path(), obligation)
+            data["entries"].pop(0)
+            _save_pending_payment_events(data)
+        journal = payment_journal.load(journal_path())
+        unrecorded = [
+            key for key, outcome in journal["obligations"].items()
+            if not isinstance(outcome, dict)
+            or (
+                outcome.get("state") == payment_journal.STATE_DONE
+                and outcome.get("payment_event_state") is not None
+                and outcome.get("payment_event_state") != "stored"
+            )
+        ]
+        if unrecorded:
+            log.error(f"payment_event_journal_unrecorded: {len(unrecorded)}")
+            _notify_unrecorded_payment_event()
+            return False
+        if data["halted"] or recovered_unrecorded:
+            if data["halted"]:
+                data["halted"] = False
+                _save_pending_payment_events(data)
+            _clear_notify_dedupe(_PAYMENT_EVENT_HALT_KEY)
+            _notify(
+                "monedula: payment outcome recording restored; payment halt cleared.",
+                priority="blocker",
+                dedupe_key=f"{_PAYMENT_EVENT_HALT_KEY}:cleared",
+                email_eligible=True,
+            )
+        return True
+    except payment_journal.JournalError as exc:
+        log.error(f"payment_journal_unreadable — payments held: {exc}")
+        _notify(
+            "monedula: payment journal could not be read or written "
+            "(payment_journal_unreadable). No further payment will execute "
+            "until it is readable. Inspect the journal before anything is paid.",
+            priority="blocker",
+            dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
+            email_eligible=True,
+        )
+        return False
+    except Exception as exc:  # noqa: BLE001 - unreadable local state fails closed
+        log.error(f"payment_event_pending_unreadable: {type(exc).__name__}")
+        _notify(
+            "monedula: pending payment outcomes cannot be read or written; "
+            "payments and approval requests are halted.",
+            priority="blocker",
+            dedupe_key=_PAYMENT_EVENT_HALT_KEY,
+            email_eligible=True,
+        )
+        return False
+
+
+def _payment_event_entry(item: Any, result: Any, status: str) -> dict[str, Any]:
+    """The fields and identity one approved item's payment_event is stored with."""
+    import payment_journal
+    from consent_email import event_id_of
+
+    approval_id = str(getattr(item, "approval_id", "") or "").strip()
+    eid = event_id_of(item.match)
+    obligation = str(getattr(item, "obligation", "") or "").strip()
+    session_id = eid or (f"obligation-{obligation}" if obligation else "")
+    session_keys = (
+        [payment_journal.session_key(item.handler_name, session_id)] if session_id else []
+    )
+    fields: dict[str, Any] = {"label": item.label, "status": status}
+    if isinstance(result, dict):
+        for name in _PAYMENT_EVENT_RESULT_FIELDS:
+            if result.get(name) not in (None, ""):
+                fields[name] = result[name]
+    fields.setdefault("amount_eur", item.amount_eur)
+    return {
+        "fields": fields,
+        "obligation": obligation,
+        "identity": {
+            "payment_date": item.payment_date,
+            "approval_id": approval_id or None,
+            "session_keys": session_keys,
+            "obligation_key": obligation or None,
+        },
+    }
+
+
+def _halt_unwritable(exc: BaseException) -> None:
+    log.error(f"payment_event_pending_unwritable: {type(exc).__name__}")
+    _notify(
+        "monedula: payment outcome recording is unavailable; payments halted.",
+        priority="blocker",
+        dedupe_key=_PAYMENT_EVENT_HALT_KEY,
+        email_eligible=True,
+    )
+
+
+def _queue_payment_event(entry: dict[str, Any]) -> bool:
+    """Append ``entry`` to the local pending file. Never raises.
+
+    Called before the journal marks the obligation done, so a crash between
+    the two leaves the record queued for the next tick's retry.
+    """
+    try:
+        data = _load_pending_payment_events()
+        data["entries"].append(entry)
+        _save_pending_payment_events(data)
+        if entry not in _load_pending_payment_events()["entries"]:
+            raise ValueError("queued payment outcome did not persist")
+        return True
+    except Exception as exc:  # noqa: BLE001 - fail closed on local write
+        _halt_unwritable(exc)
+        return False
+
+
+def _store_queued_payment_event(entry: dict[str, Any], handler_name: str) -> bool:
+    """Store a queued entry with read-back, then drop it from the queue.
+
+    On any failure the entry stays queued and the payment halt is announced.
+    Never raises; the payment itself is never retried.
+    """
+    import payment_event
+
+    try:
+        payment_event.store(entry["fields"], **entry["identity"])
+    except Exception as exc:  # noqa: BLE001 - payment itself is never retried
+        log.error(f"payment_event_store_failed {handler_name}: {type(exc).__name__}")
+        try:
+            _announce_payment_event_halt(_load_pending_payment_events())
+        except Exception as local_exc:  # noqa: BLE001 - fail closed on local write
+            _halt_unwritable(local_exc)
+        return False
+    try:
+        data = _load_pending_payment_events()
+        obligation = entry.get("obligation")
+        if obligation:
+            import payment_journal
+            from consent_email import journal_path
+
+            journal = payment_journal.load(journal_path())
+            if payment_journal.obligation_state(journal, obligation) == payment_journal.STATE_DONE:
+                payment_journal.mark_payment_event_stored(journal_path(), obligation)
+        data["entries"].remove(entry)
+        _save_pending_payment_events(data)
+    except Exception as exc:  # noqa: BLE001 - recorded, but the queue is stale
+        # The record is stored and verified; a stale queue entry is retried
+        # idempotently next tick, so this halts rather than resumes.
+        _halt_unwritable(exc)
+        return False
+    return True
+
+
+def _record_payment_event(item: Any, result: Any, status: str) -> bool:
+    """Queue one outcome durably, then store and read it back."""
+    entry = _payment_event_entry(item, result, status)
+    if not _queue_payment_event(entry):
+        return False
+    return _store_queued_payment_event(entry, item.handler_name)
+
+
 def _resolve_sessions(triggered: list[tuple], state: str) -> None:
     import payment_journal
     from consent_email import event_id_of, journal_path
@@ -1726,6 +2024,10 @@ def main() -> bool:
     same as always. Only the inability to ask is treated as broken.
     """
     log.info("Monedula starting.")
+
+    # Recovery precedes handler loading, calendar work and every consent request.
+    if not _retry_pending_payment_events():
+        return False
 
     yesterday = _yesterday()
     yesterday_str = yesterday.isoformat()
@@ -2037,6 +2339,7 @@ def main() -> bool:
         unknown: list[str] = []  # intent recorded, outcome never recorded
         terms_changed: set[str] = set()
         held_preflight: list[str] = []
+        record_halted = False
         for item in consent.pending_items:
             key = match_key(item)
             label = f"{item.handler_name}:{item.match_id or 'solo'}"
@@ -2107,8 +2410,16 @@ def main() -> bool:
                 if isinstance(result, dict)
                 else "unreported"
             )
+            # Queued before the journal marks the obligation done: a crash
+            # between the two leaves the record for the next tick to retry,
+            # and the journal holds the payment as an unknown outcome.
+            _event_entry = _payment_event_entry(item, result, status)
+            _event_queued = _queue_payment_event(_event_entry)
             try:
-                payment_journal.record_outcome(jpath, item.obligation, status)
+                payment_journal.record_outcome(
+                    jpath, item.obligation, status, event_queued=_event_queued,
+                    event_entry=_event_entry if not _event_queued else None,
+                )
             except payment_journal.JournalError as exc:
                 unknown.append(label)
                 _notify_unknown_outcome(unknown, yesterday_str)
@@ -2124,6 +2435,15 @@ def main() -> bool:
                 dedupe_key=f"monedula:payment_outcome:{item.obligation}",
                 email_eligible=True,
             )
+            if not (
+                _event_queued
+                and _store_queued_payment_event(_event_entry, handler.name)
+            ):
+                # Settle what was paid below, then execute nothing further.
+                if _job:
+                    _job.failed("payment outcome could not be recorded")
+                record_halted = True
+                break
             log.info(f"{label} result: {result}")
             if _job:
                 _job.finished(f"{handler.name} payment executed")
@@ -2157,14 +2477,14 @@ def main() -> bool:
                 f"executed_this_tick={len(newly_executed)} "
                 f"— calendar leg stays unclaimed for later ticks."
             )
-            return not strandings and not unknown
+            return not strandings and not unknown and not record_halted
 
         # Every match is terminal (approved or skipped). Record the day and
         # clear the fingerprint so a future pending set can re-email — unless
         # the profiles were degraded this tick, when other sessions may still
         # be owed.
         if profile_load_degraded or _has_pending_sessions():
-            return not strandings
+            return not strandings and not record_halted
         _mark_ran_today()
         clear_consent_state()
         _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)
@@ -2177,7 +2497,7 @@ def main() -> bool:
             log.info("Email consent: no new payments executed this tick.")
         else:
             log.info("Monedula email-consent run complete.")
-        return not strandings
+        return not strandings and not record_halted
 
     # channel == "telegram" — break-glass path (unchanged attendance phrases)
     import payment_journal

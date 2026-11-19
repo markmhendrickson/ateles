@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import consent_email  # noqa: E402
 import payment_journal  # noqa: E402
+import payment_event  # noqa: E402
 import monedula  # noqa: E402
 from conftest import initialize_test_journal  # noqa: E402
 from lib.approval.email_channel import ReadRepliesOutcome
@@ -87,6 +88,9 @@ def _install(monkeypatch, handlers, tmp_path):
     monkeypatch.setattr(monedula, "STATE_FILE", tmp_path / "last_run")
     monkeypatch.setattr(monedula, "GATE_HEALTH_FILE", tmp_path / "gate_health")
     monkeypatch.setattr(consent_email, "STATE_FILE", tmp_path / "consent.json")
+    # Consent tests do not exercise Neotoma outcome storage. Keep that
+    # independent seam successful; payment_event_loop tests cover failures.
+    monkeypatch.setattr(payment_event, "store", lambda *a, **k: {"entity_ids": ["ent_synthetic_event"]})
     monkeypatch.setattr(monedula, "fetch_due_payment_tasks", lambda *a, **k: [])
     monkeypatch.setattr(monedula, "fetch_yesterday_events", lambda: [{"summary": "x"}])
     monkeypatch.setattr(monedula, "telegram_send", lambda *a, **k: None)
