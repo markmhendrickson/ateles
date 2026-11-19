@@ -35,6 +35,8 @@ MANAGED_SCRIPT_NAMES = frozenset(
         "gmail_send_gate.py",
         "git_stash_guard.py",
         "gh_identity_guard.py",
+        "reporting_contract.py",
+        "report_quality_gate.py",
     }
 )
 
