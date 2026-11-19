@@ -78,14 +78,16 @@ DEFAULT_POST = SCRIPT_DIR / "post_lens_verdict.py"
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 VERDICT_RE = re.compile(r"^\*\*(SIGNED_OFF|APPROVE|BLOCKED|REQUEST_CHANGES)\*\*\s*$")
-# A lens header written with a colon after the name instead of the contract's
-# dash (`**🤖 Pavo: Ateles swarm, pm lens panelist**`). The model avoids em
-# dashes by house style, so it writes this shape; the gate reader
-# (`swarm_dispatch._OWN_HEADER_RE`) accepts dashes only. Name and role follow
-# that pattern's groups, with the colon excluded from the name.
-COLON_HEADER_RE = re.compile(
-    r"^\*\*🤖\s*(?P<name>[^\s:—–-](?:[^:—–\-\n]*[^\s:—–\-\n])?)\s*:\s*Ateles swarm,"
-    r"\s*(?P<role>\S(?:[^\n]*?\S)?)\s*\*\*\s*$"
+HEADER_RE = re.compile(r"^\*\*🤖\s+\S.+?\s+[—–-]\s+Ateles swarm,\s+\S.+\*\*$")
+PUBLIC_VERDICT_OPEN = "<<<PUBLIC-VERDICT>>>"
+PUBLIC_VERDICT_CLOSE = "<<<END-PUBLIC-VERDICT>>>"
+PUBLIC_VERDICT_FORMAT_REMINDER = (
+    "Put one header and verdict inside exactly one public block: "
+    f"{PUBLIC_VERDICT_OPEN} and {PUBLIC_VERDICT_CLOSE} on their own lines, "
+    "in that order, each appearing exactly once in the whole reply (do not quote them). "
+    "The first line inside the block is the bold header `**🤖 <Name> — Ateles swarm, <lens> ...**` "
+    "(a dash between name and 'Ateles swarm', no colon after the name) and the second is the bold "
+    "verdict alone. Return the full review in that block."
 )
 # A deterministic refusal at the router: do not retry, fall back at once.
 REFUSAL_HINTS = ("refus", "not eligible", "not pinnable", "no provider", "headroom")
@@ -262,11 +264,15 @@ of the repository, not from the PR). Apply its review criteria.
 - Read-only. Never `git stash`, never `--no-verify`, never commit or push,
   never read credential files. No writes of any kind to GitHub or Neotoma.
 - Report EVERY finding of a class at once, not one variant.
-- If you find a security weakness OUTSIDE this PR's scope, put no details in
-  the verdict body; write only "One out-of-scope hardening observation was
-  recorded privately." and give the details only in your final reply.
+- If you find an observation outside this PR's scope, omit its details from
+  the public block. You may put it outside the block, before or after it;
+  preferably omit it from the reply entirely.
 
-## Output (your entire reply is the verdict body)
+## Output
+Write the review inside exactly one block. Open with `{PUBLIC_VERDICT_OPEN}`
+on a line of its own and close with `{PUBLIC_VERDICT_CLOSE}` on a line of its
+own. ONLY the text between these lines is posted. Everything outside the block
+is kept privately and never shown. A missing or malformed block is never posted.
 - Line 1: your attribution header, e.g. `**🤖 {role.capitalize()} — Ateles swarm, {lens} lens panelist**`.
   The separator after your name must be the dash character shown (—), not a
   colon or any other character.
@@ -335,33 +341,66 @@ def dispatch_once(*, python: str, dispatch_script: Path, role: str, lens: str,
     return env
 
 
-def extract_verdict(stdout: str) -> str | None:
-    """The verdict body in post_lens_verdict.py's form, or None.
+def extract_public(body: str) -> tuple[str, str, str]:
+    """Return (unchanged public text, held text, status).
 
-    Header line, then the bold verdict token line. Any preamble before the
-    header is dropped.
+    Recognition uses no Markdown model. Each delimiter must appear exactly once in
+    the whole reply, on a line of its own (trimmed of spaces and tabs), the opener
+    before the closer. Any other occurrence of either delimiter string, in a fence,
+    a comment, a quote, inline text or a second line, makes the reply malformed, and
+    a malformed reply is held in full. A lens that quotes the delimiters is
+    therefore retried once, never posted.
     """
-    lines = (stdout or "").strip().splitlines()
-    for i, line in enumerate(lines):
-        if i >= 1 and VERDICT_RE.match(line.strip()) and lines[i - 1].strip():
-            return "\n".join(lines[i - 1:]).strip() + "\n"
-    return None
+    lines = body.splitlines(keepends=True)
+    openings: list[int] = []
+    closings: list[int] = []
+    for index, line in enumerate(lines):
+        bare = line.rstrip("\r\n").strip(" \t")
+        if bare == PUBLIC_VERDICT_OPEN:
+            openings.append(index)
+        elif bare == PUBLIC_VERDICT_CLOSE:
+            closings.append(index)
+    # Any occurrence not accounted for by an own-line delimiter is an embedded quote.
+    embedded = (body.count(PUBLIC_VERDICT_OPEN) != len(openings)
+                or body.count(PUBLIC_VERDICT_CLOSE) != len(closings))
+    if embedded:
+        return "", body, "duplicated"
+
+    if len(openings) > 1 or len(closings) > 1:
+        return "", body, "duplicated"
+    if closings and (not openings or closings[0] < openings[0]):
+        return "", body, "out_of_order"
+    if not openings:
+        return "", body, "missing"
+    if not closings:
+        return "", body, "unclosed"
+
+    start, end = openings[0], closings[0]
+    inner = lines[start + 1:end]
+    while inner and not inner[0].strip(" \t\r\n"):
+        inner.pop(0)
+    while inner and not inner[-1].strip(" \t\r\n"):
+        inner.pop()
+    public = "".join(inner)
+    public_lines = public.splitlines()
+    if (len(public_lines) < 2 or not HEADER_RE.fullmatch(public_lines[0])
+            or not VERDICT_RE.fullmatch(public_lines[1].strip())):
+        return "", body, "invalid_verdict"
+    held = "".join(lines[:start] + lines[end + 1:])
+    return public, held, "ok"
 
 
-def normalize_header(body: str, *, role: str) -> str:
-    """Rewrite a colon-separated line 1 into the contract's dash form.
-
-    Only line 1 changes, and only when it is this lens's own header in the
-    colon shape (`**🤖 <Name>: Ateles swarm, <role>**` with <Name> equal to
-    *role*). A header naming another agent, or any other line, is left as
-    it is, so the gate reader still refuses it. Every byte after line 1 is
-    kept.
-    """
-    first, sep, rest = body.partition("\n")
-    m = COLON_HEADER_RE.match(first)
-    if not m or m.group("name").strip().lower() != role.strip().lower():
-        return body
-    return f"**🤖 {m.group('name')} — Ateles swarm, {m.group('role')}**{sep}{rest}"
+def save_held_text(path: Path, held: str) -> None:
+    """Append a reply's held text without ever opening a writable wide-mode file."""
+    if not held:
+        return
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(held)
+        if not held.endswith("\n"):
+            fh.write("\n")
 
 
 def classify_failure(env: dict[str, Any]) -> str:
@@ -394,6 +433,11 @@ def run_lens(*, lens: str, repo: str, pr: int, head: str, task_entity_id: str,
     t_lens = clock()
     last_reason = "unknown"
     for attempt in range(1, MAX_ATTEMPTS + 1):
+        if attempt > 1 and last_reason.startswith("public block:"):
+            task_file.write_text(compose_brief(repo=repo, pr=pr, head=head,
+                                               lens=lens, role=role, extra=extra)
+                                 + "\n## Format correction\n"
+                                 + PUBLIC_VERDICT_FORMAT_REMINDER + "\n")
         t0 = clock()
         env = dispatch(python=python, dispatch_script=dispatch_script, role=role,
                        lens=lens, repo=repo, task_entity_id=task_entity_id,
@@ -404,12 +448,19 @@ def run_lens(*, lens: str, repo: str, pr: int, head: str, task_entity_id: str,
                "run_id": env.get("remote_run_id") or "",
                "outcome_unknown": bool(env.get("remote_outcome_unknown"))}
         record["attempts"].append(att)
-        (out_dir / f"{lens}.attempt{attempt}.json").write_text(
-            json.dumps({k: v for k, v in env.items() if k != "stdout"}, indent=2))
+        (out_dir / f"{lens}.attempt{attempt}.json").write_text(json.dumps({
+            "ok": bool(env.get("ok")), "provider": env.get("provider"),
+            "remote_run_id": env.get("remote_run_id"),
+            "remote_outcome_unknown": bool(env.get("remote_outcome_unknown")),
+            "returncode": env.get("returncode"),
+        }, indent=2))
         if env.get("ok"):
-            body = extract_verdict(str(env.get("stdout", "")))
-            if body is not None:
-                body = normalize_header(body, role=role)
+            body, held, status = extract_public(str(env.get("stdout", "")))
+            if held:
+                save_held_text(out_dir / f"{lens}.private.txt", held)
+                log(f"{lens}: attempt {attempt}: held {len(held.splitlines())} lines; "
+                    f"public block: {status}")
+            if status == "ok":
                 path = out_dir / f"{lens}.verdict.md"
                 path.write_text(body)
                 token = VERDICT_RE.search(body.splitlines()[1]).group(1)  # type: ignore[union-attr]
@@ -418,14 +469,16 @@ def run_lens(*, lens: str, repo: str, pr: int, head: str, task_entity_id: str,
                     provider=att["provider"], run_id=att["run_id"],
                     duration_s=round(clock() - t_lens, 1))
                 return record
-            last_reason = "the reply had no header line plus verdict token line"
+            last_reason = f"public block: {status}"
             att["problem"] = last_reason
             log(f"{lens}: attempt {attempt}: {last_reason}")
             continue  # an unreadable reply is mechanical: retry once
         kind = classify_failure(env)
-        last_reason = str(env.get("reason") or env.get("error") or "dispatch failed")
-        att["problem"] = f"{kind}: {last_reason}"
-        log(f"{lens}: attempt {attempt} failed ({kind}): {last_reason}")
+        # A failed envelope can carry arbitrary remote text in reason/error.
+        # Keep the diagnostic category, never echo that text into public sinks.
+        last_reason = f"dispatch {kind}"
+        att["problem"] = last_reason
+        log(f"{lens}: attempt {attempt} failed ({kind})")
         if kind in ("refusal", "queue", "deterministic"):
             label = "queue wait" if kind == "queue" else kind
             record.update(status="fallback", reason=f"{label}: {last_reason}",

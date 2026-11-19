@@ -1,6 +1,7 @@
 """Tests for fly_lens_review.py with the Fly dispatch mocked."""
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -15,7 +16,13 @@ HEAD = "a" * 40
 GOOD = "**\U0001F916 Pavo - Ateles swarm, pm lens panelist**\n**SIGNED_OFF**\n\nFine.\n"
 
 
-def ok_env(stdout=GOOD, **kw):
+def block(inner=GOOD, before="", after=""):
+    return f"{before}{f.PUBLIC_VERDICT_OPEN}\n{inner}{f.PUBLIC_VERDICT_CLOSE}\n{after}"
+
+
+def ok_env(stdout=None, **kw):
+    if stdout is None:
+        stdout = block()
     return {"ok": True, "provider": "claude", "remote_run_id": "fly-1", "stdout": stdout, **kw}
 
 
@@ -46,7 +53,7 @@ def run(tmp_path, dispatch, *extra, heads=(HEAD,), poster=None, lens="pm",
     posts = []
 
     def default_poster(**kw):
-        posts.append(kw)
+        posts.append({**kw, "body": Path(kw["body_file"]).read_text()})
         return True, "posted"
 
     rc = f.main(["--repo", "o/r", "--pr", "7", "--lens", lens, "--task-entity-id",
@@ -68,13 +75,178 @@ def test_head_is_pinned_in_brief_and_record(tmp_path):
 
 
 def test_verdict_file_shape_and_summary(tmp_path):
-    d = Script(ok_env("preamble line\n" + GOOD))
+    d = Script(ok_env(block(before="preamble line\n")))
     run(tmp_path, d)
-    lines = (tmp_path / "pm.verdict.md").read_text().splitlines()
-    assert lines[0].startswith("**\U0001F916") and lines[1] == "**SIGNED_OFF**"
+    verdict = (tmp_path / "pm.verdict.md").read_text()
+    assert verdict == GOOD
     rec = json.loads((tmp_path / "summary.json").read_text())["lenses"][0]
     assert (rec["provider"], rec["run_id"], rec["verdict"]) == ("claude", "fly-1", "SIGNED_OFF")
     assert "duration_s" in rec
+
+
+CANARY = "HELD_CANARY_7f82"
+
+
+def assert_no_public_sink(tmp_path, posts, capsys):
+    assert not (tmp_path / "pm.verdict.md").exists()
+    assert posts == []
+    for path in tmp_path.iterdir():
+        if path.name.endswith(".private.txt"):
+            continue
+        assert CANARY not in path.read_text(), path.name
+    captured = capsys.readouterr()
+    assert CANARY not in captured.out + captured.err
+    note = tmp_path / "pm.private.txt"
+    assert CANARY in note.read_text()
+    assert note.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("before,after", [
+    (CANARY + "\n", ""), ("", CANARY + "\n"),
+    (CANARY + " before\n", CANARY + " after\n"),
+])
+def test_only_inner_text_reaches_every_public_sink(tmp_path, capsys, before, after):
+    reply = block(before=before, after=after)
+    rc, posts = run(tmp_path, Script(ok_env(reply)), "--post")
+    assert rc == 0 and len(posts) == 1
+    assert (tmp_path / "pm.verdict.md").read_text() == GOOD
+    assert posts[0]["body_file"] == str(tmp_path / "pm.verdict.md")
+    assert posts[0]["body"] == GOOD
+    assert CANARY in (tmp_path / "pm.private.txt").read_text()
+    for path in tmp_path.iterdir():
+        if path.name.endswith(".private.txt"):
+            continue
+        assert CANARY not in path.read_text(), path.name
+    captured = capsys.readouterr()
+    assert CANARY not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("wrapper", ["```\n{}\n```", "<!--\n{}\n-->"])
+def test_a_wrapped_block_posts_only_its_inner_text(wrapper):
+    # Recognition is context-free: a valid block is the lens's explicit public text even when it
+    # sits in a fence or a comment; text outside the delimiters is still held.
+    inner = f"{f.PUBLIC_VERDICT_OPEN}\n{GOOD}{f.PUBLIC_VERDICT_CLOSE}"
+    public, held, status = f.extract_public(CANARY + "\n" + wrapper.format(inner) + "\n" + CANARY + "\n")
+    assert status == "ok"
+    assert public == GOOD.strip("\n") + "\n" or public.strip() == GOOD.strip()
+    assert CANARY not in public and CANARY in held
+
+
+@pytest.mark.parametrize("reply,status", [
+    (GOOD + CANARY, "missing"),
+    (f"{f.PUBLIC_VERDICT_OPEN}\n{GOOD}{CANARY}", "unclosed"),
+    (block() + block(after=CANARY), "duplicated"),
+    (f"{f.PUBLIC_VERDICT_CLOSE}\n{CANARY}\n{f.PUBLIC_VERDICT_OPEN}\n{GOOD}", "out_of_order"),
+    (f"> {f.PUBLIC_VERDICT_OPEN}\n{GOOD}> {f.PUBLIC_VERDICT_CLOSE}\n{CANARY}", "duplicated"),
+    (f"{f.PUBLIC_VERDICT_OPEN} trailing\n{GOOD}{f.PUBLIC_VERDICT_CLOSE}\n{CANARY}", "duplicated"),
+    (f"😀{f.PUBLIC_VERDICT_OPEN}\n{GOOD}{f.PUBLIC_VERDICT_CLOSE}\n{CANARY}", "duplicated"),
+    (f"**{f.PUBLIC_VERDICT_OPEN}**\n{GOOD}{f.PUBLIC_VERDICT_CLOSE}\n{CANARY}", "duplicated"),
+    (f"<<<PUBLΙC-VERDICT>>>\n{GOOD}{f.PUBLIC_VERDICT_CLOSE}\n{CANARY}", "out_of_order"),
+    # Context-free recognition: markup left open inside the block, then the delimiters quoted later.
+    (f"{f.PUBLIC_VERDICT_OPEN}\n{GOOD}```\nunclosed fence\n{f.PUBLIC_VERDICT_CLOSE}\n{CANARY}\n```\n{f.PUBLIC_VERDICT_CLOSE}\n", "duplicated"),
+    (f"{f.PUBLIC_VERDICT_OPEN}\n{GOOD}```python print(1)```\n{f.PUBLIC_VERDICT_CLOSE}\n```\n{CANARY}\n{f.PUBLIC_VERDICT_CLOSE}\n", "duplicated"),
+    (f"{f.PUBLIC_VERDICT_OPEN}\n{GOOD}Mentions `<!--` here\n{f.PUBLIC_VERDICT_CLOSE}\n{CANARY} -->\n{f.PUBLIC_VERDICT_CLOSE}\n", "duplicated"),
+    (f"{f.PUBLIC_VERDICT_OPEN}\n{GOOD}    ```\n{f.PUBLIC_VERDICT_CLOSE}\n{CANARY}\n{f.PUBLIC_VERDICT_CLOSE}\n", "duplicated"),
+    (f"{f.PUBLIC_VERDICT_OPEN}\n{GOOD}Quote: {f.PUBLIC_VERDICT_CLOSE} inline\n{f.PUBLIC_VERDICT_CLOSE}\n{CANARY}\n", "duplicated"),
+    (f"{f.PUBLIC_VERDICT_OPEN}\n{CANARY}\nno verdict\n{f.PUBLIC_VERDICT_CLOSE}\n", "invalid_verdict"),
+])
+def test_malformed_reply_fails_closed(tmp_path, capsys, reply, status):
+    assert f.extract_public(reply)[2] == status
+    d = Script(ok_env(reply), ok_env(reply))
+    rc, posts = run(tmp_path, d, "--post")
+    assert rc == 3 and len(d.calls) == 2
+    assert_no_public_sink(tmp_path, posts, capsys)
+    assert CANARY not in (tmp_path / "pm.brief.md").read_text()
+    assert "Format correction" in (tmp_path / "pm.brief.md").read_text()
+
+
+def test_ascii_indentation_on_delimiter_lines_is_allowed(tmp_path):
+    reply = f" \t{f.PUBLIC_VERDICT_OPEN}\t \n{GOOD} \t{f.PUBLIC_VERDICT_CLOSE} \n"
+    rc, posts = run(tmp_path, Script(ok_env(reply)), "--post")
+    assert rc == 0 and posts[0]["body"] == GOOD
+
+
+ATTACK_SHAPES = [
+    "😀 PRIVATE-NOTE: " + CANARY,
+    "<b>Private note</b> " + CANARY,
+    "Prіvate note: " + CANARY,
+    "PRIVATE-NOTE — " + CANARY,
+    "text PRIVATE-NOTE: " + CANARY,
+    "Private to the requesting session: " + CANARY,
+    "**recorded privately** " + CANARY,
+    "\u200bPRIVATE-NOTE: " + CANARY,
+]
+
+
+@pytest.mark.parametrize("shape", ATTACK_SHAPES)
+def test_old_marker_shapes_outside_block_are_held(tmp_path, shape):
+    rc, posts = run(tmp_path, Script(ok_env(block(after=shape + "\n"))), "--post")
+    assert rc == 0 and len(posts) == 1
+    assert (tmp_path / "pm.verdict.md").read_text() == GOOD
+    assert shape in (tmp_path / "pm.private.txt").read_text()
+
+
+@pytest.mark.parametrize("shape", ATTACK_SHAPES)
+def test_old_marker_shapes_inside_block_are_public_verbatim(tmp_path, shape):
+    inner = GOOD + shape + "\n"
+    rc, posts = run(tmp_path, Script(ok_env(block(inner))), "--post")
+    assert rc == 0 and len(posts) == 1
+    assert (tmp_path / "pm.verdict.md").read_text() == inner
+
+
+def test_private_file_is_0600_from_creation(tmp_path, monkeypatch):
+    opens = []
+    original = f.os.open
+
+    def checked_open(path, flags, mode=0o777):
+        opens.append(mode)
+        return original(path, flags, mode)
+
+    monkeypatch.setattr(f.os, "open", checked_open)
+    old = os.umask(0o000)
+    try:
+        run(tmp_path, Script(ok_env(block(after=CANARY))), "--post")
+    finally:
+        os.umask(old)
+    assert opens == [0o600]
+    assert (tmp_path / "pm.private.txt").stat().st_mode & 0o777 == 0o600
+
+
+def test_brief_uses_only_public_block_format(tmp_path):
+    run(tmp_path, Script(ok_env()))
+    brief = (tmp_path / "pm.brief.md").read_text()
+    assert f.PUBLIC_VERDICT_OPEN in brief and f.PUBLIC_VERDICT_CLOSE in brief
+    assert "PRIVATE-NOTE:" not in brief
+    assert "in your final reply" not in brief
+    assert "ONLY the text between" in brief
+
+
+def test_missing_block_retries_once_without_reply_text(tmp_path, capsys):
+    d = Script(ok_env(CANARY + GOOD), ok_env(CANARY + GOOD))
+    rc, posts = run(tmp_path, d, "--post")
+    assert rc == 3 and len(d.calls) == 2
+    assert_no_public_sink(tmp_path, posts, capsys)
+
+
+def test_failed_envelope_does_not_echo_remote_text(tmp_path, capsys):
+    failed = {"ok": False, "reason": CANARY, "error": CANARY,
+              "stderr": CANARY, "returncode": 1}
+    rc, posts = run(tmp_path, Script(failed, failed), "--post")
+    assert rc == 3 and posts == []
+    for path in tmp_path.iterdir():
+        assert CANARY not in path.read_text(), path.name
+    captured = capsys.readouterr()
+    assert CANARY not in captured.out + captured.err
+
+
+def test_private_write_failure_prevents_delivery(tmp_path, monkeypatch):
+    def denied(*args):
+        raise OSError("private file unavailable")
+
+    monkeypatch.setattr(f, "save_held_text", denied)
+    with pytest.raises(OSError, match="private file unavailable"):
+        run(tmp_path, Script(ok_env(block(after=CANARY))), "--post")
+    assert not (tmp_path / "pm.verdict.md").exists()
 
 
 def test_retries_once_on_mechanical_failure(tmp_path):
@@ -142,7 +314,7 @@ def test_extra_brief_passed_through(tmp_path):
 
 
 def test_all_runs_five_lenses_sequentially(tmp_path):
-    envs = [ok_env(GOOD.replace("Pavo", r).replace("pm lens", lname + " lens"))
+    envs = [ok_env(block(GOOD.replace("Pavo", r).replace("pm lens", lname + " lens")))
             for r, lname in [("Pavo", "pm"), ("Waxwing", "arch"), ("Falco", "security"),
                          ("Phoenicurus", "qa"), ("Accipiter", "ux")]]
     d = Script(*envs)
@@ -271,7 +443,7 @@ def test_default_out_dir_is_not_cwd(tmp_path, monkeypatch):
 
 
 def lens_env(role, lname):
-    return ok_env(GOOD.replace("Pavo", role).replace("pm lens", lname + " lens"))
+    return ok_env(block(GOOD.replace("Pavo", role).replace("pm lens", lname + " lens")))
 
 
 def test_legal_lens_accepted_and_dispatched_as_buteo(tmp_path):
@@ -585,58 +757,18 @@ def test_main_passes_the_repo_qualified_pr_to_dispatch_role(monkeypatch, tmp_pat
     assert rc == 0 and len(seen) == 1
     cmd = seen[0]
     assert cmd[cmd.index("--pr") + 1] == "o/r#7"
-# --------------------------------------------------------------------------
-# Colon-separated header from a Fly lens run (2026-11-16)
-# --------------------------------------------------------------------------
-COLON = "**\U0001F916 Pavo: Ateles swarm, pm lens panelist**"
-REST = "\n**SIGNED_OFF**\n\nFine: no change needed — see `a: b`.\n"
-
-
 def _swarm_dispatch():
-    apis = Path(__file__).resolve().parent.parent / "daemons" / "apis"
-    if str(apis) not in sys.path:
-        sys.path.insert(0, str(apis))
+    sys.path.insert(0, str(f.APIS_DIR))
     import swarm_dispatch
     return swarm_dispatch
 
 
-def test_colon_header_normalized_and_accepted_by_gate_reader(tmp_path):
-    sd = _swarm_dispatch()
-    # the reply as the Fly run returned it is refused by the gate reader
-    assert (sd.describe_gate_verdict_position(COLON + REST, lens_agent="pavo")
-            == "first line is not the lens header")
-    d = Script(ok_env(COLON + REST))
-    rc, _ = run(tmp_path, d, "--post")
+def test_public_header_is_preserved_exactly(tmp_path):
+    inner = GOOD.replace("Pavo -", "Pavo —")
+    rc, _ = run(tmp_path, Script(ok_env(block(inner))), "--post")
     assert rc == 0
-    body = (tmp_path / "pm.verdict.md").read_text()
-    assert body.splitlines()[0] == "**\U0001F916 Pavo — Ateles swarm, pm lens panelist**"
-    assert sd.lens_own_verdict(body, lens_agent="pavo") == "signed_off"
-    assert (sd.describe_gate_verdict_position(body, lens_agent="pavo")
-            == "the reply carries a second header or a second verdict line")
-
-
-def test_colon_header_naming_another_agent_is_not_rewritten(tmp_path):
-    sd = _swarm_dispatch()
-    other = "**\U0001F916 Waxwing: Ateles swarm, pm lens panelist**" + REST
-    assert f.normalize_header(other, role="pavo") == other
-    d = Script(ok_env(other))
-    run(tmp_path, d)
-    body = (tmp_path / "pm.verdict.md").read_text()
-    assert body == other
-    assert sd.lens_own_verdict(body, lens_agent="pavo") is None
-    assert (sd.describe_gate_verdict_position(body, lens_agent="pavo")
-            == "first line is not the lens header")
-
-
-def test_colon_header_normalization_keeps_rest_byte_identical():
-    out = f.normalize_header(COLON + REST, role="pavo")
-    first, _, rest = out.partition("\n")
-    assert first == "**\U0001F916 Pavo — Ateles swarm, pm lens panelist**"
-    assert "\n" + rest == REST
-    # a dash header and any later colon line are left untouched
-    assert f.normalize_header(GOOD, role="pavo") == GOOD
-    later = GOOD + COLON + "\n"
-    assert f.normalize_header(later, role="pavo") == later
+    assert (tmp_path / "pm.verdict.md").read_text() == inner
+    assert _swarm_dispatch().lens_own_verdict(inner, lens_agent="pavo") == "signed_off"
 
 
 def test_brief_requires_the_dash_separator(tmp_path):
