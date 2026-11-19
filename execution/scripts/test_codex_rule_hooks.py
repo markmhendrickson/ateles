@@ -729,6 +729,55 @@ class TestCodexGuardEffect(unittest.TestCase):
                     }, env={"HOME": os.fspath(home)})
                     self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_installer_merges_and_updates_credential_guard_without_clobbering_unrelated_hooks(self) -> None:
+        unrelated = {
+            "matcher": "^UnrelatedTool$",
+            "hooks": [{"type": "command", "command": "python3 /opt/operator/unrelated_hook.py", "timeout": 5}],
+        }
+        stale_guard = {
+            "matcher": "^Bash$",
+            "hooks": [{"type": "command",
+                       "command": "python3 /old/checkout/.claude/hooks/credential_read_guard.py"}],
+        }
+        other_event = {"hooks": [{"type": "command", "command": "python3 /opt/operator/stop_hook.py"}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "codex" / "hooks.json"
+            out.parent.mkdir(parents=True)
+            out.write_text(json.dumps({
+                "description": "operator file",
+                "hooks": {"PreToolUse": [unrelated, stale_guard], "Stop": [other_event]},
+            }, indent=2) + "\n", encoding="utf-8")
+
+            def run(*extra: str):
+                return subprocess.run(
+                    [os.sys.executable, os.fspath(INSTALLER), "--out", os.fspath(out), *extra],
+                    text=True, capture_output=True, cwd=REPO_ROOT, timeout=20,
+                )
+
+            first = run()
+            self.assertEqual(first.returncode, 0, first.stderr)
+            first_bytes = out.read_bytes()
+            document = json.loads(first_bytes)
+            groups = document["hooks"]["PreToolUse"]
+            # the operator's unrelated entries survive unchanged, in this event and in another event
+            self.assertIn(unrelated, groups)
+            self.assertEqual(document["hooks"]["Stop"][0], other_event)
+            self.assertEqual(document["description"], "operator file")
+            # exactly one current, absolute credential guard remains; the stale one is gone
+            commands = [hook["command"] for group in groups for hook in group["hooks"]
+                        if "credential_read_guard.py" in hook["command"]]
+            self.assertEqual(len(commands), 1, commands)
+            self.assertNotIn("/old/checkout", commands[0])
+            script = Path(shlex.split(commands[0])[-1])
+            self.assertTrue(script.is_absolute() and script.is_file())
+            self.assertEqual(script, REPO_ROOT / ".claude" / "hooks" / "credential_read_guard.py")
+            # a second install changes nothing, and the check agrees
+            second = run()
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(out.read_bytes(), first_bytes)
+            checked = run("--check")
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+
     def test_credential_guard_budget_refusal_carries_a_reason_on_stderr_for_codex(self) -> None:
         # Codex honours a refusal only when stderr carries a reason: exit 2 with an empty stderr is a FAILED hook
         # and the tool call still runs. The inspection-budget refusal must therefore also write its reason.
