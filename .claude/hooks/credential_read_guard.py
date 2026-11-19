@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """PreToolUse hook — stop an agent from putting a credential file's CONTENT
-into model context, across Bash, Read, Grep, and Glob.
+into model context, across Claude's Bash/Read/Grep/Glob and Codex command,
+code-mode, and direct file-read tools.
 
 SCOPE: this is a tripwire for ACCIDENTAL credential reads, not a boundary
 against an agent that is trying to read one; shell parsing cannot be made
@@ -2809,23 +2810,31 @@ def main() -> int:
     payload = read_hook_input()
     tool = payload.get("tool_name")
     tool_input = payload.get("tool_input") or {}
+    if tool == "exec" and isinstance(tool_input, str):
+        tool_input = {"code": tool_input}
     if not isinstance(tool_input, dict):
         return 0
 
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
 
-    if tool == "Bash":
-        command = tool_input.get("command")
+    if tool in {"Bash", "exec_command", "shell", "shell_command", "local_shell", "exec"}:
+        # Codex code mode carries JavaScript that can call a shell tool. Its
+        # literal source is useful to this accidental-read tripwire, though
+        # computed paths in arbitrary JavaScript remain outside its scope.
+        command = (
+            tool_input.get("code") or tool_input.get("source")
+            if tool == "exec" else tool_input.get("cmd") or tool_input.get("command")
+        )
         hit = check_bash(command, cwd=cwd)
         if hit:
             if hit == _COMPLEX_OPERAND:
                 return deny(_COMPLEX_OPERAND_REASON)
             shown = _describe_hit(hit)
-            log(f"blocking Bash read of credential content: {shown}")
+            log(f"blocking {tool} read of credential content: {shown}")
             return deny(_safe_alternative(shown, tool="Bash"))
         return 0
 
-    if tool == "Read":
+    if tool in {"Read", "read_file", "view_image"}:
         hit = check_read(tool_input, cwd=cwd)
         if hit:
             shown = _describe_hit(hit)
