@@ -115,6 +115,22 @@ config presence alone is not treated as proof. The user-scope path is the measur
 0.153.4. A generated `AGENTS.md` remains a fallback for installations that have not trusted the hook, not a
 second policy source.
 
+**Credential read guard after merging the Codex wiring:** from the long-lived Ateles checkout, run
+`python3 execution/scripts/install_codex_hooks.py`, then open `/hooks` in Codex and trust the new Ateles
+definition. Run this check from that same checkout:
+
+```sh
+python3 execution/scripts/install_codex_hooks.py --check && python3 execution/scripts/test_codex_rule_hooks.py TestCodexGuardEffect.test_installed_credential_guard_blocks_synthetic_reads
+```
+
+The effect test renders the installed template into a temporary directory, checks the absolute hook path,
+and expects a denial for a read of a synthetic file under a temporary home. It never reads a real
+credential file. The repository fixtures establish the `Bash` command shape and show Codex code mode
+calling `exec_command`; the turn guard also names `shell`, `shell_command`, and `local_shell`.
+They do not prove which of those names a live Codex hook emits, or the live payload of every variant.
+
+Stated limits of the Codex guard: Codex honours a refusal only when the hook writes its reason to stderr (the guard does, for every refusal, including the one for a command too large to inspect). `write_stdin`, text sent to an interactive shell that is already open, emits no hook event, so no hook can see it. A hook that times out or raises is allowed, as with the other tripwire guards. This is an accident tripwire, not a boundary against an agent that tries.
+
 **Optional: the turn guard (goal and heartbeat turns).** Codex goal continuation and scheduled heartbeats can
 spend whole turns re-answering a question or confirming nothing changed. The turn guard is a separate,
 reversible install. Run it from a long-lived checkout, not a linked worktree or a temporary path (the installer

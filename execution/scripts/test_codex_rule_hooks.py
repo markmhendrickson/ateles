@@ -15,6 +15,8 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import runpy
+import shlex
 import socket
 import subprocess
 import tempfile
@@ -615,6 +617,285 @@ class TestCodexPreToolUseMatcherSurfaces(unittest.TestCase):
 
 
 class TestCodexGuardEffect(unittest.TestCase):
+    def test_installer_resolves_credential_guard(self) -> None:
+        installer = runpy.run_path(os.fspath(INSTALLER))
+        handler = {"command": 'python3 "$(git rev-parse --show-toplevel)/.claude/hooks/credential_read_guard.py"'}
+        rendered = installer["_absolute_handler"](handler, REPO_ROOT)
+        self.assertEqual(
+            shlex.split(rendered["command"])[-1],
+            os.fspath(REPO_ROOT / ".claude" / "hooks" / "credential_read_guard.py"),
+        )
+
+    def test_credential_guard_understands_codex_payloads(self) -> None:
+        script = REPO_ROOT / ".claude" / "hooks" / "credential_read_guard.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            credential = home / ".config" / "neotoma" / ".env"
+            credential.parent.mkdir(parents=True)
+            credential.write_text("SYNTHETIC_KEY=not_a_secret\n", encoding="utf-8")
+            path = os.fspath(credential)
+            cases = {
+                "exec_command": {"cmd": f"cat {path}"},
+                "shell": {"command": f"cat {path}"},
+                "shell_command": {"command": f"cat {path}"},
+                "local_shell": {"command": f"cat {path}"},
+                "exec": {"code": f"text(await tools.exec_command({{cmd: 'cat {path}'}}))"},
+                "read_file": {"path": path},
+                "view_image": {"path": path},
+            }
+            for name, tool_input in cases.items():
+                with self.subTest(name=name):
+                    result = _run(f"python3 {shlex.quote(os.fspath(script))}", {
+                        "hook_event_name": "PreToolUse", "tool_name": name,
+                        "tool_input": tool_input, "cwd": os.fspath(home),
+                    }, env={"HOME": os.fspath(home)})
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    decision = json.loads(result.stdout)["hookSpecificOutput"]
+                    self.assertEqual(decision["permissionDecision"], "deny")
+            allowed = _run(f"python3 {shlex.quote(os.fspath(script))}", {
+                "hook_event_name": "PreToolUse", "tool_name": "exec_command",
+                "tool_input": {"cmd": "printf safe"}, "cwd": os.fspath(home),
+            }, env={"HOME": os.fspath(home)})
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_credential_guard_judges_list_form_nested_and_unrecognised_shell_payloads(self) -> None:
+        script = REPO_ROOT / ".claude" / "hooks" / "credential_read_guard.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            credential = home / ".config" / "neotoma" / ".env"
+            credential.parent.mkdir(parents=True)
+            credential.write_text("SYNTHETIC_KEY=not_a_secret\n", encoding="utf-8")
+            path = os.fspath(credential)
+            shapes = {
+                "list_shell_c": {"command": ["bash", "-lc", f"cat {path}"]},
+                "list_plain": {"command": ["cat", path]},
+                "list_cmd_field": {"cmd": ["cat", path]},
+                "nested_action_list": {"action": {"type": "exec", "command": ["cat", path]}},
+                "nested_action_string": {"action": {"type": "exec", "command": f"cat {path}"}},
+                "unrecognised_field": {"script": f"cat {path}"},
+            }
+            for tool in ("shell", "local_shell", "shell_command", "exec_command", "Bash"):
+                for shape, tool_input in shapes.items():
+                    with self.subTest(tool=tool, shape=shape):
+                        result = _run(f"python3 {shlex.quote(os.fspath(script))}", {
+                            "hook_event_name": "PreToolUse", "tool_name": tool,
+                            "tool_input": tool_input, "cwd": os.fspath(home),
+                        }, env={"HOME": os.fspath(home)})
+                        self.assertEqual(result.returncode, 2, result.stderr)
+                        self.assertTrue(result.stderr.strip(), "the reason must reach stderr for Codex")
+                        self.assertEqual(
+                            json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
+            for tool_input in ({"command": ["printf", "safe"]}, {"command": ["bash", "-lc", "printf safe"]},
+                               {"action": {"command": ["ls"]}}, {"script": "printf safe"}):
+                with self.subTest(allowed=tool_input):
+                    allowed = _run(f"python3 {shlex.quote(os.fspath(script))}", {
+                        "hook_event_name": "PreToolUse", "tool_name": "local_shell",
+                        "tool_input": tool_input, "cwd": os.fspath(home),
+                    }, env={"HOME": os.fspath(home)})
+                    self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_credential_guard_judges_the_script_after_the_c_flag_not_the_last_argument(self) -> None:
+        script = REPO_ROOT / ".claude" / "hooks" / "credential_read_guard.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            credential = home / ".config" / "neotoma" / ".env"
+            credential.parent.mkdir(parents=True)
+            credential.write_text("SYNTHETIC_KEY=not_a_secret\n", encoding="utf-8")
+            path = os.fspath(credential)
+            refused = {
+                "trailing_dollar_zero": ["bash", "-lc", f"cat {path}", "ignored0"],
+                "trailing_positionals": ["bash", "-c", f"cat {path}", "a", "b"],
+                "login_interactive": ["zsh", "-lic", f"cat {path}", "x"],
+                "path_through_dollar_zero": ["bash", "-lc", 'cat "$0"', path],
+                "path_through_dollar_one": ["sh", "-c", 'cat "$1"', "name", path],
+                "path_through_all_args": ["bash", "-c", 'cat "$@"', "name", path],
+            }
+            for name, command in refused.items():
+                with self.subTest(refused=name):
+                    result = _run(f"python3 {shlex.quote(os.fspath(script))}", {
+                        "hook_event_name": "PreToolUse", "tool_name": "local_shell",
+                        "tool_input": {"command": command}, "cwd": os.fspath(home),
+                    }, env={"HOME": os.fspath(home)})
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertTrue(result.stderr.strip())
+            for name, command in {
+                "benign_with_positionals": ["bash", "-lc", "printf safe", "a", "b"],
+                "benign_dollar_zero": ["bash", "-c", 'printf "%s" "$0"', "label"],
+            }.items():
+                with self.subTest(allowed=name):
+                    result = _run(f"python3 {shlex.quote(os.fspath(script))}", {
+                        "hook_event_name": "PreToolUse", "tool_name": "local_shell",
+                        "tool_input": {"command": command}, "cwd": os.fspath(home),
+                    }, env={"HOME": os.fspath(home)})
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_installer_merges_and_updates_credential_guard_without_clobbering_unrelated_hooks(self) -> None:
+        unrelated = {
+            "matcher": "^UnrelatedTool$",
+            "hooks": [{"type": "command", "command": "python3 /opt/operator/unrelated_hook.py", "timeout": 5}],
+        }
+        stale_guard = {
+            "matcher": "^Bash$",
+            "hooks": [{"type": "command",
+                       "command": "python3 /old/checkout/.claude/hooks/credential_read_guard.py"}],
+        }
+        other_event = {"hooks": [{"type": "command", "command": "python3 /opt/operator/stop_hook.py"}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "codex" / "hooks.json"
+            out.parent.mkdir(parents=True)
+            out.write_text(json.dumps({
+                "description": "operator file",
+                "hooks": {"PreToolUse": [unrelated, stale_guard], "Stop": [other_event]},
+            }, indent=2) + "\n", encoding="utf-8")
+
+            def run(*extra: str):
+                return subprocess.run(
+                    [os.sys.executable, os.fspath(INSTALLER), "--out", os.fspath(out), *extra],
+                    text=True, capture_output=True, cwd=REPO_ROOT, timeout=20,
+                )
+
+            first = run()
+            self.assertEqual(first.returncode, 0, first.stderr)
+            first_bytes = out.read_bytes()
+            document = json.loads(first_bytes)
+            groups = document["hooks"]["PreToolUse"]
+            # the operator's unrelated entries survive unchanged, in this event and in another event
+            self.assertIn(unrelated, groups)
+            self.assertEqual(document["hooks"]["Stop"][0], other_event)
+            self.assertEqual(document["description"], "operator file")
+            # exactly one current, absolute credential guard remains; the stale one is gone
+            commands = [hook["command"] for group in groups for hook in group["hooks"]
+                        if "credential_read_guard.py" in hook["command"]]
+            self.assertEqual(len(commands), 1, commands)
+            self.assertNotIn("/old/checkout", commands[0])
+            script = Path(shlex.split(commands[0])[-1])
+            self.assertTrue(script.is_absolute() and script.is_file())
+            self.assertEqual(script, REPO_ROOT / ".claude" / "hooks" / "credential_read_guard.py")
+            # a second install changes nothing, and the check agrees
+            second = run()
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(out.read_bytes(), first_bytes)
+            checked = run("--check")
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+
+    def test_credential_guard_judges_exec_payloads_given_as_source_or_code(self) -> None:
+        script = REPO_ROOT / ".claude" / "hooks" / "credential_read_guard.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            credential = home / ".config" / "neotoma" / ".env"
+            credential.parent.mkdir(parents=True)
+            credential.write_text("SYNTHETIC_KEY=not_a_secret\n", encoding="utf-8")
+            path = os.fspath(credential)
+            for field in ("source", "code"):
+                with self.subTest(refused=field):
+                    result = _run(f"python3 {shlex.quote(os.fspath(script))}", {
+                        "hook_event_name": "PreToolUse", "tool_name": "exec",
+                        "tool_input": {field: f"cat {path}"}, "cwd": os.fspath(home),
+                    }, env={"HOME": os.fspath(home)})
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertTrue(result.stderr.strip(), "a refusal without a stderr reason is not honoured by Codex")
+                    self.assertEqual(
+                        json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
+                with self.subTest(allowed=field):
+                    result = _run(f"python3 {shlex.quote(os.fspath(script))}", {
+                        "hook_event_name": "PreToolUse", "tool_name": "exec",
+                        "tool_input": {field: "printf safe"}, "cwd": os.fspath(home),
+                    }, env={"HOME": os.fspath(home)})
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_credential_guard_budget_refusal_carries_a_reason_on_stderr_for_codex(self) -> None:
+        # Codex honours a refusal only when stderr carries a reason: exit 2 with an empty stderr is a FAILED hook
+        # and the tool call still runs. The inspection-budget refusal must therefore also write its reason.
+        script = REPO_ROOT / ".claude" / "hooks" / "credential_read_guard.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            oversized = "cat " + "a/" * 700000
+            for tool in ("Bash", "exec_command", "local_shell"):
+                with self.subTest(tool=tool):
+                    result = _run(f"python3 {shlex.quote(os.fspath(script))}", {
+                        "hook_event_name": "PreToolUse", "tool_name": tool,
+                        "tool_input": {"command": oversized}, "cwd": os.fspath(home),
+                    }, env={"HOME": os.fspath(home)})
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertTrue(result.stderr.strip(), "a refusal without a stderr reason is not honoured by Codex")
+                    self.assertEqual(
+                        json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_installed_credential_guard_blocks_synthetic_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            credential = home / ".config" / "neotoma" / ".env"
+            credential.parent.mkdir(parents=True)
+            credential.write_text("SYNTHETIC_KEY=not_a_secret\n", encoding="utf-8")
+            out = home / "codex" / "hooks.json"
+            installed = subprocess.run(
+                [os.sys.executable, os.fspath(INSTALLER), "--out", os.fspath(out)],
+                text=True, capture_output=True, cwd=REPO_ROOT, timeout=20,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            groups = json.loads(out.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+            group = next(
+                group for group in groups
+                if any("credential_read_guard.py" in hook["command"] for hook in group["hooks"])
+            )
+            command = next(
+                hook["command"] for hook in group["hooks"]
+                if "credential_read_guard.py" in hook["command"]
+            )
+            script = Path(shlex.split(command)[-1])
+            self.assertTrue(script.is_absolute())
+            self.assertTrue(script.is_file())
+            self.assertNotIn("git rev-parse", command)
+            names = (
+                "Bash", "exec_command", "shell", "shell_command", "local_shell",
+                "exec", "Read", "read_file", "view_image", "Grep", "Glob",
+            )
+            for name in names:
+                with self.subTest(matcher=name):
+                    self.assertRegex(name, group["matcher"])
+            self.assertNotRegex("apply_patch", group["matcher"])
+
+            path = os.fspath(credential)
+            cases = {
+                "Bash": {"command": f"cat {shlex.quote(path)}"},
+                "exec_command": {"cmd": f"cat {shlex.quote(path)}"},
+                "shell": {"command": f"cat {shlex.quote(path)}"},
+                "shell_command": {"command": f"cat {shlex.quote(path)}"},
+                "local_shell": {"command": f"cat {shlex.quote(path)}"},
+                "exec": {"code": f"text(await tools.exec_command({{cmd: 'cat {path}'}}))"},
+                "Read": {"file_path": path},
+                "read_file": {"path": path},
+                "view_image": {"path": path},
+                "Grep": {"path": os.fspath(credential.parent), "output_mode": "content"},
+            }
+            for name, tool_input in cases.items():
+                with self.subTest(denied=name):
+                    event = {
+                        "session_id": "synthetic-credential-check",
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": name,
+                        "tool_input": tool_input,
+                        "cwd": os.fspath(home),
+                    }
+                    result = _run(command, event, env={"HOME": os.fspath(home)})
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    decision = json.loads(result.stdout)["hookSpecificOutput"]
+                    self.assertEqual(decision["hookEventName"], "PreToolUse")
+                    self.assertEqual(decision["permissionDecision"], "deny")
+                    self.assertNotIn("not_a_secret", result.stdout + result.stderr)
+
+            for name, tool_input in (
+                ("exec_command", {"cmd": "printf safe"}),
+                ("exec", {"code": "text(await tools.exec_command({cmd: 'printf safe'}))"}),
+                ("Read", {"file_path": os.fspath(home / "notes.txt")}),
+            ):
+                with self.subTest(allowed=name):
+                    result = _run(command, {
+                        "hook_event_name": "PreToolUse", "tool_name": name,
+                        "tool_input": tool_input, "cwd": os.fspath(home),
+                    }, env={"HOME": os.fspath(home)})
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_configured_git_stash_guard_returns_a_codex_deny(self) -> None:
         commands = _hook_commands("PreToolUse")
         command = next(c for c in commands if "git_stash_guard.py" in c)

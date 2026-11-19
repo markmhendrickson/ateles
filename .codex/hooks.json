@@ -65,6 +65,17 @@
         ]
       },
       {
+        "matcher": "^(Bash|exec_command|shell|shell_command|local_shell|exec|Read|read_file|view_image|Grep|Glob)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/credential_read_guard.py\"",
+            "timeout": 30,
+            "statusMessage": "Checking credential reads"
+          }
+        ]
+      },
+      {
         "matcher": "^Bash$",
         "hooks": [
           {

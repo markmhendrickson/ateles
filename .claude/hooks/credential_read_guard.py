@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """PreToolUse hook — stop an agent from putting a credential file's CONTENT
-into model context, across Bash, Read, Grep, and Glob.
+into model context, across Claude's Bash/Read/Grep/Glob and Codex command,
+code-mode, and direct file-read tools.
 
 SCOPE: this is a tripwire for ACCIDENTAL credential reads, not a boundary
 against an agent that is trying to read one; shell parsing cannot be made
@@ -317,7 +318,74 @@ def _describe_hit(hit: str) -> str:
     return hit
 
 
+_SHELL_NAMES = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
+
+
+def _arguments_as_command(arguments: list) -> str | None:
+    """A Codex shell tool may send its command as an argument list: judge the script after a shell's
+    `-c`/`-lc` flag directly, and any other list as the shell would see it joined."""
+    import shlex
+
+    parts = [str(a) for a in arguments]
+    if not parts:
+        return None
+    if len(parts) >= 3 and os.path.basename(parts[0]) in _SHELL_NAMES:
+        for index in range(1, len(parts) - 1):
+            flag = parts[index]
+            if flag.startswith("-") and not flag.startswith("--") and flag.endswith("c"):
+                # The shell runs the element right after the flag; what follows becomes $0, $1, ...
+                script, rest = parts[index + 1], parts[index + 2:]
+                judged = script
+                if rest:
+                    substituted = script
+                    for position, value in enumerate(rest):
+                        quoted = shlex.quote(value)
+                        substituted = substituted.replace("${%d}" % position, quoted).replace("$%d" % position, quoted)
+                    joined = shlex.join(rest)
+                    substituted = substituted.replace("$@", joined).replace("$*", joined)
+                    # judge the script as written, with the positional arguments substituted, and the full list
+                    judged = "\n".join([script, substituted, shlex.join(parts)])
+                return judged
+    return shlex.join(parts)
+
+
+def _shell_command_text(tool: str, tool_input: dict) -> str | None:
+    """The command text a matched shell tool would run, from whichever shape Codex used: a string
+    (`cmd`, `command`, code-mode `code`/`source`), an argument list, or nested under `action`. A payload
+    with none of those fields is judged on every string it carries rather than allowed by default."""
+    if tool == "exec":
+        fields = (tool_input.get("code"), tool_input.get("source"))
+    else:
+        fields = (tool_input.get("cmd"), tool_input.get("command"))
+    nested = tool_input.get("action")
+    if isinstance(nested, dict):
+        fields = fields + (nested.get("cmd"), nested.get("command"))
+    for value in fields:
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, list):
+            text = _arguments_as_command([a for a in value if isinstance(a, (str, int, float))])
+            if text:
+                return text
+    strings: list[str] = []
+
+    def collect(obj) -> None:
+        if isinstance(obj, str):
+            strings.append(obj)
+        elif isinstance(obj, dict):
+            for item in obj.values():
+                collect(item)
+        elif isinstance(obj, list):
+            for item in obj:
+                collect(item)
+
+    collect(tool_input)
+    return "\n".join(strings) or None
+
+
 def deny(reason: str) -> int:
+    # Codex shows a hook's stderr as the reason (as the sibling Codex guards do); Claude reads the JSON.
+    print(reason, file=sys.stderr)
     print(
         json.dumps(
             {
@@ -2809,23 +2877,28 @@ def main() -> int:
     payload = read_hook_input()
     tool = payload.get("tool_name")
     tool_input = payload.get("tool_input") or {}
+    if tool == "exec" and isinstance(tool_input, str):
+        tool_input = {"code": tool_input}
     if not isinstance(tool_input, dict):
         return 0
 
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
 
-    if tool == "Bash":
-        command = tool_input.get("command")
+    if tool in {"Bash", "exec_command", "shell", "shell_command", "local_shell", "exec"}:
+        # Codex code mode carries JavaScript that can call a shell tool. Its
+        # literal source is useful to this accidental-read tripwire, though
+        # computed paths in arbitrary JavaScript remain outside its scope.
+        command = _shell_command_text(tool, tool_input)
         hit = check_bash(command, cwd=cwd)
         if hit:
             if hit == _COMPLEX_OPERAND:
                 return deny(_COMPLEX_OPERAND_REASON)
             shown = _describe_hit(hit)
-            log(f"blocking Bash read of credential content: {shown}")
+            log(f"blocking {tool} read of credential content: {shown}")
             return deny(_safe_alternative(shown, tool="Bash"))
         return 0
 
-    if tool == "Read":
+    if tool in {"Read", "read_file", "view_image"}:
         hit = check_read(tool_input, cwd=cwd)
         if hit:
             shown = _describe_hit(hit)
