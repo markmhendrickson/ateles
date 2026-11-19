@@ -441,6 +441,10 @@ ends. The default channel keeps no such file; its state is the Neotoma
 Payment journal: `.monedula_payment_journal.json` — durable and never cleared
 by the consent flow. Keyed on a hash of the obligation (handler, session,
 payee, amount, currency; for Wise also profile, task and reference). Wise order:
+the approval hash binds exact terms; an unresolved replay hold follows the
+calendar event ID or the one-off due date plus profile identity when those
+terms change. A later invoice with a different due date can be offered after
+the previous invoice settles. Wise order:
 record intent and attempt key (fsynced)
 → create transfer → record transfer ID and read back → fund → record
 `funding_pending` (only with a saved transfer ID) → read transfer status on later ticks → record `done/sent`

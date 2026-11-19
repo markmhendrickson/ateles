@@ -272,22 +272,40 @@ def obligation_key(handler: Any, payment_date: str, match_id: str) -> str:
 
 
 def journal_entry_for_item(journal: dict, item: PendingItem) -> dict | None:
-    """Find an existing Wise attempt, including one written with an old one-off key.
+    """Find an attempt by terms, then hold the same session across edited terms.
 
-    A profile may have only one unresolved invoice at a time. If an old key
-    cannot be reconstructed, its journaled handler identity still holds it.
+    The approval key remains tied to the displayed terms. The replay hold uses
+    the calendar event ID or the one-off due date plus profile identity.
     """
     entry = journal["obligations"].get(item.obligation)
-    if entry is not None:
+    if entry is not None and entry.get("state") != payment_journal.STATE_DONE:
         return entry
+    profile = getattr(item.handler, "profile", None)
+    profile_id = str(getattr(profile, "entity_id", "") or "")
+    candidates = []
+    for row in journal["obligations"].values():
+        if row.get("rail") != "wise" or row.get("state") == payment_journal.STATE_DONE:
+            continue
+        if item.is_calendar:
+            if (item.match_id and row.get("match_id") == item.match_id
+                    and row.get("handler_name") == item.handler_name):
+                candidates.append(row)
+        elif (row.get("payment_date") == item.payment_date
+              and row.get("handler_name") == item.handler_name
+              and (not profile_id or not row.get("profile_entity_id")
+                   or row.get("profile_entity_id") == profile_id)):
+            candidates.append(row)
+    if candidates:
+        return candidates[0]
     if item.is_calendar:
-        return None
+        return entry
+    # Old rows without a date or profile identity cannot safely be ruled out
+    # as this invoice. Keep the existing conservative one-off cutover guard.
     candidates = [row for row in journal["obligations"].values()
                   if row.get("rail") == "wise"
                   and row.get("handler_name") == item.handler_name
                   and row.get("state") != payment_journal.STATE_DONE
-                  and (not row.get("payment_date")
-                       or row.get("payment_date") == item.payment_date)]
+                  and not row.get("payment_date")]
     # Before Wise attempt metadata existed, the writer recorded only state,
     # token, generation and intent_at. Its tick-date key cannot be reconstructed
     # later. An unclassified unresolved intent may be this invoice.
@@ -296,7 +314,7 @@ def journal_entry_for_item(journal: dict, item: PendingItem) -> dict | None:
                       and (row.get("state") == payment_journal.STATE_INTENT
                            or (row.get("state") == payment_journal.STATE_DONE
                                and row.get("outcome_status") != "sent")))
-    return candidates[0] if candidates else None
+    return candidates[0] if candidates else entry
 
 
 def journal_state_for_item(journal: dict, item: PendingItem) -> str | None:
