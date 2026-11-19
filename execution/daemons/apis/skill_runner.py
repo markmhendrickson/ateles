@@ -1698,32 +1698,6 @@ _ANSI_ESCAPE_RE = re.compile(
     r"|\x1b[@-Z\\-_]"                            # two-character escape
     r"|\x9b[0-?]*[ -/]*[@-~]"                     # 8-bit CSI
 )
-_CREDENTIAL_ENV_NAME_RE = re.compile(r"(TOKEN|SECRET|BEARER|PASSWORD|PASSWD|API_?KEY|_PAT$|^PAT$|PRIVATE_?KEY|CREDENTIAL)", re.I)
-_NON_SECRET_ENV_SUFFIXES = ("_PATH", "_DIR", "_HOME", "_FILE", "_URL", "_SUB", "_ISS", "_NAME", "_ID")
-
-
-def _strip_terminal_escapes(text: str) -> str:
-    """Remove terminal escape sequences (colour, cursor, OSC) so they cannot split a secret."""
-    return _ANSI_ESCAPE_RE.sub("", text or "")
-
-
-def _remember_child_environment_credentials(env: dict[str, str]) -> None:
-    """Remember every credential-like value handed to a child so persisted output redacts it."""
-    for name, value in env.items():
-        upper = name.upper()
-        if upper.endswith(_NON_SECRET_ENV_SUFFIXES):
-            continue
-        if _CREDENTIAL_ENV_NAME_RE.search(upper) and isinstance(value, str):
-            _remember_child_credential(value)
-
-
-_ANSI_ESCAPE_RE = re.compile(
-    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"      # OSC ... BEL or ST
-    r"|\x1b[P^_X][^\x1b]*\x1b\\"               # DCS, PM, APC, SOS ... ST
-    r"|\x1b\[[0-?]*[ -/]*[@-~]"                  # CSI ... final byte
-    r"|\x1b[@-Z\\-_]"                            # two-character escape
-    r"|\x9b[0-?]*[ -/]*[@-~]"                     # 8-bit CSI
-)
 _CREDENTIAL_NAME_RE = re.compile(
     r"(TOKEN|SECRET|BEARER|PASSWORD|PASSWD|API_?KEY|_PAT$|^PAT$|PRIVATE_?KEY|CREDENTIAL)", re.I)
 _NON_SECRET_NAME_SUFFIXES = ("_PATH", "_DIR", "_HOME", "_FILE", "_URL", "_SUB", "_ISS", "_NAME", "_ID")
@@ -1742,6 +1716,10 @@ def _remember_child_environment_credentials(child_env: dict[str, str]) -> None:
             continue
         if _CREDENTIAL_NAME_RE.search(upper) and isinstance(value, str):
             _remember_child_credential(value)
+
+
+# A credential split across lines is caught within this many consecutive lines.
+_SPLIT_SECRET_MAX_LINES = 8
 
 
 def _known_secret_values() -> list[str]:
@@ -1772,14 +1750,30 @@ def _redact_output_text(text: str) -> str:
     still contains a known secret (a combining mark, a percent-escape, a case change or a compatibility
     form can hide the exact value) is replaced as a whole, so nothing recoverable is kept."""
     secrets = _known_secret_values()
-    skeleton_secrets = [(secret.casefold(), _output_skeleton(secret)) for secret in secrets]
+    skeleton_secrets = [sk for sk in (_output_skeleton(secret) for secret in secrets) if sk]
+    lines = _redact_secrets(_strip_terminal_escapes(text or "")).splitlines(keepends=True)
+    bodies = [line.rstrip("\r\n") for line in lines]
+    skeletons = ["".join(_output_skeleton(body).split()) for body in bodies]
+    hidden: set[int] = set()
+    for sk in skeleton_secrets:
+        needle = "".join(sk.split())
+        if not needle:
+            continue
+        for start in range(len(lines)):
+            # the smallest run of consecutive lines whose joined letters contain the secret
+            joined = ""
+            for end in range(start, min(len(lines), start + _SPLIT_SECRET_MAX_LINES)):
+                joined += skeletons[end]
+                if needle in joined:
+                    # minimal: the first line must contribute, so it is not caught from a later start
+                    if end == start or needle not in joined[len(skeletons[start]):]:
+                        hidden.update(range(start, end + 1))
+                    break
     out: list[str] = []
-    for line in _redact_secrets(_strip_terminal_escapes(text or "")).splitlines(keepends=True):
-        body = line.rstrip("\r\n")
-        ending = line[len(body):]
-        skeleton = _output_skeleton(body)
-        if any(sk and sk in skeleton for _, sk in skeleton_secrets):
-            out.append("<redacted line: contains a credential in a disguised form>" + ending)
+    for index, line in enumerate(lines):
+        if index in hidden:
+            ending = line[len(bodies[index]):]
+            out.append("<redacted line: contains a credential in a disguised or split form>" + ending)
         else:
             out.append(line)
     return "".join(out)

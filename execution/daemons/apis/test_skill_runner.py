@@ -3486,6 +3486,36 @@ class TestDispatchFailureDiagnostics:
         assert "keep this line" in body and "and this one" in body  # other lines are kept
         assert "redacted" in body
 
+    @pytest.mark.parametrize("blocked", [False, True])
+    @pytest.mark.parametrize("cuts", [[13], [6, 17], [3, 9, 15, 21]])
+    def test_a_credential_split_across_lines_is_redacted(self, tmp_path, blocked, cuts) -> None:
+        fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+        pieces, last = [], 0
+        for cut in cuts + [len(fake_value)]:
+            pieces.append(fake_value[last:cut])
+            last = cut
+        split = "\n".join(pieces)
+        with (
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"),
+            patch.dict("os.environ", {"GITHUB_TOKEN": fake_value}, clear=False),
+        ):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1,
+                stdout=f"keep one\n{split}\nkeep two", stderr=f"a\n{split}\nb",
+                blocked_by_agent=blocked,
+            )
+        body = Path(path).read_text(encoding="utf-8")
+        for piece in pieces:
+            if len(piece) >= 6:
+                assert piece not in body
+        assert "keep one" in body and "keep two" in body
+        assert "split form" in body
+
+    def test_the_helper_definitions_are_not_duplicated(self) -> None:
+        source = Path(skill_runner.__file__).read_text(encoding="utf-8")
+        for name in ("_ANSI_ESCAPE_RE = ", "def _strip_terminal_escapes", "def _remember_child_environment_credentials"):
+            assert source.count(name) == 1, name
+
     def test_the_role_neotoma_bearer_given_to_a_child_is_redacted(self, tmp_path) -> None:
         # The role-specific bearer reaches a child through its environment (not the daemon's):
         # registering the child environment covers it, in a failure log and a blocked-run log.
