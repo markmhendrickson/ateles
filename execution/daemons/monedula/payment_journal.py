@@ -60,6 +60,10 @@ STATE_INTENT = "intent"
 STATE_FUNDING_PENDING = "funding_pending"
 STATE_DONE = "done"
 STATE_FAILED = "failed"
+REPLACEMENT_HOLD_MESSAGE = (
+    "The original attempt remains held. A replacement route is not available yet; "
+    "approval alone will not advance this payment. Do not pay again."
+)
 
 
 class JournalError(Exception):

@@ -372,6 +372,28 @@ def test_reconciliation_recovers_unscheduled_confirmed_transfer(attempt, monkeyp
     assert reads == [3]
 
 
+@pytest.mark.parametrize("status", ["not_submitted", "funds_refunded", "cancelled"])
+def test_terminal_wise_messages_do_not_offer_approval_as_recovery(status):
+    import monedula
+    import consent_email
+    from handlers.payment_profile import PaymentProfile
+
+    profile = PaymentProfile(prefix="SYNTHETIC", label="Synthetic", calendar_keywords=[],
+                             payment_type="wise", amount_eur=1)
+    handler = wise.WiseTransferHandler(profile)
+    item = consent_email.build_pending_items([(handler, [{"due_date": "2026-01-01"}])],
+                                             "2026-01-01")[0]
+    entry = {"state": "failed", "failure_status": status}
+    _, alert = monedula._outcome_alert(item, {"status": status})
+    hold = monedula._wise_hold_text(entry)
+    confirmation = handler.format_confirmation({"status": status})
+    for message in (alert, hold, confirmation):
+        assert "original attempt remains held" in message.lower()
+        assert "replacement route is not available yet" in message.lower()
+        assert "approval alone will not advance" in message.lower()
+        assert "do not pay again" in message.lower()
+
+
 def test_reconciliation_confirms_and_applies_effects_once(attempt, monkeypatch):
     import monedula
     from handlers.payment_profile import PaymentProfile

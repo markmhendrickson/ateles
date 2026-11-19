@@ -331,8 +331,14 @@ class WiseTransferHandler(PaymentHandler):
                 f"⏳ {self.profile.label} submitted; not confirmed; do not pay again.\n"
                 f"  Transfer ID: {result.get('transfer_id', 'not yet known')}"
             )
-        elif status == "not_submitted":
-            return f"⚠️ {self.profile.label}: not submitted; no payment was made. A new approval is required before another attempt."
+        elif status in ("not_submitted", "funds_refunded", "cancelled"):
+            import payment_journal
+            detail = {
+                "not_submitted": "not submitted; no payment was made",
+                "funds_refunded": "funds were returned",
+                "cancelled": "the transfer was cancelled",
+            }[status]
+            return f"⚠️ {self.profile.label}: {detail}. {payment_journal.REPLACEMENT_HOLD_MESSAGE}"
         elif status == "funding_rejected":
             return f"⚠️ {self.profile.label}: Wise rejected funding. The transfer exists; do not pay again."
         elif status == "manual_required":

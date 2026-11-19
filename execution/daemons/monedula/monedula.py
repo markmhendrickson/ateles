@@ -256,7 +256,7 @@ def _notify(
 # there unconditionally (lib/notify/notifier.py, _send_locked), so the "payment
 # sent" confirmation is sent as WARN, not INFO.
 _OUTCOME_CATEGORIES = {"sent", STATUS_FUNDING_PENDING, "manual_required", "failed",
-                       "not_submitted", "funding_rejected"}
+                       "not_submitted", "funding_rejected", "funds_refunded", "cancelled"}
 
 
 def _outcome_alert(item: Any, result: Any) -> tuple[str, str]:
@@ -289,8 +289,14 @@ def _outcome_alert(item: Any, result: Any) -> tuple[str, str]:
             "The existing Wise transfer will be checked on later ticks.",
         )
     if category == "not_submitted":
+        import payment_journal
         return ("blocker", f"monedula: payment not submitted for {who}; no payment was made. "
-                "A new operator approval is required before another attempt.")
+                + payment_journal.REPLACEMENT_HOLD_MESSAGE)
+    if category in ("funds_refunded", "cancelled"):
+        import payment_journal
+        outcome = "funds were returned" if category == "funds_refunded" else "transfer was cancelled"
+        return ("blocker", f"monedula: Wise {outcome} for {who}. "
+                + payment_journal.REPLACEMENT_HOLD_MESSAGE)
     if category == "funding_rejected":
         return ("blocker", f"monedula: Wise rejected funding for {who}. "
                 "The transfer exists; Monedula will check it. Do not pay again.")
@@ -1409,13 +1415,14 @@ def _notify_unknown_outcome(labels: list[str], yesterday_str: str) -> None:
 
 def _wise_hold_text(entry: dict) -> str:
     """Explain the persisted attempt without guessing whether money moved."""
+    import payment_journal
     state = entry.get("state")
     if state == "funding_pending":
         return "Submitted, not confirmed. Monedula is checking the transfer; do not pay again."
     if state == "failed":
         if entry.get("failure_status") == "not_submitted":
-            return "Not submitted; no payment was made. A new operator approval is required before another attempt."
-        return "The transfer was returned or cancelled. Do not pay again without a new operator approval."
+            return "Not submitted; no payment was made. " + payment_journal.REPLACEMENT_HOLD_MESSAGE
+        return "The transfer was returned or cancelled. " + payment_journal.REPLACEMENT_HOLD_MESSAGE
     if entry.get("transfer_id"):
         return "A transfer exists, but its outcome is unknown. Monedula is checking it; do not pay again."
     return "Submission outcome unknown. Check the payment rail; do not pay again."
@@ -1946,9 +1953,13 @@ def _reconcile_wise_entries(handlers: list) -> bool:
                 "cancelled": "the transfer was cancelled",
                 "funds_refunded": "the funds were returned",
             }[status]
+            guidance = (
+                payment_journal.REPLACEMENT_HOLD_MESSAGE
+                if status in ("cancelled", "funds_refunded")
+                else "Review the transfer; do not pay again."
+            )
             _notify(
-                f"monedula: Wise transfer [{obligation[:12]}]: {return_text}. "
-                "Review the transfer; do not pay again without a new approval.",
+                f"monedula: Wise transfer [{obligation[:12]}]: {return_text}. {guidance}",
                 priority="blocker", dedupe_key=f"monedula:wise_return:{obligation}:{status}",
             )
         try:
