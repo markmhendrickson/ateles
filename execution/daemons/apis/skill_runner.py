@@ -1691,6 +1691,59 @@ def _remember_child_credential(value: str | None) -> None:
         _CHILD_CREDENTIAL_VALUES.pop(next(iter(_CHILD_CREDENTIAL_VALUES)))
 
 
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"      # OSC ... BEL or ST
+    r"|\x1b[P^_X][^\x1b]*\x1b\\"               # DCS, PM, APC, SOS ... ST
+    r"|\x1b\[[0-?]*[ -/]*[@-~]"                  # CSI ... final byte
+    r"|\x1b[@-Z\\-_]"                            # two-character escape
+    r"|\x9b[0-?]*[ -/]*[@-~]"                     # 8-bit CSI
+)
+_CREDENTIAL_ENV_NAME_RE = re.compile(r"(TOKEN|SECRET|BEARER|PASSWORD|PASSWD|API_?KEY|_PAT$|^PAT$|PRIVATE_?KEY|CREDENTIAL)", re.I)
+_NON_SECRET_ENV_SUFFIXES = ("_PATH", "_DIR", "_HOME", "_FILE", "_URL", "_SUB", "_ISS", "_NAME", "_ID")
+
+
+def _strip_terminal_escapes(text: str) -> str:
+    """Remove terminal escape sequences (colour, cursor, OSC) so they cannot split a secret."""
+    return _ANSI_ESCAPE_RE.sub("", text or "")
+
+
+def _remember_child_environment_credentials(env: dict[str, str]) -> None:
+    """Remember every credential-like value handed to a child so persisted output redacts it."""
+    for name, value in env.items():
+        upper = name.upper()
+        if upper.endswith(_NON_SECRET_ENV_SUFFIXES):
+            continue
+        if _CREDENTIAL_ENV_NAME_RE.search(upper) and isinstance(value, str):
+            _remember_child_credential(value)
+
+
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"      # OSC ... BEL or ST
+    r"|\x1b[P^_X][^\x1b]*\x1b\\"               # DCS, PM, APC, SOS ... ST
+    r"|\x1b\[[0-?]*[ -/]*[@-~]"                  # CSI ... final byte
+    r"|\x1b[@-Z\\-_]"                            # two-character escape
+    r"|\x9b[0-?]*[ -/]*[@-~]"                     # 8-bit CSI
+)
+_CREDENTIAL_NAME_RE = re.compile(
+    r"(TOKEN|SECRET|BEARER|PASSWORD|PASSWD|API_?KEY|_PAT$|^PAT$|PRIVATE_?KEY|CREDENTIAL)", re.I)
+_NON_SECRET_NAME_SUFFIXES = ("_PATH", "_DIR", "_HOME", "_FILE", "_URL", "_SUB", "_ISS", "_NAME", "_ID")
+
+
+def _strip_terminal_escapes(text: str) -> str:
+    """Remove terminal escape sequences (colour, cursor, OSC) so they cannot split a secret."""
+    return _ANSI_ESCAPE_RE.sub("", text or "")
+
+
+def _remember_child_environment_credentials(child_env: dict[str, str]) -> None:
+    """Remember every credential-like value handed to a child so persisted output redacts it."""
+    for name, value in child_env.items():
+        upper = name.upper()
+        if upper.endswith(_NON_SECRET_NAME_SUFFIXES):
+            continue
+        if _CREDENTIAL_NAME_RE.search(upper) and isinstance(value, str):
+            _remember_child_credential(value)
+
+
 def _redact_secrets(text: str) -> str:
     """Replace any known secret value appearing in child output."""
     out = text
@@ -1736,6 +1789,7 @@ def write_dispatch_failure_log(
     duration_ms: int | None = None,
     blocked_by_agent: bool = False,
     output_truncated: bool = False,
+    stderr_truncated: bool = False,
 ) -> str:
     """
     Persist the stdout and stderr of a failed or agent-blocked run: COMPLETE unless
@@ -1774,18 +1828,21 @@ def write_dispatch_failure_log(
             f"stderr_bytes: {len(stderr)}",
             *([ "output_truncated: true (the runner kept only the tail of the output; "
                 "the beginning is not available)"] if output_truncated else []),
+            *([ "stderr_truncated: true (the runner kept only the tail of stderr)"]
+              if stderr_truncated and not output_truncated else []),
         ]
         scope = "retained tail only" if output_truncated else "complete"
+        stderr_scope = "retained tail only" if (output_truncated or stderr_truncated) else "complete"
         if cmd:
             header.append(f"command: {_summarize_command(list(cmd))}")
 
         body = (
             "\n".join(header)
             + f"\n\n===== STDOUT ({scope}) =====\n"
-            + _redact_secrets(sanitize_text(stdout, keep_newlines=True))
+            + _redact_secrets(sanitize_text(_strip_terminal_escapes(stdout), keep_newlines=True))
             + "\n===== END STDOUT =====\n"
-            + f"\n===== STDERR ({scope}) =====\n"
-            + _redact_secrets(sanitize_text(stderr, keep_newlines=True))
+            + f"\n===== STDERR ({stderr_scope}) =====\n"
+            + _redact_secrets(sanitize_text(_strip_terminal_escapes(stderr), keep_newlines=True))
             + "\n===== END STDERR =====\n"
         )
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -4365,6 +4422,7 @@ async def _run_skill_once(
                     (env_extra or {}).get("TMPDIR"), prefix="apis_gh_config_")
             subprocess_env["GH_CONFIG_DIR"] = _gh_config_dir
         try:
+            _remember_child_environment_credentials(subprocess_env)
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,

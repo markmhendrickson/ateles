@@ -4032,10 +4032,14 @@ async def _dispatch_task(
                     task_entity_id=entity_id,
                     blocked_by_agent=True,
                     output_truncated=bool(getattr(result, "output_truncated", False)),
+                    # A Fly run keeps only the tail of stderr and drops its truncation flag.
+                    stderr_truncated=bool(getattr(result, "remote_run_id", "")),
+                )
+                _tail_only = bool(
+                    getattr(result, "output_truncated", False) or getattr(result, "remote_run_id", "")
                 )
                 _what = (
-                    "Run output (the runner kept only its tail)"
-                    if getattr(result, "output_truncated", False) else "Full run output"
+                    "Run output (the runner kept only its tail)" if _tail_only else "Full run output"
                 )
                 output_note = (
                     f"\n{_what}: {output_path}"

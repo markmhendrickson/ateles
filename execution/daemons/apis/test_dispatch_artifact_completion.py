@@ -84,6 +84,7 @@ class _SpawnResult:
     error: str = ""
     skill: str = "cicada"
     output_truncated: bool = False
+    remote_run_id: str = ""
 
 
 class _RecordingJob:
@@ -364,6 +365,26 @@ def test_a_truncated_run_output_is_saved_as_a_tail_and_says_so(writes, spawn, tm
     assert "the runner kept only its tail" in blocked[0]["reason"]
     assert "Full run output" not in blocked[0]["reason"]
     assert str(files[0]) in blocked[0]["reason"]
+
+
+def test_a_fly_run_labels_stderr_as_a_tail_even_when_stdout_is_whole(writes, spawn, tmp_path):
+    spawn.result = _SpawnResult(
+        stdout="whole stdout\n[cicada] pull_request_link: BLOCKED — need input\n",
+        stderr="stderr tail of a long run",
+        remote_run_id="fly-synthetic-run",
+    )
+
+    _dispatch("ent_saved_blocked_fly", _cicada_task())
+
+    blocked = _with_status(writes, "blocked")
+    assert len(blocked) == 1
+    files = list((tmp_path / "blocked-runs").glob("*.log"))
+    assert len(files) == 1
+    body = files[0].read_text(encoding="utf-8")
+    assert "===== STDOUT (complete) =====" in body
+    assert "===== STDERR (retained tail only) =====" in body
+    assert "Full run output" not in blocked[0]["reason"]
+    assert "the runner kept only its tail" in blocked[0]["reason"]
 
 
 def test_delivered_artifact_keeps_no_output_file(writes, spawn, tmp_path, monkeypatch):

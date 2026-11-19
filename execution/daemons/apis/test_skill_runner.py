@@ -3398,6 +3398,66 @@ class TestDispatchFailureDiagnostics:
             skill_runner._CHILD_CREDENTIAL_VALUES.clear()
             skill_runner._CHILD_CREDENTIAL_VALUES.update(before)
 
+    @pytest.mark.parametrize("blocked", [False, True])
+    @pytest.mark.parametrize("escape", ["\x1b[31m", "\x1b[0m", "\x1b]0;title\x07", "\x9b32m", "\x1b[1;2;3m"])
+    def test_a_token_split_by_a_terminal_escape_is_still_redacted(self, tmp_path, blocked, escape) -> None:
+        fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+        spliced = fake_value[:9] + escape + fake_value[9:]
+        with (
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"),
+            patch.dict("os.environ", {"GITHUB_TOKEN": fake_value}, clear=False),
+        ):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1,
+                stdout=f"line\nleaked {spliced} in stdout", stderr=f"leaked {spliced} in stderr",
+                blocked_by_agent=blocked,
+            )
+        body = Path(path).read_text(encoding="utf-8")
+        assert fake_value not in body and fake_value[:9] not in body.replace("<redacted:GITHUB_TOKEN>", "")
+        assert body.count("<redacted:GITHUB_TOKEN>") == 2
+
+    def test_every_credential_in_a_child_environment_is_remembered_and_redacted(self, tmp_path) -> None:
+        child_env = {
+            "NEOTOMA_TOKEN_CICADA": "ROLE-NEOTOMA-FAKE-VALUE-1111",
+            "SOME_SERVICE_API_KEY": "API-KEY-FAKE-VALUE-2222",
+            "CODEX_GATE_BEARER": "BEARER-FAKE-VALUE-3333",
+            "NEOTOMA_AAUTH_PRIVATE_JWK_PATH": "/some/path/that/is/not/a/secret.json",
+            "NEOTOMA_AAUTH_SUB": "cicada@ateles-swarm",
+            "HOME": "/tmp/not-a-secret-home",
+        }
+        before = dict(skill_runner._CHILD_CREDENTIAL_VALUES)
+        try:
+            skill_runner._remember_child_environment_credentials(child_env)
+            assert "ROLE-NEOTOMA-FAKE-VALUE-1111" in skill_runner._CHILD_CREDENTIAL_VALUES
+            assert "API-KEY-FAKE-VALUE-2222" in skill_runner._CHILD_CREDENTIAL_VALUES
+            assert "BEARER-FAKE-VALUE-3333" in skill_runner._CHILD_CREDENTIAL_VALUES
+            assert "/some/path/that/is/not/a/secret.json" not in skill_runner._CHILD_CREDENTIAL_VALUES
+            assert "cicada@ateles-swarm" not in skill_runner._CHILD_CREDENTIAL_VALUES
+            with patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"):
+                path = skill_runner.write_dispatch_failure_log(
+                    skill="cicada", role="cicada", returncode=1,
+                    stdout="echo ROLE-NEOTOMA-FAKE-VALUE-1111 and API-KEY-FAKE-VALUE-2222",
+                    stderr="BEARER-FAKE-VALUE-3333", blocked_by_agent=True,
+                )
+            body = Path(path).read_text(encoding="utf-8")
+            for secret in ("ROLE-NEOTOMA-FAKE-VALUE-1111", "API-KEY-FAKE-VALUE-2222", "BEARER-FAKE-VALUE-3333"):
+                assert secret not in body
+            assert body.count("<redacted:child-credential>") == 3
+        finally:
+            skill_runner._CHILD_CREDENTIAL_VALUES.clear()
+            skill_runner._CHILD_CREDENTIAL_VALUES.update(before)
+
+    def test_stderr_is_labelled_a_tail_when_only_stderr_was_truncated(self, tmp_path) -> None:
+        with patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1, stdout="whole stdout", stderr="tail",
+                blocked_by_agent=True, stderr_truncated=True,
+            )
+        body = Path(path).read_text(encoding="utf-8")
+        assert "===== STDOUT (complete) =====" in body
+        assert "===== STDERR (retained tail only) =====" in body
+        assert "stderr_truncated: true" in body
+
     def test_output_file_is_private_from_creation(self, tmp_path) -> None:
         import stat
 
