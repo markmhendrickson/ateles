@@ -53,39 +53,6 @@ def numbers(kind: str, content: str) -> list[int]:
     return found
 
 
-def historical_base_text(kind: str, content: str) -> str:
-    """Read the two legacy revision table breaks on origin until their cleanup merges.
-
-    The current worktree is always parsed unchanged. This removes only a blank
-    line between two pipe-led rows in the older base copy, not malformed rows.
-    Remove this shim once origin/main includes this PR's removal of the two
-    blank lines in revisions.md; then both base and worktree use the strict reader.
-    """
-    if kind == "decision":
-        return _escape_legacy_code_span_pipes(content)
-    if kind != "revision":
-        return content
-    return re.sub(r"(?m)(^\|[^\n]*\|\n)\n(?=\|)", r"\1", content)
-
-
-def _escape_legacy_code_span_pipes(content: str) -> str:
-    """Read a base register whose rows carry an unescaped pipe inside a code span.
-
-    GitHub splits a table cell at such a pipe before it reads the code span, so the
-    strict reader refuses the row; the base copy on origin still carries one (row
-    70). Only table rows (lines that start with a pipe) are touched, and only a pipe
-    inside a backtick pair on that line is escaped, so the cell count is what the
-    author meant. The current worktree is always parsed unchanged and strict.
-    Remove this branch once origin/main includes this PR's escaped row.
-    """
-    def fix(line: str) -> str:
-        if not line.startswith("|"):
-            return line
-        return re.sub(r"`[^`\n]*`", lambda m: re.sub(r"(?<!\\)\|", r"\\|", m.group(0)), line)
-
-    return "\n".join(fix(line) for line in content.split("\n"))
-
-
 def table_counts(content: str) -> Counter[tuple[str, int]]:
     """Revision rows per (document table, number). A document's table sits under its own
     `## ` heading; one revision legitimately appears once in EACH document its pass amends."""
@@ -130,7 +97,7 @@ def origin_text(kind: str, remote: str) -> tuple[str, str]:
 
 def next_number(kind: str, remote: str) -> tuple[int, str]:
     sha, content = origin_text(kind, remote)
-    occupied = numbers(kind, historical_base_text(kind, content)) + list(reservations(kind, remote))
+    occupied = numbers(kind, content) + list(reservations(kind, remote))
     return max(occupied) + 1, sha
 
 
@@ -182,7 +149,7 @@ def reserve(kind: str, remote: str, attempts: int = MAX_ATTEMPTS) -> int:
 def check(kind: str, remote: str, base: str) -> list[str]:
     """Check numbers introduced by the worktree against create-only refs."""
     source = KINDS[kind]
-    old_text = historical_base_text(kind, git("show", f"{base}:{source}"))
+    old_text = git("show", f"{base}:{source}")
     before = numbers(kind, old_text)
     from pathlib import Path
     after = numbers(kind, Path(source).read_text(encoding="utf-8"))
