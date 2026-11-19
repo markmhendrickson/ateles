@@ -38,6 +38,22 @@ def _stamp(value: Any) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def compare_observation(
+    status: str, occurred_at: str, last_status: str | None,
+    last_occurred_at: str | None,
+) -> str:
+    """Order transfer reads; equal instants with different statuses are unknown."""
+    current = _stamp(occurred_at)
+    if last_occurred_at is None:
+        return "later"
+    previous = _stamp(last_occurred_at)
+    if current < previous:
+        return "earlier"
+    if current > previous:
+        return "later"
+    return "same" if status == last_status else "conflict"
+
+
 def latest_status(body: Any) -> tuple[str, str]:
     """Choose the latest event by occurred_at, including rollback transitions."""
     if not isinstance(body, dict):
@@ -116,11 +132,20 @@ def discrepancy_report(rows: dict[str, dict], transfer_reads: dict[int, Any]) ->
         status = None
         if isinstance(transfer_id, int) and transfer_id in transfer_reads:
             try:
-                status, _ = latest_status(transfer_reads[transfer_id])
+                status, occurred_at = latest_status(transfer_reads[transfer_id])
             except TransferReadError:
                 pass
             else:
-                if status == "outgoing_payment_sent":
+                relation = compare_observation(
+                    status, occurred_at, entry.get("last_status"),
+                    entry.get("last_occurred_at"),
+                )
+                if (entry.get("timestamp_conflict_status") and relation != "later"
+                        or relation == "conflict"):
+                    category = "unresolved"
+                elif relation == "earlier":
+                    category = "unresolved"
+                elif status == "outgoing_payment_sent":
                     category = "confirmed sent"
                 elif status in RETURN_STATUSES:
                     category = "returned"

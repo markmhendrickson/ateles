@@ -1915,7 +1915,8 @@ def _reconcile_wise_entries(handlers: list) -> bool:
     """Check every unresolved Wise transfer, independent of calendar matching."""
     import payment_journal
     from consent_email import journal_path
-    from wise_reconcile import RETURN_STATUSES, TransferReadError, read_transfer_status
+    from wise_reconcile import (RETURN_STATUSES, TransferReadError,
+                                compare_observation, read_transfer_status)
 
     path = journal_path()
     try:
@@ -1953,7 +1954,8 @@ def _reconcile_wise_entries(handlers: list) -> bool:
             )
             clean = False
             continue
-        if entry.get("state") == payment_journal.STATE_FAILED:
+        if (entry.get("state") == payment_journal.STATE_FAILED
+                and not entry.get("timestamp_conflict_status")):
             # Terminal failures remain held for a separately approved attempt.
             continue
         transfer_id = entry.get("transfer_id")
@@ -2031,7 +2033,18 @@ def _reconcile_wise_entries(handlers: list) -> bool:
                     clean = False
                     continue
                 due = next_due.timestamp() if next_due else None
-            if due is None or time.time() < due:
+            if (current.get("timestamp_conflict_status") and due is not None
+                    and time.time() < due):
+                _notify(
+                    f"monedula: two Wise reads of transfer [{obligation[:12]}] conflict "
+                    "at the same time; nothing is changed. A later observation "
+                    "from Wise is needed. Check Wise Activity; do not pay again.",
+                    priority="blocker",
+                    dedupe_key=f"monedula:wise_timestamp_conflict:{obligation}",
+                )
+                clean = False
+                continue
+            if (due is None or time.time() < due) and not current.get("timestamp_conflict_status"):
                 # Recover effects after a confirmed read only when no newer
                 # transfer check is due. If due, read it before any writes.
                 if (current_kind == "wise_modern_unresolved"
@@ -2060,15 +2073,22 @@ def _reconcile_wise_entries(handlers: list) -> bool:
             continue
         try:
             status, occurred_at = read_transfer_status(token, transfer_id, _wise_get)
-            latest_recorded = payment_journal.load(path)["obligations"][obligation].get(
-                "last_occurred_at"
+            recorded = payment_journal.load(path)["obligations"][obligation]
+            relation = compare_observation(
+                status, occurred_at, recorded.get("last_status"),
+                recorded.get("last_occurred_at"),
             )
-            from wise_reconcile import _stamp
-            if latest_recorded and _stamp(occurred_at) < _stamp(latest_recorded):
+            if relation == "earlier":
                 continue
             first_paid = payment_journal.record_wise_status(
                 path, obligation, transfer_id, status, occurred_at
             )
+            persisted = payment_journal.load(path)["obligations"][obligation]
+            if compare_observation(
+                status, occurred_at, persisted.get("last_status"),
+                persisted.get("last_occurred_at"),
+            ) == "earlier":
+                continue
         except Exception as exc:  # network, malformed body, 401/5xx, journal write
             log.error("Wise transfer read failed for %s: %s", obligation[:12], type(exc).__name__)
             clean = False
@@ -2081,6 +2101,16 @@ def _reconcile_wise_entries(handlers: list) -> bool:
                 f"monedula: Wise transfer [{obligation[:12]}] {detail}",
                 priority="blocker", dedupe_key=f"monedula:wise_read:{obligation}",
             )
+            continue
+        if (persisted.get("timestamp_conflict_status")
+                or relation == "conflict"):
+            _notify(
+                f"monedula: two Wise reads of transfer [{obligation[:12]}] conflict "
+                "at the same time; nothing is changed. A later observation "
+                "from Wise is needed. Check Wise Activity; do not pay again.",
+                priority="blocker", dedupe_key=f"monedula:wise_timestamp_conflict:{obligation}",
+            )
+            clean = False
             continue
         if status != "outgoing_payment_sent":
             if entry.get("outcome_status") == "sent":

@@ -637,6 +637,143 @@ def test_bounce_then_wise_self_recovers_without_new_submission(attempt):
     assert journal.load(attempt)["obligations"]["obligation"]["outcome_status"] == "sent"
 
 
+@pytest.mark.parametrize("first,second", [
+    ("2026-01-01T00:00:00Z", "2026-01-01T00:00:00+00:00"),
+    ("2026-01-01T00:00:00Z", "2026-01-01T01:00:00+01:00"),
+])
+@pytest.mark.parametrize("initial,conflicting", [
+    ("outgoing_payment_sent", "bounced_back"),
+    ("bounced_back", "outgoing_payment_sent"),
+])
+def test_equal_instant_journal_conflict_holds_until_later_observation(
+    attempt, first, second, initial, conflicting
+):
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_wise_status(attempt, "obligation", 3, initial, first)
+    before = journal.load(attempt)["obligations"]["obligation"].copy()
+    assert not journal.record_wise_status(attempt, "obligation", 3, conflicting, second)
+    row = journal.load(attempt)["obligations"]["obligation"]
+    assert row["last_status"] == initial
+    assert row["last_occurred_at"] == first
+    assert row.get("outcome_status") == before.get("outcome_status")
+    assert row["timestamp_conflict_status"] == conflicting
+    assert journal.classify_journal_row(row)[0] == "wise_modern_unresolved"
+    assert journal.wise_replay_hold(journal.load(attempt), "synthetic-profile")[0] == "obligation"
+    assert not journal.record_wise_status(attempt, "obligation", 3, initial, second)
+    assert journal.load(attempt)["obligations"]["obligation"]["timestamp_conflict_status"] == conflicting
+    assert not journal.record_wise_status(attempt, "obligation", 3, conflicting,
+                                          "2025-12-31T23:59:59Z")
+    assert journal.load(attempt)["obligations"]["obligation"]["timestamp_conflict_status"] == conflicting
+    journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                               "2026-01-01T00:00:01Z")
+    resolved = journal.load(attempt)["obligations"]["obligation"]
+    assert "timestamp_conflict_status" not in resolved
+    assert resolved["last_status"] == "outgoing_payment_sent"
+
+
+def test_same_instant_same_status_is_idempotent(attempt):
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                               "2026-01-01T00:00:00Z")
+    before = journal.load(attempt)["obligations"]["obligation"].copy()
+    assert not journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                                          "2026-01-01T01:00:00+01:00")
+    assert journal.load(attempt)["obligations"]["obligation"] == before
+
+
+def test_equal_instant_conflict_blocks_reconciliation_effects(attempt, monkeypatch):
+    import monedula
+    import consent_email
+
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                               "2026-01-01T00:00:00Z")
+    journal.record_wise_status(attempt, "obligation", 3, "bounced_back",
+                               "2026-01-01T00:00:00+00:00")
+    journal.schedule_wise_check(attempt, "obligation", time.time() - 1)
+    monkeypatch.setattr(consent_email, "STATE_FILE", attempt.parent / "consent.json")
+    monkeypatch.setenv("WISE_API_TOKEN", "synthetic-token")
+    monkeypatch.setattr(wise, "_wise_get", lambda *_: {
+        "status": "outgoing_payment_sent", "updated": "2026-01-01T01:00:00+01:00"
+    })
+    monkeypatch.setattr(monedula, "_apply_confirmed_wise_effects", lambda *_:
+                        pytest.fail("paid effects applied during timestamp conflict"))
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda text, **kw: alerts.append(text))
+    assert monedula._reconcile_wise_entries([]) is False
+    row = journal.load(attempt)["obligations"]["obligation"]
+    assert row["last_status"] == "outgoing_payment_sent"
+    assert row["timestamp_conflict_status"] == "bounced_back"
+    assert row.get("effects_applied") is not True
+    assert journal.session_state(journal.load(attempt), "synthetic:session") is None
+    assert journal.wise_replay_hold(journal.load(attempt), "synthetic-profile")
+    assert any("two Wise reads" in text and "Check Wise Activity" in text
+               and "do not pay again" in text for text in alerts)
+    report = wise_reconcile.discrepancy_report(
+        {"obligation": row}, {3: {"status": "outgoing_payment_sent",
+                                  "updated": "2026-01-01T00:00:00Z"}}
+    )
+    assert report[0]["category"] == "unresolved"
+
+
+@pytest.mark.parametrize("initial,read", [
+    ("outgoing_payment_sent", "bounced_back"),
+    ("bounced_back", "outgoing_payment_sent"),
+])
+def test_reconciliation_detects_equal_instant_conflict_before_paid_effects(
+    attempt, monkeypatch, initial, read
+):
+    import monedula
+    import consent_email
+
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_wise_status(attempt, "obligation", 3, initial,
+                               "2026-01-01T00:00:00Z")
+    if initial == "outgoing_payment_sent":
+        journal.schedule_wise_check(attempt, "obligation", time.time() - 1)
+    monkeypatch.setattr(consent_email, "STATE_FILE", attempt.parent / "consent.json")
+    monkeypatch.setenv("WISE_API_TOKEN", "synthetic-token")
+    monkeypatch.setattr(wise, "_wise_get", lambda *_: {
+        "status": read, "updated": "2026-01-01T01:00:00+01:00"
+    })
+    monkeypatch.setattr(monedula, "_apply_confirmed_wise_effects", lambda *_:
+                        pytest.fail("paid effects applied during timestamp conflict"))
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda text, **kw: alerts.append(text))
+    assert monedula._reconcile_wise_entries([]) is False
+    row = journal.load(attempt)["obligations"]["obligation"]
+    assert row["last_status"] == initial
+    assert row["timestamp_conflict_status"] == read
+    assert row.get("effects_applied") is not True
+    assert journal.wise_replay_hold(journal.load(attempt), "synthetic-profile")
+    assert any("two Wise reads" in text and "Check Wise Activity" in text
+               for text in alerts)
+
+
+@pytest.mark.parametrize("invalid", [None, [], "outgoing_payment_sent", "bogus"])
+def test_timestamp_conflict_classifier_rejects_corrupt_variants(attempt, invalid):
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                               "2026-01-01T00:00:00Z")
+    row = journal.load(attempt)["obligations"]["obligation"]
+    row["timestamp_conflict_status"] = invalid
+    assert journal.classify_journal_row(row)[0] == "invalid"
+
+
+def test_timestamp_conflict_census_reports_unresolved(attempt, capsys):
+    import wise_journal_hold_census as census
+
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                               "2026-01-01T00:00:00Z")
+    journal.record_wise_status(attempt, "obligation", 3, "bounced_back",
+                               "2026-01-01T01:00:00+01:00")
+    assert census.main(["census", str(attempt)]) == 0
+    output = capsys.readouterr().out
+    assert "wise_new_UNRESOLVED_with_profile_id: 1" in output
+    assert "wise_new_resolved_paid" not in output
+
+
 def test_later_return_preserves_paid_history_and_records_discrepancy(attempt):
     journal.record_transfer_created(attempt, "obligation", 3)
     journal.record_wise_status(
@@ -1487,9 +1624,16 @@ def test_mixed_offset_status_and_recovered_discrepancy(attempt):
     assert journal.load(attempt)["obligations"]["obligation"]["discrepancy_status"] == "funds_refunded"
     journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
                                "2026-01-01T13:00:00+01:00")
-    assert journal.load(attempt)["obligations"]["obligation"].get("discrepancy_status") is None
+    row = journal.load(attempt)["obligations"]["obligation"]
+    assert row["discrepancy_status"] == "funds_refunded"
+    assert row["timestamp_conflict_status"] == "outgoing_payment_sent"
     assert not journal.record_wise_status(attempt, "obligation", 3, "processing",
                                           "2026-01-01T14:00:00+03:00")
+    assert journal.load(attempt)["obligations"]["obligation"]["last_status"] == "funds_refunded"
+    journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                               "2026-01-01T13:00:00Z")
+    assert journal.load(attempt)["obligations"]["obligation"].get("timestamp_conflict_status") is None
+    assert journal.load(attempt)["obligations"]["obligation"].get("discrepancy_status") is None
     assert journal.load(attempt)["obligations"]["obligation"]["last_status"] == "outgoing_payment_sent"
 
 

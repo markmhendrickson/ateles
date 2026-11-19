@@ -344,7 +344,8 @@ _WISE_BASE_FIELDS = frozenset({
 _WISE_OPTIONAL_FIELDS = frozenset({
     "transfer_id", "create_entered", "funding_status", "funding_at",
     "last_status", "last_occurred_at", "last_checked_at", "outcome_status",
-    "outcome_at", "failure_status", "discrepancy_status", "effects_applied",
+    "outcome_at", "failure_status", "discrepancy_status",
+    "timestamp_conflict_status", "effects_applied",
     "next_check_at", "attempts",
 })
 _MODERN_SETTLED_WISE_FIELDS = _WISE_BASE_FIELDS | frozenset({
@@ -474,6 +475,17 @@ def classify_journal_row(
         return "invalid", "discrepancy status malformed"
     if "discrepancy_status" in row and (row.get("state") != STATE_DONE or row.get("outcome_status") != "sent" or row.get("last_status") != row["discrepancy_status"]):
         return "invalid", "discrepancy contradicts latest status"
+    if "timestamp_conflict_status" in row and (
+        not isinstance(row.get("timestamp_conflict_status"), str)
+        or row["timestamp_conflict_status"] not in TRANSFER_STATUSES
+        or row["timestamp_conflict_status"] == row.get("last_status")
+        or not status_fields <= keys
+        or (row.get("state"), row.get("outcome_status")) not in {
+            (STATE_FUNDING_PENDING, None), (STATE_DONE, "sent"),
+            (STATE_FAILED, "failed"),
+        }
+    ):
+        return "invalid", "timestamp conflict malformed"
     if "effects_applied" in row and row.get("outcome_status") != "sent":
         return "invalid", "effects without sent outcome"
     attempts = row.get("attempts", [])
@@ -490,6 +502,8 @@ def classify_journal_row(
     if attempts and any(_stamp(prior.get("last_occurred_at")) and _stamp(row.get("last_occurred_at")) and _stamp(row["last_occurred_at"]) < _stamp(prior["last_occurred_at"]) for prior in attempts):
         return "invalid", "latest status predates attempt history"
     state, outcome, status = row["state"], row.get("outcome_status"), row.get("last_status")
+    if "timestamp_conflict_status" in row:
+        return "wise_modern_unresolved", "timestamp conflict"
     if state == STATE_DONE and outcome == "sent":
         if not all(_text(row.get(field)) for field in (
             "handler_name", "task_id", "approved_terms_hash", "payment_date"
@@ -729,12 +743,23 @@ def record_wise_status(
         or _stamp(occurred_at) is None
     ):
         raise JournalError("Wise status transition refused")
-    from wise_reconcile import _stamp as _wise_stamp
-    current_stamp = _wise_stamp(occurred_at)
-    previous = entry.get("last_occurred_at")
-    if previous and current_stamp < _wise_stamp(previous):
+    from wise_reconcile import compare_observation
+    relation = compare_observation(
+        status, occurred_at, entry.get("last_status"), entry.get("last_occurred_at")
+    )
+    if relation in ("earlier", "same"):
         return False  # an older observation must never roll current state back
+    if relation == "conflict":
+        entry["timestamp_conflict_status"] = status
+        entry["next_check_at"] = time.time() + 86400
+        _write(path, data)
+        back = load(path)["obligations"][obligation]
+        if (back.get("timestamp_conflict_status") != status
+                or back.get("last_status") != entry.get("last_status")):
+            raise JournalError("Wise timestamp conflict did not persist")
+        return False
     first_paid = status == "outgoing_payment_sent" and entry.get("outcome_status") != "sent"
+    entry.pop("timestamp_conflict_status", None)
     entry["last_status"] = status[:64]
     entry["last_occurred_at"] = occurred_at
     entry["last_checked_at"] = time.time()
