@@ -471,6 +471,46 @@ def test_a_disguised_credential_on_the_blocked_header_never_changes_the_classifi
     assert fake_value not in blocked[0]["reason"] and forms[disguise] not in blocked[0]["reason"]
 
 
+@pytest.mark.parametrize("formatting", ["\x1b[31m", "\x1b[0m", "\x1b]8;;\x07", "\x1b[1;32m\x1b[0m"])
+def test_a_credential_split_by_terminal_formatting_never_reaches_the_reason_or_alert(
+    writes, spawn, tmp_path, monkeypatch, formatting
+):
+    fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+    split = fake_value[:9] + formatting + fake_value[9:]
+    monkeypatch.setenv("GITHUB_TOKEN", fake_value)
+    notifier = _Notifier()
+    spawn.result = _SpawnResult(
+        stdout=f"draft\n[cicada] pull_request_link: BLOCKED \u2014 need {split} to continue\n",
+        stderr="",
+    )
+
+    _dispatch("ent_blocked_terminal_formatting", _cicada_task(), notifier=notifier)
+
+    blocked = _with_status(writes, "blocked")
+    assert len(blocked) == 1, blocked
+    reason = blocked[0]["reason"]
+    assert fake_value not in reason and fake_value[:9] not in reason.replace("<redacted:GITHUB_TOKEN>", "")
+    assert notifier.sent
+    assert all(fake_value[:9] not in str(m).replace("<redacted:GITHUB_TOKEN>", "") for m in notifier.sent)
+
+
+def test_a_credential_split_by_terminal_formatting_in_a_missing_header_tail_is_redacted(
+    writes, spawn, tmp_path, monkeypatch
+):
+    fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+    split = fake_value[:9] + "\x1b[31m" + fake_value[9:]
+    monkeypatch.setenv("GITHUB_TOKEN", fake_value)
+    notifier = _Notifier()
+    spawn.result = _SpawnResult(stdout=f"I looked at {split} and found nothing to report\n", stderr="")
+
+    _dispatch("ent_missing_header_terminal_formatting", _cicada_task(), notifier=notifier)
+
+    reasons = [w.get("reason", "") for w in writes if w.get("reason")]
+    assert reasons
+    assert all(fake_value[:9] not in r.replace("<redacted:GITHUB_TOKEN>", "") for r in reasons), reasons
+    assert all(fake_value[:9] not in str(m).replace("<redacted:GITHUB_TOKEN>", "") for m in notifier.sent)
+
+
 def test_delivered_artifact_keeps_no_output_file(writes, spawn, tmp_path, monkeypatch):
     monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: True)
     spawn.result = _SpawnResult(stdout=f"draft\n{_PR_HEADER}\n")

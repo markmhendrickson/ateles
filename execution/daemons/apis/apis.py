@@ -767,13 +767,13 @@ from task_watchdog import TaskWatchdog  # noqa: E402
 # Every reason built for an operator passes agent-controlled text (the offered
 # ref, the retained BLOCKED words, the record value) through the secret redactor.
 def _redact_agent_text(text: str) -> str:
-    """Redact secrets from agent-controlled text, invisible characters removed FIRST.
+    """Redact secrets from agent-controlled text, then neutralize it for display.
 
-    One zero-width space, soft hyphen, word joiner or bidi mark inside a token
-    defeats a plain substring redaction, so those are stripped before the
-    redactor runs.
+    The redactor itself removes terminal escapes and invisible characters before it compares, so it must see
+    the RAW text: `sanitize_text` turns an escape byte into a space, which would split a token the redactor
+    could otherwise recognise. Redact first, sanitize after.
     """
-    return _redact_output_text(sanitize_text(text))
+    return sanitize_text(_redact_output_text(text))
 
 
 _gate_reason = functools.partial(artifact_gate_reason, redact=_redact_agent_text)
@@ -3990,11 +3990,7 @@ async def _dispatch_task(
                 # output has held tokens, and it is agent-controlled text.
                 tail = stdout_tail_for_reason(
                     sanitize_text(
-                        _redact_output_text(
-                            sanitize_text(
-                                getattr(result, "stdout", "") or "", keep_newlines=True
-                            )
-                        ),
+                        _redact_output_text(getattr(result, "stdout", "") or ""),
                         keep_newlines=True,
                     ),
                     limit=2048,
