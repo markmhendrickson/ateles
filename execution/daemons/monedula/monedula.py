@@ -1425,6 +1425,14 @@ def _wise_hold_text(entry: dict) -> str:
     """Explain the persisted attempt without guessing whether money moved."""
     import payment_journal
     state = entry.get("state")
+    if state == "done" and entry.get("last_status") != "outgoing_payment_sent":
+        return ("The transfer was previously sent, but its latest status is "
+                f"{entry.get('last_status') or 'unknown'}; review the return. "
+                "Task and session bookkeeping held; do not pay again.")
+    if state == "done":
+        if entry.get("effects_applied") is not True:
+            return "Transfer sent; task and session bookkeeping held; do not pay again."
+        return "Transfer already sent; do not pay again."
     if state == "funding_pending":
         return "Submitted, not confirmed. Monedula is checking the transfer; do not pay again."
     if state == "failed":
@@ -1689,6 +1697,7 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                     )
                     if (state == payment_journal.STATE_DONE
                             and entry.get("effects_applied") is True):
+                        _notify_wise_hold(entry, item.obligation, item)
                         if eid:
                             key = payment_journal.session_key(handler.name, eid)
                             if payment_journal.session_state(data, key) is None:

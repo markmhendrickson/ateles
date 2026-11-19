@@ -278,40 +278,48 @@ def journal_entry_for_item(journal: dict, item: PendingItem) -> dict | None:
     bypass an attempt tied to the same profile and task or calendar event.
     Missing identity metadata is ambiguous and holds conservatively.
     """
-    entry = journal["obligations"].get(item.obligation)
-    if entry is not None:
-        return entry
     profile = getattr(item.handler, "profile", None)
     profile_id = str(getattr(profile, "entity_id", "") or "")
     task_id = str(getattr(profile, "neotoma_task_id", "") or "")
     candidates = []
-    for row in journal["obligations"].values():
+    for key, row in journal["obligations"].items():
         if row.get("rail") != "wise":
+            continue
+        if row.get("handler_name") != item.handler_name:
+            continue
+        # A matching hash remains useful for old rows, but stable identity
+        # decides whether changed terms are still the same attempted payment.
+        if key == item.obligation:
+            candidates.append(row)
             continue
         same_profile = (not profile_id or not row.get("profile_entity_id")
                         or row["profile_entity_id"] == profile_id)
-        if not same_profile or (
-            (not profile_id or not row.get("profile_entity_id"))
-            and row.get("handler_name") != item.handler_name
-        ):
+        if not same_profile:
             continue
+        settled = payment_journal.obligation_state(
+            {"obligations": {key: row}}, key
+        ) == payment_journal.STATE_DONE
         if item.is_calendar:
             if item.match_id and row.get("match_id"):
-                same_occurrence = row["match_id"] == item.match_id
+                same_occurrence = (row["match_id"] == item.match_id or not settled)
             else:
-                # An event without an ID cannot be tracked across time edits.
-                same_occurrence = (row.get("state") != payment_journal.STATE_DONE
+                # A missing ID cannot distinguish a date edit from another
+                # occurrence. For identity-bearing rows this remains held even
+                # after settlement; an operator must restore an event ID.
+                same_occurrence = (bool(row.get("profile_entity_id"))
+                                   or not settled
                                    or row.get("payment_date") == item.payment_date)
             if same_occurrence:
                 candidates.append(row)
-        elif (not task_id or not row.get("task_id") or row["task_id"] == task_id):
-            # A one-off invoice is its profile and task, not its due date.
-            if row.get("state") != payment_journal.STATE_DONE or row.get("task_id"):
-                candidates.append(row)
+        elif (not settled or (task_id and row.get("task_id") == task_id)):
+            # The task identifies an invoice even when its date and terms move.
+            # An unresolved attempt with a missing task ID remains ambiguous.
+            candidates.append(row)
     if candidates:
         return next((row for row in candidates
-                     if row.get("state") != payment_journal.STATE_DONE
-                     or row.get("last_status") not in (None, "outgoing_payment_sent")),
+                     if payment_journal.obligation_state(
+                         {"obligations": {"candidate": row}}, "candidate"
+                     ) != payment_journal.STATE_DONE),
                     candidates[0])
     # Old rows without a date or profile identity cannot safely be ruled out
     # as this obligation, including a calendar session. The old writer stored
@@ -319,8 +327,10 @@ def journal_entry_for_item(journal: dict, item: PendingItem) -> dict | None:
     candidates = [row for row in journal["obligations"].values()
                   if row.get("rail") == "wise"
                   and row.get("handler_name") == item.handler_name
-                  and row.get("state") != payment_journal.STATE_DONE
-                  and not row.get("payment_date")]
+                  and not row.get("payment_date")
+                  and payment_journal.obligation_state(
+                      {"obligations": {"legacy": row}}, "legacy"
+                  ) != payment_journal.STATE_DONE]
     # Before Wise attempt metadata existed, the writer recorded only state,
     # token, generation and intent_at. Its tick-date key cannot be reconstructed
     # later. An unclassified unresolved intent may be this invoice.
@@ -328,8 +338,10 @@ def journal_entry_for_item(journal: dict, item: PendingItem) -> dict | None:
                       if "rail" not in row and "handler_name" not in row
                       and (row.get("state") == payment_journal.STATE_INTENT
                            or (row.get("state") == payment_journal.STATE_DONE
-                               and row.get("outcome_status") != "sent")))
-    return candidates[0] if candidates else entry
+                               and (row.get("outcome_status") != "sent"
+                                    or row.get("last_status") not in
+                                    (None, "outgoing_payment_sent")))))
+    return candidates[0] if candidates else None
 
 
 def journal_state_for_item(journal: dict, item: PendingItem) -> str | None:
@@ -338,11 +350,18 @@ def journal_state_for_item(journal: dict, item: PendingItem) -> str | None:
         return None
     if ("rail" not in entry and "handler_name" not in entry
             and entry.get("state") == payment_journal.STATE_DONE
-            and entry.get("outcome_status") != "sent"):
+            and (entry.get("outcome_status") != "sent"
+                 or entry.get("last_status") not in (None, "outgoing_payment_sent"))):
         return payment_journal.STATE_INTENT
-    return payment_journal.obligation_state(
+    state = payment_journal.obligation_state(
         {"obligations": {item.obligation: entry}}, item.obligation
     )
+    if (entry.get("rail") == "wise" and state == payment_journal.STATE_DONE
+            and entry.get("effects_applied") is not True):
+        # A confirmed rail status is not completion until task and session
+        # bookkeeping have been durably applied. Every consent route uses this.
+        return payment_journal.STATE_INTENT
+    return state
 
 
 def missing_wise_identity_note(item: PendingItem, entry: dict) -> str:
@@ -845,7 +864,10 @@ def request_and_collect(
             note = "submitted, not confirmed; Monedula is checking; do not pay again"
         elif entry.get("failure_status") == "not_submitted":
             note = "not submitted; no payment was made. " + payment_journal.REPLACEMENT_HOLD_MESSAGE
-        elif entry.get("state") == payment_journal.STATE_FAILED:
+        elif entry.get("state") == payment_journal.STATE_FAILED or (
+            entry.get("state") == payment_journal.STATE_DONE
+            and entry.get("last_status") not in (None, "outgoing_payment_sent")
+        ):
             note = "returned or cancelled. " + payment_journal.REPLACEMENT_HOLD_MESSAGE
         elif entry.get("transfer_id"):
             note = "transfer exists, outcome unknown; Monedula is checking; do not pay again"

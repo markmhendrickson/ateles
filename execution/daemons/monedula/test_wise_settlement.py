@@ -149,6 +149,158 @@ def test_session_sweep_rechecks_state_before_dropping(tmp_path, monkeypatch):
     assert journal.session_state(journal.load(attempt), "synthetic:session") == "settled"
 
 
+@pytest.mark.parametrize("route", ["payment_approval", "checkpoint", "email", "telegram"])
+@pytest.mark.parametrize("identity", ["calendar_id", "calendar_no_id", "one_off"])
+@pytest.mark.parametrize("edit", ["amount", "reference", "payee", "currency", "date",
+                                  "event_time", "event_id_removed"])
+@pytest.mark.parametrize("state", ["intent", "funding_pending", "done_sent",
+                                   "done_returned", "failed"])
+def test_wise_attempt_identity_hold_matrix(
+    approval_env, monkeypatch, route, identity, edit, state
+):
+    import consent_email
+    import monedula
+    import payment_approval
+    from handlers.payment_profile import PaymentProfile
+
+    if edit in {"event_time", "event_id_removed"} and identity == "one_off":
+        pytest.skip("calendar-only edit")
+    if edit == "event_id_removed" and identity == "calendar_no_id":
+        pytest.skip("event already has no ID")
+    world, approvals = approval_env
+    is_calendar = identity != "one_off"
+    profile = PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", payment_type="wise",
+        calendar_keywords=["yoga"] if is_calendar else [],
+        amount_eur=10, wise_reference="original", wise_recipient_id=5,
+        wise_recipient_name="Synthetic", entity_id="synthetic-profile",
+        neotoma_task_id="synthetic-task", one_off=not is_calendar,
+        due_date="2026-01-01" if not is_calendar else "",
+    )
+    world.handler = wise.WiseTransferHandler(profile)
+    if identity == "calendar_no_id":
+        world.calendars["primary"][0].pop("id")
+    events = world.calendars["primary"] if is_calendar else []
+    old = consent_email.build_pending_items(
+        [(world.handler, world.handler.matches(events))], "2026-11-18"
+    )[0]
+    path = consent_email.journal_path()
+    journal.record_intent(
+        path, old.obligation, "old-token", generation=1, rail="wise",
+        handler_name=world.handler.name, profile_entity_id=profile.entity_id,
+        task_id=profile.neotoma_task_id, approved_terms_hash=old.obligation,
+        payment_date=old.payment_date, match_id=old.match_id,
+        session_key=(journal.session_key(world.handler.name, old.match_id)
+                     if old.match_id else None),
+    )
+    if state in {"funding_pending", "done_sent", "done_returned"}:
+        journal.record_transfer_created(path, old.obligation, 3)
+    if state == "funding_pending":
+        journal.record_funding_pending(path, old.obligation, 3, "COMPLETED")
+    elif state in {"done_sent", "done_returned"}:
+        journal.record_wise_status(path, old.obligation, 3, "outgoing_payment_sent",
+                                   "2026-11-11T21:00:00Z")
+        if state == "done_returned":
+            journal.record_wise_status(path, old.obligation, 3, "funds_refunded",
+                                       "2026-11-12T21:00:00Z")
+        else:
+            data = journal.load(path)
+            data["obligations"][old.obligation]["effects_applied"] = True
+            journal._write(path, data)
+    elif state == "failed":
+        journal.record_wise_not_submitted(path, old.obligation)
+
+    if edit == "amount":
+        profile.amount_eur = 20
+    elif edit == "reference":
+        profile.wise_reference = "edited"
+    elif edit == "payee":
+        profile.wise_recipient_name = "Other Synthetic"
+    elif edit == "currency":
+        monkeypatch.setattr(consent_email, "CURRENCY", "USD")
+    elif edit == "date":
+        if is_calendar:
+            events[0]["start"]["dateTime"] = "2026-11-10T20:00:00+01:00"
+        else:
+            profile.due_date = "2026-02-01"
+    elif edit == "event_time":
+        events[0]["start"]["dateTime"] = "2026-11-11T20:30:00+01:00"
+    elif edit == "event_id_removed":
+        events[0].pop("id")
+    changed_matches = world.handler.matches(events)
+    changed = consent_email.build_pending_items(
+        [(world.handler, changed_matches)], "2026-11-18"
+    )[0]
+    assert consent_email.journal_entry_for_item(journal.load(path), changed) is not None
+    expected = "done" if state == "done_sent" else (
+        "failed" if state in {"done_returned", "failed"} else state
+    )
+    assert consent_email.journal_state_for_item(journal.load(path), changed) == expected
+
+    monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", route)
+    monkeypatch.setattr(monedula, "_reconcile_wise_entries", lambda *a: True)
+    monkeypatch.setattr(payment_approval, "collect", lambda *a, **k:
+                        pytest.fail("second default consent offered"))
+    monkeypatch.setattr(consent_email, "request_and_collect", lambda *a, **k:
+                        pytest.fail("second email consent offered"))
+    monkeypatch.setattr(monedula, "telegram_send", lambda *a, **k:
+                        pytest.fail("second Telegram consent offered"))
+    monkeypatch.setattr(wise, "_create_transfer", lambda *a, **k:
+                        pytest.fail("second Wise transfer created"))
+    monkeypatch.setattr(wise, "_fund_transfer", lambda *a, **k:
+                        pytest.fail("second Wise transfer funded"))
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda message, **kw: alerts.append(message))
+    assert monedula._apply_session_journal([(world.handler, changed_matches)], reconcile=True) == []
+    world.tick()
+    assert approvals.writes == 0 and world.sends == []
+    assert list(journal.load(path)["obligations"]) == [old.obligation]
+    assert any("do not pay again" in message.lower() for message in alerts)
+    if state == "done_returned":
+        assert any("latest status is funds_refunded" in message for message in alerts)
+    if is_calendar and not changed.match_id:
+        assert any("Calendar event ID missing" in message for message in alerts)
+
+
+def test_settled_wise_event_with_new_id_offers_next_occurrence(approval_env, monkeypatch):
+    import consent_email
+    import monedula
+    from handlers.payment_profile import PaymentProfile
+
+    world, approvals = approval_env
+    profile = PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", payment_type="wise",
+        calendar_keywords=["yoga"], amount_eur=10, wise_reference="original",
+        wise_recipient_id=5, wise_recipient_name="Synthetic",
+        entity_id="synthetic-profile", neotoma_task_id="synthetic-task",
+    )
+    world.handler = wise.WiseTransferHandler(profile)
+    old = consent_email.build_pending_items(
+        [(world.handler, world.handler.matches(world.calendars["primary"]))], "2026-11-18"
+    )[0]
+    path = consent_email.journal_path()
+    journal.record_intent(
+        path, old.obligation, "old-token", generation=1, rail="wise",
+        handler_name=world.handler.name, profile_entity_id=profile.entity_id,
+        task_id=profile.neotoma_task_id, payment_date=old.payment_date,
+        match_id=old.match_id,
+    )
+    journal.record_transfer_created(path, old.obligation, 3)
+    journal.record_wise_status(path, old.obligation, 3, "outgoing_payment_sent",
+                               "2026-11-11T21:00:00Z")
+    world.calendars["primary"][0]["id"] = "next-event"
+    later = consent_email.build_pending_items(
+        [(world.handler, world.handler.matches(world.calendars["primary"]))], "2026-11-18"
+    )[0]
+    assert consent_email.journal_state_for_item(journal.load(path), later) is None
+    monkeypatch.setattr(monedula, "_reconcile_wise_entries", lambda *a: True)
+    monkeypatch.setattr(wise, "_create_transfer", lambda *a, **k:
+                        pytest.fail("consent has not been granted for the next event"))
+    world.tick()
+    assert approvals.writes == 1
+    assert approvals.only["payment_key"] == later.obligation
+
+
 def _old_obligation_key(handler, payment_date):
     import consent_email
 
@@ -1085,7 +1237,7 @@ def test_unclassified_legacy_oneoff_intent_holds_before_every_consent_route(
     assert journal.load(path)["obligations"][old_key] == old
 
 
-@pytest.mark.parametrize("old_shape", ["intent", "done_unconfirmed"])
+@pytest.mark.parametrize("old_shape", ["intent", "done_unconfirmed", "done_returned"])
 @pytest.mark.parametrize("identity", ["calendar_event", "invoice", "recurring_no_id"])
 @pytest.mark.parametrize("change", ["amount", "reference", "payee", "date", "nothing"])
 @pytest.mark.parametrize("channel", ["payment_approval", "checkpoint", "email", "telegram"])
@@ -1120,10 +1272,12 @@ def test_unclassified_legacy_wise_attempt_holds_every_identity_and_consent_route
     old_key = consent_email._legacy_obligation_key(world.handler, old_date, old_match_id)
     path = consent_email.journal_path()
     journal.record_intent(path, old_key, "old-token", generation=1)
-    if old_shape == "done_unconfirmed":
+    if old_shape in {"done_unconfirmed", "done_returned"}:
         data = journal.load(path)
         data["obligations"][old_key].update(
-            state=journal.STATE_DONE, outcome_status="funding_pending",
+            state=journal.STATE_DONE,
+            outcome_status=("sent" if old_shape == "done_returned" else "funding_pending"),
+            last_status=("funds_refunded" if old_shape == "done_returned" else None),
             outcome_at=time.time(),
         )
         journal._write(path, data)
