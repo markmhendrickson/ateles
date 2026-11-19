@@ -233,12 +233,18 @@ def test_email_request_holds_terminal_attempt_without_offering_reapproval(
 ):
     held = _Handler("old_invoice", label="Old invoice", amount=25, calendar=False)
     open_item = _Handler("new_invoice", label="New invoice", amount=30, calendar=False)
+    held.profile.entity_id = "old-profile"
+    held.profile.neotoma_task_id = "old-task"
+    open_item.profile.entity_id = "new-profile"
+    open_item.profile.neotoma_task_id = "new-task"
     state_path = tmp_path / "request.json"
     jpath = consent_email.journal_path(state_path)
     item = consent_email.build_pending_items([(held, [{}])], "2026-09-22")[0]
     payment_journal.record_intent(
         jpath, item.obligation, item.token, generation=1,
         rail="wise", handler_name=held.name,
+        profile_entity_id=held.profile.entity_id,
+        task_id=held.profile.neotoma_task_id,
     )
     if status == "not_submitted":
         payment_journal.record_wise_not_submitted(jpath, item.obligation)
@@ -2624,7 +2630,7 @@ def test_tokenless_payment_reply_holds_entire_request(
             mids = (["m1"] if "subject:" not in query and items[0].token in query else
                     ["m1", "m2"] if "subject:" in query else [])
             return {"complete": True, "messages": [{
-                "id": mid, "subject": f"RE: [Ateles] Monedula consent 2026-09-22"
+                "id": mid, "subject": "RE: [Ateles] Monedula consent 2026-09-22"
                                       + (f" {subject_marker(items[0].token)}" if mid == "m1" else ""),
                 "from": "op@example.com"} for mid in mids]}
         if "+read" in args:

@@ -282,66 +282,52 @@ def journal_entry_for_item(journal: dict, item: PendingItem) -> dict | None:
     profile_id = str(getattr(profile, "entity_id", "") or "")
     task_id = str(getattr(profile, "neotoma_task_id", "") or "")
     candidates = []
+    ambiguous = []
     for key, row in journal["obligations"].items():
         if row.get("rail") != "wise":
             continue
-        if row.get("handler_name") != item.handler_name:
-            continue
-        # A matching hash remains useful for old rows, but stable identity
-        # decides whether changed terms are still the same attempted payment.
         if key == item.obligation:
             candidates.append(row)
             continue
-        same_profile = (not profile_id or not row.get("profile_entity_id")
-                        or row["profile_entity_id"] == profile_id)
-        if not same_profile:
+        row_profile = row.get("profile_entity_id")
+        row_task = row.get("task_id")
+        row_event = row.get("match_id")
+        if not profile_id or not row_profile:
+            ambiguous.append(row)
+            continue
+        if row_profile != profile_id:
             continue
         settled = payment_journal.obligation_state(
             {"obligations": {key: row}}, key
         ) == payment_journal.STATE_DONE
         if item.is_calendar:
-            if item.match_id and row.get("match_id"):
-                same_occurrence = (row["match_id"] == item.match_id or not settled)
-            else:
-                # A missing ID cannot distinguish a date edit from another
-                # occurrence. For identity-bearing rows this remains held even
-                # after settlement; an operator must restore an event ID.
-                same_occurrence = (bool(row.get("profile_entity_id"))
-                                   or not settled
-                                   or row.get("payment_date") == item.payment_date)
-            if same_occurrence:
+            if not item.match_id or not row_event:
+                ambiguous.append(row)
+            elif row_event == item.match_id or not settled:
                 candidates.append(row)
-        elif (not settled or (task_id and row.get("task_id") == task_id)):
-            # The task identifies an invoice even when its date and terms move.
-            # An unresolved attempt with a missing task ID remains ambiguous.
+        elif not task_id or not row_task:
+            ambiguous.append(row)
+        elif row_task == task_id or not settled:
+            # An unresolved attempt under the same profile cannot be ruled out
+            # solely because its task ID changed. A settled different task can.
             candidates.append(row)
+    candidates.extend(ambiguous)
     if candidates:
         return next((row for row in candidates
                      if payment_journal.obligation_state(
                          {"obligations": {"candidate": row}}, "candidate"
                      ) != payment_journal.STATE_DONE),
                     candidates[0])
-    # Old rows without a date or profile identity cannot safely be ruled out
-    # as this obligation, including a calendar session. The old writer stored
-    # only a hashed key, so changed terms cannot recover its event identity.
-    candidates = [row for row in journal["obligations"].values()
-                  if row.get("rail") == "wise"
-                  and row.get("handler_name") == item.handler_name
-                  and not row.get("payment_date")
-                  and payment_journal.obligation_state(
-                      {"obligations": {"legacy": row}}, "legacy"
-                  ) != payment_journal.STATE_DONE]
     # Before Wise attempt metadata existed, the writer recorded only state,
     # token, generation and intent_at. Its tick-date key cannot be reconstructed
     # later. An unclassified unresolved intent may be this invoice.
-    candidates.extend(row for row in journal["obligations"].values()
-                      if "rail" not in row and "handler_name" not in row
-                      and (row.get("state") == payment_journal.STATE_INTENT
-                           or (row.get("state") == payment_journal.STATE_DONE
-                               and (row.get("outcome_status") != "sent"
-                                    or row.get("last_status") not in
-                                    (None, "outgoing_payment_sent")))))
-    return candidates[0] if candidates else None
+    return next((row for row in journal["obligations"].values()
+                 if "rail" not in row and "handler_name" not in row
+                 and (row.get("state") == payment_journal.STATE_INTENT
+                      or (row.get("state") == payment_journal.STATE_DONE
+                          and (row.get("outcome_status") != "sent"
+                               or row.get("last_status") not in
+                               (None, "outgoing_payment_sent"))))), None)
 
 
 def journal_state_for_item(journal: dict, item: PendingItem) -> str | None:
@@ -356,6 +342,18 @@ def journal_state_for_item(journal: dict, item: PendingItem) -> str | None:
     state = payment_journal.obligation_state(
         {"obligations": {item.obligation: entry}}, item.obligation
     )
+    profile = getattr(item.handler, "profile", None)
+    if entry.get("rail") == "wise" and state == payment_journal.STATE_DONE and (
+        not getattr(profile, "entity_id", None)
+        or not entry.get("profile_entity_id")
+        or (item.is_calendar and (not item.match_id or not entry.get("match_id")))
+        or (not item.is_calendar and (
+            not getattr(profile, "neotoma_task_id", None) or not entry.get("task_id")
+        ))
+    ):
+        # A sent status cannot settle an offer whose obligation identity is
+        # unknown. The transfer still needs operator reconciliation.
+        return payment_journal.STATE_INTENT
     if (entry.get("rail") == "wise" and state == payment_journal.STATE_DONE
             and entry.get("effects_applied") is not True):
         # A confirmed rail status is not completion until task and session
@@ -366,12 +364,14 @@ def journal_state_for_item(journal: dict, item: PendingItem) -> str | None:
 
 def missing_wise_identity_note(item: PendingItem, entry: dict) -> str:
     """Explain which missing stable identity makes an unresolved hold broad."""
+    notes: list[str] = []
+    if not entry.get("profile_entity_id"):
+        notes.append("Payment profile ID missing")
     if item.is_calendar and (not item.match_id or not entry.get("match_id")):
-        return " Calendar event ID missing; this transfer is held across event edits."
-    if not item.is_calendar and (not entry.get("profile_entity_id")
-                                 or not entry.get("task_id")):
-        return " Invoice profile or task ID missing; this transfer is held across invoice edits."
-    return ""
+        notes.append("Calendar event ID missing")
+    if not item.is_calendar and not entry.get("task_id"):
+        notes.append("Invoice task ID missing")
+    return (" " + "; ".join(notes) + "; this transfer remains held across edits.") if notes else ""
 
 
 def _profile_fields(handler: Any) -> tuple[str, int, bool]:

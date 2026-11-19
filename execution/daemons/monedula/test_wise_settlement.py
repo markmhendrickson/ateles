@@ -191,6 +191,14 @@ def _bind_synthetic_attempt(path, profile, payment_date="2026-01-01"):
     journal._write(path, data)
 
 
+def test_wise_malformed_handler_name_makes_journal_unreadable(attempt):
+    data = journal.load(attempt)
+    data["obligations"]["obligation"]["handler_name"] = 42
+    journal._write(attempt, data)
+    with pytest.raises(journal.JournalError, match="handler name malformed"):
+        journal.load(attempt)
+
+
 @pytest.mark.parametrize("failure", ["binding", "task_write"])
 def test_confirmed_wise_effect_failure_keeps_session_pending_through_sweep(
     attempt, monkeypatch, failure
@@ -266,7 +274,12 @@ def test_session_sweep_rechecks_state_before_dropping(tmp_path, monkeypatch):
 @pytest.mark.parametrize("route", ["payment_approval", "checkpoint", "email", "telegram"])
 @pytest.mark.parametrize("identity", ["calendar_id", "calendar_no_id", "one_off"])
 @pytest.mark.parametrize("edit", ["amount", "reference", "payee", "currency", "date",
-                                  "event_time", "event_id_removed"])
+                                  "event_time", "event_id_removed", "prefix_other",
+                                  "prefix_case", "prefix_space", "prefix_encoded",
+                                  "prefix_unicode", "prefix_removed",
+                                  "handler_name_null", "handler_name_absent",
+                                  "row_profile_missing", "row_task_missing",
+                                  "row_event_missing"])
 @pytest.mark.parametrize("state", ["intent", "funding_pending", "done_sent",
                                    "done_returned", "failed"])
 def test_wise_attempt_identity_hold_matrix(
@@ -281,10 +294,17 @@ def test_wise_attempt_identity_hold_matrix(
         pytest.skip("calendar-only edit")
     if edit == "event_id_removed" and identity == "calendar_no_id":
         pytest.skip("event already has no ID")
+    if edit == "row_task_missing" and identity != "one_off":
+        pytest.skip("invoice-only identity")
+    if edit == "row_event_missing" and identity == "one_off":
+        pytest.skip("calendar-only identity")
     world, approvals = approval_env
     is_calendar = identity != "one_off"
     profile = PaymentProfile(
-        prefix="SYNTHETIC", label="Synthetic", payment_type="wise",
+        prefix=({"prefix_removed": "CUSTOM_PREFIX",
+                 "prefix_encoded": "SYNTHETIC ",
+                 "prefix_unicode": "SYNTHÉTIC"}.get(edit, "SYNTHETIC")),
+        label="Synthetic", payment_type="wise",
         calendar_keywords=["yoga"] if is_calendar else [],
         amount_eur=10, wise_reference="original", wise_recipient_id=5,
         wise_recipient_name="Synthetic", entity_id="synthetic-profile",
@@ -324,6 +344,22 @@ def test_wise_attempt_identity_hold_matrix(
     elif state == "failed":
         journal.record_wise_not_submitted(path, old.obligation)
 
+    if edit in {"handler_name_null", "handler_name_absent",
+                "row_profile_missing", "row_task_missing", "row_event_missing"}:
+        data = journal.load(path)
+        row = data["obligations"][old.obligation]
+        if edit == "handler_name_null":
+            row["handler_name"] = None
+        elif edit == "handler_name_absent":
+            row.pop("handler_name")
+        elif edit == "row_profile_missing":
+            row["profile_entity_id"] = ""
+        elif edit == "row_task_missing":
+            row["task_id"] = ""
+        elif edit == "row_event_missing":
+            row["match_id"] = ""
+        journal._write(path, data)
+
     if edit == "amount":
         profile.amount_eur = 20
     elif edit == "reference":
@@ -341,14 +377,29 @@ def test_wise_attempt_identity_hold_matrix(
         events[0]["start"]["dateTime"] = "2026-11-11T20:30:00+01:00"
     elif edit == "event_id_removed":
         events[0].pop("id")
+    elif edit.startswith("prefix_"):
+        profile.prefix = {
+            "prefix_other": "ANOTHER",
+            "prefix_case": "synthetic",
+            "prefix_space": "SYNTHETIC ",
+            "prefix_encoded": "SYNTHETIC%20",
+            "prefix_unicode": "SYNTHE\u0301TIC",
+            "prefix_removed": "SYNTHETIC",
+        }[edit]
+    elif edit in {"handler_name_null", "handler_name_absent",
+                "row_profile_missing", "row_task_missing", "row_event_missing"}:
+        profile.prefix = "ANOTHER"
     changed_matches = world.handler.matches(events)
     changed = consent_email.build_pending_items(
         [(world.handler, changed_matches)], "2026-11-18"
     )[0]
     assert consent_email.journal_entry_for_item(journal.load(path), changed) is not None
-    expected = "done" if state == "done_sent" else (
+    expected = ("intent" if state == "done_sent" and (
+                    edit.startswith("row_") or (is_calendar and not changed.match_id)
+                )
+                else "done" if state == "done_sent" else (
         "failed" if state in {"done_returned", "failed"} else state
-    )
+    ))
     assert consent_email.journal_state_for_item(journal.load(path), changed) == expected
 
     monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", route)
@@ -373,6 +424,12 @@ def test_wise_attempt_identity_hold_matrix(
     if state == "done_returned":
         assert any("latest status is funds_refunded" in message for message in alerts)
     if is_calendar and not changed.match_id:
+        assert any("Calendar event ID missing" in message for message in alerts)
+    if edit == "row_profile_missing":
+        assert any("Payment profile ID missing" in message for message in alerts)
+    if edit == "row_task_missing":
+        assert any("Invoice task ID missing" in message for message in alerts)
+    if edit == "row_event_missing":
         assert any("Calendar event ID missing" in message for message in alerts)
 
 
@@ -1505,6 +1562,7 @@ def test_settled_older_invoice_does_not_hide_later_invoice(approval_env, monkeyp
     path = consent_email.journal_path()
     journal.record_intent(path, old_key, "old-token", generation=1,
                           rail="wise", handler_name=world.handler.name,
+                          profile_entity_id="older-profile", task_id="older-task",
                           payment_date="2026-01-01")
     journal.record_transfer_created(path, old_key, 3)
     journal.record_wise_status(path, old_key, 3, "outgoing_payment_sent",

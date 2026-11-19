@@ -119,6 +119,10 @@ def load(path: Path) -> dict[str, Any]:
         if entry.get("state") not in (STATE_INTENT, STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED):
             raise JournalError("payment journal obligation state malformed")
         if entry.get("rail") == "wise":
+            if entry.get("handler_name") is not None and not isinstance(
+                entry["handler_name"], str
+            ):
+                raise JournalError("payment journal Wise handler name malformed")
             if any(field in entry and not isinstance(entry[field], str) for field in (
                 "profile_entity_id", "task_id", "approved_terms_hash", "payment_date", "match_id"
             )):

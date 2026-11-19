@@ -1715,14 +1715,18 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                     # No event id to key a session on (legacy shape). The
                     # obligation itself is the dedupe: an already-paid one is
                     # never raised again.
-                    if len(matches) == 1 and payment_journal.obligation_state(
-                        data,
-                        obligation_key(
-                            handler,
-                            event_session_date(match) or _yesterday().isoformat(),
-                            "",
-                        ),
-                    ) == payment_journal.STATE_DONE:
+                    if (
+                        not isinstance(handler, WiseTransferHandler)
+                        and len(matches) == 1
+                        and payment_journal.obligation_state(
+                            data,
+                            obligation_key(
+                                handler,
+                                event_session_date(match) or _yesterday().isoformat(),
+                                "",
+                            ),
+                        ) == payment_journal.STATE_DONE
+                    ):
                         continue
                     keep.append(match)
                     continue
@@ -1730,14 +1734,15 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                 state = payment_journal.session_state(data, key)
                 if state in payment_journal.SESSION_TERMINAL:
                     continue
-                legacy_states = {
-                    payment_journal.obligation_state(data, legacy)
-                    for legacy in legacy_obligation_keys(
-                        handler, match, matches, _yesterday().isoformat()
-                    )
-                }
-                if (state is None and payment_journal.STATE_DONE in legacy_states
-                        and not isinstance(handler, WiseTransferHandler)):
+                legacy_states = set()
+                if not isinstance(handler, WiseTransferHandler):
+                    legacy_states = {
+                        payment_journal.obligation_state(data, legacy)
+                        for legacy in legacy_obligation_keys(
+                            handler, match, matches, _yesterday().isoformat()
+                        )
+                    }
+                if state is None and payment_journal.STATE_DONE in legacy_states:
                     # Only a settled legacy obligation closes the session.
                     log.warning(
                         f"session {key} already has a journaled obligation under "
