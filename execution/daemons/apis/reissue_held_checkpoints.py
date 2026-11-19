@@ -62,7 +62,7 @@ def main() -> int:
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="write checkpoints (default: dry run, no writes)",
+        help="write eligible missing checkpoints; default is a dry run that writes nothing",
     )
     parser.add_argument(
         "--task",
@@ -84,6 +84,7 @@ def main() -> int:
     parser.add_argument(
         "--gate-hold-only", action="store_true",
         help=("inspect one bounded page of recent gate holds missing a checkpoint; "
+              "default is a dry run that writes nothing; "
               "exit 1 if any hold is unreconstructable, including in dry run"),
     )
     args = parser.parse_args()

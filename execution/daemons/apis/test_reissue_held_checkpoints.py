@@ -371,6 +371,19 @@ def _run_cli(monkeypatch, *argv):
     return cli.main()
 
 
+def test_cli_help_explains_apply_and_gate_hold_dry_run(monkeypatch, capsys):
+    with pytest.raises(SystemExit) as stopped:
+        _run_cli(monkeypatch, "--help")
+
+    assert stopped.value.code == 0
+    options = " ".join(capsys.readouterr().out.rsplit("options:", 1)[-1].split())
+    assert "--apply" in options
+    assert "write eligible missing checkpoints" in options
+    assert "--gate-hold-only" in options
+    assert "one bounded page of recent gate holds" in options
+    assert "default is a dry run that writes nothing" in options
+
+
 def test_cli_dry_run_by_default_and_nonzero_on_failure(record, monkeypatch, capsys):
     record.add_task("ent_t1")
     record.persist = False
