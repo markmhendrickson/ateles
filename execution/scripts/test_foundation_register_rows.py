@@ -413,6 +413,10 @@ class TestGfmTableBlock(unittest.TestCase):
         for blank in ("", " ", "\t", " \t "):
             decision_rows(decision + blank + "\n999 plain pipeless\n")
             revision_rows(revision + blank + "\n999 plain pipeless\n")
+        for ending in ("\n", "\r", "\r\n"):
+            with self.subTest(ending=repr(ending)):
+                self.assertEqual(len(decision_rows(decision.replace("\n", ending))), 1)
+                self.assertEqual(len(revision_rows(revision.replace("\n", ending))), 1)
 
     def test_status_source_vocabulary_rejects_invisible_and_lookalike_text(self):
         for status in ("**o\u200bpen**", "\u200b**open**", "**open**\u200b",
