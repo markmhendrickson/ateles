@@ -151,8 +151,13 @@ def discrepancy_report(rows: dict[str, dict], transfer_reads: dict[int, Any]) ->
                     category = "returned"
                 else:
                     category = "still pending"
-        report.append({"obligation": obligation, "transfer_id": transfer_id,
-                       "category": category, "wise_status": status})
+        reported = {"obligation": obligation, "transfer_id": transfer_id,
+                    "category": category, "wise_status": status}
+        if entry.get("timestamp_conflict_status"):
+            from wise_hold_message import hold_text
+
+            reported["guidance"] = hold_text(entry)
+        report.append(reported)
     return report
 
 

@@ -46,6 +46,7 @@ from lib.approval.email_channel import (
 from lib.approval.tokens import subject_marker, token_for
 
 import payment_journal
+from wise_hold_message import hold_text
 
 log = logging.getLogger(__name__)
 
@@ -805,21 +806,7 @@ def request_and_collect(
         if item.obligation not in unknown:
             continue
         entry = journal_entry_for_item(journal, item) or {}
-        if entry.get("state") == payment_journal.STATE_FUNDING_PENDING:
-            note = "submitted, not confirmed; Monedula is checking; do not pay again"
-        elif entry.get("failure_status") == "not_submitted":
-            note = "not submitted; no payment was made. " + payment_journal.REPLACEMENT_HOLD_MESSAGE
-        elif entry.get("state") == payment_journal.STATE_FAILED or (
-            entry.get("state") == payment_journal.STATE_DONE
-            and entry.get("last_status") not in (None, "outgoing_payment_sent")
-        ):
-            note = "returned or cancelled. " + payment_journal.REPLACEMENT_HOLD_MESSAGE
-        elif entry.get("transfer_id"):
-            note = "transfer exists, outcome unknown; Monedula is checking; do not pay again"
-        else:
-            note = ("Wise submission outcome unknown; check Wise Activity by date, "
-                    "amount and reference; do not pay again. Monedula cannot check "
-                    "automatically without a transfer ID")
+        note = hold_text(entry, email=True)
         attempt_key = entry.get("_journal_key") or item.obligation
         held_notes[item.obligation] = (
             f"Held by Wise attempt [{attempt_key}]; this obligation is not lost. "

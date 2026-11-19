@@ -1423,29 +1423,9 @@ def _notify_unknown_outcome(labels: list[str], yesterday_str: str) -> None:
 
 def _wise_hold_text(entry: dict) -> str:
     """Explain the persisted attempt without guessing whether money moved."""
-    import payment_journal
-    state = entry.get("state")
-    if state == "done" and "last_status" not in entry and entry.get("outcome_status") != "sent":
-        return "Outcome unconfirmed; check Wise Activity; do not pay again."
-    if state == "done" and entry.get("last_status") != "outgoing_payment_sent":
-        return ("The transfer was previously sent, but its latest status is "
-                f"{entry.get('last_status') or 'unknown'}; review the return. "
-                "Task and session bookkeeping held; do not pay again.")
-    if state == "done":
-        if entry.get("effects_applied") is not True:
-            return "Transfer sent; task and session bookkeeping held; do not pay again."
-        return "Transfer already sent; do not pay again."
-    if state == "funding_pending":
-        return "Submitted, not confirmed. Monedula is checking the transfer; do not pay again."
-    if state == "failed":
-        if entry.get("failure_status") == "not_submitted":
-            return "Not submitted; no payment was made. " + payment_journal.REPLACEMENT_HOLD_MESSAGE
-        return "The transfer was returned or cancelled. " + payment_journal.REPLACEMENT_HOLD_MESSAGE
-    if entry.get("transfer_id"):
-        return "A transfer exists, but its outcome is unknown. Monedula is checking it; do not pay again."
-    return ("Wise submission outcome unknown. Check Wise Activity by date, amount "
-            "and reference; do not pay again. Monedula cannot check automatically "
-            "without a transfer ID.")
+    from wise_hold_message import hold_text
+
+    return hold_text(entry)
 
 
 def _notify_wise_hold(entry: dict, obligation: str) -> None:
@@ -1964,10 +1944,7 @@ def _reconcile_wise_entries(handlers: list) -> bool:
                                     payment_journal.STATE_FUNDING_PENDING)
                 and isinstance(pending_since, (int, float))
                 and time.time() - pending_since >= WISE_PENDING_ALERT_AFTER_SECONDS):
-            explanation = (
-                "Monedula is checking it; do not pay again."
-                if transfer_id else _wise_hold_text(entry)
-            )
+            explanation = _wise_hold_text(entry)
             _notify(
                 f"monedula: Wise transfer [{obligation[:12]}] has not been confirmed "
                 f"for two days. {explanation}",
@@ -1993,9 +1970,10 @@ def _reconcile_wise_entries(handlers: list) -> bool:
                 and current.get("last_status") != "outgoing_payment_sent"):
             prior_effects = "already applied" if current.get("effects_applied") else "held"
             _notify(
-                f"monedula: Wise transfer [{obligation[:12]}] was previously sent, "
-                f"but latest status is {current.get('last_status') or 'unknown'}; "
-                f"task and session effects {prior_effects}; review the return; do not pay again.",
+                f"monedula: Wise transfer [{obligation[:12]}] "
+                + (_wise_hold_text(current) if current.get("timestamp_conflict_status") else
+                   f"was previously sent, but latest status is {current.get('last_status') or 'unknown'}; "
+                   f"task and session effects {prior_effects}; review the return; do not pay again."),
                 priority="blocker", dedupe_key=f"monedula:wise_discrepancy:{obligation}",
             )
         session_key = current.get("session_key")
@@ -2036,9 +2014,7 @@ def _reconcile_wise_entries(handlers: list) -> bool:
             if (current.get("timestamp_conflict_status") and due is not None
                     and time.time() < due):
                 _notify(
-                    f"monedula: two Wise reads of transfer [{obligation[:12]}] conflict "
-                    "at the same time; nothing is changed. A later observation "
-                    "from Wise is needed. Check Wise Activity; do not pay again.",
+                    f"monedula: Wise transfer [{obligation[:12]}] {_wise_hold_text(current)}",
                     priority="blocker",
                     dedupe_key=f"monedula:wise_timestamp_conflict:{obligation}",
                 )
@@ -2066,8 +2042,9 @@ def _reconcile_wise_entries(handlers: list) -> bool:
         if not token:
             clean = False
             _notify(
-                f"monedula: Wise transfer [{obligation[:12]}] could not be checked; "
-                "outcome unknown; do not pay again.",
+                f"monedula: Wise transfer [{obligation[:12]}] "
+                + (_wise_hold_text(current) if current.get("timestamp_conflict_status") else
+                   "could not be checked; outcome unknown; do not pay again."),
                 priority="blocker", dedupe_key=f"monedula:wise_read:{obligation}",
             )
             continue
@@ -2098,16 +2075,15 @@ def _reconcile_wise_entries(handlers: list) -> bool:
                 else "read failed; outcome unknown; do not pay again."
             )
             _notify(
-                f"monedula: Wise transfer [{obligation[:12]}] {detail}",
+                f"monedula: Wise transfer [{obligation[:12]}] "
+                + (_wise_hold_text(current) if current.get("timestamp_conflict_status") else detail),
                 priority="blocker", dedupe_key=f"monedula:wise_read:{obligation}",
             )
             continue
         if (persisted.get("timestamp_conflict_status")
                 or relation == "conflict"):
             _notify(
-                f"monedula: two Wise reads of transfer [{obligation[:12]}] conflict "
-                "at the same time; nothing is changed. A later observation "
-                "from Wise is needed. Check Wise Activity; do not pay again.",
+                f"monedula: Wise transfer [{obligation[:12]}] {_wise_hold_text(persisted)}",
                 priority="blocker", dedupe_key=f"monedula:wise_timestamp_conflict:{obligation}",
             )
             clean = False

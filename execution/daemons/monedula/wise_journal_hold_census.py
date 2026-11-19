@@ -13,6 +13,7 @@ from collections import Counter
 from pathlib import Path
 
 import payment_journal
+from wise_hold_message import hold_text
 
 
 def classify(row: object, data: dict) -> str:
@@ -49,9 +50,14 @@ def main(argv: list[str]) -> int:
     kinds = Counter()
     held_profiles = Counter()
     hold_all = 0
+    conflict_count = 0
+    conflict_row = None
     for row in rows.values():
         kind = classify(row, data)
         kinds[kind] += 1
+        if isinstance(row, dict) and row.get("timestamp_conflict_status"):
+            conflict_count += 1
+            conflict_row = row
         if kind == "wise_new_UNRESOLVED_with_profile_id":
             held_profiles[str(row.get("handler_name") or "(unnamed)")] += 1
         elif kind.endswith("UNRESOLVED_all_profiles") or kind == "unreadable_UNRESOLVED":
@@ -60,6 +66,9 @@ def main(argv: list[str]) -> int:
     for kind, n in sorted(kinds.items()):
         print(f"  {kind}: {n}")
     print(f"rows that would hold ALL Wise obligations: {hold_all}")
+    if conflict_count:
+        print(f"rows with conflicting Wise reads: {conflict_count}")
+        print("  " + hold_text(conflict_row))
     print("payees held individually (handler name: unresolved rows):")
     if not held_profiles:
         print("  none")

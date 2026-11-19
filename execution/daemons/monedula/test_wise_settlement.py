@@ -714,6 +714,8 @@ def test_equal_instant_conflict_blocks_reconciliation_effects(attempt, monkeypat
                                   "updated": "2026-01-01T00:00:00Z"}}
     )
     assert report[0]["category"] == "unresolved"
+    assert "two Wise reads" in report[0]["guidance"]
+    assert "later observation from Wise" in report[0]["guidance"]
 
 
 @pytest.mark.parametrize("initial,read", [
@@ -772,6 +774,37 @@ def test_timestamp_conflict_census_reports_unresolved(attempt, capsys):
     output = capsys.readouterr().out
     assert "wise_new_UNRESOLVED_with_profile_id: 1" in output
     assert "wise_new_resolved_paid" not in output
+    assert "two wise reads" in output.lower()
+    assert "later observation from Wise" in output
+    assert "Check Wise Activity; do not pay again" in output
+
+
+@pytest.mark.parametrize("state,extra,expected", [
+    ("done", {"last_status": "outgoing_payment_sent", "effects_applied": True}, "two Wise reads"),
+    ("intent", {}, "two Wise reads"),
+    ("funding_pending", {}, "two Wise reads"),
+    ("failed", {"failure_status": "funds_refunded"}, "two Wise reads"),
+    ("done", {"last_status": "outgoing_payment_sent", "effects_applied": True}, "Transfer already sent"),
+])
+def test_wise_hold_builder_conflict_precedes_row_state(state, extra, expected):
+    from wise_hold_message import hold_text
+
+    entry = {"state": state, **extra}
+    if expected == "two Wise reads":
+        entry["timestamp_conflict_status"] = "bounced_back"
+    for email in (False, True):
+        message = hold_text(entry, email=email)
+        if email and expected == "Transfer already sent":
+            assert "outcome unknown" in message
+        else:
+            assert expected in message
+        if "timestamp_conflict_status" in entry:
+            assert "same time" in message
+            assert "nothing has been changed" in message
+            assert "later observation from Wise" in message
+            assert "Check Wise Activity; do not pay again" in message
+            assert "already sent" not in message.lower()
+            assert "outcome unknown" not in message.lower()
 
 
 def test_later_return_preserves_paid_history_and_records_discrepancy(attempt):
@@ -1940,7 +1973,7 @@ def test_effect_retry_after_due_date_failure_does_not_duplicate_note(monkeypatch
 @pytest.mark.parametrize("route", ["payment_approval", "email", "telegram"])
 @pytest.mark.parametrize("attempt_state", [
     "intent", "funding_pending", "submission_unknown", "done_then_returned",
-    "funds_refunded", "cancelled", "confirmed_unapplied",
+    "funds_refunded", "cancelled", "confirmed_unapplied", "timestamp_conflict",
 ])
 def test_unresolved_profile_holds_changed_obligation_on_every_route(
     approval_env, monkeypatch, route, attempt_state
@@ -1973,7 +2006,7 @@ def test_unresolved_profile_holds_changed_obligation_on_every_route(
         data = journal.load(path)
         data["obligations"][old.obligation]["submission_status"] = "unknown"
         journal._write(path, data)
-    if attempt_state in {"funding_pending", "done_then_returned", "funds_refunded", "cancelled", "confirmed_unapplied"}:
+    if attempt_state in {"funding_pending", "done_then_returned", "funds_refunded", "cancelled", "confirmed_unapplied", "timestamp_conflict"}:
         journal.record_transfer_created(path, old.obligation, 3)
     if attempt_state == "funding_pending":
         journal.record_funding_pending(path, old.obligation, 3, "COMPLETED")
@@ -1988,6 +2021,13 @@ def test_unresolved_profile_holds_changed_obligation_on_every_route(
     elif attempt_state == "confirmed_unapplied":
         journal.record_wise_status(path, old.obligation, 3, "outgoing_payment_sent",
                                    "2026-11-12T21:00:00Z")
+    elif attempt_state == "timestamp_conflict":
+        journal.record_wise_status(path, old.obligation, 3, "outgoing_payment_sent",
+                                   "2026-11-12T21:00:00Z")
+        journal.mark_wise_effects_applied(path, old.obligation, 3)
+        journal.record_wise_status(path, old.obligation, 3, "bounced_back",
+                                   "2026-11-12T22:00:00+01:00")
+        assert journal.load(path)["obligations"][old.obligation]["timestamp_conflict_status"] == "bounced_back"
 
     profile.amount_eur = 20
     profile.wise_reference = "second"
@@ -2012,6 +2052,10 @@ def test_unresolved_profile_holds_changed_obligation_on_every_route(
                         pytest.fail("held obligation offered for Telegram consent"))
     monkeypatch.setattr(wise, "_create_transfer", lambda *a, **kw:
                         pytest.fail("second Wise transfer created"))
+    monkeypatch.setattr(wise, "_fund_transfer", lambda *a, **kw:
+                        pytest.fail("second Wise transfer funded"))
+    monkeypatch.setattr(monedula, "_apply_confirmed_wise_effects", lambda *a, **kw:
+                        pytest.fail("held transfer applied task effects"))
     messages = []
     monkeypatch.setattr(monedula, "_notify", lambda message, **kw: messages.append(message))
     assert monedula._apply_session_journal([(world.handler, [world.handler.matches([event])[0]])],
@@ -2020,6 +2064,18 @@ def test_unresolved_profile_holds_changed_obligation_on_every_route(
     assert approvals.writes == 0 and world.sends == []
     assert any(old.obligation in message and "not lost" in message
                and "do not pay again" in message.lower() for message in messages)
+    if attempt_state == "timestamp_conflict":
+        for message in (m for m in messages if old.obligation in m):
+            assert "two wise reads" in message.lower()
+            assert "same time" in message
+            assert "nothing has been changed" in message
+            assert "later observation from Wise" in message
+            assert "Check Wise Activity; do not pay again" in message
+            assert "already sent" not in message.lower()
+            assert "outcome unknown" not in message.lower()
+        assert journal.load(path)["obligations"][old.obligation]["effects_applied"] is True
+        assert journal.session_state(journal.load(path),
+                                     journal.session_key(world.handler.name, "new-event")) != journal.SESSION_SETTLED
     assert list(journal.load(path)["obligations"]) == [old.obligation]
 
 
