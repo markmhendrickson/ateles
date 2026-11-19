@@ -165,11 +165,45 @@ def test_gate_and_sweep_share_one_signed_checkpoint_identity(monkeypatch):
     first, second = (entry["body"] for entry in server.stores)
     assert first["idempotency_key"] == second["idempotency_key"]
     assert first["entities"][0]["title"] == second["entities"][0]["title"]
+    assert first["entities"][0]["title"].startswith(
+        "PLAN checkpoint: Generic task [ent_task] #"
+    )
     assert first["entities"][0]["plan_summary"] != second["entities"][0]["plan_summary"]
     assert "Trigger: created." in first["entities"][0]["plan_summary"]
     assert "Gate hold for cicada." in second["entities"][0]["plan_summary"]
     for field in ("body", "task_entity_id", "reason", "policy_entity_id", "gate_action"):
         assert first["entities"][0][field] == second["entities"][0][field]
+
+
+def test_reissue_checkpoint_title_names_the_task(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+    snapshot = {"title": "Approve the recovery", "status": "awaiting_approval"}
+    record = {
+        "entity_id": "ent_task", "entity_type": "task",
+        "observation_count": 4,
+        "snapshot": snapshot,
+    }
+    policy = ExecutionPolicy(entity_id="policy", loaded=True)
+    decision = GateDecision(
+        action=GateAction.CHECKPOINT, blast_radius=BlastRadius.HIGH,
+        confidence=0.2, threshold=0.85, policy_id="policy", reason="gate reason",
+    )
+    monkeypatch.setattr(apis, "_task_gate_context", lambda _snapshot: (
+        "cicada", "open_or_merge_pr", policy, decision
+    ))
+    monkeypatch.setattr(apis, "fetch_task_record", lambda _id: record)
+    monkeypatch.setattr(apis, "fetch_entity_user_id", lambda _id: "tenant-a")
+    monkeypatch.setattr(apis, "write_checkpoint_brief", gating.write_checkpoint_brief)
+
+    brief_id = apis._file_fresh_checkpoint(
+        prior_checkpoint_id="ent_old", task_id="ent_task",
+        task_snapshot=snapshot, notifier=None,
+    )
+
+    assert brief_id is not None
+    assert server.entities[brief_id]["fields"]["title"].startswith(
+        "PLAN checkpoint: Approve the recovery [ent_task] #"
+    )
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("read failed"), asyncio.CancelledError()])

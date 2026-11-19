@@ -1924,8 +1924,22 @@ def test_one_hold_uses_one_key_and_identity_when_summaries_differ(monkeypatch):
     assert len(server.entities) == 1
     first_body, second_body = (entry["body"] for entry in server.stores)
     assert first_body["idempotency_key"] == second_body["idempotency_key"]
-    assert first_body["entities"][0]["title"] == second_body["entities"][0]["title"]
+    assert first_body["entities"][0]["title"].startswith("PLAN checkpoint: Live title [ent_task] #")
+    assert second_body["entities"][0]["title"].startswith("PLAN checkpoint: Recovery title [ent_task] #")
+    assert first_body["entities"][0]["title"].rsplit(" #", 1)[1] == second_body["entities"][0]["title"].rsplit(" #", 1)[1]
     assert server.entities[first]["fields"]["plan_summary"].startswith("Scored 0.30")
+
+
+@pytest.mark.parametrize("context", ["hold-obs-1", "fresh-reissue-1"])
+def test_contextual_checkpoint_title_names_task_for_live_and_reissue(monkeypatch, context):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    brief_id = _hold(title="Review the held release", idempotency_context=context)
+
+    assert brief_id is not None
+    assert server.entities[brief_id]["fields"]["title"].startswith(
+        "PLAN checkpoint: Review the held release [ent_task] #"
+    )
 
 
 @pytest.mark.parametrize("failure", ["unreadable", "malformed_list", "malformed_readback"])

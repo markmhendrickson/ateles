@@ -1412,7 +1412,7 @@ def write_checkpoint_brief(
             "context": idempotency_context,
         }).encode()).hexdigest()[:16]
         body["idempotency_key"] += f"-{hold_identity}"
-        _entity["title"] = f"PLAN checkpoint: {task_entity_id} #{hold_identity}"
+        _entity["title"] = f"{_entity['title']} #{hold_identity}"
     else:
         # Legacy callers have no hold observation. Retain content-based
         # identity so a changed task receives a distinct checkpoint.
@@ -1489,8 +1489,14 @@ def write_checkpoint_brief(
                 for row in rows
             ):
                 return None
+            # The descriptive title may change between the live write and a
+            # recovery replay. The hold suffix, task, handler, and signed
+            # authorization identify the same checkpoint without its wording.
+            title_suffix = f" [{task_entity_id}] #{hold_identity}"
             matches = [row for row in rows if (
-                row["snapshot"].get("title") == _entity["title"]
+                isinstance(row["snapshot"].get("title"), str)
+                and row["snapshot"]["title"].startswith("PLAN checkpoint: ")
+                and row["snapshot"]["title"].endswith(title_suffix)
                 and row["snapshot"].get("handler") == handler
             )]
             if len(matches) != 1:
@@ -1500,7 +1506,9 @@ def write_checkpoint_brief(
             existing_snapshot = existing.get("snapshot") if isinstance(existing, dict) else None
             if (not isinstance(existing, dict)
                     or not isinstance(existing_snapshot, dict)
-                    or existing_snapshot.get("title") != _entity["title"]
+                    or not isinstance(existing_snapshot.get("title"), str)
+                    or not existing_snapshot["title"].startswith("PLAN checkpoint: ")
+                    or not existing_snapshot["title"].endswith(title_suffix)
                     or existing_snapshot.get("task_entity_id") != task_entity_id
                     or existing_snapshot.get("handler") != handler
                     or existing_snapshot.get("status") not in valid_statuses

@@ -69,10 +69,12 @@ def test_missing_gate_checkpoint_is_raised_once_and_read_back(recovery):
 @pytest.mark.parametrize("status", ["awaiting_operator", "rejected"])
 def test_existing_brief_for_hold_is_skipped_even_with_different_summary(recovery, status):
     state, _, _ = recovery
+    state["task"]["snapshot"]["title"] = "Renamed task after the live hold"
     state["checkpoints"] = [{
         "entity_id": "ent_live_brief", "created_at": "2026-01-01T00:01:00Z",
         "snapshot": {
             "status": status, "task_entity_id": "ent_task",
+            "title": "PLAN checkpoint: Original task [ent_task] #holdidentity",
             "plan_summary": "Live gate: scorer's explanation and trigger",
         },
     }]
@@ -81,6 +83,24 @@ def test_existing_brief_for_hold_is_skipped_even_with_different_summary(recovery
 
     assert outcome == ("held_with_checkpoint" if status == "awaiting_operator" else "skipped_by_reason")
     assert state["writes"] == 0
+    assert len(state["checkpoints"]) == 1
+
+
+def test_renamed_task_with_stale_brief_is_not_duplicated(recovery, monkeypatch):
+    state, _, _ = recovery
+    state["task"]["snapshot"]["title"] = "Renamed after the live hold"
+    state["checkpoints"] = [{
+        "entity_id": "ent_live_brief", "created_at": "2026-01-01T00:01:00Z",
+        "snapshot": {
+            "status": "awaiting_operator", "task_entity_id": "ent_task",
+            "title": "PLAN checkpoint: Original title [ent_task] #holdidentity",
+        },
+    }]
+    monkeypatch.setattr(apis, "_checkpoint_authority_state", lambda *_args: "stale")
+
+    assert apis._reconcile_missing_checkpoint("ent_task", apply=True) == "unreconstructable"
+    assert state["writes"] == 0
+    assert len(state["checkpoints"]) == 1
 
 
 def test_fresh_hold_is_skipped_and_old_hold_is_raised(recovery):
