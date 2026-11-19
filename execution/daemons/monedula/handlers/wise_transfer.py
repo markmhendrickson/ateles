@@ -212,12 +212,22 @@ class WiseTransferHandler(PaymentHandler):
         """Execute Wise transfer. Returns result dict with status and details."""
         log.info(f"[{self.name}] Executing Wise payment...")
 
+        journal_context = match.get("_wise_journal")
+
+        def not_submitted(error: str) -> dict[str, Any]:
+            if journal_context is not None:
+                import payment_journal
+                payment_journal.record_wise_not_submitted(*journal_context)
+            return {"status": "not_submitted", "handler": self.name, "error": error}
+
         rid = self.profile.wise_recipient_id
         if rid:
             contact = {"name": self.profile.wise_recipient_name, "iban": ""}
         else:
             contact = _load_contact(self.profile)
         if not contact:
+            if journal_context is not None:
+                return not_submitted("Could not load contact")
             return {
                 "status": "manual_required",
                 "handler": self.name,
@@ -230,6 +240,8 @@ class WiseTransferHandler(PaymentHandler):
         recipient_name = contact.get("name", "")
 
         if not iban and not rid:
+            if journal_context is not None:
+                return not_submitted("No IBAN found in contact")
             return {
                 "status": "manual_required",
                 "handler": self.name,
@@ -242,6 +254,8 @@ class WiseTransferHandler(PaymentHandler):
         token = os.environ.get("WISE_API_TOKEN", "").strip()
         if not token:
             log.error(f"[{self.name}] WISE_API_TOKEN not set")
+            if journal_context is not None:
+                return not_submitted("WISE_API_TOKEN not set")
             return {
                 "status": "manual_required",
                 "handler": self.name,
@@ -252,7 +266,6 @@ class WiseTransferHandler(PaymentHandler):
                 "reference": self.profile.wise_reference,
             }
 
-        journal_context = match.get("_wise_journal")
         try:
             result = _execute_wise_transfer(
                 token,
@@ -266,9 +279,11 @@ class WiseTransferHandler(PaymentHandler):
                 recipient_status_lookup=self.recipient_status_lookup,
                 journal_context=journal_context,
             )
-        except WiseRecipientError:
-            # Fail closed and raise: never converted into a create or a
-            # quiet manual_required. Preflight normally catches this first.
+        except WiseNotSubmittedError as exc:
+            return not_submitted(str(exc))
+        except WiseRecipientError as exc:
+            if journal_context is not None:
+                return not_submitted(str(exc))
             raise
         except Exception as exc:
             log.error(f"[{self.name}] Wise transfer exception: {exc}")
@@ -316,6 +331,10 @@ class WiseTransferHandler(PaymentHandler):
                 f"⏳ {self.profile.label} submitted; not confirmed; do not pay again.\n"
                 f"  Transfer ID: {result.get('transfer_id', 'not yet known')}"
             )
+        elif status == "not_submitted":
+            return f"⚠️ {self.profile.label}: not submitted; no payment was made. A new approval is required before another attempt."
+        elif status == "funding_rejected":
+            return f"⚠️ {self.profile.label}: Wise rejected funding. The transfer exists; do not pay again."
         elif status == "manual_required":
             iban = result.get("iban", "see contacts")
             name = result.get("recipient_name", "recipient")
@@ -689,6 +708,10 @@ def _fund_transfer(token: str, profile_id: int, transfer_id: int) -> dict:
     )
 
 
+class WiseNotSubmittedError(RuntimeError):
+    """Transfer creation was never entered."""
+
+
 def _execute_wise_transfer(
     token: str,
     iban: str,
@@ -707,26 +730,32 @@ def _execute_wise_transfer(
         + ("pinned recipient" if recipient_id else f"IBAN {iban[:10]}…")
     )
 
-    if recipient_id:
-        # Verify the pinned recipient before anything else is called.
-        verify_recipient_active(token, int(recipient_id), recipient_status_lookup)
+    try:
+        if recipient_id:
+            # Verify the pinned recipient before anything else is called.
+            verify_recipient_active(token, int(recipient_id), recipient_status_lookup)
 
-    profile_id = _get_wise_profile_id(token)
-    log.info(f"[{label}] Wise profile_id: {profile_id}")
+        profile_id = _get_wise_profile_id(token)
+        log.info(f"[{label}] Wise profile_id: {profile_id}")
 
-    account_id = _get_or_create_recipient(
-        token,
-        profile_id,
-        iban,
-        recipient_name,
-        legal_type,
-        recipient_id=recipient_id,
-        recipient_status_lookup=recipient_status_lookup,
-    )
-    log.info(f"[{label}] Wise recipient account_id: {account_id}")
+        account_id = _get_or_create_recipient(
+            token,
+            profile_id,
+            iban,
+            recipient_name,
+            legal_type,
+            recipient_id=recipient_id,
+            recipient_status_lookup=recipient_status_lookup,
+        )
+        log.info(f"[{label}] Wise recipient account_id: {account_id}")
 
-    quote_uuid = _create_quote(token, profile_id, amount_eur)
-    log.info(f"[{label}] Wise quote_uuid: {quote_uuid}")
+        quote_uuid = _create_quote(token, profile_id, amount_eur)
+        log.info(f"[{label}] Wise quote_uuid: {quote_uuid}")
+
+    except Exception as exc:
+        if journal_context is not None:
+            raise WiseNotSubmittedError(str(exc)) from exc
+        raise
 
     if journal_context is not None:
         import payment_journal
@@ -763,6 +792,9 @@ def _execute_wise_transfer(
             "reference": reference,
             "wise_status": status,
         }
+    elif status == "REJECTED":
+        return {"status": "funding_rejected", "transfer_id": transfer_id,
+                "error": "Wise rejected funding"}
     else:
         raise RuntimeError(
             f"Wise funding status unexpected: {status} — full result: {funding_result}"

@@ -21,7 +21,7 @@ from handlers import wise_transfer as wise  # noqa: E402
 from test_payment_approval import env as approval_env  # noqa: E402,F401
 from test_payment_approval_authority import _approve  # noqa: E402
 from test_telegram_gate import sent_messages, _install_handlers  # noqa: E402,F401
-from test_session_payments import _event  # noqa: E402
+from test_session_payments import _event, world  # noqa: E402,F401
 
 
 def test_pending_obligation_state_is_distinct_from_intent():
@@ -66,7 +66,7 @@ def test_funding_status_is_pending_and_never_updates_task(attempt, monkeypatch, 
     assert journal.load(attempt)["obligations"]["obligation"].get("outcome_status") is None
 
 
-@pytest.mark.parametrize("status", ["REJECTED", "SOMETHING_NEW", None])
+@pytest.mark.parametrize("status", ["SOMETHING_NEW", None])
 def test_rejected_or_missing_funding_status_holds_existing_transfer(attempt, monkeypatch, status):
     monkeypatch.setattr(wise, "_get_wise_profile_id", lambda token: 1)
     monkeypatch.setattr(wise, "_get_or_create_recipient", lambda *a, **k: 2)
@@ -82,6 +82,21 @@ def test_rejected_or_missing_funding_status_holds_existing_transfer(attempt, mon
     assert entry["state"] == "intent" and entry["transfer_id"] == 3
     with pytest.raises(journal.JournalError, match="already recorded"):
         journal.record_intent(attempt, "obligation", "approval", generation=1, rail="wise")
+
+
+def test_rejected_funding_names_rejection_and_holds_transfer(attempt, monkeypatch):
+    monkeypatch.setattr(wise, "_get_wise_profile_id", lambda *_: 1)
+    monkeypatch.setattr(wise, "_get_or_create_recipient", lambda *a, **k: 2)
+    monkeypatch.setattr(wise, "_create_quote", lambda *a: "quote")
+    monkeypatch.setattr(wise, "_create_transfer", lambda *a: 3)
+    monkeypatch.setattr(wise, "_fund_transfer", lambda *a: {"status": "REJECTED"})
+    result = wise._execute_wise_transfer(
+        "synthetic-token", "XX000", "Synthetic", 1, "ref",
+        journal_context=(attempt, "obligation"),
+    )
+    assert result["status"] == "funding_rejected"
+    entry = journal.load(attempt)["obligations"]["obligation"]
+    assert entry["state"] == "intent" and entry["transfer_id"] == 3
 
 
 def test_failed_pending_write_keeps_intent_and_consumed_approval(attempt, monkeypatch):
@@ -322,7 +337,7 @@ def test_email_copy_for_pending_transfer_forbids_another_payment():
     _, body = consent_email.build_request_body(
         [item], superseded=False, unknown={"synthetic-obligation"}
     )
-    assert "submitted; not confirmed; do not pay again" in body
+    assert "outcome unknown; do not pay again" in body
     assert "already paid" not in body
 
 
@@ -490,6 +505,8 @@ def test_telegram_pending_confirmation_never_closes_session_or_resends(
         wise_recipient_id=5, wise_recipient_name="Synthetic",
         neotoma_task_id="synthetic-task",
     ))
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda text, **kw: alerts.append(text))
     handler.recipient_status_lookup = lambda token, rid: {"id": rid, "active": True}
     _install_handlers(monkeypatch, [handler])
     event = _event("evt-1", summary="synthetic",
@@ -513,5 +530,417 @@ def test_telegram_pending_confirmation_never_closes_session_or_resends(
     assert journal.session_state(journal.load(path), "synthetic:evt-1") == "pending"
     assert any("submitted; not confirmed; do not pay again" in msg for msg in sent_messages)
     assert monedula.main() is False  # unresolved transfer remains a hold
+    assert any("Monedula is checking" in text and "do not pay again" in text
+               for text in alerts)
+    assert not any("result was never recorded" in text for text in alerts)
     assert calls == ["create", "fund"]
     assert journal.session_state(journal.load(path), "synthetic:evt-1") == "pending"
+
+
+@pytest.mark.parametrize("rail_status", ["incoming_payment_waiting", "funds_refunded", "cancelled"])
+def test_oneoff_next_day_holds_same_attempt_on_default_approval(
+    approval_env, monkeypatch, rail_status
+):
+    """A new tick date cannot mint a second consent or transfer for one invoice."""
+    import consent_email
+    import monedula
+    from handlers.payment_profile import PaymentProfile
+
+    world, approvals = approval_env
+    world.handler = wise.WiseTransferHandler(PaymentProfile(
+        prefix="INVOICE", label="Synthetic invoice", calendar_keywords=[],
+        payment_type="wise", amount_eur=10, wise_reference="ref",
+        due_date="2026-01-01", one_off=True, wise_recipient_id=5,
+        wise_recipient_name="Synthetic", neotoma_task_id="synthetic-task",
+    ))
+    world.handler.recipient_status_lookup = lambda token, rid: {"id": rid, "active": True}
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda text, **kw: alerts.append(text))
+    monkeypatch.setenv("WISE_API_TOKEN", "synthetic-token")
+    monkeypatch.setattr(wise, "_get_wise_profile_id", lambda *_: 1)
+    monkeypatch.setattr(wise, "_create_quote", lambda *_: "quote")
+    calls = []
+    monkeypatch.setattr(wise, "_create_transfer", lambda *args: calls.append("create") or 3)
+    monkeypatch.setattr(wise, "_fund_transfer", lambda *args: calls.append("fund") or
+                        {"status": "COMPLETED"})
+    monkeypatch.setattr(wise, "_wise_get", lambda *_: {
+        "status": rail_status, "updated": datetime.now(timezone.utc).isoformat()
+    })
+    first = consent_email.build_pending_items(
+        [(world.handler, world.handler.matches([]))], "2026-11-18"
+    )[0]
+    second = consent_email.build_pending_items(
+        [(world.handler, world.handler.matches([]))], "2026-11-19"
+    )[0]
+    assert first.obligation == second.obligation
+    world.tick()
+    _approve(approvals, answer="yes invoice")
+    world.tick(minutes=15)
+    assert calls == ["create", "fund"]
+    assert world.tick(minutes=1440) is False
+    assert approvals.writes == 1
+    assert calls == ["create", "fund"]
+    assert any("do not pay again" in text.lower() for text in alerts)
+    if rail_status == "incoming_payment_waiting":
+        assert any("Monedula is checking" in text for text in alerts)
+    state = journal.load(consent_email.journal_path())["obligations"][first.obligation]["state"]
+    assert state == ("failed" if rail_status in {"funds_refunded", "cancelled"} else "funding_pending")
+
+
+def test_old_tick_date_oneoff_key_still_holds(monkeypatch, tmp_path):
+    import monedula
+    from handlers.payment_profile import PaymentProfile
+    from handlers.wise_transfer import WiseTransferHandler
+    from consent_email import obligation_key
+
+    handler = WiseTransferHandler(PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", calendar_keywords=[],
+        payment_type="wise", amount_eur=1, due_date="2026-01-01",
+    ))
+    attempt = tmp_path / journal.JOURNAL_NAME
+    journal.init_journal(attempt)
+    old_key = obligation_key(handler, "2026-01-02", "")
+    journal.record_intent(attempt, old_key, "old", generation=2,
+                          rail="wise", handler_name=handler.name)
+    journal.record_transfer_created(attempt, old_key, 3)
+    journal.record_funding_pending(attempt, old_key, 3, "COMPLETED")
+    monkeypatch.setattr("consent_email.STATE_FILE", attempt.parent / "consent.json")
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda text, **kw: alerts.append(text))
+    assert monedula._apply_session_journal(
+        [(handler, [{"trigger": "due_date", "due_date": "2026-01-01"}])],
+        reconcile=True,
+    ) == []
+    assert any("do not pay again" in text for text in alerts)
+
+
+@pytest.mark.parametrize("failure", ["account", "quote", "token", "create", "rejected"])
+def test_wise_submission_boundary_and_alert(attempt, monkeypatch, failure):
+    import monedula
+    from handlers.payment_profile import PaymentProfile
+
+    handler = wise.WiseTransferHandler(PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", calendar_keywords=[],
+        payment_type="wise", amount_eur=1, wise_recipient_id=5,
+        wise_recipient_name="Synthetic",
+    ))
+    handler.recipient_status_lookup = lambda token, rid: {"id": rid, "active": True}
+    monkeypatch.setenv("WISE_API_TOKEN", "synthetic-token")
+    monkeypatch.setattr(wise, "_get_wise_profile_id", lambda *_: 1)
+    monkeypatch.setattr(wise, "_get_or_create_recipient", lambda *a, **k:
+                        (_ for _ in ()).throw(RuntimeError("account failed")) if failure == "account" else 5)
+    monkeypatch.setattr(wise, "_create_quote", lambda *a:
+                        (_ for _ in ()).throw(RuntimeError("quote failed")) if failure == "quote" else "quote")
+    calls = []
+    def create(*args):
+        calls.append("create")
+        if failure == "create":
+            raise TimeoutError("unknown response")
+        return 3
+    monkeypatch.setattr(wise, "_create_transfer", create)
+    monkeypatch.setattr(wise, "_fund_transfer", lambda *a: calls.append("fund") or
+                        {"status": "REJECTED"})
+    if failure == "token":
+        monkeypatch.delenv("WISE_API_TOKEN")
+    result = handler.execute({"_wise_journal": (attempt, "obligation")})
+    entry = journal.load(attempt)["obligations"]["obligation"]
+    item = type("Item", (), {"handler_name": "synthetic", "payment_date": "2026-01-01",
+                              "amount_eur": 1, "obligation": "obligation"})()
+    alert = monedula._outcome_alert(item, result)[1]
+    if failure in {"account", "quote", "token"}:
+        assert result["status"] == "not_submitted"
+        assert entry["state"] == "failed" and entry["failure_status"] == "not_submitted"
+        assert "not submitted" in alert and "no payment was made" in alert
+        assert calls == []
+    elif failure == "create":
+        assert result["status"] == "funding_pending"
+        assert entry["state"] == "intent" and entry.get("transfer_id") is None
+        assert "submitted" in alert and "do not pay again" in alert
+        assert calls == ["create"]
+    else:
+        assert result["status"] == "funding_rejected"
+        assert entry["state"] == "intent" and entry["transfer_id"] == 3
+        assert "rejected funding" in alert and calls == ["create", "fund"]
+    with pytest.raises(journal.JournalError, match="already recorded"):
+        journal.record_intent(attempt, "obligation", "new-approval", generation=2, rail="wise")
+
+
+def test_mixed_offset_status_and_recovered_discrepancy(attempt):
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                               "2026-01-01T10:00:00+00:00")
+    journal.record_wise_status(attempt, "obligation", 3, "funds_refunded",
+                               "2026-01-01T12:00:00+00:00")
+    assert journal.load(attempt)["obligations"]["obligation"]["discrepancy_status"] == "funds_refunded"
+    journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                               "2026-01-01T13:00:00+01:00")
+    assert journal.load(attempt)["obligations"]["obligation"].get("discrepancy_status") is None
+    assert not journal.record_wise_status(attempt, "obligation", 3, "processing",
+                                          "2026-01-01T14:00:00+03:00")
+    assert journal.load(attempt)["obligations"]["obligation"]["last_status"] == "outgoing_payment_sent"
+
+
+def test_btc_legacy_done_non_sent_stays_done():
+    assert journal.obligation_state({"obligations": {"btc": {
+        "state": "done", "outcome_status": "manual_required"
+    }}}, "btc") == "done"
+
+
+@pytest.mark.parametrize("journal_condition", ["not_initialized", "missing", "malformed", "locked"])
+def test_entrypoint_journal_failure_uses_fixed_alert_and_nonzero(
+    tmp_path, monkeypatch, journal_condition
+):
+    import monedula
+    import consent_email
+    import types
+
+    path = tmp_path / journal.JOURNAL_NAME
+    if journal_condition != "not_initialized":
+        journal.init_journal(path)
+    if journal_condition == "missing":
+        path.unlink()
+    elif journal_condition == "malformed":
+        path.write_text("not json")
+    monkeypatch.setattr(consent_email, "STATE_FILE", tmp_path / "consent.json")
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda msg, **kw: alerts.append((msg, kw)))
+    monkeypatch.setattr(monedula, "_record_notify_health", lambda: None)
+    strandings_checked = []
+    monkeypatch.setattr(monedula, "escalate_strandings",
+                        lambda rows: strandings_checked.append(rows))
+    monkeypatch.setitem(sys.modules, "handlers", types.SimpleNamespace(
+        load_handlers=lambda rows: []
+    ))
+    if journal_condition == "locked":
+        with journal.single_writer(path):
+            code = monedula.run_entrypoint()
+    else:
+        code = monedula.run_entrypoint()
+    assert code == 1
+    assert strandings_checked == [[]]
+    assert any("payment journal" in msg and kw.get("priority") == "blocker"
+               for msg, kw in alerts)
+    if journal_condition in {"not_initialized", "missing"}:
+        assert any(kw.get("dedupe_key") == "monedula:payment_journal_missing"
+                   for _, kw in alerts)
+    assert not any("fatal error" in msg for msg, _ in alerts)
+
+
+def test_reconcile_read_failure_makes_main_nonclean(tmp_path, monkeypatch):
+    import monedula
+    import consent_email
+    import types
+    from handlers.payment_profile import PaymentProfile
+
+    path = tmp_path / journal.JOURNAL_NAME
+    journal.init_journal(path)
+    journal.record_intent(path, "obligation", "approval", generation=1,
+                          rail="wise", handler_name="synthetic")
+    journal.record_transfer_created(path, "obligation", 3)
+    journal.record_funding_pending(path, "obligation", 3, "COMPLETED")
+    handler = wise.WiseTransferHandler(PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", payment_type="wise",
+        amount_eur=1, calendar_keywords=[], due_date="",
+    ))
+    monkeypatch.setattr(consent_email, "STATE_FILE", tmp_path / "consent.json")
+    monkeypatch.setitem(sys.modules, "handlers", types.SimpleNamespace(
+        load_handlers=lambda rows: [handler]
+    ))
+    monkeypatch.setenv("WISE_API_TOKEN", "synthetic-token")
+    monkeypatch.setattr(wise, "_wise_get", lambda *a:
+                        (_ for _ in ()).throw(RuntimeError("read failed")))
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda msg, **kw: alerts.append(msg))
+    monkeypatch.setattr(monedula, "fetch_yesterday_events", lambda: [])
+    monkeypatch.setattr(monedula, "fetch_due_payment_tasks", lambda *a, **k: [])
+    monkeypatch.setattr(monedula, "escalate_strandings", lambda rows: rows)
+    assert monedula.main() is False
+    assert any("read failed" in msg and "do not pay again" in msg for msg in alerts)
+
+
+def test_reconcile_schedule_write_failure_uses_journal_alert(attempt, monkeypatch):
+    import monedula
+    import consent_email
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_funding_pending(attempt, "obligation", 3, "COMPLETED")
+    monkeypatch.setattr(consent_email, "STATE_FILE", attempt.parent / "consent.json")
+    monkeypatch.setenv("WISE_API_TOKEN", "synthetic-token")
+    monkeypatch.setattr(wise, "_wise_get", lambda *a: {
+        "status": "bounced_back", "updated": datetime.now(timezone.utc).isoformat()
+    })
+    monkeypatch.setattr(journal, "schedule_wise_check", lambda *a:
+                        (_ for _ in ()).throw(journal.JournalError("synthetic write failure")))
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda msg, **kw: alerts.append(msg))
+    assert monedula._reconcile_wise_entries([]) is False
+    assert any("payment journal could not be read or written" in msg for msg in alerts)
+
+
+def test_daemon_env_is_loaded_before_module_constants_in_clean_process(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    fake = tmp_path / "fake.env"
+    expected = {
+        "TELEGRAM_BOT_TOKEN": "fake-bot", "TELEGRAM_CHAT_ID": "fake-chat",
+        "TELEGRAM_ALLOWED_USER_ID": "fake-user", "TELEGRAM_TOPIC_MONEDULA": "fake-topic",
+        "NEOTOMA_BEARER_TOKEN": "fake-bearer", "NEOTOMA_BASE_URL": "https://example.invalid",
+        "MONEDULA_DEAD_GATE_THRESHOLD": "7",
+    }
+    fake.write_text("".join(f"{k}={v}\n" for k, v in expected.items()))
+    repo = Path(__file__).resolve().parents[3]
+    code = (
+        "import json, monedula; "
+        "print(json.dumps({k: str(getattr(monedula, k)) for k in "
+        + repr(list(expected)) + "}))"
+    )
+    env = {"HOME": str(tmp_path), "PATH": os.environ.get("PATH", ""),
+           "ATELES_DOTENV_FILE": str(fake), "PYTHONPATH": f"{repo}:{Path(__file__).parent}"}
+    completed = subprocess.run([sys.executable, "-c", code], env=env,
+                               text=True, capture_output=True, check=True)
+    assert json.loads(completed.stdout.splitlines()[-1]) == expected
+
+
+def test_email_second_tick_pending_sends_no_new_consent(world, monkeypatch):
+    import consent_email
+    import monedula
+    from handlers.payment_profile import PaymentProfile
+    from lib.approval.email_channel import ReadRepliesOutcome
+    from lib.approval.tokens import subject_marker
+
+    world.handler = wise.WiseTransferHandler(PaymentProfile(
+        prefix="INVOICE", label="Synthetic invoice", payment_type="wise",
+        calendar_keywords=[],
+        amount_eur=1, due_date="2026-01-01", one_off=True,
+        wise_recipient_id=5, wise_recipient_name="Synthetic",
+    ))
+    world.handler.recipient_status_lookup = lambda token, rid: {"id": rid, "active": True}
+    monkeypatch.setenv("WISE_API_TOKEN", "synthetic-token")
+    monkeypatch.setattr(wise, "_get_wise_profile_id", lambda *_: 1)
+    monkeypatch.setattr(wise, "_create_quote", lambda *_: "quote")
+    calls = []
+    monkeypatch.setattr(wise, "_create_transfer", lambda *a: calls.append("create") or 3)
+    monkeypatch.setattr(wise, "_fund_transfer", lambda *a: calls.append("fund") or
+                        {"status": "COMPLETED"})
+    monkeypatch.setattr(wise, "_wise_get", lambda *a: {
+        "status": "incoming_payment_waiting", "updated": datetime.now(timezone.utc).isoformat()
+    })
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda text, **kw: alerts.append(text))
+    world.tick()
+    assert len(world.sends) == 1
+    monkeypatch.setattr(consent_email, "read_replies_with_status", lambda tokens, **kw:
+                        ReadRepliesOutcome(kind="ok", texts=[
+                            f"RE: {subject_marker(t)}\nAPPROVE" for t in tokens
+                        ]))
+    world.tick(minutes=15)
+    assert calls == ["create", "fund"]
+    world.tick(minutes=1440)
+    assert len(world.sends) == 1
+    assert calls == ["create", "fund"]
+    assert any("Monedula is checking" in text and "do not pay again" in text
+               for text in alerts)
+
+
+def test_reconcile_does_not_read_terminal_failure_each_tick(attempt, monkeypatch):
+    import monedula
+    import consent_email
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_wise_status(attempt, "obligation", 3, "cancelled",
+                               "2026-01-01T00:00:00+00:00")
+    monkeypatch.setattr(consent_email, "STATE_FILE", attempt.parent / "consent.json")
+    monkeypatch.setenv("WISE_API_TOKEN", "synthetic-token")
+    monkeypatch.setattr(wise, "_wise_get", lambda *a:
+                        pytest.fail("terminal failure must not be read again"))
+    assert monedula._reconcile_wise_entries([])
+    assert monedula._reconcile_wise_entries([])
+
+
+def test_overdue_pending_transfer_alerts_without_another_submission(attempt, monkeypatch):
+    import monedula
+    import consent_email
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_funding_pending(attempt, "obligation", 3, "COMPLETED")
+    data = journal.load(attempt)
+    data["obligations"]["obligation"]["funding_at"] = (
+        time.time() - monedula.WISE_PENDING_ALERT_AFTER_SECONDS - 1
+    )
+    journal._write(attempt, data)
+    monkeypatch.setattr(consent_email, "STATE_FILE", attempt.parent / "consent.json")
+    monkeypatch.setenv("WISE_API_TOKEN", "synthetic-token")
+    monkeypatch.setattr(wise, "_wise_get", lambda *a: {
+        "status": "processing", "updated": datetime.now(timezone.utc).isoformat()
+    })
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda text, **kw: alerts.append(text))
+    assert monedula._reconcile_wise_entries([])
+    assert any("two days" in text and "do not pay again" in text for text in alerts)
+    assert journal.load(attempt)["obligations"]["obligation"]["state"] == "funding_pending"
+
+
+def test_confirmed_oneoff_profile_is_reloaded_before_matching(tmp_path, monkeypatch):
+    import monedula
+    import consent_email
+    import types
+    from handlers.payment_profile import PaymentProfile
+
+    journal.init_journal(tmp_path / journal.JOURNAL_NAME)
+    monkeypatch.setattr(consent_email, "STATE_FILE", tmp_path / "consent.json")
+    handler = wise.WiseTransferHandler(PaymentProfile(
+        prefix="INVOICE", label="Synthetic", payment_type="wise", amount_eur=1,
+        calendar_keywords=[],
+        due_date="2026-01-01", one_off=True,
+    ))
+    matched = []
+    monkeypatch.setattr(handler, "matches", lambda events: matched.append(events) or [])
+    active = [handler]
+    monkeypatch.setitem(sys.modules, "handlers", types.SimpleNamespace(
+        load_handlers=lambda rows: list(active)
+    ))
+    monkeypatch.setattr(monedula, "_reconcile_wise_entries", lambda handlers:
+                        active.clear() or True)
+    monkeypatch.setattr(monedula, "fetch_yesterday_events", lambda: [])
+    monkeypatch.setattr(monedula, "fetch_due_payment_tasks", lambda *a, **k: [])
+    monkeypatch.setattr(monedula, "escalate_strandings", lambda rows: rows)
+    monkeypatch.setattr(monedula, "_notify", lambda *a, **k: None)
+    monedula.main()
+    assert matched == []
+
+
+def test_not_submitted_attempt_can_only_be_reserved_with_new_approval(attempt):
+    journal.record_wise_not_submitted(attempt, "obligation")
+    with pytest.raises(journal.JournalError, match="fresh approval"):
+        journal.record_approved_replacement_intent(
+            attempt, "obligation", "approval", generation=2
+        )
+    journal.record_approved_replacement_intent(
+        attempt, "obligation", "second-approval", generation=2
+    )
+    entry = journal.load(attempt)["obligations"]["obligation"]
+    assert entry["state"] == "intent" and entry["attempt"] == 2
+    assert entry["attempts"][0]["failure_status"] == "not_submitted"
+    assert entry["attempts"][0].get("transfer_id") is None
+    assert journal.load(attempt)["consumed_tokens"]["second-approval"] == "obligation"
+
+
+def test_effect_retry_after_due_date_failure_does_not_duplicate_note(monkeypatch):
+    from fake_neotoma import FakeNeotoma
+    from handlers import task_writes
+    from handlers.payment_profile import PaymentProfile
+
+    fake = FakeNeotoma({"synthetic-task": {"title": "Synthetic task"}})
+    monkeypatch.setattr(task_writes, "make_client", fake.connection)
+    monkeypatch.setattr(wise, "_find_task_id", lambda profile: "synthetic-task")
+    monkeypatch.setattr(wise, "_find_next_event_due_date", lambda profile: "2026-12-01")
+    original = task_writes.write_field
+    monkeypatch.setattr(task_writes, "write_field", lambda client, base, task, typ, field, value:
+                        False if field == "due_date" else original(client, base, task, typ, field, value))
+    profile = PaymentProfile(prefix="SYNTHETIC", label="Synthetic", payment_type="wise",
+                             amount_eur=1, calendar_keywords=["synthetic"])
+    result = {"status": "sent", "transfer_id": 3, "paid_at_date": "2026-01-01"}
+    assert wise._update_task(profile, result) is False
+    assert wise._update_task(profile, result) is False
+    notes = fake.entities["synthetic-task"]["notes"]
+    assert notes.count("Wise transfer_id=3") == 1
+    assert len(fake.writes("notes")) == 1

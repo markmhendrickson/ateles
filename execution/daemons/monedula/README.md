@@ -450,7 +450,24 @@ leaves `intent` or `funding_pending`, never a retry. The daemon serializes ticks
 with a lock on the existing first-use marker. BTC `sent` remains its existing
 final handler result. The journal also issues the monotonically
 increasing request generation. A missing journal and marker hold every payment
-on both the default approval and Telegram routes. **First use or deliberate
+on both the default approval and Telegram routes.
+
+For one-off invoices, the obligation key uses the invoice due date and profile
+terms, so it does not change on the next tick. Journal rows written under the
+older tick-date key remain under that key; their handler identity holds a new
+match until the original transfer is resolved. The daemon reloads active
+profiles after reconciliation so an archived one-off cannot be asked again in
+the same tick. A failed account lookup, quote, or missing token before Wise
+transfer creation is recorded as `not_submitted`: no payment was made, and a
+new operator approval is needed before a numbered attempt on the same
+obligation. A create call that was entered but returned no ID remains unknown
+and held; a rejected funding response names the rejection while holding the
+existing transfer for a read. Neither consent route yet implements the fresh
+approval and execution of a numbered replacement; a human must reconcile the
+original and the Finances lead must verify that adapter before a retry is
+available. Pending attempts older than two calendar days raise a deduped alert.
+
+**First use or deliberate
 fresh start:** reconcile against the chain and wallet, then run from the repo
 root:
 
