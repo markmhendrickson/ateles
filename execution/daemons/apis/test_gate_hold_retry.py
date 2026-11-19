@@ -61,8 +61,9 @@ def test_unproven_hold_is_bounded_and_never_authorizes(monkeypatch):
 
 
 @pytest.mark.parametrize("lands", [True, False])
-def test_dispatch_creates_checkpoint_only_after_late_hold_lands(monkeypatch, lands):
-    snapshot = {"title": "Generic task", "tags": ["ops"], "status": "pending", "confidence": 0.2}
+@pytest.mark.parametrize("title", ["Generic task", "A" * 80])
+def test_dispatch_creates_checkpoint_only_after_late_hold_lands(monkeypatch, lands, title):
+    snapshot = {"title": title, "tags": ["ops"], "status": "pending", "confidence": 0.2}
     policy = ExecutionPolicy(entity_id="policy", loaded=True)
     decision = GateDecision(
         action=GateAction.CHECKPOINT, blast_radius=BlastRadius.HIGH,
@@ -108,6 +109,8 @@ def test_dispatch_creates_checkpoint_only_after_late_hold_lands(monkeypatch, lan
     )
     assert len(briefs) == int(lands)
     assert sweep_outcomes == ["skipped_in_flight"]
+    assert notices[0].splitlines()[0] == f"PLAN checkpoint: {title[:70]}"
+    assert "task=ent_task brief=" in notices[0]
     if lands:
         assert briefs[0]["task_record"]["snapshot"]["status"] == "awaiting_approval"
         assert briefs[0]["idempotency_context"] == "hold-obs-hold"

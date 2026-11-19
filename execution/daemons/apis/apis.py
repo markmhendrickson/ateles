@@ -3656,7 +3656,7 @@ async def _dispatch_task(
                          or decision.reason.startswith("not scored by a producer"))
                 )
                 notifier.send(
-                    "PLAN checkpoint for held task\n"
+                    f"PLAN checkpoint: {title[:70]}\n"
                     f"  agent={skill} blast={decision.blast_radius.value} "
                     f"conf={_shown_confidence(confidence, confidence_source)} — "
                     f"{decision.reason}\n"
