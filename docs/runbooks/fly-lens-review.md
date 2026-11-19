@@ -1,8 +1,14 @@
 # Run a lens review on Fly
 
+## Purpose
+
 Operator ruling 2026-11-12 (agent_policy `ent_161873dfe2a269554d60187f`): lens
 reviews run on Fly first. This is the one supported command for a session lead
 or a subagent. A local subagent lens is the fallback, not the default.
+
+## Scope
+
+This runbook covers the Fly lens runner, its local fallback, and verdict posting.
 
 ## The command
 
@@ -40,10 +46,17 @@ list cannot be read, `all` also runs legal.
   --action-class lens_review:<lens>`, one Fly job at a time, with the 45 minute
   per-job limit.
 - Retries once on a mechanical failure (unknown outcome, "no result recorded
-  for run", a reply with no header and verdict line). A refusal, or a queue wait
+  for run", a missing or malformed public verdict block). A refusal, or a queue wait
   over the limit, is not retried.
-- Writes `<out-dir>/<lens>.verdict.md` (attribution header line, bold verdict
-  token line, findings: the form `post_lens_verdict.py` reads), plus
+- Requires exactly one `<<<PUBLIC-VERDICT>>>` line followed by exactly one
+  `<<<END-PUBLIC-VERDICT>>>` line. Only the unchanged text between them is
+  eligible for posting, including its attribution header and bold verdict.
+  Text outside the block is held in a 0600 private file. A lens that ignores
+  the format is retried once, then falls back locally; its reply is never
+  posted as-is. Text placed inside a valid block is public, regardless of its
+  wording, so the lens must keep out-of-scope details outside it or omit them.
+- Writes `<out-dir>/<lens>.verdict.md` (the public block's attribution header,
+  bold verdict token and findings: the form `post_lens_verdict.py` reads), plus
   `<lens>.brief.md`, per-attempt JSON, and `summary.json` (provider, duration,
   Fly run id, reviewed head, attempts, verdict).
 - Posts nothing unless `--post`, which then calls `post_lens_verdict.py` per

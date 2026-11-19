@@ -47,7 +47,6 @@ import re
 import subprocess
 import sys
 import time
-import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -79,14 +78,13 @@ DEFAULT_POST = SCRIPT_DIR / "post_lens_verdict.py"
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 VERDICT_RE = re.compile(r"^\*\*(SIGNED_OFF|APPROVE|BLOCKED|REQUEST_CHANGES)\*\*\s*$")
-# A lens header written with a colon after the name instead of the contract's
-# dash (`**🤖 Pavo: Ateles swarm, pm lens panelist**`). The model avoids em
-# dashes by house style, so it writes this shape; the gate reader
-# (`swarm_dispatch._OWN_HEADER_RE`) accepts dashes only. Name and role follow
-# that pattern's groups, with the colon excluded from the name.
-COLON_HEADER_RE = re.compile(
-    r"^\*\*🤖\s*(?P<name>[^\s:—–-](?:[^:—–\-\n]*[^\s:—–\-\n])?)\s*:\s*Ateles swarm,"
-    r"\s*(?P<role>\S(?:[^\n]*?\S)?)\s*\*\*\s*$"
+HEADER_RE = re.compile(r"^\*\*🤖\s+\S.+?\s+[—–-]\s+Ateles swarm,\s+\S.+\*\*$")
+PUBLIC_VERDICT_OPEN = "<<<PUBLIC-VERDICT>>>"
+PUBLIC_VERDICT_CLOSE = "<<<END-PUBLIC-VERDICT>>>"
+PUBLIC_VERDICT_FORMAT_REMINDER = (
+    "Put one header and verdict inside exactly one public block: "
+    f"{PUBLIC_VERDICT_OPEN} and {PUBLIC_VERDICT_CLOSE} on their own lines, "
+    "in that order. Return the full review in that block."
 )
 # A deterministic refusal at the router: do not retry, fall back at once.
 REFUSAL_HINTS = ("refus", "not eligible", "not pinnable", "no provider", "headroom")
@@ -263,14 +261,15 @@ of the repository, not from the PR). Apply its review criteria.
 - Read-only. Never `git stash`, never `--no-verify`, never commit or push,
   never read credential files. No writes of any kind to GitHub or Neotoma.
 - Report EVERY finding of a class at once, not one variant.
-- If you find a security weakness OUTSIDE this PR's scope, put no details in
-  the verdict body; write only "One out-of-scope hardening observation was
-  recorded privately." in the body, and put the details AFTER a line reading
-  `PRIVATE-NOTE:` at the very end of your reply. Everything from that line on
-  is removed before anything is posted and is kept privately; nothing above
-  that line is ever private, and your whole reply is otherwise posted as-is.
+- If you find an observation outside this PR's scope, omit its details from
+  the public block. You may put it outside the block, before or after it;
+  preferably omit it from the reply entirely.
 
-## Output (your entire reply is the verdict body)
+## Output
+Write the review inside exactly one block. Open with `{PUBLIC_VERDICT_OPEN}`
+on a line of its own and close with `{PUBLIC_VERDICT_CLOSE}` on a line of its
+own. ONLY the text between these lines is posted. Everything outside the block
+is kept privately and never shown. A missing or malformed block is never posted.
 - Line 1: your attribution header, e.g. `**🤖 {role.capitalize()} — Ateles swarm, {lens} lens panelist**`.
   The separator after your name must be the dash character shown (—), not a
   colon or any other character.
@@ -339,79 +338,73 @@ def dispatch_once(*, python: str, dispatch_script: Path, role: str, lens: str,
     return env
 
 
-def extract_verdict(stdout: str) -> str | None:
-    """The verdict body in post_lens_verdict.py's form, or None.
+def extract_public(body: str) -> tuple[str, str, str]:
+    """Return (unchanged public text, held text, status).
 
-    Header line, then the bold verdict token line. Any preamble before the
-    header is dropped.
+    Only exact delimiter lines count. Lines in Markdown fences or HTML comments
+    do not count; if they are the only apparent delimiters, the reply is held.
+    A malformed reply is held in full, including any apparent public block.
     """
-    lines = (stdout or "").strip().splitlines()
-    for i, line in enumerate(lines):
-        if i >= 1 and VERDICT_RE.match(line.strip()) and lines[i - 1].strip():
-            return "\n".join(lines[i - 1:]).strip() + "\n"
-    return None
+    lines = body.splitlines(keepends=True)
+    openings: list[int] = []
+    closings: list[int] = []
+    fence = ""
+    html_comment = False
+    for index, line in enumerate(lines):
+        bare = line.rstrip("\r\n").strip(" \t")
+        if html_comment:
+            html_comment = "-->" not in line
+            continue
+        if fence:
+            if bare.startswith(fence) and bare.lstrip(fence[0]).strip(" \t") == "":
+                fence = ""
+            continue
+        if bare.startswith("```") or bare.startswith("~~~"):
+            fence = bare[:len(bare) - len(bare.lstrip(bare[0]))]
+            continue
+        if "<!--" in line:
+            html_comment = "-->" not in line.split("<!--", 1)[1]
+            continue
+        if bare == PUBLIC_VERDICT_OPEN:
+            openings.append(index)
+        elif bare == PUBLIC_VERDICT_CLOSE:
+            closings.append(index)
+
+    if len(openings) > 1 or len(closings) > 1:
+        return "", body, "duplicated"
+    if closings and (not openings or closings[0] < openings[0]):
+        return "", body, "out_of_order"
+    if not openings:
+        return "", body, "missing"
+    if not closings:
+        return "", body, "unclosed"
+
+    start, end = openings[0], closings[0]
+    inner = lines[start + 1:end]
+    while inner and not inner[0].strip(" \t\r\n"):
+        inner.pop(0)
+    while inner and not inner[-1].strip(" \t\r\n"):
+        inner.pop()
+    public = "".join(inner)
+    public_lines = public.splitlines()
+    if (len(public_lines) < 2 or not HEADER_RE.fullmatch(public_lines[0])
+            or not VERDICT_RE.fullmatch(public_lines[1].strip())):
+        return "", body, "invalid_verdict"
+    held = "".join(lines[:start] + lines[end + 1:])
+    return public, held, "ok"
 
 
-# A line that opens a private section of a lens reply. The brief asks for `PRIVATE-NOTE:`; a lens
-# also wrote "Private to the requesting session ..." unprompted once and it was posted publicly, so
-# both are recognised, by their WORDS and not by exact punctuation: each line is normalised first
-# (NFKC so full-width and compatibility forms fold, zero-width characters and the BOM removed,
-# case folded, markdown prefix and emphasis dropped) and the marker is then matched with any
-# hyphen, underscore or space between its words. A marker line is the marker followed by a colon
-# (ASCII or full-width, with at most a short qualifier before it) or standing alone on its line (a
-# heading). Everything from the first such line on (and a horizontal rule directly above it) is
-# private: never posted, kept in a 0600 file.
-_ZERO_WIDTH_RE = re.compile("[\u200b-\u200f\u2060-\u2064\ufeff\u00ad]")
-_MARKUP_PREFIX_RE = re.compile(r"^[\s>#*_`~\-+\d.()\[\]|]+")
-PRIVATE_LINE_RE = re.compile(
-    r"^(?:private[\W_]*notes?(?:[^\n:\uff1a]{0,40}[:\uff1a].*|\W*)"
-    r"|private[\W_]*(?:to[\W_]*)?(?:the[\W_]*)?requesting[\W_]*session.*)$")
-
-
-def _normalise_line(line: str) -> str:
-    text = unicodedata.normalize("NFKC", line)
-    text = _ZERO_WIDTH_RE.sub("", text).casefold()
-    text = _MARKUP_PREFIX_RE.sub("", text)
-    return text.replace("*", "").replace("_", "_").replace("`", "").replace("~", "").strip()
-
-
-def _private_line(line: str) -> bool:
-    return bool(PRIVATE_LINE_RE.match(_normalise_line(line)))
-
-
-RECORDED_PRIVATELY_RE = re.compile(r"recorded\s+privately", re.IGNORECASE)
-
-
-def split_private(body: str) -> tuple[str, str]:
-    """(public body, private text). The private text is "" when the reply has no private section."""
-    lines = body.splitlines()
-    for i, line in enumerate(lines):
-        if _private_line(line):
-            cut = i
-            j = i - 1
-            while j >= 0 and not lines[j].strip():
-                j -= 1
-            if j >= 0 and re.fullmatch(r"\s*(?:-{3,}|\*{3,}|_{3,})\s*", lines[j]):
-                cut = j
-            public = "\n".join(lines[:cut]).rstrip() + "\n"
-            return public, "\n".join(lines[cut:]).strip() + "\n"
-    return body, ""
-
-
-def normalize_header(body: str, *, role: str) -> str:
-    """Rewrite a colon-separated line 1 into the contract's dash form.
-
-    Only line 1 changes, and only when it is this lens's own header in the
-    colon shape (`**🤖 <Name>: Ateles swarm, <role>**` with <Name> equal to
-    *role*). A header naming another agent, or any other line, is left as
-    it is, so the gate reader still refuses it. Every byte after line 1 is
-    kept.
-    """
-    first, sep, rest = body.partition("\n")
-    m = COLON_HEADER_RE.match(first)
-    if not m or m.group("name").strip().lower() != role.strip().lower():
-        return body
-    return f"**🤖 {m.group('name')} — Ateles swarm, {m.group('role')}**{sep}{rest}"
+def save_held_text(path: Path, held: str) -> None:
+    """Append a reply's held text without ever opening a writable wide-mode file."""
+    if not held:
+        return
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(held)
+        if not held.endswith("\n"):
+            fh.write("\n")
 
 
 def classify_failure(env: dict[str, Any]) -> str:
@@ -444,6 +437,11 @@ def run_lens(*, lens: str, repo: str, pr: int, head: str, task_entity_id: str,
     t_lens = clock()
     last_reason = "unknown"
     for attempt in range(1, MAX_ATTEMPTS + 1):
+        if attempt > 1 and last_reason.startswith("public block:"):
+            task_file.write_text(compose_brief(repo=repo, pr=pr, head=head,
+                                               lens=lens, role=role, extra=extra)
+                                 + "\n## Format correction\n"
+                                 + PUBLIC_VERDICT_FORMAT_REMINDER + "\n")
         t0 = clock()
         env = dispatch(python=python, dispatch_script=dispatch_script, role=role,
                        lens=lens, repo=repo, task_entity_id=task_entity_id,
@@ -454,36 +452,19 @@ def run_lens(*, lens: str, repo: str, pr: int, head: str, task_entity_id: str,
                "run_id": env.get("remote_run_id") or "",
                "outcome_unknown": bool(env.get("remote_outcome_unknown"))}
         record["attempts"].append(att)
-        (out_dir / f"{lens}.attempt{attempt}.json").write_text(
-            json.dumps({k: v for k, v in env.items() if k != "stdout"}, indent=2))
+        (out_dir / f"{lens}.attempt{attempt}.json").write_text(json.dumps({
+            "ok": bool(env.get("ok")), "provider": env.get("provider"),
+            "remote_run_id": env.get("remote_run_id"),
+            "remote_outcome_unknown": bool(env.get("remote_outcome_unknown")),
+            "returncode": env.get("returncode"),
+        }, indent=2))
         if env.get("ok"):
-            body = extract_verdict(str(env.get("stdout", "")))
-            if body is not None:
-                body = normalize_header(body, role=role)
-                body, private = split_private(body)
-                public_lines = body.splitlines()
-                if len(public_lines) < 2 or not VERDICT_RE.match(public_lines[1].strip()):
-                    # Removing the private section left no header and verdict: fail closed
-                    # (an unreadable reply, retried once) rather than post an empty body.
-                    last_reason = "the reply had no header and verdict above its private section"
-                    att["problem"] = last_reason
-                    log(f"{lens}: attempt {attempt}: {last_reason}")
-                    continue
-                if private:
-                    note = out_dir / f"{lens}.private.txt"
-                    fd = os.open(note, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                    with os.fdopen(fd, "w") as fh:
-                        fh.write(private)
-                    os.chmod(note, 0o600)  # also when the file already existed with another mode
-                    log(f"{lens}: a private section ({len(private.splitlines())} lines) was removed "
-                        f"from the verdict (kept in {note.name})")
-                elif RECORDED_PRIVATELY_RE.search(body):
-                    # The reply says an observation was recorded privately but no private section
-                    # was found: the details may sit in a form the matching missed. Never post.
-                    last_reason = "the reply says an observation was recorded privately but has no private section"
-                    att["problem"] = last_reason
-                    log(f"{lens}: attempt {attempt}: {last_reason}")
-                    continue
+            body, held, status = extract_public(str(env.get("stdout", "")))
+            if held:
+                save_held_text(out_dir / f"{lens}.private.txt", held)
+                log(f"{lens}: attempt {attempt}: held {len(held.splitlines())} lines; "
+                    f"public block: {status}")
+            if status == "ok":
                 path = out_dir / f"{lens}.verdict.md"
                 path.write_text(body)
                 token = VERDICT_RE.search(body.splitlines()[1]).group(1)  # type: ignore[union-attr]
@@ -492,14 +473,16 @@ def run_lens(*, lens: str, repo: str, pr: int, head: str, task_entity_id: str,
                     provider=att["provider"], run_id=att["run_id"],
                     duration_s=round(clock() - t_lens, 1))
                 return record
-            last_reason = "the reply had no header line plus verdict token line"
+            last_reason = f"public block: {status}"
             att["problem"] = last_reason
             log(f"{lens}: attempt {attempt}: {last_reason}")
             continue  # an unreadable reply is mechanical: retry once
         kind = classify_failure(env)
-        last_reason = str(env.get("reason") or env.get("error") or "dispatch failed")
-        att["problem"] = f"{kind}: {last_reason}"
-        log(f"{lens}: attempt {attempt} failed ({kind}): {last_reason}")
+        # A failed envelope can carry arbitrary remote text in reason/error.
+        # Keep the diagnostic category, never echo that text into public sinks.
+        last_reason = f"dispatch {kind}"
+        att["problem"] = last_reason
+        log(f"{lens}: attempt {attempt} failed ({kind})")
         if kind in ("refusal", "queue", "deterministic"):
             label = "queue wait" if kind == "queue" else kind
             record.update(status="fallback", reason=f"{label}: {last_reason}",
