@@ -40,6 +40,7 @@ import argparse
 import contextlib
 import fcntl
 import json
+import logging
 import os
 import stat
 import tempfile
@@ -47,6 +48,8 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 JOURNAL_NAME = ".monedula_payment_journal.json"
 MARKER_NAME = ".monedula_payment_journal.initialized"
@@ -153,13 +156,8 @@ def load(path: Path) -> dict[str, Any]:
             ):
                 raise JournalError("payment journal Wise attempt history malformed")
             transfer_id = entry.get("transfer_id")
-            if not legacy_wise and entry["state"] in (STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED) and not (
-                entry["state"] == STATE_FAILED and entry.get("failure_status") == "not_submitted"
-            ) and (
-                not isinstance(transfer_id, int) or isinstance(transfer_id, bool)
-                or transfer_id <= 0
-            ):
-                raise JournalError("payment journal Wise transfer id missing")
+            if not _wise_row_consistent(entry):
+                log.warning("payment journal Wise attempt %s has contradictory outcome; held", obligation)
     try:
         _ensure_marker(marker)
     except JournalError:
@@ -328,8 +326,45 @@ def obligation_state(data: dict[str, Any], obligation: str) -> str | None:
     return state
 
 
+def _wise_row_consistent(entry: dict[str, Any]) -> bool:
+    """Classify contradictory Wise outcomes as unresolved without hiding the row."""
+    state = entry.get("state")
+    outcome = entry.get("outcome_status")
+    status = entry.get("last_status")
+    discrepancy = entry.get("discrepancy_status")
+    failure = entry.get("failure_status")
+    effects = entry.get("effects_applied")
+    transfer_id = entry.get("transfer_id")
+    has_id = isinstance(transfer_id, int) and not isinstance(transfer_id, bool) and transfer_id > 0
+    if effects is not None and not isinstance(effects, bool) or (effects is True and outcome != "sent"):
+        return False
+    if status is None and "last_occurred_at" not in entry:
+        if outcome == "sent" and state == STATE_DONE and failure is None and discrepancy is None:
+            return True  # historical row without status history
+        if state == STATE_FAILED and failure == "not_submitted":
+            return outcome == "failed" and not has_id and not entry.get("create_entered")
+        return (state in (STATE_INTENT, STATE_FUNDING_PENDING)
+                and (state == STATE_INTENT or has_id)
+                and outcome is None and failure is None and discrepancy is None)
+    if not isinstance(status, str) or not status or not entry.get("last_occurred_at"):
+        return False
+    if not has_id:
+        return False
+    if outcome == "sent":
+        return (state == STATE_DONE and failure is None and
+                (status == "outgoing_payment_sent" and discrepancy is None or
+                 status != "outgoing_payment_sent" and discrepancy == status))
+    if outcome == "failed":
+        return (state == STATE_FAILED and status in ("funds_refunded", "cancelled")
+                and failure == status and discrepancy is None)
+    return (outcome is None and state == STATE_FUNDING_PENDING
+            and failure is None and discrepancy is None and effects is not True)
+
+
 def _wise_paid(entry: dict[str, Any], data: dict[str, Any] | None = None) -> bool:
     """Only a consistent, fully applied and session-settled attempt releases its profile."""
+    if not _wise_row_consistent(entry):
+        return False
     if "last_status" not in entry and "last_occurred_at" not in entry:
         return entry.get("state") == STATE_DONE and entry.get("outcome_status") == "sent"
     return (
@@ -525,6 +560,7 @@ def record_wise_status(
         entry["outcome_status"] = "sent"
         entry["outcome_at"] = time.time()
         entry.pop("discrepancy_status", None)
+        entry.pop("failure_status", None)
     elif status in ("funds_refunded", "cancelled") and entry.get("outcome_status") != "sent":
         entry["state"] = STATE_FAILED
         entry["outcome_status"] = "failed"

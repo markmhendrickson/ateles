@@ -1844,6 +1844,32 @@ def test_legacy_wise_done_sent_without_status_history_never_holds(tmp_path):
     assert journal.wise_replay_hold(journal.load(path), "profile-p") is None
 
 
+@pytest.mark.parametrize("changes", [
+    {"state": "done", "last_status": "bounced_back"},
+    {"state": "failed", "outcome_status": "sent"},
+    {"transfer_id": None},
+    {"last_status": "processing"},
+    {"discrepancy_status": "bounced_back"},
+    {"failure_status": "cancelled"},
+    {"effects_applied": False},
+])
+def test_contradictory_wise_row_loads_but_holds_profile(attempt, changes):
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                               "2026-11-11T21:00:00Z")
+    journal.mark_wise_effects_applied(attempt, "obligation", 3)
+    journal.set_session_state(attempt, "synthetic:session", journal.SESSION_SETTLED)
+    assert journal.wise_replay_hold(journal.load(attempt), "synthetic-profile") is None
+    data = journal.load(attempt)
+    data["obligations"]["obligation"].update(changes)
+    journal._write(attempt, data)
+    loaded = journal.load(attempt)
+    assert journal.wise_replay_hold(loaded, "synthetic-profile")[0] == "obligation"
+    with pytest.raises(journal.JournalError, match="obligation"):
+        journal.record_intent(attempt, "new-obligation", "new-token", generation=2,
+                              rail="wise", profile_entity_id="synthetic-profile")
+
+
 @pytest.mark.parametrize("bad_id", [None, 42, ""])
 def test_unreadable_wise_profile_identity_holds_all_profiles(tmp_path, bad_id):
     path = tmp_path / journal.JOURNAL_NAME
