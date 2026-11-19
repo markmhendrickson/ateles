@@ -34,6 +34,7 @@ class NumberedRow:
     number: str
     cells: tuple[str, ...]
     line: int
+    table: str
 
 
 def candidate_cells(line: str) -> tuple[str, ...] | None:
@@ -227,12 +228,14 @@ def revision_rows(text: str) -> list[NumberedRow]:
     """Read each revision table block without silently losing body lines."""
     rows: list[NumberedRow] = []
     header = separator = in_table = other_table = False
+    current_heading = "<before first heading>"
     lines = _markdown_lines(text)
     for position, line in enumerate(lines):
         index = position + 1
         if _blank(line) or line.startswith("## "):
             in_table = other_table = False
             if line.startswith("## "):
+                current_heading = line[3:].strip()
                 header = separator = False
             continue
         cells = candidate_cells(line)
@@ -262,5 +265,5 @@ def revision_rows(text: str) -> list[NumberedRow]:
         number = _row_number(legacy.group(1) if legacy else cells[0], index, "revision")
         if not all(cells[1:]):
             raise _row_error("revision", index)
-        rows.append(NumberedRow(number, cells, index))
+        rows.append(NumberedRow(number, cells, index, current_heading))
     return rows

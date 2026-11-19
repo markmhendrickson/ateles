@@ -270,6 +270,38 @@ def test_a_revision_may_not_repeat_inside_one_document_table(clones: tuple[Path,
     assert "appears 2 times in the table" in result.stderr
 
 
+def test_unicode_line_separator_cannot_split_one_table_into_two_counts(
+    clones: tuple[Path, Path, Path]
+) -> None:
+    _, first, _ = clones
+    revisions = first / "docs" / "foundation" / "revisions.md"
+    revisions.write_text(
+        revisions.read_text()
+        + "| 18 | pass | first\u2028## Other |\n"
+        + "| 18 | pass | second, same table |\n"
+    )
+    assert run(first, "reserve", "revision").stdout.strip() == "18"
+    result = run(first, "check", "revision")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "appears 2 times in the table" in result.stderr
+
+
+def test_duplicate_revision_before_first_heading_is_counted(
+    clones: tuple[Path, Path, Path]
+) -> None:
+    _, first, _ = clones
+    revisions = first / "docs" / "foundation" / "revisions.md"
+    revisions.write_text(
+        "| Revision | Pass | What changed |\n|-|-|-|\n"
+        "| 18 | pass | first |\n| 18 | pass | second |\n\n"
+        + revisions.read_text()
+    )
+    assert run(first, "reserve", "revision").stdout.strip() == "18"
+    result = run(first, "check", "revision")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "appears 2 times in the table" in result.stderr
+
+
 def test_in_table_repeats_already_on_the_base_are_history_not_a_failure(clones: tuple[Path, Path, Path]) -> None:
     _, first, _ = clones
     revisions = first / "docs" / "foundation" / "revisions.md"

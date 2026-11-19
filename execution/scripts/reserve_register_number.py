@@ -90,16 +90,9 @@ def table_counts(content: str) -> Counter[tuple[str, int]]:
     """Revision rows per (document table, number). A document's table sits under its own
     `## ` heading; one revision legitimately appears once in EACH document its pass amends."""
     counts: Counter[tuple[str, int]] = Counter()
-    titles: dict[int, str] = {}
-    current = ""
-    for index, line in enumerate(content.splitlines(), 1):
-        if line.startswith("## "):
-            current = line[3:].strip()
-        titles[index] = current
     for row in revision_rows(content):
-        if titles[row.line]:
-            for number in numbers_from_cell(row.number):
-                counts[(titles[row.line], number)] += 1
+        for number in numbers_from_cell(row.number):
+            counts[(row.table, number)] += 1
     return counts
 
 
