@@ -121,18 +121,33 @@ def test_only_inner_text_reaches_every_public_sink(tmp_path, capsys, before, aft
     assert CANARY not in captured.out + captured.err
 
 
+@pytest.mark.parametrize("wrapper", ["```\n{}\n```", "<!--\n{}\n-->"])
+def test_a_wrapped_block_posts_only_its_inner_text(wrapper):
+    # Recognition is context-free: a valid block is the lens's explicit public text even when it
+    # sits in a fence or a comment; text outside the delimiters is still held.
+    inner = f"{f.PUBLIC_VERDICT_OPEN}\n{GOOD}{f.PUBLIC_VERDICT_CLOSE}"
+    public, held, status = f.extract_public(CANARY + "\n" + wrapper.format(inner) + "\n" + CANARY + "\n")
+    assert status == "ok"
+    assert public == GOOD.strip("\n") + "\n" or public.strip() == GOOD.strip()
+    assert CANARY not in public and CANARY in held
+
+
 @pytest.mark.parametrize("reply,status", [
     (GOOD + CANARY, "missing"),
     (f"{f.PUBLIC_VERDICT_OPEN}\n{GOOD}{CANARY}", "unclosed"),
     (block() + block(after=CANARY), "duplicated"),
     (f"{f.PUBLIC_VERDICT_CLOSE}\n{CANARY}\n{f.PUBLIC_VERDICT_OPEN}\n{GOOD}", "out_of_order"),
-    (f"```\n{f.PUBLIC_VERDICT_OPEN}\n{GOOD}{f.PUBLIC_VERDICT_CLOSE}\n```\n{CANARY}", "missing"),
-    (f"> {f.PUBLIC_VERDICT_OPEN}\n{GOOD}> {f.PUBLIC_VERDICT_CLOSE}\n{CANARY}", "missing"),
-    (f"{f.PUBLIC_VERDICT_OPEN} trailing\n{GOOD}{f.PUBLIC_VERDICT_CLOSE}\n{CANARY}", "out_of_order"),
-    (f"😀{f.PUBLIC_VERDICT_OPEN}\n{GOOD}{f.PUBLIC_VERDICT_CLOSE}\n{CANARY}", "out_of_order"),
-    (f"**{f.PUBLIC_VERDICT_OPEN}**\n{GOOD}{f.PUBLIC_VERDICT_CLOSE}\n{CANARY}", "out_of_order"),
+    (f"> {f.PUBLIC_VERDICT_OPEN}\n{GOOD}> {f.PUBLIC_VERDICT_CLOSE}\n{CANARY}", "duplicated"),
+    (f"{f.PUBLIC_VERDICT_OPEN} trailing\n{GOOD}{f.PUBLIC_VERDICT_CLOSE}\n{CANARY}", "duplicated"),
+    (f"😀{f.PUBLIC_VERDICT_OPEN}\n{GOOD}{f.PUBLIC_VERDICT_CLOSE}\n{CANARY}", "duplicated"),
+    (f"**{f.PUBLIC_VERDICT_OPEN}**\n{GOOD}{f.PUBLIC_VERDICT_CLOSE}\n{CANARY}", "duplicated"),
     (f"<<<PUBLΙC-VERDICT>>>\n{GOOD}{f.PUBLIC_VERDICT_CLOSE}\n{CANARY}", "out_of_order"),
-    (f"<!--\n{f.PUBLIC_VERDICT_OPEN}\n{GOOD}{f.PUBLIC_VERDICT_CLOSE}\n-->\n{CANARY}", "missing"),
+    # Context-free recognition: markup left open inside the block, then the delimiters quoted later.
+    (f"{f.PUBLIC_VERDICT_OPEN}\n{GOOD}```\nunclosed fence\n{f.PUBLIC_VERDICT_CLOSE}\n{CANARY}\n```\n{f.PUBLIC_VERDICT_CLOSE}\n", "duplicated"),
+    (f"{f.PUBLIC_VERDICT_OPEN}\n{GOOD}```python print(1)```\n{f.PUBLIC_VERDICT_CLOSE}\n```\n{CANARY}\n{f.PUBLIC_VERDICT_CLOSE}\n", "duplicated"),
+    (f"{f.PUBLIC_VERDICT_OPEN}\n{GOOD}Mentions `<!--` here\n{f.PUBLIC_VERDICT_CLOSE}\n{CANARY} -->\n{f.PUBLIC_VERDICT_CLOSE}\n", "duplicated"),
+    (f"{f.PUBLIC_VERDICT_OPEN}\n{GOOD}    ```\n{f.PUBLIC_VERDICT_CLOSE}\n{CANARY}\n{f.PUBLIC_VERDICT_CLOSE}\n", "duplicated"),
+    (f"{f.PUBLIC_VERDICT_OPEN}\n{GOOD}Quote: {f.PUBLIC_VERDICT_CLOSE} inline\n{f.PUBLIC_VERDICT_CLOSE}\n{CANARY}\n", "duplicated"),
     (f"{f.PUBLIC_VERDICT_OPEN}\n{CANARY}\nno verdict\n{f.PUBLIC_VERDICT_CLOSE}\n", "invalid_verdict"),
 ])
 def test_malformed_reply_fails_closed(tmp_path, capsys, reply, status):

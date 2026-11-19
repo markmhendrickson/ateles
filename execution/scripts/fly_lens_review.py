@@ -84,7 +84,10 @@ PUBLIC_VERDICT_CLOSE = "<<<END-PUBLIC-VERDICT>>>"
 PUBLIC_VERDICT_FORMAT_REMINDER = (
     "Put one header and verdict inside exactly one public block: "
     f"{PUBLIC_VERDICT_OPEN} and {PUBLIC_VERDICT_CLOSE} on their own lines, "
-    "in that order. Return the full review in that block."
+    "in that order, each appearing exactly once in the whole reply (do not quote them). "
+    "The first line inside the block is the bold header `**🤖 <Name> — Ateles swarm, <lens> ...**` "
+    "(a dash between name and 'Ateles swarm', no colon after the name) and the second is the bold "
+    "verdict alone. Return the full review in that block."
 )
 # A deterministic refusal at the router: do not retry, fall back at once.
 REFUSAL_HINTS = ("refus", "not eligible", "not pinnable", "no provider", "headroom")
@@ -341,34 +344,27 @@ def dispatch_once(*, python: str, dispatch_script: Path, role: str, lens: str,
 def extract_public(body: str) -> tuple[str, str, str]:
     """Return (unchanged public text, held text, status).
 
-    Only exact delimiter lines count. Lines in Markdown fences or HTML comments
-    do not count; if they are the only apparent delimiters, the reply is held.
-    A malformed reply is held in full, including any apparent public block.
+    Recognition uses no Markdown model. Each delimiter must appear exactly once in
+    the whole reply, on a line of its own (trimmed of spaces and tabs), the opener
+    before the closer. Any other occurrence of either delimiter string, in a fence,
+    a comment, a quote, inline text or a second line, makes the reply malformed, and
+    a malformed reply is held in full. A lens that quotes the delimiters is
+    therefore retried once, never posted.
     """
     lines = body.splitlines(keepends=True)
     openings: list[int] = []
     closings: list[int] = []
-    fence = ""
-    html_comment = False
     for index, line in enumerate(lines):
         bare = line.rstrip("\r\n").strip(" \t")
-        if html_comment:
-            html_comment = "-->" not in line
-            continue
-        if fence:
-            if bare.startswith(fence) and bare.lstrip(fence[0]).strip(" \t") == "":
-                fence = ""
-            continue
-        if bare.startswith("```") or bare.startswith("~~~"):
-            fence = bare[:len(bare) - len(bare.lstrip(bare[0]))]
-            continue
-        if "<!--" in line:
-            html_comment = "-->" not in line.split("<!--", 1)[1]
-            continue
         if bare == PUBLIC_VERDICT_OPEN:
             openings.append(index)
         elif bare == PUBLIC_VERDICT_CLOSE:
             closings.append(index)
+    # Any occurrence not accounted for by an own-line delimiter is an embedded quote.
+    embedded = (body.count(PUBLIC_VERDICT_OPEN) != len(openings)
+                or body.count(PUBLIC_VERDICT_CLOSE) != len(closings))
+    if embedded:
+        return "", body, "duplicated"
 
     if len(openings) > 1 or len(closings) > 1:
         return "", body, "duplicated"
