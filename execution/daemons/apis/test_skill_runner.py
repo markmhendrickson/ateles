@@ -3341,6 +3341,32 @@ class TestDispatchFailureDiagnostics:
         assert fake_value not in body
         assert body.count("<redacted:GITHUB_TOKEN>") == 2
 
+    @pytest.mark.parametrize("blocked", [False, True])
+    @pytest.mark.parametrize("splice", ["\u200b", "\u200d", "\u2060", "\ufeff", "\u00ad", "\u202e", "\u2066"])
+    def test_a_token_split_by_an_invisible_character_is_still_redacted(
+        self, tmp_path, blocked, splice
+    ) -> None:
+        # One invisible format character inside an echoed token must not defeat the
+        # redaction in either stream, for a failure log and for a blocked-run log.
+        fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+        spliced = fake_value[:9] + splice + fake_value[9:]
+        with (
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"),
+            patch.dict("os.environ", {"GITHUB_TOKEN": fake_value}, clear=False),
+        ):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1,
+                stdout=f"line one\nleaked {spliced} in stdout\nline three",
+                stderr=f"leaked {spliced} in stderr",
+                blocked_by_agent=blocked,
+            )
+        assert path
+        body = Path(path).read_text(encoding="utf-8")
+        assert fake_value not in body and spliced not in body
+        assert fake_value[:9] not in body.replace("<redacted:GITHUB_TOKEN>", "")
+        assert body.count("<redacted:GITHUB_TOKEN>") == 2
+        assert "line one\nleaked" in body  # normal line structure is kept
+
     def test_output_file_is_private_from_creation(self, tmp_path) -> None:
         import stat
 

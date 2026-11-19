@@ -319,6 +319,28 @@ def test_agent_blocked_keeps_complete_redacted_output(writes, spawn, tmp_path, m
     assert fake_value not in body
 
 
+@pytest.mark.parametrize("splice", ["\u200b", "\u200d", "\u2060", "\ufeff", "\u00ad", "\u202e", "\u2066"])
+def test_agent_blocked_output_redacts_a_token_split_by_an_invisible_character(
+    writes, spawn, tmp_path, monkeypatch, splice
+):
+    fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+    spliced = fake_value[:9] + splice + fake_value[9:]
+    monkeypatch.setenv("GITHUB_TOKEN", fake_value)
+    spawn.result = _SpawnResult(
+        stdout=f"draft\nleaked {spliced}\n[cicada] pull_request_link: BLOCKED — need input\n",
+        stderr=f"diagnostic {spliced} end",
+    )
+
+    _dispatch("ent_saved_blocked_spliced", _cicada_task())
+
+    files = list((tmp_path / "blocked-runs").glob("*.log"))
+    assert len(files) == 1
+    body = files[0].read_text(encoding="utf-8")
+    assert fake_value not in body and spliced not in body
+    assert fake_value[:9] not in body.replace("<redacted:GITHUB_TOKEN>", "")
+    assert body.count("<redacted:GITHUB_TOKEN>") == 2
+
+
 def test_delivered_artifact_keeps_no_output_file(writes, spawn, tmp_path, monkeypatch):
     monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: True)
     spawn.result = _SpawnResult(stdout=f"draft\n{_PR_HEADER}\n")

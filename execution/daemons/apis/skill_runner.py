@@ -70,6 +70,7 @@ from lib.daemon_runtime import (  # noqa: E402
     AgentDefinition, AgentDefinitionUnavailable, AgentPolicyUnavailable,
     AgentLoader, admit_agent_definition,
 )
+from lib.daemon_runtime.artifact_contract import sanitize_text  # noqa: E402
 from dispatch_usage import DispatchUsage, parse_dispatch_usage  # noqa: E402
 import audit_queue  # noqa: E402
 from foundation import (  # noqa: E402
@@ -1754,10 +1755,10 @@ def write_dispatch_failure_log(
         body = (
             "\n".join(header)
             + "\n\n===== STDOUT (complete) =====\n"
-            + _redact_secrets(stdout)
+            + _redact_secrets(sanitize_text(stdout, keep_newlines=True))
             + "\n===== END STDOUT =====\n"
             + "\n===== STDERR (complete) =====\n"
-            + _redact_secrets(stderr)
+            + _redact_secrets(sanitize_text(stderr, keep_newlines=True))
             + "\n===== END STDERR =====\n"
         )
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
