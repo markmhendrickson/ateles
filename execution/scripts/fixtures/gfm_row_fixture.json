@@ -154,5 +154,8 @@
    "rows": 1,
    "in_table": true
   }
- }
+ },
+ "additional_inputs_note": "These inputs extend local parser regressions. GitHub HTML for the new Unicode probes could not be recorded in this worker environment; regenerate with gh api markdown --method POST -f mode=gfm -f text=\"<fixture markdown>\" once an ateles-agent token and network are available.",
+ "unescaped_code_pipe": {"row": "| 999 | q | `a | b` | **ruled** | **open** |", "gfm_cell_count": 6},
+ "unicode_probe_inputs": [{"name": "nbsp", "position": "own_line", "text": "\u00a0\n999 plain pipeless"}, {"name": "nbsp", "position": "in_row", "text": "\u00a0999 plain pipeless"}, {"name": "em_space", "position": "own_line", "text": "\u2003\n999 plain pipeless"}, {"name": "em_space", "position": "in_row", "text": "\u2003999 plain pipeless"}, {"name": "ideographic_space", "position": "own_line", "text": "\u3000\n999 plain pipeless"}, {"name": "ideographic_space", "position": "in_row", "text": "\u3000999 plain pipeless"}, {"name": "form_feed", "position": "own_line", "text": "\f\n999 plain pipeless"}, {"name": "form_feed", "position": "in_row", "text": "\f999 plain pipeless"}, {"name": "next_line", "position": "own_line", "text": "\u0085\n999 plain pipeless"}, {"name": "next_line", "position": "in_row", "text": "\u0085999 plain pipeless"}, {"name": "vertical_tab", "position": "own_line", "text": "\u000b\n999 plain pipeless"}, {"name": "vertical_tab", "position": "in_row", "text": "\u000b999 plain pipeless"}, {"name": "line_separator", "position": "own_line", "text": "\u2028\n999 plain pipeless"}, {"name": "line_separator", "position": "in_row", "text": "\u2028999 plain pipeless"}]
 }

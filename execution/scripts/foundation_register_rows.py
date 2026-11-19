@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 REGISTER_HEADING = "## The register of open design decisions"
 NUMBER = re.compile(r"(?:0|[1-9][0-9]*)(?:[–-](?:0|[1-9][0-9]*))?\Z")
-STATUS_LEAD = re.compile(r"\*\*([^*]+)\*\*")
+STATUS_LEAD = re.compile(r"\*\*([^*]+)\*\*(?:[ \t].*)?\Z")
 STATUSES = frozenset(
     {"ruled in part", "not a decision", "withdrawn", "reopened", "open", "ruled"}
 )
@@ -41,35 +41,54 @@ def candidate_cells(line: str) -> tuple[str, ...] | None:
     line = _visible_line(line)
     if not _has_unescaped_pipe(line):
         return None
-    content = line.strip()
+    content = line.strip(" \t")
     if content.startswith("|"):
         content = content[1:]
-    if content.endswith("|"):
+    if content.endswith("|") and _pipe_is_unescaped(content, len(content) - 1):
         content = content[:-1]
     cells: list[str] = []
     part: list[str] = []
-    in_code = False
     for index, char in enumerate(content):
-        if char == "`" and (index == 0 or content[index - 1] != "\\"):
-            in_code = not in_code
-        if char == "|" and not in_code and (index == 0 or content[index - 1] != "\\"):
-            cells.append("".join(part).strip())
+        # GFM divides table cells before parsing inline code spans. Only an
+        # escaped pipe remains inside a cell, including inside backticks.
+        if char == "|" and _pipe_is_unescaped(content, index):
+            cells.append("".join(part).strip(" \t"))
             part = []
         else:
             part.append(char)
-    cells.append("".join(part).strip())
+    cells.append("".join(part).strip(" \t"))
     return tuple(cells)
 
 
 def _visible_line(line: str) -> str:
-    """Remove invisible formatting characters and one blockquote marker."""
-    line = "".join(char for char in line if unicodedata.category(char) != "Cf")
-    line = line.lstrip()
-    return re.sub(r"^>\s?", "", line).lstrip()
+    """Tolerate invisible prefixes at a structural marker, never in cell values."""
+    line = line.lstrip(" \t")
+    prefix = 0
+    while prefix < len(line) and unicodedata.category(line[prefix]) == "Cf":
+        prefix += 1
+    if prefix and line[prefix:prefix + 1] in ("|", ">"):
+        line = line[prefix:]
+    return re.sub(r"^>[ \t]?", "", line).lstrip(" \t")
+
+
+def _pipe_is_unescaped(line: str, index: int) -> bool:
+    backslashes = 0
+    while index - backslashes - 1 >= 0 and line[index - backslashes - 1] == "\\":
+        backslashes += 1
+    return backslashes % 2 == 0
 
 
 def _has_unescaped_pipe(line: str) -> bool:
-    return any(char == "|" and (i == 0 or line[i - 1] != "\\") for i, char in enumerate(line))
+    return any(char == "|" and _pipe_is_unescaped(line, i) for i, char in enumerate(line))
+
+
+def _markdown_lines(text: str) -> list[str]:
+    """GFM recognizes CR, LF and CRLF as line endings, not Unicode separators."""
+    return re.split(r"\r\n|\n|\r", text)
+
+
+def _blank(line: str) -> bool:
+    return line.strip(" \t") == ""
 
 
 def _row_error(kind: str, index: int, reason: str = "malformed") -> ValueError:
@@ -113,25 +132,43 @@ def _outside_number_cell(cells: tuple[str, ...]) -> bool:
     return has_digit(cells[0]) and OUTSIDE_LABEL_WIDTHS.get(cells[0]) != len(cells)
 
 
+def _table_delimiter(cells: tuple[str, ...] | None, width: int) -> bool:
+    return bool(cells and len(cells) == width and all(SEPARATOR.fullmatch(cell) for cell in cells))
+
+
+def _outside_table_start(lines: list[str], index: int, cells: tuple[str, ...] | None) -> bool:
+    return bool(
+        cells
+        and index + 1 < len(lines)
+        and _table_delimiter(candidate_cells(lines[index + 1]), len(cells))
+    )
+
+
 def decision_rows(text: str) -> dict[str, dict[str, str]]:
     """Validate every line of the register table block, including pipe-less lines."""
-    lines = text.splitlines()
+    lines = _markdown_lines(text)
     start, end = _section_bounds(lines)
     rows: dict[str, dict[str, str]] = {}
-    header = separator = in_table = False
+    header = separator = in_table = outside_table = False
     for index, line in enumerate(lines):
         location = index + 1
         inside = start <= index < end
         cells = candidate_cells(line)
         if not inside:
+            if _blank(line) or line.startswith("## "):
+                outside_table = False
+            elif _outside_table_start(lines, index, cells):
+                outside_table = True
             if cells and _outside_number_cell(cells):
                 raise ValueError(
                     f"line {location}: numbered table row outside the register section "
                     "(labels exempt from this rule are listed in OUTSIDE_LABEL_WIDTHS in "
                     "execution/scripts/foundation_register_rows.py)"
                 )
+            if outside_table and cells is None and _outside_number_cell((line.strip(" \t"),)):
+                raise ValueError(f"line {location}: numbered table row outside the register section")
             continue
-        if not line.strip():
+        if _blank(line):
             in_table = False
             continue
         if cells and len(cells) == 5 and cells[0] == "#":
@@ -139,7 +176,7 @@ def decision_rows(text: str) -> dict[str, dict[str, str]]:
                 raise ValueError(f"line {location}: duplicate register table header")
             header = in_table = True
             continue
-        if cells and len(cells) == 5 and all(SEPARATOR.fullmatch(cell) for cell in cells):
+        if _table_delimiter(cells, 5):
             if separator:
                 raise ValueError(f"line {location}: duplicate register table separator")
             if not header:
@@ -160,7 +197,9 @@ def decision_rows(text: str) -> dict[str, dict[str, str]]:
         if not in_table:
             raise _row_error("register", location)
         number = _row_number(cells[0], location, "register")
-        lead = STATUS_LEAD.match(cells[4])
+        if any(unicodedata.category(char) == "Cf" for char in cells[4]):
+            raise ValueError(f"line {location}: malformed register row status")
+        lead = STATUS_LEAD.fullmatch(cells[4])
         if lead is None:
             raise ValueError(f"line {location}: malformed register row status")
         status = lead.group(1)
@@ -187,10 +226,12 @@ def decision_rows(text: str) -> dict[str, dict[str, str]]:
 def revision_rows(text: str) -> list[NumberedRow]:
     """Read each revision table block without silently losing body lines."""
     rows: list[NumberedRow] = []
-    header = separator = in_table = False
-    for index, line in enumerate(text.splitlines(), 1):
-        if not line.strip() or line.startswith("## "):
-            in_table = False
+    header = separator = in_table = other_table = False
+    lines = _markdown_lines(text)
+    for position, line in enumerate(lines):
+        index = position + 1
+        if _blank(line) or line.startswith("## "):
+            in_table = other_table = False
             if line.startswith("## "):
                 header = separator = False
             continue
@@ -198,12 +239,17 @@ def revision_rows(text: str) -> list[NumberedRow]:
         if cells and len(cells) == 3 and cells[0] == "Revision":
             header = in_table = True
             separator = False
+            other_table = False
             continue
-        if header and cells and len(cells) == 3 and all(SEPARATOR.fullmatch(cell) for cell in cells):
+        if header and _table_delimiter(cells, 3):
             separator = True
             continue
         if not in_table:
-            if cells and has_digit(cells[0]) and OUTSIDE_LABEL_WIDTHS.get(cells[0]) != len(cells):
+            if _outside_table_start(lines, position, cells):
+                other_table = True
+            if cells and _outside_number_cell(cells):
+                raise _row_error("revision", index)
+            if other_table and cells is None and _outside_number_cell((line.strip(" \t"),)):
                 raise _row_error("revision", index)
             continue
         if _invalid_indent(line) or _block_start(line):

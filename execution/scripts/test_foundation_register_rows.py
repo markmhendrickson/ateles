@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import render_decision_state as ds
 import reserve_register_number as reserve
 import check_foundation_register_narrative as narrative
+import check_plan_decision_citations as citations
 from foundation_register_rows import candidate_cells, decision_rows, has_digit, revision_rows
 
 
@@ -357,10 +358,103 @@ class TestGfmTableBlock(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate register row"):
             decision_rows(register(**{"5-7": "**open**", "5–7": "**open**"}))
 
-    def test_blocks_cell_preserves_inline_code_pipe(self):
+    def test_unescaped_pipe_inside_code_span_is_an_extra_cell(self):
+        fixture = json.loads((Path(__file__).parent / "fixtures/gfm_row_fixture.json").read_text())
+        row = fixture["unescaped_code_pipe"]
         text = (
             "| # | The question | Argued in | Blocks | Status |\n"
             "|---|---|---|---|---|\n"
-            "| 1 | q | a | `left|right` and more | **open** |\n"
+            + row["row"] + "\n"
         )
-        self.assertEqual(ds.parse_rows(text)["1"]["blocks"], "`left|right` and more")
+        self.assertEqual(len(candidate_cells(text.splitlines()[2])), row["gfm_cell_count"])
+        with self.assertRaisesRegex(ValueError, "malformed register row"):
+            decision_rows(text)
+        with self.assertRaisesRegex(ValueError, "malformed revision row"):
+            revision_rows("| Revision | Pass | Change |\n|---|---|---|\n| 999 | `a | b` | change |\n")
+        self.assertEqual(
+            candidate_cells(r"| 1 | q | a | `left\|right` and more | **open** |")[-2],
+            r"`left\|right` and more",
+        )
+
+    def test_real_row_70_has_five_cells_and_full_blocks_text(self):
+        source = Path("docs/foundation/conformance.md").read_text()
+        line = next(line for line in source.splitlines() if line.startswith("| 70 |"))
+        self.assertEqual(len(candidate_cells(line)), 5)
+        self.assertIn(r"`*\|intake`", decision_rows(source)["70"]["blocks"])
+
+    def test_pipeless_digit_rows_in_outside_tables(self):
+        outside = "## Other\n| Label | Value |\n|---|---|\n| ordinary | value |\n"
+        decision = "## The register of open design decisions\n" + register(**{"1": "**open**"})
+        revision = "## Revisions\n| Revision | Pass | Change |\n|---|---|---|\n| 1 | p | c |\n"
+        for cell in ("999 lost row", "٩٩٩ lost row", "**999** x", "[999](x) y", "  999 lost row"):
+            with self.subTest(cell=cell):
+                with self.assertRaisesRegex(ValueError, "outside the register section"):
+                    decision_rows(outside + cell + "\n" + decision)
+                with self.assertRaisesRegex(ValueError, "malformed revision row"):
+                    revision_rows(outside + cell + "\n" + revision)
+                decision_rows(outside + "\n" + cell + "\n" + decision)
+                revision_rows(outside + "\n" + cell + "\n" + revision)
+        # The declared exemptions keep their exact labels and widths.
+        decision_rows("| Check | A | B | C |\n|---|---|---|---|\n"
+                      "| Decision 78 ruling | x | y | z |\n" + decision)
+
+    def test_non_ascii_whitespace_does_not_end_table_or_split_lines(self):
+        decision = register(**{"1": "**open**"})
+        revision = "| Revision | Pass | Change |\n|---|---|---|\n| 1 | p | c |\n"
+        probes = json.loads((Path(__file__).parent / "fixtures/gfm_row_fixture.json").read_text())[
+            "unicode_probe_inputs"
+        ]
+        for probe in probes:
+            with self.subTest(name=probe["name"], position=probe["position"]):
+                with self.assertRaisesRegex(ValueError, "malformed register row"):
+                    decision_rows(decision + probe["text"] + "\n")
+                with self.assertRaisesRegex(ValueError, "malformed revision row"):
+                    revision_rows(revision + probe["text"] + "\n")
+        for blank in ("", " ", "\t", " \t "):
+            decision_rows(decision + blank + "\n999 plain pipeless\n")
+            revision_rows(revision + blank + "\n999 plain pipeless\n")
+
+    def test_status_source_vocabulary_rejects_invisible_and_lookalike_text(self):
+        for status in ("**o\u200bpen**", "\u200b**open**", "**open**\u200b",
+                       "**оpen**", "**open**extra", "*open*"):
+            with self.subTest(status=status):
+                with self.assertRaisesRegex(ValueError, "(malformed|unknown) .*status"):
+                    decision_rows(register(**{"1": status}))
+        self.assertEqual(decision_rows(register(**{"1": "**open** (context)"}))["1"]["status"], "open")
+
+    def test_outside_pipeless_row_reaches_all_decision_consumers(self):
+        text = (
+            "## Other\n| Check | Value |\n|---|---|\n| ordinary | value |\n"
+            "999 lost row\n## The register of open design decisions\n"
+            + register(**{"1": "**open**"})
+        )
+        for reader in (
+            lambda: ds.parse_rows(text),
+            lambda: reserve.numbers("decision", text),
+            lambda: narrative.parse_register(text),
+        ):
+            with self.subTest(reader=reader), self.assertRaises(ValueError):
+                reader()
+        with unittest.mock.patch.object(citations, "run", return_value=(0, text)):
+            with self.assertRaises(ValueError):
+                citations.register_rows()
+
+    def test_all_four_renderer_modes_reject_status_pollution(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "conformance.md"
+            with unittest.mock.patch.object(ds, "FOUNDATION_DIR", root):
+                for status in ("**o\u200bpen**", "\u200b**open**", "**open**\u200b",
+                               "**оpen**", "**open**extra", "*open*"):
+                    path.write_text(register(**{"1": status}))
+                    for mode in TestRegisterCandidateAccounting.MODES:
+                        target = root / "out.md"
+                        target.unlink(missing_ok=True)
+                        flags = list(mode) + ([str(target)] if mode == ("--out",) else [])
+                        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                            code = ds.main(flags)
+                        with self.subTest(status=repr(status), mode=mode):
+                            self.assertEqual(code, 1)
+                            self.assertFalse(target.exists())
