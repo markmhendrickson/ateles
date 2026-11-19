@@ -441,11 +441,17 @@ ends. The default channel keeps no such file; its state is the Neotoma
 Payment journal: `.monedula_payment_journal.json` — durable and never cleared
 by the consent flow. Keyed on a hash of the obligation (handler, session,
 payee, amount, currency; for Wise also profile, task and reference). Wise order:
-the approval hash binds exact terms; an unresolved replay hold follows the
-calendar event ID and profile identity or the one-off profile and task identity
-when those terms change. A missing event or invoice identity holds conservatively
-with an operator message. A later invoice needs a different task or profile;
-editing the same invoice's due date never offers another payment. Wise order:
+the approval hash binds exact terms; every new Wise intent records the stable
+payment profile ID. While any attempt for that profile lacks a confirmed paid
+latest transfer status, every obligation of that profile is held across all
+term, date, event, prefix and handler edits. An unresolved old row with no
+profile ID holds all Wise profiles; the alert names its journal key and asks
+the operator to reconcile it in Wise Activity. Old rows with no transfer-status
+history and `done/sent` are settled and hold nothing. A status-bearing row is
+settled only when its latest status by time is `outgoing_payment_sent`.
+Later obligations are offered after confirmation. Precise obligation-level
+matching and legacy classification are deferred to a separate work unit.
+Wise order:
 record intent and attempt key (fsynced)
 → create transfer → record transfer ID and read back → fund → record
 `funding_pending` (only with a saved transfer ID) → read transfer status on later ticks → record `done/sent`
@@ -469,10 +475,9 @@ on both the default approval and Telegram routes.
 
 For one-off invoices, the obligation key uses the invoice due date, profile
 identity, task identity, and transfer terms, so it does not change on the next
-tick. An unresolved older Wise row with a handler identity holds that invoice;
-a settled older invoice does not hide a later one. Pre-Wise-metadata unresolved
-intents have no rail or handler identity and hold one-off Wise requests until
-they are reconciled. The daemon reloads active
+tick. The replay hold uses only the journaled profile ID; it is deliberately
+coarse until the deferred identity work is complete. Pre-profile-ID unresolved
+rows hold every Wise profile until manually reconciled. The daemon reloads active
 profiles after reconciliation so an archived one-off cannot be asked again in
 the same tick. A failed account lookup, quote, or missing token before Wise
 transfer creation is recorded as `not_submitted`: no payment was made, and the

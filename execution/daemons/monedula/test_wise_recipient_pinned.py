@@ -96,7 +96,8 @@ def test_pinned_recipient_happy_path_transfers_to_that_account(monkeypatch, tmp_
     path = tmp_path / payment_journal.JOURNAL_NAME
     payment_journal.init_journal(path)
     payment_journal.record_intent(path, "synthetic", "approval", generation=1,
-                                  rail="wise", handler_name="synthetic")
+                                  rail="wise", handler_name="synthetic",
+                                  profile_entity_id="synthetic-profile")
     monkeypatch.setenv("WISE_API_TOKEN", "fake-token")
     h = wt.WiseTransferHandler(_profile(wise_recipient_id="555"))
     h.recipient_status_lookup = lambda token, rid: {"id": rid, "active": True}

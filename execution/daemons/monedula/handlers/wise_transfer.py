@@ -684,8 +684,18 @@ def _require_wise_intent(
     path, obligation = journal_context
     data = payment_journal.load(path)
     entry = data["obligations"].get(obligation)
+    if isinstance(entry, dict):
+        held = payment_journal.wise_replay_hold(
+            data, entry.get("profile_entity_id", ""), exclude_obligation=obligation
+        )
+        if held is not None:
+            raise payment_journal.JournalError(
+                f"Wise attempt {held[0]} holds this profile; check Wise Activity; do not pay again"
+            )
     if (not isinstance(entry, dict) or entry.get("rail") != "wise"
             or entry.get("state") != payment_journal.STATE_INTENT
+            or not isinstance(entry.get("profile_entity_id"), str)
+            or not entry["profile_entity_id"].strip()
             or not entry.get("customer_transaction_id")
             or data["consumed_tokens"].get(entry.get("token")) != obligation):
         raise payment_journal.JournalError("Wise intent unavailable before submission")

@@ -124,10 +124,16 @@ def load(path: Path) -> dict[str, Any]:
             ):
                 raise JournalError("payment journal Wise handler name malformed")
             if any(field in entry and not isinstance(entry[field], str) for field in (
-                "profile_entity_id", "task_id", "approved_terms_hash", "payment_date", "match_id"
+                "task_id", "approved_terms_hash", "payment_date", "match_id"
             )):
                 raise JournalError("payment journal Wise approval binding malformed")
-            if (
+            legacy_wise = (
+                "customer_transaction_id" not in entry
+                and "attempt" not in entry
+                and "last_status" not in entry
+                and "last_occurred_at" not in entry
+            )
+            if not legacy_wise and (
                 not isinstance(entry.get("customer_transaction_id"), str)
                 or not isinstance(entry.get("attempt"), int)
                 or entry["attempt"] < 1
@@ -147,7 +153,7 @@ def load(path: Path) -> dict[str, Any]:
             ):
                 raise JournalError("payment journal Wise attempt history malformed")
             transfer_id = entry.get("transfer_id")
-            if entry["state"] in (STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED) and not (
+            if not legacy_wise and entry["state"] in (STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED) and not (
                 entry["state"] == STATE_FAILED and entry.get("failure_status") == "not_submitted"
             ) and (
                 not isinstance(transfer_id, int) or isinstance(transfer_id, bool)
@@ -317,12 +323,44 @@ def obligation_state(data: dict[str, Any], obligation: str) -> str | None:
     state = entry.get("state")
     if state not in (STATE_INTENT, STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED):
         raise JournalError("payment journal obligation state malformed")
-    if state == STATE_DONE and entry.get("rail") == "wise" and (
-        entry.get("outcome_status") != "sent"
-        or entry.get("last_status") != "outgoing_payment_sent"
-    ):
+    if state == STATE_DONE and entry.get("rail") == "wise" and not _wise_paid(entry):
         return STATE_FAILED  # historical settlement cannot clear a later return
     return state
+
+
+def _wise_paid(entry: dict[str, Any]) -> bool:
+    """A legacy sent outcome is settled; a status-bearing row needs a timed rail confirmation."""
+    if "last_status" not in entry and "last_occurred_at" not in entry:
+        return entry.get("state") == STATE_DONE and entry.get("outcome_status") == "sent"
+    return (
+        entry.get("last_status") == "outgoing_payment_sent"
+        and isinstance(entry.get("last_occurred_at"), str)
+        and bool(entry["last_occurred_at"])
+    )
+
+
+def wise_replay_hold(
+    data: dict[str, Any], profile_entity_id: str, *, exclude_obligation: str = ""
+) -> tuple[str, dict[str, Any]] | None:
+    """Hold a Wise offer on any unresolved attempt for its profile or an unclassified row.
+
+    The key is returned for the operator message. No terms, calendar identity,
+    handler name, or current obligation hash participates in this decision.
+    """
+    profile_hold = None
+    for key, entry in data["obligations"].items():
+        if key == exclude_obligation or entry.get("rail") == "btc":
+            continue
+        if _wise_paid(entry):
+            continue
+        if entry.get("rail") not in (None, "wise"):
+            return key, entry
+        row_profile = entry.get("profile_entity_id")
+        if not isinstance(row_profile, str) or not row_profile.strip():
+            return key, entry
+        if profile_hold is None and (not profile_entity_id or row_profile == profile_entity_id):
+            profile_hold = key, entry
+    return profile_hold
 
 
 def token_consumed(data: dict[str, Any], token: str) -> bool:
@@ -345,6 +383,12 @@ def record_intent(
         raise JournalError("obligation already recorded — refusing a second attempt")
     if token in data["consumed_tokens"]:
         raise JournalError("approval token already consumed")
+    if rail == "wise" and (not isinstance(profile_entity_id, str) or not profile_entity_id.strip()):
+        raise JournalError("Wise profile ID required before intent")
+    if rail == "wise":
+        held = wise_replay_hold(data, profile_entity_id)
+        if held is not None:
+            raise JournalError(f"Wise attempt {held[0]} holds this profile; check Wise Activity")
     entry = {
         "state": STATE_INTENT,
         "token": token,

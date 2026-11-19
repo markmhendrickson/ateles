@@ -18,7 +18,7 @@ The foundation design explicitly requires a rail read at the declared terminal s
 
 The handler status **`funding_pending`** requires a persisted Wise transfer ID. It means that transfer can be checked on later ticks, but payment has not been confirmed. The distinct handler status **`submission_unknown`** means transfer creation was entered but no ID was saved; the journal stays at `intent`, the operator must check Wise Activity by date, amount and reference, and Monedula cannot reconcile it automatically. Journal `funding_pending` remains distinct from both `intent` and `done` (confirmed terminal result). Every reader treats either unresolved state as **no new payment authorized**.
 
-The journal lookup holds an unresolved attempt across edits to amount, reference, payee text, due date, date format, currency or calendar event time. Consent and settlement effects remain bound to the original approved terms; the replay hold follows the calendar event ID and profile identity, or the one-off profile and task identity recorded at intent. When an event ID or invoice task/profile identity is missing, the unresolved attempt is held conservatively and the operator is told which identity is missing. After settlement, a later calendar occurrence or a later invoice with a different task or profile remains eligible; changing the due date on the same invoice does not create a later invoice.
+The approval key and settlement effects remain bound to the original approved terms. The replay hold is deliberately coarser: each new Wise intent records the stable payment profile ID. Any unresolved row for that profile holds every new obligation of the profile across edits to amount, reference, payee, due date, calendar event, prefix or handler name. An unresolved row without a usable profile ID holds all Wise profiles, with its journal key in the operator alert and manual reconciliation in Wise Activity. A legacy row with no transfer-status history and `done/sent` is settled and holds nothing; a status-bearing row is settled only if its latest status by time is `outgoing_payment_sent`. Once all attempts of a profile are confirmed paid, later obligations are offered normally. Precise obligation-level matching and legacy classification are deferred to task `ent_67373ae4067dfcc0c1dd769d`.
 
 | Consumer | Current `sent` behavior | Risk if only the handler changes; required `funding_pending` behavior |
 | --- | --- | --- |
@@ -66,8 +66,9 @@ rejected funding response leaves an existing transfer ID held for reconciliation
 it is never represented as “not submitted.”
 
 One-off obligations use the invoice due date and profile terms, not the tick
-date. An unresolved row written under the old tick-date key is found by its
-journaled handler name and held; the old row is never re-keyed or discarded.
+date. An unresolved row written under the old tick-date key is held by its
+journaled profile ID, or globally if no usable profile ID was recorded; the
+old row is never re-keyed or discarded.
 After confirmed settlement, the profile is reloaded so an archived one-off is
 not offered again in that tick.
 
@@ -90,9 +91,10 @@ this payment-state repair.
   alert. This is a wall-clock threshold, not a business-day calculation.
 - Terminally failed transfers are not read on every tick. Any later vendor
   status change needs a separate operator-initiated review.
-- A new invoice reusing a handler name with an unmatched old journal row can
-  be conservatively held until the old row is reconciled. The handler-name
-  cutover guard favors avoiding a duplicate payment over automatic reuse.
+- A new invoice for a profile with any unresolved Wise row is held even if it
+  is a distinct obligation. A row with no usable profile ID holds all Wise
+  invoices until manual reconciliation. This deliberate scope cut will be
+  narrowed only by the deferred identity work.
 - Routine confirmed-transfer monitoring ends after the existing 30-day window;
   a later return requires a separate statement or transfer read.
 

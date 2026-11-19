@@ -235,12 +235,12 @@ def payee_identity(handler: Any) -> str:
     return "profile|" + "|".join(str(getattr(profile, f, "") or "") for f in fields)
 
 
-def _legacy_obligation_key(
+def _base_obligation_key(
     handler: Any,
     payment_date: str,
     match_id: str,
 ) -> str:
-    """Pre-binding key, used only to recognize an earlier journaled session."""
+    """Base approval hash; the BTC cutover lookup uses the same older shape."""
     _label, amount, _is_cal = _profile_fields(handler)
     basis = "|".join(
         [
@@ -257,7 +257,7 @@ def _legacy_obligation_key(
 
 def obligation_key(handler: Any, payment_date: str, match_id: str) -> str:
     """Bind a Wise approval to its exact profile, task and transfer terms."""
-    legacy = _legacy_obligation_key(handler, payment_date, match_id)
+    legacy = _base_obligation_key(handler, payment_date, match_id)
     profile = getattr(handler, "profile", None)
     if getattr(profile, "payment_type", None) != "wise":
         return legacy
@@ -272,106 +272,45 @@ def obligation_key(handler: Any, payment_date: str, match_id: str) -> str:
 
 
 def journal_entry_for_item(journal: dict, item: PendingItem) -> dict | None:
-    """Find an attempt by terms or stable invoice/session identity.
-
-    Approval still binds the displayed terms. An edited obligation cannot
-    bypass an attempt tied to the same profile and task or calendar event.
-    Missing identity metadata is ambiguous and holds conservatively.
-    """
+    """Return the Wise profile hold, or the exact settled/current obligation."""
     profile = getattr(item.handler, "profile", None)
-    profile_id = str(getattr(profile, "entity_id", "") or "")
-    task_id = str(getattr(profile, "neotoma_task_id", "") or "")
-    candidates = []
-    ambiguous = []
-    for key, row in journal["obligations"].items():
-        if row.get("rail") != "wise":
-            continue
-        if key == item.obligation:
-            candidates.append(row)
-            continue
-        row_profile = row.get("profile_entity_id")
-        row_task = row.get("task_id")
-        row_event = row.get("match_id")
-        if not profile_id or not row_profile:
-            ambiguous.append(row)
-            continue
-        if row_profile != profile_id:
-            continue
-        settled = payment_journal.obligation_state(
-            {"obligations": {key: row}}, key
-        ) == payment_journal.STATE_DONE
-        if item.is_calendar:
-            if not item.match_id or not row_event:
-                ambiguous.append(row)
-            elif row_event == item.match_id or not settled:
-                candidates.append(row)
-        elif not task_id or not row_task:
-            ambiguous.append(row)
-        elif row_task == task_id or not settled:
-            # An unresolved attempt under the same profile cannot be ruled out
-            # solely because its task ID changed. A settled different task can.
-            candidates.append(row)
-    candidates.extend(ambiguous)
-    if candidates:
-        return next((row for row in candidates
-                     if payment_journal.obligation_state(
-                         {"obligations": {"candidate": row}}, "candidate"
-                     ) != payment_journal.STATE_DONE),
-                    candidates[0])
-    # Before Wise attempt metadata existed, the writer recorded only state,
-    # token, generation and intent_at. Its tick-date key cannot be reconstructed
-    # later. An unclassified unresolved intent may be this invoice.
-    return next((row for row in journal["obligations"].values()
-                 if "rail" not in row and "handler_name" not in row
-                 and (row.get("state") == payment_journal.STATE_INTENT
-                      or (row.get("state") == payment_journal.STATE_DONE
-                          and (row.get("outcome_status") != "sent"
-                               or row.get("last_status") not in
-                               (None, "outgoing_payment_sent"))))), None)
+    if getattr(profile, "payment_type", None) == "wise":
+        held = payment_journal.wise_replay_hold(
+            journal, str(getattr(profile, "entity_id", "") or "")
+        )
+        if held is not None:
+            key, row = held
+            return {**row, "_journal_key": key}
+    return journal["obligations"].get(item.obligation)
 
 
 def journal_state_for_item(journal: dict, item: PendingItem) -> str | None:
     entry = journal_entry_for_item(journal, item)
     if entry is None:
         return None
-    if ("rail" not in entry and "handler_name" not in entry
-            and entry.get("state") == payment_journal.STATE_DONE
-            and (entry.get("outcome_status") != "sent"
-                 or entry.get("last_status") not in (None, "outgoing_payment_sent"))):
+    if ("rail" not in entry and entry.get("state") == payment_journal.STATE_DONE
+            and entry.get("outcome_status") != "sent"):
         return payment_journal.STATE_INTENT
     state = payment_journal.obligation_state(
         {"obligations": {item.obligation: entry}}, item.obligation
     )
-    profile = getattr(item.handler, "profile", None)
-    if entry.get("rail") == "wise" and state == payment_journal.STATE_DONE and (
-        not getattr(profile, "entity_id", None)
-        or not entry.get("profile_entity_id")
-        or (item.is_calendar and (not item.match_id or not entry.get("match_id")))
-        or (not item.is_calendar and (
-            not getattr(profile, "neotoma_task_id", None) or not entry.get("task_id")
-        ))
-    ):
-        # A sent status cannot settle an offer whose obligation identity is
-        # unknown. The transfer still needs operator reconciliation.
-        return payment_journal.STATE_INTENT
     if (entry.get("rail") == "wise" and state == payment_journal.STATE_DONE
-            and entry.get("effects_applied") is not True):
+            and "last_status" in entry and entry.get("effects_applied") is not True
+            and item.obligation in journal["obligations"]):
         # A confirmed rail status is not completion until task and session
         # bookkeeping have been durably applied. Every consent route uses this.
         return payment_journal.STATE_INTENT
     return state
 
 
-def missing_wise_identity_note(item: PendingItem, entry: dict) -> str:
-    """Explain which missing stable identity makes an unresolved hold broad."""
-    notes: list[str] = []
-    if not entry.get("profile_entity_id"):
-        notes.append("Payment profile ID missing")
-    if item.is_calendar and (not item.match_id or not entry.get("match_id")):
-        notes.append("Calendar event ID missing")
-    if not item.is_calendar and not entry.get("task_id"):
-        notes.append("Invoice task ID missing")
-    return (" " + "; ".join(notes) + "; this transfer remains held across edits.") if notes else ""
+def unclassified_wise_attempt_note(entry: dict) -> str:
+    """An unclassified old attempt needs manual reconciliation before any Wise offer."""
+    if (entry.get("rail") not in (None, "wise")
+            or not isinstance(entry.get("profile_entity_id"), str)
+            or not entry["profile_entity_id"].strip()):
+        return (" Old attempt needs to be reconciled by hand first; check Wise "
+                "Activity. Every Wise obligation is held until then.")
+    return ""
 
 
 def _profile_fields(handler: Any) -> tuple[str, int, bool]:
@@ -441,7 +380,7 @@ def legacy_obligation_keys(
                 ids.add(str(candidate))
         # The old code fell back to the match's own position in the list.
         ids.update(str(i) for i, m in enumerate(matches) if m is match)
-    return {_legacy_obligation_key(handler, d, i) for d in dates for i in ids}
+    return {_base_obligation_key(handler, d, i) for d in dates for i in ids}
 
 
 def build_pending_items(
@@ -875,7 +814,12 @@ def request_and_collect(
             note = ("Wise submission outcome unknown; check Wise Activity by date, "
                     "amount and reference; do not pay again. Monedula cannot check "
                     "automatically without a transfer ID")
-        held_notes[item.obligation] = note + missing_wise_identity_note(item, entry)
+        attempt_key = entry.get("_journal_key") or item.obligation
+        held_notes[item.obligation] = (
+            f"Held by Wise attempt [{attempt_key}]; this obligation is not lost. "
+            + note + " Check Wise Activity before any replacement."
+            + unclassified_wise_attempt_note(entry)
+        )
 
     if len(settled | unknown) == len(probe):
         result.pending_items = probe
