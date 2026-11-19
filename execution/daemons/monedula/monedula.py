@@ -1887,21 +1887,25 @@ def _reconcile_wise_entries(handlers: list) -> bool:
         if entry.get("state") == payment_journal.STATE_FAILED:
             # Terminal failures remain held for a separately approved attempt.
             continue
+        transfer_id = entry.get("transfer_id")
         pending_since = entry.get("funding_at") or entry.get("intent_at")
         if (entry.get("state") in (payment_journal.STATE_INTENT,
                                     payment_journal.STATE_FUNDING_PENDING)
                 and isinstance(pending_since, (int, float))
                 and time.time() - pending_since >= WISE_PENDING_ALERT_AFTER_SECONDS):
+            explanation = (
+                "Monedula is checking it; do not pay again."
+                if transfer_id else _wise_hold_text(entry)
+            )
             _notify(
                 f"monedula: Wise transfer [{obligation[:12]}] has not been confirmed "
-                "for two days. Monedula is checking it; do not pay again.",
+                f"for two days. {explanation}",
                 priority="blocker", dedupe_key=f"monedula:wise_overdue:{obligation}",
             )
-        transfer_id = entry.get("transfer_id")
         if not transfer_id:
             _notify(
-                f"monedula: Wise attempt [{obligation[:12]}] has no confirmed transfer id; "
-                "outcome unknown; do not pay again.",
+                f"monedula: Wise attempt [{obligation[:12]}] has no confirmed transfer id. "
+                f"{_wise_hold_text(entry)}",
                 priority="blocker", dedupe_key=f"monedula:wise_unknown:{obligation}",
             )
             clean = False

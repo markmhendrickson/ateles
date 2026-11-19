@@ -1267,6 +1267,33 @@ def test_overdue_pending_transfer_alerts_without_another_submission(attempt, mon
     assert journal.load(attempt)["obligations"]["obligation"]["state"] == "funding_pending"
 
 
+def test_overdue_no_id_attempt_reports_manual_wise_check_on_later_ticks(attempt, monkeypatch):
+    import monedula
+    import consent_email
+
+    data = journal.load(attempt)
+    data["obligations"]["obligation"]["intent_at"] = (
+        time.time() - monedula.WISE_PENDING_ALERT_AFTER_SECONDS - 1
+    )
+    journal._write(attempt, data)
+    monkeypatch.setattr(consent_email, "STATE_FILE", attempt.parent / "consent.json")
+    monkeypatch.setattr(wise, "_wise_get", lambda *a:
+                        pytest.fail("a no-ID attempt cannot be reconciled by transfer ID"))
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda text, **kw: alerts.append(text))
+
+    for _ in range(2):
+        assert not monedula._reconcile_wise_entries([])
+    overdue = [text for text in alerts if "for two days" in text]
+    assert len(overdue) == 2
+    assert all("submission outcome unknown" in text and "Wise Activity" in text
+               and "cannot check automatically" in text and "do not pay again" in text
+               and "Monedula is checking" not in text for text in overdue)
+    assert all("Wise Activity" in text and "cannot check automatically" in text
+               for text in alerts)
+    assert journal.load(attempt)["obligations"]["obligation"]["state"] == "intent"
+
+
 def test_confirmed_oneoff_profile_is_reloaded_before_matching(tmp_path, monkeypatch):
     import monedula
     import consent_email
