@@ -182,7 +182,7 @@ def test_legacy_obligation_never_replays_and_only_done_settles(env, state):
     key. Red against the old code: a fresh payment_approval was raised and a
     truthful "attended" paid it twice."""
     w, neo = env
-    old_key = consent_email.obligation_key(w.handler, "2026-11-11", "")
+    old_key = consent_email._legacy_obligation_key(w.handler, "2026-11-11", "")
     jpath = consent_email.journal_path()
     payment_journal.record_intent(jpath, old_key, "old-token", generation=1)
     if state == "done":
@@ -199,7 +199,7 @@ def test_legacy_obligation_never_replays_and_only_done_settles(env, state):
 def test_multi_match_legacy_index_key_is_also_recognised(env):
     w, neo = env
     w.calendars["primary"] = [_event("evt-1"), _event("evt-2")]
-    old_key = consent_email.obligation_key(w.handler, "2026-11-11", "1")
+    old_key = consent_email._legacy_obligation_key(w.handler, "2026-11-11", "1")
     jpath = consent_email.journal_path()
     payment_journal.record_intent(jpath, old_key, "old-token", generation=1)
     payment_journal.record_outcome(jpath, old_key, "sent")

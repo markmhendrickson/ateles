@@ -440,11 +440,12 @@ ends. The default channel keeps no such file; its state is the Neotoma
 
 Payment journal: `.monedula_payment_journal.json` — durable and never cleared
 by the consent flow. Keyed on a hash of the obligation (handler, session,
-payee, amount, currency). Wise order: record intent and attempt key (fsynced)
+payee, amount, currency; for Wise also profile, task and reference). Wise order:
+record intent and attempt key (fsynced)
 → create transfer → record transfer ID and read back → fund → record
 `funding_pending` → read transfer status on later ticks → record `done/sent`
 only for `outgoing_payment_sent`. `funds_refunded` and `cancelled` are confirmed
-failure states that remain held for a new operator decision. `bounced_back` is
+failure states that remain held until a replacement route is verified. `bounced_back` is
 nonterminal and is checked again the next day. A lost create or funding response
 leaves `intent` or `funding_pending`, never a retry. The daemon serializes ticks
 with a lock on the existing first-use marker. BTC `sent` remains its existing
@@ -452,20 +453,22 @@ final handler result. The journal also issues the monotonically
 increasing request generation. A missing journal and marker hold every payment
 on both the default approval and Telegram routes.
 
-For one-off invoices, the obligation key uses the invoice due date and profile
-terms, so it does not change on the next tick. Journal rows written under the
-older tick-date key remain under that key; their handler identity holds a new
-match until the original transfer is resolved. The daemon reloads active
+For one-off invoices, the obligation key uses the invoice due date, profile
+identity, task identity, and transfer terms, so it does not change on the next
+tick. An unresolved older Wise row with a handler identity holds that invoice;
+a settled older invoice does not hide a later one. Pre-Wise-metadata unresolved
+intents have no rail or handler identity and hold one-off Wise requests until
+they are reconciled. The daemon reloads active
 profiles after reconciliation so an archived one-off cannot be asked again in
 the same tick. A failed account lookup, quote, or missing token before Wise
-transfer creation is recorded as `not_submitted`: no payment was made, and a
-new operator approval is needed before a numbered attempt on the same
-obligation. A create call that was entered but returned no ID remains unknown
+transfer creation is recorded as `not_submitted`: no payment was made, and the
+original attempt stays held. A create call that was entered but returned no ID remains unknown
 and held; a rejected funding response names the rejection while holding the
 existing transfer for a read. Neither consent route yet implements the fresh
 approval and execution of a numbered replacement; a human must reconcile the
 original and the Finances lead must verify that adapter before a retry is
-available. Pending attempts older than two calendar days raise a deduped alert.
+available. Approval alone cannot advance a replacement payment. Pending
+attempts older than two calendar days raise a deduped alert.
 
 **First use or deliberate
 fresh start:** reconcile against the chain and wallet, then run from the repo

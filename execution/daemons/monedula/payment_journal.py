@@ -119,6 +119,10 @@ def load(path: Path) -> dict[str, Any]:
         if entry.get("state") not in (STATE_INTENT, STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED):
             raise JournalError("payment journal obligation state malformed")
         if entry.get("rail") == "wise":
+            if any(field in entry and not isinstance(entry[field], str) for field in (
+                "profile_entity_id", "task_id", "approved_terms_hash", "payment_date", "match_id"
+            )):
+                raise JournalError("payment journal Wise approval binding malformed")
             if (
                 not isinstance(entry.get("customer_transaction_id"), str)
                 or not isinstance(entry.get("attempt"), int)
@@ -321,6 +325,8 @@ def token_consumed(data: dict[str, Any], token: str) -> bool:
 def record_intent(
     path: Path, obligation: str, token: str, *, generation: int, rail: str | None = None,
     handler_name: str | None = None, session_key: str | None = None,
+    profile_entity_id: str = "", task_id: str = "", approved_terms_hash: str = "",
+    payment_date: str = "", match_id: str = "",
 ) -> None:
     """Durably record intent-to-pay BEFORE the transfer, and read it back.
 
@@ -345,6 +351,11 @@ def record_intent(
             customer_transaction_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"wise:{obligation}:1")),
             handler_name=handler_name,
             session_key=session_key,
+            profile_entity_id=profile_entity_id,
+            task_id=task_id,
+            approved_terms_hash=approved_terms_hash,
+            payment_date=payment_date,
+            match_id=match_id,
         )
     data["obligations"][obligation] = entry
     data["consumed_tokens"][token] = obligation
@@ -356,7 +367,9 @@ def record_intent(
         raise JournalError("payment intent did not persist")
     if rail == "wise" and any(
         back["obligations"][obligation].get(field) != entry[field]
-        for field in ("token", "generation", "attempt", "customer_transaction_id")
+        for field in ("token", "generation", "attempt", "customer_transaction_id",
+                      "profile_entity_id", "task_id", "approved_terms_hash",
+                      "payment_date", "match_id")
     ):
         raise JournalError("Wise attempt identity did not persist")
 
@@ -539,6 +552,11 @@ def record_approved_replacement_intent(
         )),
         handler_name=previous.get("handler_name"),
         session_key=previous.get("session_key"),
+        profile_entity_id=previous.get("profile_entity_id", ""),
+        task_id=previous.get("task_id", ""),
+        approved_terms_hash=previous.get("approved_terms_hash", ""),
+        payment_date=previous.get("payment_date", ""),
+        match_id=previous.get("match_id", ""),
         attempts=attempts,
     )
     data["consumed_tokens"][token] = obligation
