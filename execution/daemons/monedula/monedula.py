@@ -34,6 +34,19 @@ from typing import Any
 NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
 
 # ---------------------------------------------------------------------------
+# Bootstrap: load env from ~/.config/neotoma/.env before anything else.
+# (launchd does not source shell profiles)
+# ---------------------------------------------------------------------------
+
+_NEOTOMA_ENV_FILE = Path.home() / ".config" / "neotoma" / ".env"
+if _NEOTOMA_ENV_FILE.exists():
+    for _line in _NEOTOMA_ENV_FILE.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
+
+# ---------------------------------------------------------------------------
 # lib/notify integration (path bootstrap required before import)
 # ---------------------------------------------------------------------------
 
