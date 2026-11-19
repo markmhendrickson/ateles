@@ -694,6 +694,24 @@ class TestCodexGuardEffect(unittest.TestCase):
                     }, env={"HOME": os.fspath(home)})
                     self.assertEqual(allowed.returncode, 0, allowed.stderr)
 
+    def test_credential_guard_budget_refusal_carries_a_reason_on_stderr_for_codex(self) -> None:
+        # Codex honours a refusal only when stderr carries a reason: exit 2 with an empty stderr is a FAILED hook
+        # and the tool call still runs. The inspection-budget refusal must therefore also write its reason.
+        script = REPO_ROOT / ".claude" / "hooks" / "credential_read_guard.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            oversized = "cat " + "a/" * 700000
+            for tool in ("Bash", "exec_command", "local_shell"):
+                with self.subTest(tool=tool):
+                    result = _run(f"python3 {shlex.quote(os.fspath(script))}", {
+                        "hook_event_name": "PreToolUse", "tool_name": tool,
+                        "tool_input": {"command": oversized}, "cwd": os.fspath(home),
+                    }, env={"HOME": os.fspath(home)})
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertTrue(result.stderr.strip(), "a refusal without a stderr reason is not honoured by Codex")
+                    self.assertEqual(
+                        json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
+
     def test_installed_credential_guard_blocks_synthetic_reads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
