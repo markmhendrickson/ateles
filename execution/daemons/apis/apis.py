@@ -380,7 +380,10 @@ def _gate_hold_is_in_flight(task_id: str) -> bool:
 def _gate_hold_write_details(snapshot: dict, skill: str | None, action_type: str | None, decision: GateDecision) -> tuple[str, str, list[str] | None]:
     """Use identical checkpoint content for a gate write and its recovery."""
     title = str(snapshot.get("title") or "Held task")
-    summary = f"Gate hold for {skill or 'unassigned'}. Action: {action_type or 'unknown'}. {decision.reason}."
+    summary = (
+        f"Gate hold for {skill or 'unassigned'}. Action: {action_type or 'unknown'}. "
+        f"{decision.reason}. Confidence drivers: {_confidence_drivers_text(snapshot)}"
+    )
     alternatives = (
         ["Re-scope to a lower-blast action", "Provide missing inputs", "Decline"]
         if decision.action == GateAction.CHECKPOINT_WITH_ALTERNATIVES else None
@@ -3614,8 +3617,11 @@ async def _dispatch_task(
                         if isinstance(observation_id, str) and observation_id
                         else f"hold-revision-{entity_record_digest(task_record)}"
                     )
+                    # The read-back is the record the recovery path will read, so it
+                    # normally carries the same fields; the pre-gate snapshot only
+                    # fills a field the read-back lacks (the creator's drivers).
                     held_title, summary, alternatives = _gate_hold_write_details(
-                        held_snapshot, skill, action_type, decision
+                        {**(snapshot or {}), **held_snapshot}, skill, action_type, decision
                     )
                     # The recovery path cannot recover an in-memory scoring
                     # source. Keep the persisted checkpoint shape identical.
