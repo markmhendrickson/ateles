@@ -1713,9 +1713,10 @@ def write_dispatch_failure_log(
     cmd: list[str] | None = None,
     cwd: str | None = None,
     duration_ms: int | None = None,
+    blocked_by_agent: bool = False,
 ) -> str:
     """
-    Persist the COMPLETE stdout and stderr of a failed dispatch to a file.
+    Persist the COMPLETE stdout and stderr of a failed or agent-blocked run.
 
     Returns the absolute path written, or ``""`` when the write could not be
     made. NEVER raises — diagnostics must not be able to break a dispatch.
@@ -1723,13 +1724,20 @@ def write_dispatch_failure_log(
     The file is written mode-0600: child output can contain repository content
     and, in pathological cases, tokens echoed by a failing tool.
     """
+    path: Path | None = None
+    created = False
     try:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        DISPATCH_FAILURE_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        path = DISPATCH_FAILURE_LOG_DIR / f"{_slug(skill)}-{ts}.log"
+        log_dir = (
+            DISPATCH_FAILURE_LOG_DIR.parent / "blocked-runs"
+            if blocked_by_agent else DISPATCH_FAILURE_LOG_DIR
+        )
+        log_dir.mkdir(parents=True, exist_ok=True)
+        path = log_dir / f"{_slug(skill)}-{ts}.log"
 
         header = [
-            "# Ateles dispatch failure (ateles#257)",
+            ("# Ateles agent-blocked run" if blocked_by_agent
+             else "# Ateles dispatch failure (ateles#257)"),
             f"written_at: {datetime.now(timezone.utc).isoformat()}",
             f"skill: {skill}",
             f"role: {role}",
@@ -1752,14 +1760,21 @@ def write_dispatch_failure_log(
             + _redact_secrets(stderr)
             + "\n===== END STDERR =====\n"
         )
-        path.write_text(body, encoding="utf-8")
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        created = True
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            output.write(body)
         return str(path)
     except Exception as exc:  # noqa: BLE001 — diagnostics must never break dispatch
-        log.warning(f"[apis] could not write dispatch-failure log (non-fatal): {exc}")
+        if created and path is not None:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if blocked_by_agent:
+            log.warning(f"[apis] could not write blocked-run log (non-fatal): {exc}")
+        else:
+            log.warning(f"[apis] could not write dispatch-failure log (non-fatal): {exc}")
         return ""
 
 

@@ -3341,6 +3341,33 @@ class TestDispatchFailureDiagnostics:
         assert fake_value not in body
         assert body.count("<redacted:GITHUB_TOKEN>") == 2
 
+    def test_output_file_is_private_from_creation(self, tmp_path) -> None:
+        import stat
+
+        log_dir = tmp_path / "blocked-runs"
+        original_open = os.open
+        observed_modes = []
+
+        def checking_open(path, flags, mode=0o777, *, dir_fd=None):
+            fd = original_open(path, flags, mode, dir_fd=dir_fd)
+            if Path(path).parent == log_dir:
+                observed_modes.append(stat.S_IMODE(os.fstat(fd).st_mode))
+                assert flags & os.O_EXCL
+            return fd
+
+        with (
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "dispatch-failures"),
+            patch("skill_runner.os.open", side_effect=checking_open),
+        ):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=0,
+                stdout="draft", stderr="", blocked_by_agent=True,
+            )
+
+        assert path
+        assert observed_modes == [0o600]
+        assert stat.S_IMODE(Path(path).stat().st_mode) == 0o600
+
     def test_skill_name_is_slugified_into_the_filename(self, tmp_path) -> None:
         with patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"):
             path = skill_runner.write_dispatch_failure_log(

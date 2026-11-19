@@ -691,7 +691,12 @@ import build_delivery  # noqa: E402
 import model_tiering  # noqa: E402
 import producer_confidence  # noqa: E402
 from red_conditions import ApisNotifier  # noqa: E402
-from skill_runner import SkillResult, _redact_secrets, run_skill  # noqa: E402
+from skill_runner import (  # noqa: E402
+    SkillResult,
+    _redact_secrets,
+    run_skill,
+    write_dispatch_failure_log,
+)
 from swarm_dispatch import SwarmDispatcher, _token_for_agent_on_repo  # noqa: E402
 from task_reconciler import TaskReconciler  # noqa: E402
 from unroutable_ledger import shared_ledger  # noqa: E402
@@ -4015,15 +4020,39 @@ async def _dispatch_task(
                 # BLOCKED is the agent reporting honestly, so it is not a
                 # failure: BLOCKED is re-openable by operator remediation,
                 # FAILED is the watchdog's retry lane, and retrying a stated
-                # blocker is noise. The body is kept verbatim — it names what
-                # the agent needs.
+                # blocker is noise. Keep the complete output beside dispatch
+                # failures so the agent's draft survives the task transition.
+                output_path = await asyncio.to_thread(
+                    write_dispatch_failure_log,
+                    skill=skill,
+                    role=contract.role,
+                    returncode=result.returncode,
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                    task_entity_id=entity_id,
+                    blocked_by_agent=True,
+                )
+                output_note = (
+                    f"\nFull run output: {output_path}"
+                    if output_path else "\nFull run output could not be kept."
+                )
+                if output_path:
+                    log.info(
+                        "[%s] agent-blocked output for %s: %s",
+                        DAEMON_NAME, entity_id, output_path,
+                    )
+                else:
+                    log.warning(
+                        "[%s] agent-blocked output for %s could not be kept",
+                        DAEMON_NAME, entity_id,
+                    )
                 _artifact_fail(
                     TaskStatus.BLOCKED,
                     _gate_reason(
                         "blocked", role=contract.role, kind=contract.artifact_kind,
                         task_id=entity_id,
                         verbatim_body=header.body[:800],
-                    ),
+                    ) + output_note,
                     stage="blocked",
                     alert="agent_blocked",
                 )

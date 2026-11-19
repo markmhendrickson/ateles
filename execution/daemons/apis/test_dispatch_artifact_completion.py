@@ -41,6 +41,7 @@ Run: pytest execution/daemons/apis/test_dispatch_artifact_completion.py -v
 from __future__ import annotations
 
 import asyncio
+import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +52,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import apis  # noqa: E402
+import skill_runner  # noqa: E402
 from lib.daemon_runtime import task_lifecycle as tl  # noqa: E402
 from lib.daemon_runtime.task_lifecycle import CompletionOutcome, TaskStatus  # noqa: E402
 from unroutable_ledger import UnroutableLedger  # noqa: E402
@@ -285,6 +287,66 @@ def test_ok_with_cicada_blocked_header_sets_blocked_and_retains_reason(
     assert "BLOCKED — missing context" in reason, "lost the agent's own blocker text"
     assert "blocked" in stages, f"run thread never recorded the blocked stage: {stages}"
     assert notifier.sent
+
+
+def test_agent_blocked_keeps_complete_redacted_output(writes, spawn, tmp_path, monkeypatch):
+    fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+    monkeypatch.setenv("GITHUB_TOKEN", fake_value)
+    stdout = "draft start\n" + ("paragraph\n" * 1200) + fake_value
+    stderr = "diagnostic start\n" + ("detail\n" * 400) + "diagnostic end"
+    spawn.result = _SpawnResult(
+        stdout=f"{stdout}\n[cicada] pull_request_link: BLOCKED — need input\n",
+        stderr=stderr,
+    )
+
+    _dispatch("ent_saved_blocked", _cicada_task())
+
+    blocked = _with_status(writes, "blocked")
+    assert len(blocked) == 1
+    files = list((tmp_path / "blocked-runs").glob("*.log"))
+    assert len(files) == 1
+    path = files[0]
+    assert list((tmp_path / "dispatch-failures").glob("*.log")) == []
+    assert str(path) in blocked[0]["reason"]
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    body = path.read_text(encoding="utf-8")
+    assert body.split("===== STDOUT (complete) =====\n", 1)[1].split(
+        "\n===== END STDOUT =====", 1
+    )[0] == spawn.result.stdout.replace(fake_value, "<redacted:GITHUB_TOKEN>")
+    assert body.split("===== STDERR (complete) =====\n", 1)[1].split(
+        "\n===== END STDERR =====", 1
+    )[0] == stderr
+    assert fake_value not in body
+
+
+def test_delivered_artifact_keeps_no_output_file(writes, spawn, tmp_path, monkeypatch):
+    monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: True)
+    spawn.result = _SpawnResult(stdout=f"draft\n{_PR_HEADER}\n")
+
+    _dispatch("ent_delivered_no_log", _cicada_task())
+
+    assert [w for w in writes if w.get("fn") == "complete_task_with_result"]
+    assert list((tmp_path / "blocked-runs").glob("*.log")) == []
+    assert list((tmp_path / "dispatch-failures").glob("*.log")) == []
+
+
+def test_agent_blocked_output_write_failure_is_reported(
+    writes, spawn, tmp_path, monkeypatch, caplog
+):
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("directory creation must fail", encoding="utf-8")
+    monkeypatch.setattr(skill_runner, "DISPATCH_FAILURE_LOG_DIR", blocker / "dispatch-failures")
+    spawn.result = _SpawnResult(
+        stdout="draft\n[cicada] pull_request_link: BLOCKED — need input\n"
+    )
+
+    _dispatch("ent_unsaved_blocked", _cicada_task())
+
+    blocked = _with_status(writes, "blocked")
+    assert len(blocked) == 1
+    assert "Full run output could not be kept" in blocked[0]["reason"]
+    assert "could not write blocked-run log" in caplog.text
+    assert "agent-blocked output for ent_unsaved_blocked could not be kept" in caplog.text
 
 
 def test_ok_without_required_artifact_header_is_not_done(writes, stages, spawn):
