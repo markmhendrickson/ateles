@@ -77,6 +77,78 @@ def _bind_synthetic_attempt(path, profile, payment_date="2026-01-01"):
     journal._write(path, data)
 
 
+@pytest.mark.parametrize("failure", ["binding", "task_write"])
+def test_confirmed_wise_effect_failure_keeps_session_pending_through_sweep(
+    attempt, monkeypatch, failure
+):
+    import consent_email
+    import monedula
+    from handlers.payment_profile import PaymentProfile
+    from test_session_payments import _event
+
+    profile = PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", calendar_keywords=["synthetic"],
+        payment_type="wise", amount_eur=1, entity_id="synthetic-profile",
+        neotoma_task_id="synthetic-task", wise_recipient_id=5,
+        wise_recipient_name="Synthetic", wise_reference="original",
+    )
+    handler = wise.WiseTransferHandler(profile)
+    event = _event("session", "synthetic")
+    match = handler.matches([event])[0]
+    payment_date = consent_email.event_session_date(match)
+    _bind_synthetic_attempt(attempt, profile, payment_date)
+    data = journal.load(attempt)
+    entry = data["obligations"]["obligation"]
+    entry["match_id"] = "session"
+    entry["approved_terms_hash"] = consent_email.obligation_key(
+        handler, payment_date, "session"
+    )
+    journal._write(attempt, data)
+    journal.note_pending(attempt, "synthetic:session")
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_wise_status(
+        attempt, "obligation", 3, "outgoing_payment_sent", "2026-11-11T21:00:00Z"
+    )
+    monkeypatch.setattr(consent_email, "STATE_FILE", attempt.parent / "consent.json")
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda message, **kw: alerts.append(message))
+    if failure == "binding":
+        profile.wise_reference = "edited"
+    else:
+        monkeypatch.setattr(wise, "_update_task", lambda *a, **kw: False)
+
+    assert not monedula._apply_confirmed_wise_effects(
+        attempt, "obligation", entry, {profile.entity_id: handler}
+    )
+    assert monedula._apply_session_journal([(handler, [match])], reconcile=True) == []
+    assert journal.session_state(journal.load(attempt), "synthetic:session") == "pending"
+    assert monedula._apply_session_journal([], reconcile=True) == []
+    assert journal.session_state(journal.load(attempt), "synthetic:session") == "pending"
+    assert not journal.load(attempt)["obligations"]["obligation"].get("effects_applied")
+    assert any("bookkeeping held" in message or "needs task bookkeeping" in message
+               for message in alerts)
+
+
+def test_session_sweep_rechecks_state_before_dropping(tmp_path, monkeypatch):
+    import consent_email
+    import monedula
+
+    attempt = tmp_path / journal.JOURNAL_NAME
+    journal.init_journal(attempt)
+    monkeypatch.setattr(consent_email, "STATE_FILE", tmp_path / "consent.json")
+    journal.note_pending(attempt, "synthetic:session")
+    original = journal.pending_sessions
+
+    def settle_after_snapshot(data):
+        pending = original(data)
+        journal.set_session_state(attempt, "synthetic:session", journal.SESSION_SETTLED)
+        return pending
+
+    monkeypatch.setattr(journal, "pending_sessions", settle_after_snapshot)
+    assert monedula._apply_session_journal([], reconcile=True) == []
+    assert journal.session_state(journal.load(attempt), "synthetic:session") == "settled"
+
+
 def _old_obligation_key(handler, payment_date):
     import consent_email
 

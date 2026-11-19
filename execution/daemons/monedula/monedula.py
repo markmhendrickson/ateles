@@ -1687,7 +1687,8 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                     state = journal_state_for_item(
                         {"obligations": {item.obligation: entry}}, item
                     )
-                    if state == payment_journal.STATE_DONE:
+                    if (state == payment_journal.STATE_DONE
+                            and entry.get("effects_applied") is True):
                         if eid:
                             key = payment_journal.session_key(handler.name, eid)
                             if payment_journal.session_state(data, key) is None:
@@ -1726,7 +1727,8 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                         handler, match, matches, _yesterday().isoformat()
                     )
                 }
-                if state is None and payment_journal.STATE_DONE in legacy_states:
+                if (state is None and payment_journal.STATE_DONE in legacy_states
+                        and not isinstance(handler, WiseTransferHandler)):
                     # Only a settled legacy obligation closes the session.
                     log.warning(
                         f"session {key} already has a journaled obligation under "
@@ -1756,16 +1758,23 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
             if keep:
                 kept.append((handler, keep))
         if reconcile:
-            for key in payment_journal.pending_sessions(data):
+            for key in payment_journal.pending_sessions(payment_journal.load(jpath)):
                 if key not in seen_keys:
-                    if any(
-                        entry.get("rail") == "wise"
-                        and entry.get("session_key") == key
-                        and payment_journal.obligation_state(
-                            {"obligations": {"held": entry}}, "held"
-                        ) != payment_journal.STATE_DONE
-                        for entry in data["obligations"].values()
-                    ):
+                    # Earlier iterations may have applied effects or settled a
+                    # session. Never drop it using the snapshot from entry.
+                    current = payment_journal.load(jpath)
+                    if payment_journal.session_state(current, key) != payment_journal.SESSION_PENDING:
+                        continue
+                    wise_rows = [entry for entry in current["obligations"].values()
+                                 if entry.get("rail") == "wise"
+                                 and entry.get("session_key") == key]
+                    if wise_rows:
+                        if any(entry.get("effects_applied") is True
+                               and entry.get("last_status") == "outgoing_payment_sent"
+                               for entry in wise_rows):
+                            payment_journal.set_session_state(
+                                jpath, key, payment_journal.SESSION_SETTLED
+                            )
                         continue
                     log.warning(
                         "Pending session no longer matches an event/profile — dropping."
@@ -1854,11 +1863,11 @@ def _apply_confirmed_wise_effects(path: Path, obligation: str, entry: dict, hand
     task_ok = _update_task(
         profile, {"status": "sent", "transfer_id": transfer_id, "paid_at_date": paid_date}
     )
-    session_key = entry.get("session_key")
-    if session_key:
-        payment_journal.set_session_state(path, session_key, payment_journal.SESSION_SETTLED)
     if task_ok:
         payment_journal.mark_wise_effects_applied(path, obligation, transfer_id)
+        session_key = entry.get("session_key")
+        if session_key:
+            payment_journal.set_session_state(path, session_key, payment_journal.SESSION_SETTLED)
         return True
     _notify(
         f"monedula: confirmed Wise transfer [{obligation[:12]}] "
@@ -1941,6 +1950,15 @@ def _reconcile_wise_entries(handlers: list) -> bool:
                 f"but latest status is {current.get('last_status') or 'unknown'}; "
                 f"task and session effects {prior_effects}; review the return; do not pay again.",
                 priority="blocker", dedupe_key=f"monedula:wise_discrepancy:{obligation}",
+            )
+        session_key = current.get("session_key")
+        if (session_key and current.get("effects_applied") is True
+                and current.get("last_status") == "outgoing_payment_sent"
+                and payment_journal.session_state(
+                    payment_journal.load(path), session_key
+                ) == payment_journal.SESSION_PENDING):
+            payment_journal.set_session_state(
+                path, session_key, payment_journal.SESSION_SETTLED
             )
         if current.get("state") == payment_journal.STATE_DONE:
             due = current.get("next_check_at")
