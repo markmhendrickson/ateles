@@ -718,6 +718,31 @@ def test_equal_instant_conflict_blocks_reconciliation_effects(attempt, monkeypat
     assert "later observation from Wise" in report[0]["guidance"]
 
 
+@pytest.mark.parametrize("later_status,category", [
+    ("outgoing_payment_sent", "confirmed sent"),
+    ("bounced_back", "returned"),
+])
+def test_discrepancy_report_guidance_follows_the_comparison_with_a_later_snapshot(
+    attempt, later_status, category
+):
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                               "2026-01-01T00:00:00Z")
+    journal.record_wise_status(attempt, "obligation", 3, "bounced_back",
+                               "2026-01-01T00:00:00+00:00")
+    row = journal.load(attempt)["obligations"]["obligation"]
+    assert row["timestamp_conflict_status"]
+    report = wise_reconcile.discrepancy_report(
+        {"obligation": row}, {3: {"status": later_status, "updated": "2026-01-01T02:00:00Z"}}
+    )
+    assert report[0]["category"] == category
+    guidance = report[0]["guidance"]
+    assert "later than the two conflicting reads" in guidance
+    assert "remains held until reconciliation records it" in guidance
+    assert "A later observation from Wise is needed" not in guidance
+    assert "do not pay again" in guidance
+
+
 @pytest.mark.parametrize("initial,read", [
     ("outgoing_payment_sent", "bounced_back"),
     ("bounced_back", "outgoing_payment_sent"),

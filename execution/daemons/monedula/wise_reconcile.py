@@ -130,6 +130,7 @@ def discrepancy_report(rows: dict[str, dict], transfer_reads: dict[int, Any]) ->
         transfer_id = entry.get("transfer_id")
         category = "unmatched"
         status = None
+        relation = None
         if isinstance(transfer_id, int) and transfer_id in transfer_reads:
             try:
                 status, occurred_at = latest_status(transfer_reads[transfer_id])
@@ -156,7 +157,16 @@ def discrepancy_report(rows: dict[str, dict], transfer_reads: dict[int, Any]) ->
         if entry.get("timestamp_conflict_status"):
             from wise_hold_message import hold_text
 
-            reported["guidance"] = hold_text(entry)
+            if relation == "later":
+                # The supplied snapshot is already the later observation the conflict waits for:
+                # say so, and that the journal stays held until reconciliation records it.
+                reported["guidance"] = (
+                    "This snapshot is later than the two conflicting reads recorded in the journal "
+                    f"and reports {status}. The journal remains held until reconciliation records "
+                    "it; nothing has been changed by this report. Check Wise Activity; do not pay again."
+                )
+            else:
+                reported["guidance"] = hold_text(entry)
         report.append(reported)
     return report
 
