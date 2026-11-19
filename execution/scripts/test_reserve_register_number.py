@@ -228,6 +228,29 @@ def test_historical_split_table_is_read_only_on_origin_side(monkeypatch, tmp_pat
         module.check("revision", "origin", "origin/main")
 
 
+def test_a_base_register_row_with_a_code_span_pipe_is_read_on_the_origin_side_only(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """origin/main still carries a row whose code span holds an unescaped pipe (row 70)."""
+    module = _load_module()
+    header = "| # | The question | Argued in | Blocks | Status |\n|---|---|---|---|---|\n"
+    old = header + "| 40 | question | `doc.md#q` | how `a|b` splits | **open** |\n"
+    current = header + "| 40 | question | `doc.md#q` | how `a\\|b` splits | **open** |\n"
+    source = tmp_path / "conformance.md"
+    source.write_text(current)
+    monkeypatch.setitem(module.KINDS, "decision", str(source))
+    monkeypatch.setattr(module, "git", lambda *args: old)
+    monkeypatch.setattr(module, "reservations", lambda kind, remote: set())
+    monkeypatch.setattr(module, "origin_text", lambda kind, remote: ("base-sha", old))
+    # The production reader (check and next) accepts the unescaped base row.
+    assert module.next_number("decision", "origin") == (41, "base-sha")
+    assert module.check("decision", "origin", "origin/main") == []
+    # The worktree side stays strict: the same unescaped row there is refused.
+    source.write_text(old)
+    with pytest.raises(ValueError, match="malformed register row"):
+        module.check("decision", "origin", "origin/main")
+
+
 def test_an_unreasonable_range_is_rejected(clones: tuple[Path, Path, Path]) -> None:
     _, first, _ = clones
     register = first / "docs" / "foundation" / "conformance.md"

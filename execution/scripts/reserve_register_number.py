@@ -61,9 +61,29 @@ def historical_base_text(kind: str, content: str) -> str:
     Remove this shim once origin/main includes this PR's removal of the two
     blank lines in revisions.md; then both base and worktree use the strict reader.
     """
+    if kind == "decision":
+        return _escape_legacy_code_span_pipes(content)
     if kind != "revision":
         return content
     return re.sub(r"(?m)(^\|[^\n]*\|\n)\n(?=\|)", r"\1", content)
+
+
+def _escape_legacy_code_span_pipes(content: str) -> str:
+    """Read a base register whose rows carry an unescaped pipe inside a code span.
+
+    GitHub splits a table cell at such a pipe before it reads the code span, so the
+    strict reader refuses the row; the base copy on origin still carries one (row
+    70). Only table rows (lines that start with a pipe) are touched, and only a pipe
+    inside a backtick pair on that line is escaped, so the cell count is what the
+    author meant. The current worktree is always parsed unchanged and strict.
+    Remove this branch once origin/main includes this PR's escaped row.
+    """
+    def fix(line: str) -> str:
+        if not line.startswith("|"):
+            return line
+        return re.sub(r"`[^`\n]*`", lambda m: re.sub(r"(?<!\\)\|", r"\\|", m.group(0)), line)
+
+    return "\n".join(fix(line) for line in content.split("\n"))
 
 
 def table_counts(content: str) -> Counter[tuple[str, int]]:
