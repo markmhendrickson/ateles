@@ -3674,8 +3674,10 @@ async def _dispatch_task(
                     + f"  task={entity_id} brief={brief_id or '(unpersisted)'}"
                     + (
                         ("\n  The periodic gate-hold sweep can retry this recent hold."
-                         if sweep_can_retry else
-                         "\n  Run reissue_held_checkpoints.py for holds the periodic sweep cannot reconstruct.")
+                         if sweep_can_retry else "")
+                        + ("\n  Recover missing gate checkpoints: "
+                           "reissue_held_checkpoints.py --gate-hold-only --apply "
+                           "(default run is a dry run and writes nothing).")
                         if not hold_proven or not brief_id else ""
                     ),
                     priority=Priority.BLOCKER,

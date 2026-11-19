@@ -115,7 +115,11 @@ def test_dispatch_creates_checkpoint_only_after_late_hold_lands(monkeypatch, lan
         assert briefs[0]["task_record"]["snapshot"]["status"] == "awaiting_approval"
         assert briefs[0]["idempotency_context"] == "hold-obs-hold"
     else:
-        assert any("reissue_held_checkpoints.py" in message for message in notices)
+        assert any(
+            "reissue_held_checkpoints.py --gate-hold-only --apply" in message
+            and "default run is a dry run" in message
+            for message in notices
+        )
 
 
 def test_gate_and_sweep_share_one_signed_checkpoint_identity(monkeypatch):
