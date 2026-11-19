@@ -3341,6 +3341,409 @@ class TestDispatchFailureDiagnostics:
         assert fake_value not in body
         assert body.count("<redacted:GITHUB_TOKEN>") == 2
 
+    @pytest.mark.parametrize("blocked", [False, True])
+    @pytest.mark.parametrize("splice", ["\u200b", "\u200d", "\u2060", "\ufeff", "\u00ad", "\u202e", "\u2066"])
+    def test_a_token_split_by_an_invisible_character_is_still_redacted(
+        self, tmp_path, blocked, splice
+    ) -> None:
+        # One invisible format character inside an echoed token must not defeat the
+        # redaction in either stream, for a failure log and for a blocked-run log.
+        fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+        spliced = fake_value[:9] + splice + fake_value[9:]
+        with (
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"),
+            patch.dict("os.environ", {"GITHUB_TOKEN": fake_value}, clear=False),
+        ):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1,
+                stdout=f"line one\nleaked {spliced} in stdout\nline three",
+                stderr=f"leaked {spliced} in stderr",
+                blocked_by_agent=blocked,
+            )
+        assert path
+        body = Path(path).read_text(encoding="utf-8")
+        assert fake_value not in body and spliced not in body
+        assert fake_value[:9] not in body.replace("<redacted:GITHUB_TOKEN>", "")
+        assert body.count("<redacted:GITHUB_TOKEN>") == 2
+        assert "line one\nleaked" in body  # normal line structure is kept
+
+    @pytest.mark.parametrize("blocked", [False, True])
+    def test_a_credential_given_only_to_the_child_is_redacted(self, tmp_path, blocked) -> None:
+        # A per-dispatch credential is injected into the child's environment and is not in
+        # the daemon's own environment; once remembered it is redacted from persisted output.
+        child_only = "CHILD-ONLY-FAKE-VALUE-1234"
+        assert not any(v == child_only for v in os.environ.values())
+        skill_runner._remember_child_credential(child_only)
+        try:
+            with patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"):
+                path = skill_runner.write_dispatch_failure_log(
+                    skill="cicada", role="cicada", returncode=1,
+                    stdout=f"echoed {child_only} here", stderr=f"and {child_only[:9]}\u200b{child_only[9:]}",
+                    blocked_by_agent=blocked,
+                )
+        finally:
+            skill_runner._CHILD_CREDENTIAL_VALUES.pop(child_only, None)
+        body = Path(path).read_text(encoding="utf-8")
+        assert child_only not in body and child_only[:9] not in body.replace("<redacted:child-credential>", "")
+        assert body.count("<redacted:child-credential>") == 2
+
+    def test_an_active_childs_credential_survives_many_later_dispatches(self, tmp_path) -> None:
+        # Redaction state must outlive the run: registering many later credentials must not
+        # evict the first child's, whether its log is a failure log or a blocked-run log.
+        first = "FIRST-CHILD-FAKE-VALUE-5555"
+        before = dict(skill_runner._CHILD_CREDENTIAL_VALUES)
+        try:
+            skill_runner._remember_child_credential(first)
+            for i in range(200):
+                skill_runner._remember_child_credential(f"LATER-CHILD-FAKE-VALUE-{i:04d}")
+            assert first in skill_runner._CHILD_CREDENTIAL_VALUES
+            for blocked in (False, True):
+                with patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"):
+                    path = skill_runner.write_dispatch_failure_log(
+                        skill="cicada", role="cicada", returncode=1,
+                        stdout=f"echo {first}", stderr="", blocked_by_agent=blocked,
+                    )
+                assert first not in Path(path).read_text(encoding="utf-8")
+        finally:
+            skill_runner._CHILD_CREDENTIAL_VALUES.clear()
+            skill_runner._CHILD_CREDENTIAL_VALUES.update(before)
+
+    def test_remembered_child_credentials_expire_by_age_and_are_capped(self, monkeypatch) -> None:
+        before = dict(skill_runner._CHILD_CREDENTIAL_VALUES)
+        try:
+            clock = [1000.0]
+            monkeypatch.setattr(skill_runner.time, "monotonic", lambda: clock[0])
+            skill_runner._remember_child_credential("OLD-CHILD-FAKE-VALUE-0001")
+            clock[0] += skill_runner._CHILD_CREDENTIAL_TTL_SECONDS - 1
+            skill_runner._remember_child_credential("NEW-CHILD-FAKE-VALUE-0002")
+            assert "OLD-CHILD-FAKE-VALUE-0001" in skill_runner._CHILD_CREDENTIAL_VALUES
+            clock[0] += 2
+            skill_runner._remember_child_credential("NEWER-CHILD-FAKE-VALUE-0003")
+            assert "OLD-CHILD-FAKE-VALUE-0001" not in skill_runner._CHILD_CREDENTIAL_VALUES
+            monkeypatch.setattr(skill_runner, "_CHILD_CREDENTIAL_LIMIT", 5)
+            for i in range(20):
+                skill_runner._remember_child_credential(f"CAP-CHILD-FAKE-VALUE-{i:04d}")
+            assert len(skill_runner._CHILD_CREDENTIAL_VALUES) == 5
+        finally:
+            skill_runner._CHILD_CREDENTIAL_VALUES.clear()
+            skill_runner._CHILD_CREDENTIAL_VALUES.update(before)
+
+    @pytest.mark.parametrize("blocked", [False, True])
+    @pytest.mark.parametrize("escape", ["\x1b[31m", "\x1b[0m", "\x1b]0;title\x07", "\x9b32m", "\x1b[1;2;3m"])
+    def test_a_token_split_by_a_terminal_escape_is_still_redacted(self, tmp_path, blocked, escape) -> None:
+        fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+        spliced = fake_value[:9] + escape + fake_value[9:]
+        with (
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"),
+            patch.dict("os.environ", {"GITHUB_TOKEN": fake_value}, clear=False),
+        ):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1,
+                stdout=f"line\nleaked {spliced} in stdout", stderr=f"leaked {spliced} in stderr",
+                blocked_by_agent=blocked,
+            )
+        body = Path(path).read_text(encoding="utf-8")
+        assert fake_value not in body and fake_value[:9] not in body.replace("<redacted:GITHUB_TOKEN>", "")
+        assert body.count("<redacted:GITHUB_TOKEN>") == 2
+
+    def test_every_credential_in_a_child_environment_is_remembered_and_redacted(self, tmp_path) -> None:
+        child_env = {
+            "NEOTOMA_TOKEN_CICADA": "ROLE-NEOTOMA-FAKE-VALUE-1111",
+            "SOME_SERVICE_API_KEY": "API-KEY-FAKE-VALUE-2222",
+            "CODEX_GATE_BEARER": "BEARER-FAKE-VALUE-3333",
+            "NEOTOMA_AAUTH_PRIVATE_JWK_PATH": "/some/path/that/is/not/a/secret.json",
+            "NEOTOMA_AAUTH_SUB": "cicada@ateles-swarm",
+            "HOME": "/tmp/not-a-secret-home",
+        }
+        before = dict(skill_runner._CHILD_CREDENTIAL_VALUES)
+        try:
+            skill_runner._remember_child_environment_credentials(child_env)
+            assert "ROLE-NEOTOMA-FAKE-VALUE-1111" in skill_runner._CHILD_CREDENTIAL_VALUES
+            assert "API-KEY-FAKE-VALUE-2222" in skill_runner._CHILD_CREDENTIAL_VALUES
+            assert "BEARER-FAKE-VALUE-3333" in skill_runner._CHILD_CREDENTIAL_VALUES
+            assert "/some/path/that/is/not/a/secret.json" not in skill_runner._CHILD_CREDENTIAL_VALUES
+            assert "cicada@ateles-swarm" not in skill_runner._CHILD_CREDENTIAL_VALUES
+            with patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"):
+                path = skill_runner.write_dispatch_failure_log(
+                    skill="cicada", role="cicada", returncode=1,
+                    stdout="echo ROLE-NEOTOMA-FAKE-VALUE-1111 and API-KEY-FAKE-VALUE-2222",
+                    stderr="BEARER-FAKE-VALUE-3333", blocked_by_agent=True,
+                )
+            body = Path(path).read_text(encoding="utf-8")
+            for secret in ("ROLE-NEOTOMA-FAKE-VALUE-1111", "API-KEY-FAKE-VALUE-2222", "BEARER-FAKE-VALUE-3333"):
+                assert secret not in body
+            assert body.count("<redacted:child-credential>") == 3
+        finally:
+            skill_runner._CHILD_CREDENTIAL_VALUES.clear()
+            skill_runner._CHILD_CREDENTIAL_VALUES.update(before)
+
+    def test_stderr_is_labelled_a_tail_when_only_stderr_was_truncated(self, tmp_path) -> None:
+        with patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1, stdout="whole stdout", stderr="tail",
+                blocked_by_agent=True, stderr_truncated=True,
+            )
+        body = Path(path).read_text(encoding="utf-8")
+        assert "===== STDOUT (complete) =====" in body
+        assert "===== STDERR (retained tail only) =====" in body
+        assert "stderr_truncated: true" in body
+
+    @pytest.mark.parametrize("blocked", [False, True])
+    @pytest.mark.parametrize("disguise", ["combining", "percent", "case", "fullwidth", "joiner_mark"])
+    def test_a_disguised_credential_never_survives_in_saved_output(self, tmp_path, blocked, disguise) -> None:
+        fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+        forms = {
+            "combining": fake_value[:9] + "\u0301\u034f" + fake_value[9:],
+            "percent": "".join(f"%{ord(c):02X}" if c in "-" else c for c in fake_value),
+            "case": fake_value.lower(),
+            "fullwidth": fake_value.replace("T", "\uff34"),
+            "joiner_mark": fake_value[:5] + "\u200d\u0300" + fake_value[5:],
+        }
+        disguised = forms[disguise]
+        with (
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"),
+            patch.dict("os.environ", {"GITHUB_TOKEN": fake_value}, clear=False),
+        ):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1,
+                stdout=f"keep this line\nleaked {disguised} here\nand this one",
+                stderr=f"x {disguised}", blocked_by_agent=blocked,
+            )
+        body = Path(path).read_text(encoding="utf-8")
+        stripped = "".join(ch for ch in body if ord(ch) > 0x2ff or ch.isascii()).casefold()
+        assert disguised not in body
+        assert fake_value.casefold() not in body.casefold()
+        assert "keep this line" in body and "and this one" in body  # other lines are kept
+        assert "redacted" in body
+
+    @pytest.mark.parametrize("blocked", [False, True])
+    @pytest.mark.parametrize("cuts", [[13], [6, 17], [3, 9, 15, 21]])
+    def test_a_credential_split_across_lines_is_redacted(self, tmp_path, blocked, cuts) -> None:
+        fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+        pieces, last = [], 0
+        for cut in cuts + [len(fake_value)]:
+            pieces.append(fake_value[last:cut])
+            last = cut
+        split = "\n".join(pieces)
+        with (
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"),
+            patch.dict("os.environ", {"GITHUB_TOKEN": fake_value}, clear=False),
+        ):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1,
+                stdout=f"keep one\n{split}\nkeep two", stderr=f"a\n{split}\nb",
+                blocked_by_agent=blocked,
+            )
+        body = Path(path).read_text(encoding="utf-8")
+        for piece in pieces:
+            if len(piece) >= 6:
+                assert piece not in body
+        assert "keep one" in body and "keep two" in body
+        assert "split form" in body
+
+    @pytest.mark.parametrize("blocked", [False, True])
+    def test_a_twice_percent_encoded_credential_is_redacted(self, tmp_path, blocked) -> None:
+        fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+        twice = fake_value.replace("-", "%252D")  # a dash encoded twice
+        assert twice != fake_value and "%25" in twice
+        with (
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"),
+            patch.dict("os.environ", {"GITHUB_TOKEN": fake_value}, clear=False),
+        ):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1,
+                stdout=f"keep\nurl {twice} end", stderr="", blocked_by_agent=blocked,
+            )
+        body = Path(path).read_text(encoding="utf-8")
+        assert twice not in body and fake_value not in body and "keep" in body
+
+    def test_every_secret_a_fly_job_carries_is_remembered_and_redacted(self, tmp_path) -> None:
+        import json
+        from types import SimpleNamespace
+
+        key_document = json.dumps({"kty": "EC", "crv": "P-256", "d": "FAKE-PRIVATE-KEY-COMPONENT-6666", "x": "short"})
+        job = SimpleNamespace(secrets={
+            "ATELES_DELIVERY_GITHUB_TOKEN": "FAKE-DELIVERY-TOKEN-VALUE-7777",
+            "GITHUB_TOKEN": "FAKE-READ-TOKEN-VALUE-8888",
+            "NEOTOMA_AAUTH_PRIVATE_JWK": key_document,
+        })
+        before = dict(skill_runner._CHILD_CREDENTIAL_VALUES)
+        try:
+            skill_runner._remember_fly_job_secrets(job)
+            for blocked in (False, True):
+                with patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"):
+                    path = skill_runner.write_dispatch_failure_log(
+                        skill="cicada", role="cicada", returncode=1,
+                        stdout="a FAKE-DELIVERY-TOKEN-VALUE-7777 b FAKE-READ-TOKEN-VALUE-8888",
+                        stderr="key FAKE-PRIVATE-KEY-COMPONENT-6666 and " + key_document,
+                        blocked_by_agent=blocked,
+                    )
+                body = Path(path).read_text(encoding="utf-8")
+                for secret in ("FAKE-DELIVERY-TOKEN-VALUE-7777", "FAKE-READ-TOKEN-VALUE-8888",
+                               "FAKE-PRIVATE-KEY-COMPONENT-6666"):
+                    assert secret not in body
+        finally:
+            skill_runner._CHILD_CREDENTIAL_VALUES.clear()
+            skill_runner._CHILD_CREDENTIAL_VALUES.update(before)
+
+    @pytest.mark.parametrize("blocked", [False, True])
+    @pytest.mark.parametrize("form", ["html_entity", "backslash_u", "backslash_x", "spaced", "base64", "base64_urlsafe",
+                                      "hex", "reversed", "mixed"])
+    def test_other_disguises_of_a_credential_never_survive(self, tmp_path, blocked, form) -> None:
+        import base64
+
+        fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+        raw = fake_value.encode()
+        forms = {
+            "html_entity": fake_value[:5] + "&#x54;" + fake_value[6:],
+            "backslash_u": fake_value[:5] + "\\u0054" + fake_value[6:],
+            "backslash_x": fake_value[:5] + "\\x54" + fake_value[6:],
+            "spaced": " ".join(fake_value),
+            "base64": base64.b64encode(raw).decode(),
+            "base64_urlsafe": base64.urlsafe_b64encode(raw).decode(),
+            "hex": raw.hex(),
+            "reversed": fake_value[::-1],
+            "mixed": "%46AKE-" + "&#84;EST-" + "TOKEN-VALUE-0000",
+        }
+        disguised = forms[form]
+        with (
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"),
+            patch.dict("os.environ", {"GITHUB_TOKEN": fake_value}, clear=False),
+        ):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1,
+                stdout=f"keep one\nleak {disguised} end\nkeep two", stderr="", blocked_by_agent=blocked,
+            )
+            reason = skill_runner._redact_output_text(f"needs {disguised} now")
+        body = Path(path).read_text(encoding="utf-8")
+        assert disguised not in body and disguised not in reason
+        assert "keep one" in body and "keep two" in body
+        assert "redacted" in body and "redacted" in reason
+
+    def test_a_blocked_run_is_not_written_when_its_directory_cannot_be_made_private(self, tmp_path) -> None:
+        log_dir = tmp_path / "blocked-runs"
+        log_dir.mkdir(mode=0o755)
+        os.chmod(log_dir, 0o755)
+        with (
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"),
+            patch("skill_runner.os.chmod", side_effect=PermissionError("denied")),
+        ):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1, stdout="draft", stderr="", blocked_by_agent=True,
+            )
+        assert path == ""
+        assert list(log_dir.glob("*.log")) == []
+
+    def test_a_blocked_run_is_not_written_into_a_directory_that_stays_open(self, tmp_path) -> None:
+        log_dir = tmp_path / "blocked-runs"
+        log_dir.mkdir(mode=0o755)
+        os.chmod(log_dir, 0o755)
+        with (
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"),
+            patch("skill_runner.os.chmod", side_effect=lambda *a, **k: None),  # reports success, changes nothing
+        ):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1, stdout="draft", stderr="", blocked_by_agent=True,
+            )
+        assert path == ""
+        assert list(log_dir.glob("*.log")) == []
+
+    def test_a_new_blocked_runs_directory_is_created_private_under_a_permissive_umask(self, tmp_path) -> None:
+        import stat
+
+        old = os.umask(0)
+        try:
+            with patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"):
+                path = skill_runner.write_dispatch_failure_log(
+                    skill="cicada", role="cicada", returncode=1, stdout="x", stderr="", blocked_by_agent=True,
+                )
+        finally:
+            os.umask(old)
+        assert path and stat.S_IMODE(Path(path).parent.stat().st_mode) == 0o700
+
+    def test_a_registration_failure_refuses_the_fly_launch_instead_of_going_on_unredacted(self) -> None:
+        import fly_runner
+
+        def failing(value):
+            raise RuntimeError("registry unavailable")
+
+        fly_runner.CHILD_CREDENTIAL_HOOKS.append(failing)
+        try:
+            with pytest.raises(fly_runner.FlyIneligible, match="could not be registered"):
+                fly_runner._announce_child_credential("MINTED-FAKE-VALUE-3434")
+        finally:
+            fly_runner.CHILD_CREDENTIAL_HOOKS.remove(failing)
+
+    def test_a_credential_announced_by_the_fly_runner_is_remembered(self) -> None:
+        import fly_runner
+
+        before = dict(skill_runner._CHILD_CREDENTIAL_VALUES)
+        try:
+            fly_runner._announce_child_credential("ANNOUNCED-FAKE-VALUE-1212")
+            assert "ANNOUNCED-FAKE-VALUE-1212" in skill_runner._CHILD_CREDENTIAL_VALUES
+        finally:
+            skill_runner._CHILD_CREDENTIAL_VALUES.clear()
+            skill_runner._CHILD_CREDENTIAL_VALUES.update(before)
+
+    def test_the_blocked_runs_directory_is_private(self, tmp_path) -> None:
+        import stat
+
+        with patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1, stdout="x", stderr="", blocked_by_agent=True,
+            )
+        assert stat.S_IMODE(Path(path).parent.stat().st_mode) == 0o700
+
+    def test_the_helper_definitions_are_not_duplicated(self) -> None:
+        source = Path(skill_runner.__file__).read_text(encoding="utf-8")
+        for name in ("_ANSI_ESCAPE_RE = ", "def _strip_terminal_escapes", "def _remember_child_environment_credentials"):
+            assert source.count(name) == 1, name
+
+    def test_the_role_neotoma_bearer_given_to_a_child_is_redacted(self, tmp_path) -> None:
+        # The role-specific bearer reaches a child through its environment (not the daemon's):
+        # registering the child environment covers it, in a failure log and a blocked-run log.
+        bearer = "ROLE-BEARER-FAKE-VALUE-4444"
+        before = dict(skill_runner._CHILD_CREDENTIAL_VALUES)
+        try:
+            skill_runner._remember_child_environment_credentials({"NEOTOMA_BEARER_TOKEN": bearer})
+            for blocked in (False, True):
+                with patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"):
+                    path = skill_runner.write_dispatch_failure_log(
+                        skill="cicada", role="cicada", returncode=1,
+                        stdout=f"saw {bearer}", stderr="", blocked_by_agent=blocked,
+                    )
+                assert bearer not in Path(path).read_text(encoding="utf-8")
+        finally:
+            skill_runner._CHILD_CREDENTIAL_VALUES.clear()
+            skill_runner._CHILD_CREDENTIAL_VALUES.update(before)
+
+    def test_output_file_is_private_from_creation(self, tmp_path) -> None:
+        import stat
+
+        log_dir = tmp_path / "blocked-runs"
+        original_open = os.open
+        observed_modes = []
+
+        def checking_open(path, flags, mode=0o777, *, dir_fd=None):
+            fd = original_open(path, flags, mode, dir_fd=dir_fd)
+            if Path(path).parent == log_dir:
+                observed_modes.append(stat.S_IMODE(os.fstat(fd).st_mode))
+                assert flags & os.O_EXCL
+            return fd
+
+        with (
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "dispatch-failures"),
+            patch("skill_runner.os.open", side_effect=checking_open),
+        ):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=0,
+                stdout="draft", stderr="", blocked_by_agent=True,
+            )
+
+        assert path
+        assert observed_modes == [0o600]
+        assert stat.S_IMODE(Path(path).stat().st_mode) == 0o600
+
     def test_skill_name_is_slugified_into_the_filename(self, tmp_path) -> None:
         with patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"):
             path = skill_runner.write_dispatch_failure_log(

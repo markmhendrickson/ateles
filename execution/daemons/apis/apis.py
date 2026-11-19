@@ -691,7 +691,13 @@ import build_delivery  # noqa: E402
 import model_tiering  # noqa: E402
 import producer_confidence  # noqa: E402
 from red_conditions import ApisNotifier  # noqa: E402
-from skill_runner import SkillResult, _redact_secrets, run_skill  # noqa: E402
+from skill_runner import (  # noqa: E402
+    SkillResult,
+    _redact_output_text,
+    _redact_secrets,
+    run_skill,
+    write_dispatch_failure_log,
+)
 from swarm_dispatch import SwarmDispatcher, _token_for_agent_on_repo  # noqa: E402
 from task_reconciler import TaskReconciler  # noqa: E402
 from unroutable_ledger import shared_ledger  # noqa: E402
@@ -761,13 +767,13 @@ from task_watchdog import TaskWatchdog  # noqa: E402
 # Every reason built for an operator passes agent-controlled text (the offered
 # ref, the retained BLOCKED words, the record value) through the secret redactor.
 def _redact_agent_text(text: str) -> str:
-    """Redact secrets from agent-controlled text, invisible characters removed FIRST.
+    """Redact secrets from agent-controlled text, then neutralize it for display.
 
-    One zero-width space, soft hyphen, word joiner or bidi mark inside a token
-    defeats a plain substring redaction, so those are stripped before the
-    redactor runs.
+    The redactor itself removes terminal escapes and invisible characters before it compares, so it must see
+    the RAW text: `sanitize_text` turns an escape byte into a space, which would split a token the redactor
+    could otherwise recognise. Redact first, sanitize after.
     """
-    return _redact_secrets(sanitize_text(text))
+    return sanitize_text(_redact_output_text(text))
 
 
 _gate_reason = functools.partial(artifact_gate_reason, redact=_redact_agent_text)
@@ -3963,6 +3969,10 @@ async def _dispatch_task(
                     artifact_kind=contract.artifact_kind,
                 )
 
+            # Decisions (is it blocked, what shape, which reference) are taken on the ORIGINAL header:
+            # redacting a line that holds a credential replaces the whole line, which must never change
+            # how the agent's outcome is classified. Only what is stored or shown is redacted.
+            header_original = header
             if header is not None:
                 # Redact the agent-controlled header ONCE, here, so nothing
                 # downstream (the reason, the alert, the run thread, a printed
@@ -3980,11 +3990,7 @@ async def _dispatch_task(
                 # output has held tokens, and it is agent-controlled text.
                 tail = stdout_tail_for_reason(
                     sanitize_text(
-                        _redact_secrets(
-                            sanitize_text(
-                                getattr(result, "stdout", "") or "", keep_newlines=True
-                            )
-                        ),
+                        _redact_output_text(getattr(result, "stdout", "") or ""),
                         keep_newlines=True,
                     ),
                     limit=2048,
@@ -4000,7 +4006,7 @@ async def _dispatch_task(
                 )
                 return None
 
-            body_class = classify_artifact_body(header.body)
+            body_class = classify_artifact_body(header_original.body)
             if body_class == "empty":
                 _artifact_fail(
                     TaskStatus.FAILED,
@@ -4015,15 +4021,48 @@ async def _dispatch_task(
                 # BLOCKED is the agent reporting honestly, so it is not a
                 # failure: BLOCKED is re-openable by operator remediation,
                 # FAILED is the watchdog's retry lane, and retrying a stated
-                # blocker is noise. The body is kept verbatim — it names what
-                # the agent needs.
+                # blocker is noise. Keep the complete output beside dispatch
+                # failures so the agent's draft survives the task transition.
+                output_path = await asyncio.to_thread(
+                    write_dispatch_failure_log,
+                    skill=skill,
+                    role=contract.role,
+                    returncode=result.returncode,
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                    task_entity_id=entity_id,
+                    blocked_by_agent=True,
+                    output_truncated=bool(getattr(result, "output_truncated", False)),
+                    # A Fly run keeps only the tail of stderr and drops its truncation flag.
+                    stderr_truncated=bool(getattr(result, "remote_run_id", "")),
+                )
+                _tail_only = bool(
+                    getattr(result, "output_truncated", False) or getattr(result, "remote_run_id", "")
+                )
+                _what = (
+                    "Run output (the runner kept only its tail)" if _tail_only else "Full run output"
+                )
+                output_note = (
+                    f"\n{_what}: {output_path}"
+                    if output_path else f"\n{_what} could not be kept."
+                )
+                if output_path:
+                    log.info(
+                        "[%s] agent-blocked output for %s: %s",
+                        DAEMON_NAME, entity_id, output_path,
+                    )
+                else:
+                    log.warning(
+                        "[%s] agent-blocked output for %s could not be kept",
+                        DAEMON_NAME, entity_id,
+                    )
                 _artifact_fail(
                     TaskStatus.BLOCKED,
                     _gate_reason(
                         "blocked", role=contract.role, kind=contract.artifact_kind,
                         task_id=entity_id,
                         verbatim_body=header.body[:800],
-                    ),
+                    ) + output_note,
                     stage="blocked",
                     alert="agent_blocked",
                 )
@@ -4033,7 +4072,7 @@ async def _dispatch_task(
                 role=contract.role,
                 dispatch_mode=_dispatch_mode_from_snapshot(snapshot),
             )
-            shape = infer_body_shape(header.body)
+            shape = infer_body_shape(header_original.body)
             if shape not in accepted:
                 # Before any resolve: an eng-spec section on a direct impl
                 # dispatch answered a different question, and there is nothing
@@ -4062,7 +4101,7 @@ async def _dispatch_task(
                 # that verified reference, without changing the header body.
                 stored_line += "\n" + build_delivery.fly_delivery_summary(result)
 
-            if shape == "eng_spec_section" and not eng_spec_has_content(header.body):
+            if shape == "eng_spec_section" and not eng_spec_has_content(header_original.body):
                 # A bare token names no authored section.
                 _artifact_fail(
                     TaskStatus.FAILED,
@@ -4087,7 +4126,7 @@ async def _dispatch_task(
             # No inner handler: anything `parse_github_ref` raises is an unexpected
             # gate error, and the catch-all at the call site turns it into BLOCKED
             # (`gate_error`), not a FAILED the watchdog would re-run.
-            parsed = parse_github_ref(header.body, dispatch_repo=dispatch_repo)
+            parsed = parse_github_ref(header_original.body, dispatch_repo=dispatch_repo)
             offered = header.body
             if isinstance(parsed, InvalidRef):
                 # `ref_unverifiable` (no repo recorded on the task, a malformed
@@ -4384,7 +4423,7 @@ async def _dispatch_task(
             job.failed(f"task {entity_id} → {skill} Fly delivery ended")
         elif (getattr(result, "fly_delivery_not_launched", False)
               and getattr(result, "fly_delivery_cleanup", "") in {"released", "not_reserved"}):
-            reason = _redact_secrets(build_delivery.fly_prelaunch_failure_summary(result))
+            reason = _redact_output_text(build_delivery.fly_prelaunch_failure_summary(result))
             _run_stage("assistant", reason, stage="blocked")
             if run_session:
                 update_run_session_status(run_session, status="failed")

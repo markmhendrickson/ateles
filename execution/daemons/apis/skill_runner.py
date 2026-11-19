@@ -70,6 +70,7 @@ from lib.daemon_runtime import (  # noqa: E402
     AgentDefinition, AgentDefinitionUnavailable, AgentPolicyUnavailable,
     AgentLoader, admit_agent_definition,
 )
+from lib.daemon_runtime.artifact_contract import sanitize_text  # noqa: E402
 from dispatch_usage import DispatchUsage, parse_dispatch_usage  # noqa: E402
 import audit_queue  # noqa: E402
 from foundation import (  # noqa: E402
@@ -1672,6 +1673,180 @@ def _redacted_env_var_names() -> list[str]:
     return names
 
 
+# Credentials injected into a child's environment for one dispatch (the per-agent
+# GitHub token, the role's Neotoma bearer) are absent from the daemon's own
+# environment, so they are remembered here and redacted from anything persisted or
+# reported from that run. A value is kept for longer than the longest possible run
+# (an active child must never lose its redaction before its log is written), then
+# dropped by age; a large hard cap only guards memory.
+_CHILD_CREDENTIAL_VALUES: dict[str, float] = {}
+_CHILD_CREDENTIAL_TTL_SECONDS = 6 * 60 * 60
+_CHILD_CREDENTIAL_LIMIT = 4096
+
+
+def _remember_child_credential(value: str | None) -> None:
+    """Remember a credential value handed to a child so output redaction covers it."""
+    if not value or len(value) < 8:
+        return
+    now = time.monotonic()
+    for old_value, stamp in list(_CHILD_CREDENTIAL_VALUES.items()):
+        if now - stamp > _CHILD_CREDENTIAL_TTL_SECONDS:
+            _CHILD_CREDENTIAL_VALUES.pop(old_value, None)
+    _CHILD_CREDENTIAL_VALUES.pop(value, None)
+    _CHILD_CREDENTIAL_VALUES[value] = now
+    while len(_CHILD_CREDENTIAL_VALUES) > _CHILD_CREDENTIAL_LIMIT:
+        _CHILD_CREDENTIAL_VALUES.pop(next(iter(_CHILD_CREDENTIAL_VALUES)))
+
+
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"      # OSC ... BEL or ST
+    r"|\x1b[P^_X][^\x1b]*\x1b\\"               # DCS, PM, APC, SOS ... ST
+    r"|\x1b\[[0-?]*[ -/]*[@-~]"                  # CSI ... final byte
+    r"|\x1b[@-Z\\-_]"                            # two-character escape
+    r"|\x9b[0-?]*[ -/]*[@-~]"                     # 8-bit CSI
+)
+_CREDENTIAL_NAME_RE = re.compile(
+    r"(TOKEN|SECRET|BEARER|PASSWORD|PASSWD|API_?KEY|_PAT$|^PAT$|PRIVATE_?KEY|CREDENTIAL)", re.I)
+_NON_SECRET_NAME_SUFFIXES = ("_PATH", "_DIR", "_HOME", "_FILE", "_URL", "_SUB", "_ISS", "_NAME", "_ID")
+
+
+def _strip_terminal_escapes(text: str) -> str:
+    """Remove terminal escape sequences (colour, cursor, OSC) so they cannot split a secret."""
+    return _ANSI_ESCAPE_RE.sub("", text or "")
+
+
+def _remember_child_environment_credentials(child_env: dict[str, str]) -> None:
+    """Remember every credential-like value handed to a child so persisted output redacts it."""
+    for name, value in child_env.items():
+        upper = name.upper()
+        if upper.endswith(_NON_SECRET_NAME_SUFFIXES):
+            continue
+        if _CREDENTIAL_NAME_RE.search(upper) and isinstance(value, str):
+            _remember_child_credential(value)
+
+
+# A credential split across lines is caught within this many consecutive lines.
+_SPLIT_SECRET_MAX_LINES = 8
+
+
+fly_runner.CHILD_CREDENTIAL_HOOKS.append(_remember_child_credential)
+
+
+def _remember_fly_job_secrets(job) -> None:
+    """Remember every secret value a Fly job carries (tokens, and each string inside a signing key
+    document) so output from that run is redacted wherever it is persisted or reported."""
+    import json as _json
+
+    for value in list(getattr(job, "secrets", {}).values()):
+        if not isinstance(value, str):
+            continue
+        _remember_child_credential(value)
+        try:
+            document = _json.loads(value)
+        except ValueError:
+            continue
+        stack = [document]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, dict):
+                stack.extend(item.values())
+            elif isinstance(item, list):
+                stack.extend(item)
+            elif isinstance(item, str) and len(item) >= 16:
+                _remember_child_credential(item)
+
+
+def _known_secret_values() -> list[str]:
+    """Every secret value known to this process: the named environment values and the child credentials."""
+    values: list[str] = []
+    for var in _redacted_env_var_names():
+        secret = os.environ.get(var, "")
+        if secret and len(secret) >= 8:
+            values.append(secret)
+    values.extend(v for v in _CHILD_CREDENTIAL_VALUES if len(v) >= 8)
+    return values
+
+
+_BACKSLASH_ESCAPE_RE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2}))")
+
+
+def _decode_escapes(text: str) -> str:
+    """Decode percent-escapes (repeatedly), HTML entities and backslash-u/x escapes until stable."""
+    import html
+    from urllib.parse import unquote
+
+    for _ in range(4):
+        decoded = unquote(text)
+        decoded = html.unescape(decoded)
+        decoded = _BACKSLASH_ESCAPE_RE.sub(lambda m: chr(int(m.group(1) or m.group(2), 16)), decoded)
+        if decoded == text:
+            break
+        text = decoded
+    return text
+
+
+def _output_skeleton(line: str) -> str:
+    """A line reduced to its visible letters: escapes, format, combining characters and inner spacing
+    removed, compatibility forms folded, percent / entity / backslash escapes decoded, case folded."""
+    import unicodedata
+
+    text = _decode_escapes(_strip_terminal_escapes(line))
+    text = unicodedata.normalize("NFKC", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) not in {"Cf", "Mn", "Me", "Cc", "Zs"})
+    return "".join(text.split()).casefold()
+
+
+def _encoded_secret_forms(secret: str) -> list[str]:
+    """Other encodings of a secret that must not appear in persisted output (case-sensitive forms)."""
+    import base64
+
+    raw = secret.encode("utf-8", "replace")
+    forms = {
+        base64.b64encode(raw).decode(), base64.urlsafe_b64encode(raw).decode(),
+        base64.b64encode(raw).decode().rstrip("="), base64.urlsafe_b64encode(raw).decode().rstrip("="),
+        raw.hex(), raw.hex().upper(), secret[::-1],
+    }
+    return [f for f in forms if len(f) >= 8]
+
+
+def _redact_output_text(text: str) -> str:
+    """Redact persisted run output: exact values first, then ANY line whose visible-letter skeleton
+    still contains a known secret (a combining mark, a percent-escape, a case change or a compatibility
+    form can hide the exact value) is replaced as a whole, so nothing recoverable is kept."""
+    secrets = _known_secret_values()
+    skeleton_secrets = [sk for sk in (_output_skeleton(secret) for secret in secrets) if sk]
+    encoded_forms = [form for secret in secrets for form in _encoded_secret_forms(secret)]
+    lines = _redact_secrets(_strip_terminal_escapes(text or "")).splitlines(keepends=True)
+    bodies = [line.rstrip("\r\n") for line in lines]
+    skeletons = [_output_skeleton(body) for body in bodies]
+    hidden: set[int] = {
+        index for index, body in enumerate(bodies)
+        if any(form in body or form in "".join(_decode_escapes(body).split()) for form in encoded_forms)
+    }
+    for sk in skeleton_secrets:
+        needle = "".join(sk.split())
+        if not needle:
+            continue
+        for start in range(len(lines)):
+            # the smallest run of consecutive lines whose joined letters contain the secret
+            joined = ""
+            for end in range(start, min(len(lines), start + _SPLIT_SECRET_MAX_LINES)):
+                joined += skeletons[end]
+                if needle in joined:
+                    # minimal: the first line must contribute, so it is not caught from a later start
+                    if end == start or needle not in joined[len(skeletons[start]):]:
+                        hidden.update(range(start, end + 1))
+                    break
+    out: list[str] = []
+    for index, line in enumerate(lines):
+        if index in hidden:
+            ending = line[len(bodies[index]):]
+            out.append("<redacted line: contains a credential in a disguised or split form>" + ending)
+        else:
+            out.append(line)
+    return "".join(out)
+
+
 def _redact_secrets(text: str) -> str:
     """Replace any known secret value appearing in child output."""
     out = text
@@ -1679,6 +1854,8 @@ def _redact_secrets(text: str) -> str:
         secret = os.environ.get(var, "")
         if secret and len(secret) >= 8:
             out = out.replace(secret, f"<redacted:{var}>")
+    for secret in list(_CHILD_CREDENTIAL_VALUES):
+        out = out.replace(secret, "<redacted:child-credential>")
     return out
 
 
@@ -1713,9 +1890,15 @@ def write_dispatch_failure_log(
     cmd: list[str] | None = None,
     cwd: str | None = None,
     duration_ms: int | None = None,
+    blocked_by_agent: bool = False,
+    output_truncated: bool = False,
+    stderr_truncated: bool = False,
 ) -> str:
     """
-    Persist the COMPLETE stdout and stderr of a failed dispatch to a file.
+    Persist the stdout and stderr of a failed or agent-blocked run: COMPLETE unless
+    ``output_truncated`` (the Fly runner keeps only the last 256 KiB of stdout and a
+    stderr tail), in which case the sections and header say plainly that it is only
+    the retained tail.
 
     Returns the absolute path written, or ``""`` when the write could not be
     made. NEVER raises — diagnostics must not be able to break a dispatch.
@@ -1723,13 +1906,29 @@ def write_dispatch_failure_log(
     The file is written mode-0600: child output can contain repository content
     and, in pathological cases, tokens echoed by a failing tool.
     """
+    path: Path | None = None
+    created = False
     try:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        DISPATCH_FAILURE_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        path = DISPATCH_FAILURE_LOG_DIR / f"{_slug(skill)}-{ts}.log"
+        log_dir = (
+            DISPATCH_FAILURE_LOG_DIR.parent / "blocked-runs"
+            if blocked_by_agent else DISPATCH_FAILURE_LOG_DIR
+        )
+        if blocked_by_agent:
+            # The file names (skill and time) are private too: create the directory private, and if it
+            # already exists with a wider mode the mode must be corrected and VERIFIED, or nothing is
+            # written (the caller then reports that the output could not be kept).
+            log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(log_dir, 0o700)
+            if (log_dir.stat().st_mode & 0o077) != 0:
+                raise OSError("blocked-runs directory is not private")
+        else:
+            log_dir.mkdir(parents=True, exist_ok=True)
+        path = log_dir / f"{_slug(skill)}-{ts}.log"
 
         header = [
-            "# Ateles dispatch failure (ateles#257)",
+            ("# Ateles agent-blocked run" if blocked_by_agent
+             else "# Ateles dispatch failure (ateles#257)"),
             f"written_at: {datetime.now(timezone.utc).isoformat()}",
             f"skill: {skill}",
             f"role: {role}",
@@ -1739,27 +1938,40 @@ def write_dispatch_failure_log(
             f"duration_ms: {duration_ms if duration_ms is not None else '(unknown)'}",
             f"stdout_bytes: {len(stdout)}",
             f"stderr_bytes: {len(stderr)}",
+            *([ "output_truncated: true (the runner kept only the tail of the output; "
+                "the beginning is not available)"] if output_truncated else []),
+            *([ "stderr_truncated: true (the runner kept only the tail of stderr)"]
+              if stderr_truncated and not output_truncated else []),
         ]
+        scope = "retained tail only" if output_truncated else "complete"
+        stderr_scope = "retained tail only" if (output_truncated or stderr_truncated) else "complete"
         if cmd:
             header.append(f"command: {_summarize_command(list(cmd))}")
 
         body = (
             "\n".join(header)
-            + "\n\n===== STDOUT (complete) =====\n"
-            + _redact_secrets(stdout)
+            + f"\n\n===== STDOUT ({scope}) =====\n"
+            + _redact_output_text(sanitize_text(_strip_terminal_escapes(stdout), keep_newlines=True))
             + "\n===== END STDOUT =====\n"
-            + "\n===== STDERR (complete) =====\n"
-            + _redact_secrets(stderr)
+            + f"\n===== STDERR ({stderr_scope}) =====\n"
+            + _redact_output_text(sanitize_text(_strip_terminal_escapes(stderr), keep_newlines=True))
             + "\n===== END STDERR =====\n"
         )
-        path.write_text(body, encoding="utf-8")
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        created = True
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            output.write(body)
         return str(path)
     except Exception as exc:  # noqa: BLE001 — diagnostics must never break dispatch
-        log.warning(f"[apis] could not write dispatch-failure log (non-fatal): {exc}")
+        if created and path is not None:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if blocked_by_agent:
+            log.warning(f"[apis] could not write blocked-run log (non-fatal): {exc}")
+        else:
+            log.warning(f"[apis] could not write dispatch-failure log (non-fatal): {exc}")
         return ""
 
 
@@ -4078,6 +4290,7 @@ async def _run_skill_once(
     if github_token:
         subprocess_env["GITHUB_TOKEN"] = github_token
         subprocess_env["GH_TOKEN"] = github_token
+        _remember_child_credential(github_token)
     if agent_git_env:
         apply_agent_git_identity(subprocess_env, agent_git_env)
 
@@ -4321,6 +4534,7 @@ async def _run_skill_once(
                     (env_extra or {}).get("TMPDIR"), prefix="apis_gh_config_")
             subprocess_env["GH_CONFIG_DIR"] = _gh_config_dir
         try:
+            _remember_child_environment_credentials(subprocess_env)
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
@@ -4356,7 +4570,12 @@ async def _run_skill_once(
         try:
             if _fly_job is not None:
                 try:
-                    returncode, stdout, stderr = await fly_runner.get_executor().run(_fly_job)
+                    try:
+                        _remember_fly_job_secrets(_fly_job)
+                        returncode, stdout, stderr = await fly_runner.get_executor().run(_fly_job)
+                    finally:
+                        # The delivery token is minted inside run(): remember it whatever the outcome.
+                        _remember_fly_job_secrets(_fly_job)
                     # Only once the run actually happened on Fly: a token mint
                     # or other refusal inside run() raises before this, and
                     # that run then goes home with its normal tools.

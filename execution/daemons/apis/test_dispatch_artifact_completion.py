@@ -41,6 +41,7 @@ Run: pytest execution/daemons/apis/test_dispatch_artifact_completion.py -v
 from __future__ import annotations
 
 import asyncio
+import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +52,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import apis  # noqa: E402
+import skill_runner  # noqa: E402
 from lib.daemon_runtime import task_lifecycle as tl  # noqa: E402
 from lib.daemon_runtime.task_lifecycle import CompletionOutcome, TaskStatus  # noqa: E402
 from unroutable_ledger import UnroutableLedger  # noqa: E402
@@ -81,6 +83,8 @@ class _SpawnResult:
     stderr: str = ""
     error: str = ""
     skill: str = "cicada"
+    output_truncated: bool = False
+    remote_run_id: str = ""
 
 
 class _RecordingJob:
@@ -285,6 +289,256 @@ def test_ok_with_cicada_blocked_header_sets_blocked_and_retains_reason(
     assert "BLOCKED — missing context" in reason, "lost the agent's own blocker text"
     assert "blocked" in stages, f"run thread never recorded the blocked stage: {stages}"
     assert notifier.sent
+
+
+def test_agent_blocked_keeps_complete_redacted_output(writes, spawn, tmp_path, monkeypatch):
+    fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+    monkeypatch.setenv("GITHUB_TOKEN", fake_value)
+    stdout = "draft start\n" + ("paragraph\n" * 1200) + fake_value
+    stderr = "diagnostic start\n" + ("detail\n" * 400) + "diagnostic end"
+    spawn.result = _SpawnResult(
+        stdout=f"{stdout}\n[cicada] pull_request_link: BLOCKED — need input\n",
+        stderr=stderr,
+    )
+
+    _dispatch("ent_saved_blocked", _cicada_task())
+
+    blocked = _with_status(writes, "blocked")
+    assert len(blocked) == 1
+    files = list((tmp_path / "blocked-runs").glob("*.log"))
+    assert len(files) == 1
+    path = files[0]
+    assert list((tmp_path / "dispatch-failures").glob("*.log")) == []
+    assert str(path) in blocked[0]["reason"]
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    body = path.read_text(encoding="utf-8")
+    assert body.split("===== STDOUT (complete) =====\n", 1)[1].split(
+        "\n===== END STDOUT =====", 1
+    )[0] == spawn.result.stdout.replace(fake_value, "<redacted:GITHUB_TOKEN>")
+    assert body.split("===== STDERR (complete) =====\n", 1)[1].split(
+        "\n===== END STDERR =====", 1
+    )[0] == stderr
+    assert fake_value not in body
+
+
+@pytest.mark.parametrize("splice", ["\u200b", "\u200d", "\u2060", "\ufeff", "\u00ad", "\u202e", "\u2066"])
+def test_agent_blocked_output_redacts_a_token_split_by_an_invisible_character(
+    writes, spawn, tmp_path, monkeypatch, splice
+):
+    fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+    spliced = fake_value[:9] + splice + fake_value[9:]
+    monkeypatch.setenv("GITHUB_TOKEN", fake_value)
+    spawn.result = _SpawnResult(
+        stdout=f"draft\nleaked {spliced}\n[cicada] pull_request_link: BLOCKED — need input\n",
+        stderr=f"diagnostic {spliced} end",
+    )
+
+    _dispatch("ent_saved_blocked_spliced", _cicada_task())
+
+    files = list((tmp_path / "blocked-runs").glob("*.log"))
+    assert len(files) == 1
+    body = files[0].read_text(encoding="utf-8")
+    assert fake_value not in body and spliced not in body
+    assert fake_value[:9] not in body.replace("<redacted:GITHUB_TOKEN>", "")
+    assert body.count("<redacted:GITHUB_TOKEN>") == 2
+
+
+def test_a_truncated_run_output_is_saved_as_a_tail_and_says_so(writes, spawn, tmp_path):
+    spawn.result = _SpawnResult(
+        stdout="[output truncated: the runner kept only the last 256 KiB]\nthe tail\n"
+               "[cicada] pull_request_link: BLOCKED — need input\n",
+        stderr="stderr tail",
+        output_truncated=True,
+    )
+
+    _dispatch("ent_saved_blocked_truncated", _cicada_task())
+
+    blocked = _with_status(writes, "blocked")
+    assert len(blocked) == 1
+    files = list((tmp_path / "blocked-runs").glob("*.log"))
+    assert len(files) == 1
+    body = files[0].read_text(encoding="utf-8")
+    assert "===== STDOUT (retained tail only) =====" in body
+    assert "===== STDERR (retained tail only) =====" in body
+    assert "(complete)" not in body
+    assert "output_truncated: true" in body
+    assert "the runner kept only its tail" in blocked[0]["reason"]
+    assert "Full run output" not in blocked[0]["reason"]
+    assert str(files[0]) in blocked[0]["reason"]
+
+
+def test_a_fly_run_labels_stderr_as_a_tail_even_when_stdout_is_whole(writes, spawn, tmp_path):
+    spawn.result = _SpawnResult(
+        stdout="whole stdout\n[cicada] pull_request_link: BLOCKED — need input\n",
+        stderr="stderr tail of a long run",
+        remote_run_id="fly-synthetic-run",
+    )
+
+    _dispatch("ent_saved_blocked_fly", _cicada_task())
+
+    blocked = _with_status(writes, "blocked")
+    assert len(blocked) == 1
+    files = list((tmp_path / "blocked-runs").glob("*.log"))
+    assert len(files) == 1
+    body = files[0].read_text(encoding="utf-8")
+    assert "===== STDOUT (complete) =====" in body
+    assert "===== STDERR (retained tail only) =====" in body
+    assert "Full run output" not in blocked[0]["reason"]
+    assert "the runner kept only its tail" in blocked[0]["reason"]
+
+
+@pytest.mark.parametrize("disguise", ["percent", "twice", "combining", "split", "case"])
+def test_the_reason_redactor_applies_the_same_effective_redaction_as_the_file(monkeypatch, disguise):
+    fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+    monkeypatch.setenv("GITHUB_TOKEN", fake_value)
+    forms = {
+        "percent": fake_value.replace("-", "%2D"),
+        "twice": fake_value.replace("-", "%252D"),
+        "combining": fake_value[:9] + "\u0301" + fake_value[9:],
+        "split": fake_value[:13] + "\n" + fake_value[13:],
+        "case": fake_value.lower(),
+    }
+    out = apis._redact_agent_text(f"needs {forms[disguise]} now")
+    assert forms[disguise] not in out and fake_value not in out
+    assert "redacted" in out
+
+
+def test_a_fly_job_secret_is_redacted_from_the_file_and_the_reason(writes, spawn, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    secret = "FAKE-DELIVERY-TOKEN-VALUE-9999"  # gitleaks:allow (synthetic fake value for a redaction test)
+    before = dict(skill_runner._CHILD_CREDENTIAL_VALUES)
+    try:
+        skill_runner._remember_fly_job_secrets(SimpleNamespace(secrets={"ATELES_DELIVERY_GITHUB_TOKEN": secret}))
+        spawn.result = _SpawnResult(
+            stdout=f"draft {secret}\n[cicada] pull_request_link: BLOCKED — need {secret} here\n",
+            stderr=f"stderr {secret}",
+            remote_run_id="fly-synthetic-run",
+        )
+
+        _dispatch("ent_saved_blocked_fly_secret", _cicada_task())
+
+        blocked = _with_status(writes, "blocked")
+        assert len(blocked) == 1
+        files = list((tmp_path / "blocked-runs").glob("*.log"))
+        assert len(files) == 1
+        assert secret not in files[0].read_text(encoding="utf-8")
+        assert secret not in blocked[0]["reason"]
+    finally:
+        skill_runner._CHILD_CREDENTIAL_VALUES.clear()
+        skill_runner._CHILD_CREDENTIAL_VALUES.update(before)
+
+
+def test_missing_artifact_header_does_not_emit_percent_encoded_credential_in_reason_or_alert(
+    writes, spawn, tmp_path, monkeypatch
+):
+    fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+    monkeypatch.setenv("GITHUB_TOKEN", fake_value)
+    encoded = fake_value.replace("-", "%2D")
+    spawn.result = _SpawnResult(stdout=f"I looked at {encoded} and found nothing to report\n", stderr="")
+    notifier = _Notifier()
+
+    _dispatch("ent_missing_header_encoded", _cicada_task(), notifier=notifier)
+
+    reasons = [w.get("reason", "") for w in writes if w.get("reason")]
+    assert reasons and all(encoded not in r and fake_value not in r for r in reasons), reasons
+    assert any("redacted" in r for r in reasons)
+    assert notifier.sent
+    assert all(encoded not in str(m) and fake_value not in str(m) for m in notifier.sent)
+
+
+@pytest.mark.parametrize("disguise", ["combining", "case", "percent"])
+def test_a_disguised_credential_on_the_blocked_header_never_changes_the_classification(
+    writes, spawn, tmp_path, monkeypatch, disguise
+):
+    fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+    monkeypatch.setenv("GITHUB_TOKEN", fake_value)
+    forms = {
+        "combining": fake_value[:9] + "\u0301" + fake_value[9:],
+        "case": fake_value.lower(),
+        "percent": fake_value.replace("-", "%2D"),
+    }
+    spawn.result = _SpawnResult(
+        stdout=f"draft\n[cicada] pull_request_link: BLOCKED \u2014 need {forms[disguise]} to continue\n",
+        stderr="",
+    )
+
+    _dispatch("ent_blocked_disguised_classification", _cicada_task())
+
+    blocked = _with_status(writes, "blocked")
+    failed = _with_status(writes, "failed")
+    assert len(blocked) == 1 and failed == [], (blocked, failed)
+    assert fake_value not in blocked[0]["reason"] and forms[disguise] not in blocked[0]["reason"]
+
+
+@pytest.mark.parametrize("formatting", ["\x1b[31m", "\x1b[0m", "\x1b]8;;\x07", "\x1b[1;32m\x1b[0m"])
+def test_a_credential_split_by_terminal_formatting_never_reaches_the_reason_or_alert(
+    writes, spawn, tmp_path, monkeypatch, formatting
+):
+    fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+    split = fake_value[:9] + formatting + fake_value[9:]
+    monkeypatch.setenv("GITHUB_TOKEN", fake_value)
+    notifier = _Notifier()
+    spawn.result = _SpawnResult(
+        stdout=f"draft\n[cicada] pull_request_link: BLOCKED \u2014 need {split} to continue\n",
+        stderr="",
+    )
+
+    _dispatch("ent_blocked_terminal_formatting", _cicada_task(), notifier=notifier)
+
+    blocked = _with_status(writes, "blocked")
+    assert len(blocked) == 1, blocked
+    reason = blocked[0]["reason"]
+    assert fake_value not in reason and fake_value[:9] not in reason.replace("<redacted:GITHUB_TOKEN>", "")
+    assert notifier.sent
+    assert all(fake_value[:9] not in str(m).replace("<redacted:GITHUB_TOKEN>", "") for m in notifier.sent)
+
+
+def test_a_credential_split_by_terminal_formatting_in_a_missing_header_tail_is_redacted(
+    writes, spawn, tmp_path, monkeypatch
+):
+    fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+    split = fake_value[:9] + "\x1b[31m" + fake_value[9:]
+    monkeypatch.setenv("GITHUB_TOKEN", fake_value)
+    notifier = _Notifier()
+    spawn.result = _SpawnResult(stdout=f"I looked at {split} and found nothing to report\n", stderr="")
+
+    _dispatch("ent_missing_header_terminal_formatting", _cicada_task(), notifier=notifier)
+
+    reasons = [w.get("reason", "") for w in writes if w.get("reason")]
+    assert reasons
+    assert all(fake_value[:9] not in r.replace("<redacted:GITHUB_TOKEN>", "") for r in reasons), reasons
+    assert all(fake_value[:9] not in str(m).replace("<redacted:GITHUB_TOKEN>", "") for m in notifier.sent)
+
+
+def test_delivered_artifact_keeps_no_output_file(writes, spawn, tmp_path, monkeypatch):
+    monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: True)
+    spawn.result = _SpawnResult(stdout=f"draft\n{_PR_HEADER}\n")
+
+    _dispatch("ent_delivered_no_log", _cicada_task())
+
+    assert [w for w in writes if w.get("fn") == "complete_task_with_result"]
+    assert list((tmp_path / "blocked-runs").glob("*.log")) == []
+    assert list((tmp_path / "dispatch-failures").glob("*.log")) == []
+
+
+def test_agent_blocked_output_write_failure_is_reported(
+    writes, spawn, tmp_path, monkeypatch, caplog
+):
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("directory creation must fail", encoding="utf-8")
+    monkeypatch.setattr(skill_runner, "DISPATCH_FAILURE_LOG_DIR", blocker / "dispatch-failures")
+    spawn.result = _SpawnResult(
+        stdout="draft\n[cicada] pull_request_link: BLOCKED — need input\n"
+    )
+
+    _dispatch("ent_unsaved_blocked", _cicada_task())
+
+    blocked = _with_status(writes, "blocked")
+    assert len(blocked) == 1
+    assert "Full run output could not be kept" in blocked[0]["reason"]
+    assert "could not write blocked-run log" in caplog.text
+    assert "agent-blocked output for ent_unsaved_blocked could not be kept" in caplog.text
 
 
 def test_ok_without_required_artifact_header_is_not_done(writes, stages, spawn):
