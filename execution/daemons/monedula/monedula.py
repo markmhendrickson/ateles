@@ -1877,6 +1877,21 @@ def _reconcile_wise_entries(handlers: list) -> bool:
             continue
         if current.get("state") == payment_journal.STATE_DONE:
             due = current.get("next_check_at")
+            if due is None and "next_check_at" not in current:
+                from datetime import datetime, timezone
+                from wise_reconcile import next_check_at
+
+                confirmed = datetime.fromtimestamp(current["outcome_at"], timezone.utc)
+                next_due = next_check_at(confirmed, datetime.now(timezone.utc))
+                try:
+                    payment_journal.schedule_wise_check(
+                        path, obligation, next_due.timestamp() if next_due else None
+                    )
+                except payment_journal.JournalError as exc:
+                    log.error("Wise monitoring schedule recovery failed: %s", exc)
+                    clean = False
+                    continue
+                due = next_due.timestamp() if next_due else None
             if due is None or time.time() < due:
                 continue
         elif current.get("last_status") == "bounced_back" and time.time() < current.get(
