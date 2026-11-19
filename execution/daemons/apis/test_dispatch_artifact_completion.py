@@ -406,7 +406,7 @@ def test_the_reason_redactor_applies_the_same_effective_redaction_as_the_file(mo
 def test_a_fly_job_secret_is_redacted_from_the_file_and_the_reason(writes, spawn, tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    secret = "FAKE-DELIVERY-TOKEN-VALUE-9999"
+    secret = "FAKE-DELIVERY-TOKEN-VALUE-9999"  # gitleaks:allow (synthetic fake value for a redaction test)
     before = dict(skill_runner._CHILD_CREDENTIAL_VALUES)
     try:
         skill_runner._remember_fly_job_secrets(SimpleNamespace(secrets={"ATELES_DELIVERY_GITHUB_TOKEN": secret}))

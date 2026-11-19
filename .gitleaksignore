@@ -34,3 +34,6 @@ d73b2ce6ddd2d81b1342f28295b63047a88a19ad:execution/evals/fly_delivery_receipt/fl
 d4093a9e47e7a75ac949f9172164077c5e1907c1:lib/daemon_runtime/test_policy_fetch_cache.py:generic-api-key:25
 # fail-closed settings PR: a suffix-spoof test address in an EARLIER commit; the later commit builds it at runtime. The PR-range scan reads history.
 65be4bc294afed81ffdf9cac180149b72f1a9789:execution/daemons/riparia/test_riparia.py:pii-email:46
+# ateles PR #1833: a synthetic fake credential in a redaction test, flagged in an EARLIER commit of the PR
+# (carried over from the closed PR #1832). The later state of the line is marked gitleaks:allow; the PR-range scan reads history.
+88f758247b40d0c827572213258952aef5bbd777:execution/daemons/apis/test_dispatch_artifact_completion.py:protected-patterns:409
