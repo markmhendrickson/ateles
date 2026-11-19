@@ -123,6 +123,14 @@ def load(path: Path) -> dict[str, Any]:
                 or data["consumed_tokens"].get(entry["token"]) != obligation
             ):
                 raise JournalError("payment journal Wise attempt malformed")
+            attempts = entry.get("attempts", [])
+            if not isinstance(attempts, list) or any(
+                not isinstance(prior, dict)
+                or prior.get("failure_status") not in ("funds_refunded", "cancelled")
+                or not isinstance(prior.get("transfer_id"), int)
+                for prior in attempts
+            ):
+                raise JournalError("payment journal Wise attempt history malformed")
             transfer_id = entry.get("transfer_id")
             if entry["state"] in (STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED) and (
                 not isinstance(transfer_id, int) or isinstance(transfer_id, bool)

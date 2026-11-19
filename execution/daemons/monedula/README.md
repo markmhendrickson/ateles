@@ -484,6 +484,11 @@ python3 execution/daemons/monedula/wise_reconcile.py report --journal /path/to/j
 
 Review `coverage` and every `unmatched` row before deciding any payment action.
 The report has no daemon hook and never unlocks a retry.
+The journal can reserve a numbered replacement after a confirmed refund or
+cancellation, but the live consent routes do not yet create an attempt-specific
+approval for that replacement. Leave the obligation held until that approval
+path is implemented and separately verified. Routine monitoring ends after 30
+days; a later return raises a discrepancy only if a subsequent read observes it.
 
 ## Constraints
 

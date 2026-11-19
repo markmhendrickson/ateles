@@ -141,6 +141,14 @@ def test_unreadable_or_malformed_entry_holds(attempt):
         journal.load(attempt)
 
 
+def test_malformed_replacement_history_holds(attempt):
+    data = journal.load(attempt)
+    data["obligations"]["obligation"]["attempts"] = "broken"
+    attempt.write_text(json.dumps(data))
+    with pytest.raises(journal.JournalError, match="attempt history malformed"):
+        journal.load(attempt)
+
+
 def test_existing_marker_serializes_ticks(attempt):
     with journal.single_writer(attempt):
         with pytest.raises(journal.JournalError, match="writer unavailable"):
