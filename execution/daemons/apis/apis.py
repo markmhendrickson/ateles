@@ -378,7 +378,7 @@ def _gate_hold_is_in_flight(task_id: str) -> bool:
 
 
 def _gate_hold_write_details(snapshot: dict, skill: str | None, action_type: str | None, decision: GateDecision) -> tuple[str, str, list[str] | None]:
-    """Use identical checkpoint content for a gate write and its recovery."""
+    """Describe a gate hold when recovery cannot reconstruct its scoring details."""
     title = str(snapshot.get("title") or "Held task")
     summary = (
         f"Gate hold for {skill or 'unassigned'}. Action: {action_type or 'unknown'}. "
@@ -388,9 +388,6 @@ def _gate_hold_write_details(snapshot: dict, skill: str | None, action_type: str
         ["Re-scope to a lower-blast action", "Provide missing inputs", "Decline"]
         if decision.action == GateAction.CHECKPOINT_WITH_ALTERNATIVES else None
     )
-    # The gate's trigger and scoring narrative are deliberately omitted: the
-    # recovery thread cannot reconstruct them, and a differing body changes
-    # both Neotoma's content-bound key and the title-derived entity identity.
     return title, summary, alternatives
 
 
@@ -3617,20 +3614,26 @@ async def _dispatch_task(
                         if isinstance(observation_id, str) and observation_id
                         else f"hold-revision-{entity_record_digest(task_record)}"
                     )
-                    # The read-back is the record the recovery path will read, so it
-                    # normally carries the same fields; the pre-gate snapshot only
-                    # fills a field the read-back lacks (the creator's drivers).
-                    held_title, summary, alternatives = _gate_hold_write_details(
-                        {**(snapshot or {}), **held_snapshot}, skill, action_type, decision
+                    alternatives = (
+                        ["Re-scope to a lower-blast action", "Provide missing inputs", "Decline"]
+                        if decision.action == GateAction.CHECKPOINT_WITH_ALTERNATIVES else None
                     )
-                    # The recovery path cannot recover an in-memory scoring
-                    # source. Keep the persisted checkpoint shape identical.
-                    checkpoint_decision = dataclasses.replace(decision, confidence_source="")
                     brief_id = write_checkpoint_brief(
                         task_entity_id=entity_id,
-                        decision=checkpoint_decision,
-                        title=held_title,
-                        plan_summary=summary,
+                        decision=decision,
+                        title=title,
+                        plan_summary=(
+                            f"Assigned to {skill}. Action: {action_type or 'unknown'}. "
+                            f"Trigger: {trigger}. {decision.reason}."
+                            + _scoring_summary(
+                                decision.confidence_source,
+                                confidence,
+                                confidence_rationale,
+                                scoring_note,
+                                confidence_capped_from,
+                            )
+                            + f" Confidence drivers: {_confidence_drivers_text(snapshot)}"
+                        ),
                         handler=DAEMON_NAME,
                         user_id=tenant_id,
                         action_type=action_type,
