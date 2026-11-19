@@ -3458,6 +3458,52 @@ class TestDispatchFailureDiagnostics:
         assert "===== STDERR (retained tail only) =====" in body
         assert "stderr_truncated: true" in body
 
+    @pytest.mark.parametrize("blocked", [False, True])
+    @pytest.mark.parametrize("disguise", ["combining", "percent", "case", "fullwidth", "joiner_mark"])
+    def test_a_disguised_credential_never_survives_in_saved_output(self, tmp_path, blocked, disguise) -> None:
+        fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+        forms = {
+            "combining": fake_value[:9] + "\u0301\u034f" + fake_value[9:],
+            "percent": "".join(f"%{ord(c):02X}" if c in "-" else c for c in fake_value),
+            "case": fake_value.lower(),
+            "fullwidth": fake_value.replace("T", "\uff34"),
+            "joiner_mark": fake_value[:5] + "\u200d\u0300" + fake_value[5:],
+        }
+        disguised = forms[disguise]
+        with (
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"),
+            patch.dict("os.environ", {"GITHUB_TOKEN": fake_value}, clear=False),
+        ):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1,
+                stdout=f"keep this line\nleaked {disguised} here\nand this one",
+                stderr=f"x {disguised}", blocked_by_agent=blocked,
+            )
+        body = Path(path).read_text(encoding="utf-8")
+        stripped = "".join(ch for ch in body if ord(ch) > 0x2ff or ch.isascii()).casefold()
+        assert disguised not in body
+        assert fake_value.casefold() not in body.casefold()
+        assert "keep this line" in body and "and this one" in body  # other lines are kept
+        assert "redacted" in body
+
+    def test_the_role_neotoma_bearer_given_to_a_child_is_redacted(self, tmp_path) -> None:
+        # The role-specific bearer reaches a child through its environment (not the daemon's):
+        # registering the child environment covers it, in a failure log and a blocked-run log.
+        bearer = "ROLE-BEARER-FAKE-VALUE-4444"
+        before = dict(skill_runner._CHILD_CREDENTIAL_VALUES)
+        try:
+            skill_runner._remember_child_environment_credentials({"NEOTOMA_BEARER_TOKEN": bearer})
+            for blocked in (False, True):
+                with patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"):
+                    path = skill_runner.write_dispatch_failure_log(
+                        skill="cicada", role="cicada", returncode=1,
+                        stdout=f"saw {bearer}", stderr="", blocked_by_agent=blocked,
+                    )
+                assert bearer not in Path(path).read_text(encoding="utf-8")
+        finally:
+            skill_runner._CHILD_CREDENTIAL_VALUES.clear()
+            skill_runner._CHILD_CREDENTIAL_VALUES.update(before)
+
     def test_output_file_is_private_from_creation(self, tmp_path) -> None:
         import stat
 

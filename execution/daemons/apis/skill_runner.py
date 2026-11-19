@@ -1744,6 +1744,47 @@ def _remember_child_environment_credentials(child_env: dict[str, str]) -> None:
             _remember_child_credential(value)
 
 
+def _known_secret_values() -> list[str]:
+    """Every secret value known to this process: the named environment values and the child credentials."""
+    values: list[str] = []
+    for var in _redacted_env_var_names():
+        secret = os.environ.get(var, "")
+        if secret and len(secret) >= 8:
+            values.append(secret)
+    values.extend(v for v in _CHILD_CREDENTIAL_VALUES if len(v) >= 8)
+    return values
+
+
+def _output_skeleton(line: str) -> str:
+    """A line reduced to its visible letters: escapes, format and combining characters removed,
+    compatibility forms folded, percent-escapes decoded, case folded."""
+    import unicodedata
+    from urllib.parse import unquote
+
+    text = unquote(_strip_terminal_escapes(line))
+    text = unicodedata.normalize("NFKC", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) not in {"Cf", "Mn", "Me", "Cc"})
+    return text.casefold()
+
+
+def _redact_output_text(text: str) -> str:
+    """Redact persisted run output: exact values first, then ANY line whose visible-letter skeleton
+    still contains a known secret (a combining mark, a percent-escape, a case change or a compatibility
+    form can hide the exact value) is replaced as a whole, so nothing recoverable is kept."""
+    secrets = _known_secret_values()
+    skeleton_secrets = [(secret.casefold(), _output_skeleton(secret)) for secret in secrets]
+    out: list[str] = []
+    for line in _redact_secrets(_strip_terminal_escapes(text or "")).splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        ending = line[len(body):]
+        skeleton = _output_skeleton(body)
+        if any(sk and sk in skeleton for _, sk in skeleton_secrets):
+            out.append("<redacted line: contains a credential in a disguised form>" + ending)
+        else:
+            out.append(line)
+    return "".join(out)
+
+
 def _redact_secrets(text: str) -> str:
     """Replace any known secret value appearing in child output."""
     out = text
@@ -1839,10 +1880,10 @@ def write_dispatch_failure_log(
         body = (
             "\n".join(header)
             + f"\n\n===== STDOUT ({scope}) =====\n"
-            + _redact_secrets(sanitize_text(_strip_terminal_escapes(stdout), keep_newlines=True))
+            + _redact_output_text(sanitize_text(_strip_terminal_escapes(stdout), keep_newlines=True))
             + "\n===== END STDOUT =====\n"
             + f"\n===== STDERR ({stderr_scope}) =====\n"
-            + _redact_secrets(sanitize_text(_strip_terminal_escapes(stderr), keep_newlines=True))
+            + _redact_output_text(sanitize_text(_strip_terminal_escapes(stderr), keep_newlines=True))
             + "\n===== END STDERR =====\n"
         )
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
