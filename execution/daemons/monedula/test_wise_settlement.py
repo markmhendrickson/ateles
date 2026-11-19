@@ -296,6 +296,7 @@ def test_settled_wise_event_with_new_id_offers_next_occurrence(approval_env, mon
     journal.record_transfer_created(path, old.obligation, 3)
     journal.record_wise_status(path, old.obligation, 3, "outgoing_payment_sent",
                                "2026-11-11T21:00:00Z")
+    journal.mark_wise_effects_applied(path, old.obligation, 3)
     world.calendars["primary"][0]["id"] = "next-event"
     later = consent_email.build_pending_items(
         [(world.handler, world.handler.matches(world.calendars["primary"]))], "2026-11-18"
@@ -1215,6 +1216,7 @@ def test_later_invoice_same_profile_is_offered_after_prior_settlement(approval_e
     journal.record_transfer_created(path, old.obligation, 3)
     journal.record_wise_status(path, old.obligation, 3, "outgoing_payment_sent",
                                datetime.now(timezone.utc).isoformat())
+    journal.mark_wise_effects_applied(path, old.obligation, 3)
     profile.due_date = "2026-02-01"
     profile.wise_reference = "second"
     profile.neotoma_task_id = "later-task"
@@ -1624,7 +1626,7 @@ def test_effect_retry_after_due_date_failure_does_not_duplicate_note(monkeypatch
 @pytest.mark.parametrize("route", ["payment_approval", "email", "telegram"])
 @pytest.mark.parametrize("attempt_state", [
     "intent", "funding_pending", "submission_unknown", "done_then_returned",
-    "funds_refunded", "cancelled",
+    "funds_refunded", "cancelled", "confirmed_unapplied",
 ])
 def test_unresolved_profile_holds_changed_obligation_on_every_route(
     approval_env, monkeypatch, route, attempt_state
@@ -1657,7 +1659,7 @@ def test_unresolved_profile_holds_changed_obligation_on_every_route(
         data = journal.load(path)
         data["obligations"][old.obligation]["submission_status"] = "unknown"
         journal._write(path, data)
-    if attempt_state in {"funding_pending", "done_then_returned", "funds_refunded", "cancelled"}:
+    if attempt_state in {"funding_pending", "done_then_returned", "funds_refunded", "cancelled", "confirmed_unapplied"}:
         journal.record_transfer_created(path, old.obligation, 3)
     if attempt_state == "funding_pending":
         journal.record_funding_pending(path, old.obligation, 3, "COMPLETED")
@@ -1668,6 +1670,9 @@ def test_unresolved_profile_holds_changed_obligation_on_every_route(
                                    "2026-11-12T21:00:00Z")
     elif attempt_state in {"funds_refunded", "cancelled"}:
         journal.record_wise_status(path, old.obligation, 3, attempt_state,
+                                   "2026-11-12T21:00:00Z")
+    elif attempt_state == "confirmed_unapplied":
+        journal.record_wise_status(path, old.obligation, 3, "outgoing_payment_sent",
                                    "2026-11-12T21:00:00Z")
 
     profile.amount_eur = 20
@@ -1704,7 +1709,7 @@ def test_unresolved_profile_holds_changed_obligation_on_every_route(
     assert list(journal.load(path)["obligations"]) == [old.obligation]
 
 
-def test_wise_hold_is_scoped_to_profile_and_paid_later_obligations_are_offered(
+def test_wise_hold_is_scoped_to_profile_and_unapplied_sent_blocks_later_obligation(
     approval_env, monkeypatch
 ):
     import consent_email
@@ -1745,9 +1750,21 @@ def test_wise_hold_is_scoped_to_profile_and_paid_later_obligations_are_offered(
         [(world.handler, world.handler.matches(world.calendars["primary"]))], "2026-11-18"
     )[0]
     assert later.obligation != old.obligation
-    assert journal.wise_replay_hold(journal.load(path), old_profile.entity_id) is None
+    assert journal.wise_replay_hold(journal.load(path), old_profile.entity_id)[0] == old.obligation
     world.tick(minutes=15)
-    assert approvals.writes == 2
+    assert approvals.writes == 1
+    assert list(journal.load(path)["obligations"]) == [old.obligation]
+
+
+def test_wise_profile_releases_only_after_effects_and_session_settlement(attempt):
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                               "2026-11-11T21:00:00Z")
+    assert journal.wise_replay_hold(journal.load(attempt), "synthetic-profile") is not None
+    journal.mark_wise_effects_applied(attempt, "obligation", 3)
+    assert journal.wise_replay_hold(journal.load(attempt), "synthetic-profile") is not None
+    journal.set_session_state(attempt, "synthetic:session", journal.SESSION_SETTLED)
+    assert journal.wise_replay_hold(journal.load(attempt), "synthetic-profile") is None
 
 
 @pytest.mark.parametrize("legacy_outcome", [None, "manual_required", "failed"])

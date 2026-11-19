@@ -292,7 +292,8 @@ def journal_state_for_item(journal: dict, item: PendingItem) -> str | None:
             and entry.get("outcome_status") != "sent"):
         return payment_journal.STATE_INTENT
     state = payment_journal.obligation_state(
-        {"obligations": {item.obligation: entry}}, item.obligation
+        {"obligations": {item.obligation: entry}, "sessions": journal.get("sessions", {})},
+        item.obligation,
     )
     if (entry.get("rail") == "wise" and state == payment_journal.STATE_DONE
             and "last_status" in entry and entry.get("effects_applied") is not True
