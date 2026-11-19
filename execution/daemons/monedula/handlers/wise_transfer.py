@@ -28,9 +28,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from ..handler_base import PaymentHandler
+    from ..handler_base import PaymentHandler, STATUS_FUNDING_PENDING
 except ImportError:
-    from handler_base import PaymentHandler  # type: ignore[no-redef]
+    from handler_base import PaymentHandler, STATUS_FUNDING_PENDING  # type: ignore[no-redef]
 from . import task_writes
 from .payment_profile import PaymentProfile
 
@@ -252,6 +252,7 @@ class WiseTransferHandler(PaymentHandler):
                 "reference": self.profile.wise_reference,
             }
 
+        journal_context = match.get("_wise_journal")
         try:
             result = _execute_wise_transfer(
                 token,
@@ -263,6 +264,7 @@ class WiseTransferHandler(PaymentHandler):
                 legal_type=self.profile.wise_legal_type,
                 recipient_id=rid,
                 recipient_status_lookup=self.recipient_status_lookup,
+                journal_context=journal_context,
             )
         except WiseRecipientError:
             # Fail closed and raise: never converted into a create or a
@@ -270,6 +272,14 @@ class WiseTransferHandler(PaymentHandler):
             raise
         except Exception as exc:
             log.error(f"[{self.name}] Wise transfer exception: {exc}")
+            # Once intent is durable, an exception may follow a successful
+            # create or funding POST. Never suggest a second manual payment.
+            if journal_context is not None:
+                return {
+                    "status": STATUS_FUNDING_PENDING,
+                    "handler": self.name,
+                    "error": "Wise outcome unknown; reconcile the existing attempt",
+                }
             result = {
                 "status": "manual_required",
                 "handler": self.name,
@@ -282,7 +292,7 @@ class WiseTransferHandler(PaymentHandler):
 
         result["handler"] = self.name
 
-        if result.get("status") in ("sent", "manual_required"):
+        if result.get("status") == "sent":
             _update_task(self.profile, result)
 
         return result
@@ -300,6 +310,11 @@ class WiseTransferHandler(PaymentHandler):
                 f"  Recipient: {name}\n"
                 f"  Amount: €{amount}\n"
                 f"  Reference: {reference}"
+            )
+        elif status == STATUS_FUNDING_PENDING:
+            return (
+                f"⏳ {self.profile.label} submitted; not confirmed; do not pay again.\n"
+                f"  Transfer ID: {result.get('transfer_id', 'not yet known')}"
             )
         elif status == "manual_required":
             iban = result.get("iban", "see contacts")
@@ -645,14 +660,15 @@ def _create_quote(token: str, profile_id: int, amount_eur: int) -> str:
 
 
 def _create_transfer(
-    token: str, target_account_id: int, quote_uuid: str, reference: str
+    token: str, target_account_id: int, quote_uuid: str, reference: str,
+    customer_transaction_id: str | None = None,
 ) -> int:
     import uuid as _uuid
 
     body = {
         "targetAccount": target_account_id,
         "quoteUuid": quote_uuid,
-        "customerTransactionId": str(_uuid.uuid4()),
+        "customerTransactionId": customer_transaction_id or str(_uuid.uuid4()),
         "details": {
             "reference": reference,
             "transferPurpose": "personal.family.support",
@@ -683,6 +699,7 @@ def _execute_wise_transfer(
     legal_type: str = "PRIVATE",
     recipient_id: int | None = None,
     recipient_status_lookup=None,
+    journal_context: tuple[Path, str] | None = None,
 ) -> dict:
     """Full Wise transfer flow. Returns result dict with status and details."""
     log.info(
@@ -711,16 +728,32 @@ def _execute_wise_transfer(
     quote_uuid = _create_quote(token, profile_id, amount_eur)
     log.info(f"[{label}] Wise quote_uuid: {quote_uuid}")
 
-    transfer_id = _create_transfer(token, account_id, quote_uuid, reference)
+    if journal_context is not None:
+        import payment_journal
+
+        journal_path, obligation = journal_context
+        entry = payment_journal.load(journal_path)["obligations"].get(obligation)
+        if not isinstance(entry, dict) or entry.get("rail") != "wise":
+            raise payment_journal.JournalError("Wise intent unavailable before create")
+        transfer_id = _create_transfer(
+            token, account_id, quote_uuid, reference, entry["customer_transaction_id"]
+        )
+        payment_journal.record_transfer_created(journal_path, obligation, transfer_id)
+    else:
+        transfer_id = _create_transfer(token, account_id, quote_uuid, reference)
     log.info(f"[{label}] Wise transfer_id: {transfer_id}")
 
     funding_result = _fund_transfer(token, profile_id, transfer_id)
     log.info(f"[{label}] Wise funding result: {funding_result}")
 
     status = funding_result.get("status", "")
-    if status in ("COMPLETED", "PROCESSING", "PENDING"):
+    if status in ("CREATED", "COMPLETED", "PROCESSING", "PENDING"):
+        if journal_context is not None:
+            payment_journal.record_funding_pending(
+                journal_context[0], journal_context[1], transfer_id, status
+            )
         return {
-            "status": "sent",
+            "status": STATUS_FUNDING_PENDING,
             "transfer_id": transfer_id,
             "quote_uuid": quote_uuid,
             "account_id": account_id,
@@ -788,18 +821,21 @@ def _find_task_id(profile: PaymentProfile) -> str:
     return ""
 
 
-def _update_task(profile: PaymentProfile, result: dict) -> None:
+def _update_task(profile: PaymentProfile, result: dict) -> bool:
     """Never let bookkeeping crash the tick after money has moved."""
+    if result.get("status") != "sent":
+        return False
     try:
-        _update_task_impl(profile, result)
+        return _update_task_impl(profile, result)
     except Exception as exc:  # noqa: BLE001
         log.error(
             f"[{profile.name}] payment itself settled, but the Neotoma task update "
             f"raised: {exc} - task notes/due_date need updating by hand."
         )
+        return False
 
 
-def _update_task_impl(profile: PaymentProfile, result: dict) -> None:
+def _update_task_impl(profile: PaymentProfile, result: dict) -> bool:
     """Update the Neotoma payment task: add note and roll due_date.
 
     Writes go through REST ``/correct`` with read-back (handlers/task_writes.py);
@@ -809,15 +845,15 @@ def _update_task_impl(profile: PaymentProfile, result: dict) -> None:
     task_id = _find_task_id(profile)
     if not task_id:
         log.error(f"[{profile.name}] payment settled, but no task ID found - task NOT updated")
-        return
+        return False
 
     connection = task_writes.make_client()
     if connection is None:
-        return
+        return False
     client, base = connection
 
     with client:
-        today = date.today()
+        today = date.fromisoformat(result.get("paid_at_date", date.today().isoformat()))
         transfer_id = result.get("transfer_id", "unknown")
         amount = profile.amount_eur
         reference = profile.wise_reference
@@ -825,7 +861,8 @@ def _update_task_impl(profile: PaymentProfile, result: dict) -> None:
             f"Payment sent {today.isoformat()}: "
             f"\u20ac{amount} Wise transfer_id={transfer_id} ref={reference}"
         )
-        if task_writes.append_note(client, base, task_id, note):
+        note_written = task_writes.append_note(client, base, task_id, note)
+        if note_written:
             log.info(f"[{profile.name}] Neotoma task {task_id} notes updated (read back).")
         else:
             log.error(
@@ -841,23 +878,24 @@ def _update_task_impl(profile: PaymentProfile, result: dict) -> None:
                     f"[{profile.name}] one-off payment not sent - leaving task and "
                     f"profile active for retry."
                 )
-                return
-            _close_one_off(profile, task_id, client=client, base=base)
-            return
+                return False
+            return _close_one_off(profile, task_id, client=client, base=base) and note_written
 
         next_due = _find_next_event_due_date(profile)
         if not next_due:
             log.error(
                 f"[{profile.name}] payment settled, but no next event date found - due_date NOT updated."
             )
-            return
-        if task_writes.write_field(client, base, task_id, "task", "due_date", next_due):
+            return False
+        due_written = task_writes.write_field(client, base, task_id, "task", "due_date", next_due)
+        if due_written:
             log.info(f"[{profile.name}] Neotoma task due_date set to {next_due} (read back).")
         else:
             log.error(
                 f"[{profile.name}] payment settled, but Neotoma task {task_id} due_date "
                 f"NOT updated; set it to {next_due} by hand"
             )
+        return note_written and due_written
 
 
 def _close_one_off(
@@ -866,7 +904,7 @@ def _close_one_off(
     *,
     client: Any = None,
     base: str = "",
-) -> None:
+) -> bool:
     """Mark a one-off task done and archive its profile after a paid transfer.
 
     Archiving matters: load_profiles_from_neotoma() skips non-active profiles,
@@ -884,8 +922,9 @@ def _close_one_off(
                 f"[{profile.name}] ONE-OFF CLEANUP FAILED: no Neotoma connection - "
                 f"this profile may re-trigger; archive it by hand."
             )
-            return
+            return False
         client, base = owned
+    complete = True
     try:
         for entity_id, entity_type, value, what in (
             (task_id, "task", "done", "task status=done"),
@@ -896,6 +935,7 @@ def _close_one_off(
                     f"[{profile.name}] ONE-OFF CLEANUP FAILED ({what}): no entity id - "
                     f"this profile may re-trigger; archive it by hand."
                 )
+                complete = False
                 continue
             try:
                 ok = task_writes.write_field(
@@ -906,6 +946,7 @@ def _close_one_off(
                     f"[{profile.name}] ONE-OFF CLEANUP ERROR ({what}): {exc} - "
                     f"this profile may re-trigger; archive it by hand."
                 )
+                complete = False
                 continue
             if ok:
                 log.info(f"[{profile.name}] one-off {what} set (read back).")
@@ -914,9 +955,11 @@ def _close_one_off(
                     f"[{profile.name}] ONE-OFF CLEANUP FAILED ({what}) - "
                     f"this profile may re-trigger; archive it by hand."
                 )
+                complete = False
     finally:
         if owned is not None:
             client.close()
+    return complete
 
 
 def _find_next_event_due_date(profile: PaymentProfile) -> str | None:

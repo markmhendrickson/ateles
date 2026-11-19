@@ -176,7 +176,7 @@ def test_two_entities_for_one_key_is_an_error_not_a_pick(monkeypatch):
 
 
 @pytest.mark.parametrize("state", ["done", "intent"])
-def test_session_paid_under_the_old_obligation_key_is_never_raised_again(env, state):
+def test_legacy_obligation_never_replays_and_only_done_settles(env, state):
     """The old code keyed a single match on (run yesterday, empty match id).
     A session paid just before this change went live exists only under that
     key. Red against the old code: a fresh payment_approval was raised and a
@@ -191,7 +191,9 @@ def test_session_paid_under_the_old_obligation_key_is_never_raised_again(env, st
     w.tick(minutes=15)
     assert neo.writes == 0, "a payment_approval was raised for an already-paid session"
     assert w.handler.execute_calls == []
-    assert payment_journal.session_state(w.journal, "yoga:evt-1") == "settled"
+    assert payment_journal.session_state(w.journal, "yoga:evt-1") == (
+        "settled" if state == "done" else "pending"
+    )
 
 
 def test_multi_match_legacy_index_key_is_also_recognised(env):
