@@ -1691,6 +1691,24 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
             items = build_pending_items([(handler, matches)], _yesterday().isoformat())
             for match, item in zip(matches, items):
                 eid = event_id_of(match)
+                if isinstance(handler, WiseTransferHandler):
+                    legacy_paid = any(
+                        (row := data["obligations"].get(legacy)) is not None
+                        and row.get("state") == payment_journal.STATE_DONE
+                        and row.get("outcome_status") == "sent"
+                        and "last_status" not in row
+                        and "last_occurred_at" not in row
+                        for legacy in legacy_obligation_keys(
+                            handler, match, matches, _yesterday().isoformat()
+                        )
+                    )
+                    if legacy_paid:
+                        if eid:
+                            key = payment_journal.session_key(handler.name, eid)
+                            if payment_journal.session_state(data, key) is None:
+                                payment_journal.note_pending(jpath, key, ended_at=_match_ended_at(match))
+                            payment_journal.set_session_state(jpath, key, payment_journal.SESSION_SETTLED)
+                        continue
                 entry = journal_entry_for_item(data, item)
                 if entry is not None and isinstance(handler, WiseTransferHandler):
                     state = journal_state_for_item(data, item)

@@ -1920,6 +1920,54 @@ def test_contradictory_wise_row_loads_but_holds_profile(attempt, changes):
                               rail="wise", profile_entity_id="synthetic-profile")
 
 
+@pytest.mark.parametrize("route", ["payment_approval", "email", "telegram"])
+def test_legacy_done_sent_wise_row_settles_same_calendar_event_without_new_consent(
+    approval_env, monkeypatch, route
+):
+    import consent_email
+    import monedula
+    import payment_approval
+    from handlers.payment_profile import PaymentProfile
+
+    world, approvals = approval_env
+    profile = PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", payment_type="wise",
+        calendar_keywords=["yoga"], amount_eur=10, wise_recipient_id=5,
+        wise_recipient_name="Synthetic", entity_id="synthetic-profile",
+    )
+    world.handler = wise.WiseTransferHandler(profile)
+    event = world.calendars["primary"][0]
+    match = world.handler.matches([event])[0]
+    old_key = consent_email._base_obligation_key(
+        world.handler, consent_email.event_session_date(match), ""
+    )
+    current = consent_email.build_pending_items([(world.handler, [match])], "2026-11-18")[0]
+    assert current.obligation != old_key
+    path = consent_email.journal_path()
+    journal.record_intent(path, old_key, "legacy-token", generation=1)
+    journal.record_outcome(path, old_key, "sent")
+    data = journal.load(path)
+    data["obligations"][old_key]["rail"] = "wise"
+    journal._write(path, data)
+    monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", route)
+    monkeypatch.setattr(monedula, "_reconcile_wise_entries", lambda *a: True)
+    monkeypatch.setattr(payment_approval, "collect", lambda *a, **kw:
+                        pytest.fail("legacy paid event offered for default consent"))
+    monkeypatch.setattr(consent_email, "request_and_collect", lambda *a, **kw:
+                        pytest.fail("legacy paid event offered for email consent"))
+    monkeypatch.setattr(monedula, "telegram_send", lambda *a, **kw:
+                        pytest.fail("legacy paid event offered for Telegram consent"))
+    monkeypatch.setattr(wise, "_create_transfer", lambda *a, **kw:
+                        pytest.fail("legacy paid event created a transfer"))
+    monkeypatch.setattr(wise, "_fund_transfer", lambda *a, **kw:
+                        pytest.fail("legacy paid event funded a transfer"))
+    world.tick()
+    session = journal.session_key(world.handler.name, event["id"])
+    assert journal.session_state(journal.load(path), session) == journal.SESSION_SETTLED
+    assert approvals.writes == 0 and world.sends == []
+    assert list(journal.load(path)["obligations"]) == [old_key]
+
+
 @pytest.mark.parametrize("bad_id", [None, 42, ""])
 def test_unreadable_wise_profile_identity_holds_all_profiles(tmp_path, bad_id):
     path = tmp_path / journal.JOURNAL_NAME
