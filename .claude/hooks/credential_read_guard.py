@@ -318,7 +318,63 @@ def _describe_hit(hit: str) -> str:
     return hit
 
 
+_SHELL_NAMES = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
+
+
+def _arguments_as_command(arguments: list) -> str | None:
+    """A Codex shell tool may send its command as an argument list: judge the script after a shell's
+    `-c`/`-lc` flag directly, and any other list as the shell would see it joined."""
+    import shlex
+
+    parts = [str(a) for a in arguments]
+    if not parts:
+        return None
+    if (
+        len(parts) >= 3
+        and os.path.basename(parts[0]) in _SHELL_NAMES
+        and any(flag.startswith("-") and flag.endswith("c") for flag in parts[1:-1])
+    ):
+        return parts[-1]
+    return shlex.join(parts)
+
+
+def _shell_command_text(tool: str, tool_input: dict) -> str | None:
+    """The command text a matched shell tool would run, from whichever shape Codex used: a string
+    (`cmd`, `command`, code-mode `code`/`source`), an argument list, or nested under `action`. A payload
+    with none of those fields is judged on every string it carries rather than allowed by default."""
+    if tool == "exec":
+        fields = (tool_input.get("code"), tool_input.get("source"))
+    else:
+        fields = (tool_input.get("cmd"), tool_input.get("command"))
+    nested = tool_input.get("action")
+    if isinstance(nested, dict):
+        fields = fields + (nested.get("cmd"), nested.get("command"))
+    for value in fields:
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, list):
+            text = _arguments_as_command([a for a in value if isinstance(a, (str, int, float))])
+            if text:
+                return text
+    strings: list[str] = []
+
+    def collect(obj) -> None:
+        if isinstance(obj, str):
+            strings.append(obj)
+        elif isinstance(obj, dict):
+            for item in obj.values():
+                collect(item)
+        elif isinstance(obj, list):
+            for item in obj:
+                collect(item)
+
+    collect(tool_input)
+    return "\n".join(strings) or None
+
+
 def deny(reason: str) -> int:
+    # Codex shows a hook's stderr as the reason (as the sibling Codex guards do); Claude reads the JSON.
+    print(reason, file=sys.stderr)
     print(
         json.dumps(
             {
@@ -2821,10 +2877,7 @@ def main() -> int:
         # Codex code mode carries JavaScript that can call a shell tool. Its
         # literal source is useful to this accidental-read tripwire, though
         # computed paths in arbitrary JavaScript remain outside its scope.
-        command = (
-            tool_input.get("code") or tool_input.get("source")
-            if tool == "exec" else tool_input.get("cmd") or tool_input.get("command")
-        )
+        command = _shell_command_text(tool, tool_input)
         hit = check_bash(command, cwd=cwd)
         if hit:
             if hit == _COMPLEX_OPERAND:

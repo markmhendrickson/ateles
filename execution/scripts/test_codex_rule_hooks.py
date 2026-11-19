@@ -658,6 +658,42 @@ class TestCodexGuardEffect(unittest.TestCase):
             }, env={"HOME": os.fspath(home)})
             self.assertEqual(allowed.returncode, 0, allowed.stderr)
 
+    def test_credential_guard_judges_list_form_nested_and_unrecognised_shell_payloads(self) -> None:
+        script = REPO_ROOT / ".claude" / "hooks" / "credential_read_guard.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            credential = home / ".config" / "neotoma" / ".env"
+            credential.parent.mkdir(parents=True)
+            credential.write_text("SYNTHETIC_KEY=not_a_secret\n", encoding="utf-8")
+            path = os.fspath(credential)
+            shapes = {
+                "list_shell_c": {"command": ["bash", "-lc", f"cat {path}"]},
+                "list_plain": {"command": ["cat", path]},
+                "list_cmd_field": {"cmd": ["cat", path]},
+                "nested_action_list": {"action": {"type": "exec", "command": ["cat", path]}},
+                "nested_action_string": {"action": {"type": "exec", "command": f"cat {path}"}},
+                "unrecognised_field": {"script": f"cat {path}"},
+            }
+            for tool in ("shell", "local_shell", "shell_command", "exec_command", "Bash"):
+                for shape, tool_input in shapes.items():
+                    with self.subTest(tool=tool, shape=shape):
+                        result = _run(f"python3 {shlex.quote(os.fspath(script))}", {
+                            "hook_event_name": "PreToolUse", "tool_name": tool,
+                            "tool_input": tool_input, "cwd": os.fspath(home),
+                        }, env={"HOME": os.fspath(home)})
+                        self.assertEqual(result.returncode, 2, result.stderr)
+                        self.assertTrue(result.stderr.strip(), "the reason must reach stderr for Codex")
+                        self.assertEqual(
+                            json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
+            for tool_input in ({"command": ["printf", "safe"]}, {"command": ["bash", "-lc", "printf safe"]},
+                               {"action": {"command": ["ls"]}}, {"script": "printf safe"}):
+                with self.subTest(allowed=tool_input):
+                    allowed = _run(f"python3 {shlex.quote(os.fspath(script))}", {
+                        "hook_event_name": "PreToolUse", "tool_name": "local_shell",
+                        "tool_input": tool_input, "cwd": os.fspath(home),
+                    }, env={"HOME": os.fspath(home)})
+                    self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
     def test_installed_credential_guard_blocks_synthetic_reads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
