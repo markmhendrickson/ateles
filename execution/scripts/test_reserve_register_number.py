@@ -209,48 +209,6 @@ def test_one_new_revision_may_appear_in_several_document_tables(clones: tuple[Pa
     assert run(first, "check", "revision").returncode == 0
 
 
-def test_historical_split_table_is_read_only_on_origin_side(monkeypatch, tmp_path: Path) -> None:
-    """The historical base has blank lines in two revision tables; new text must be strict."""
-    module = _load_module()
-    header = "## Example\n| Revision | Pass | What changed |\n|---|---|---|\n"
-    old = header + "| 17 | pass | first |\n\n| 18 | pass | second |\n"
-    current = header + "| 17 | pass | first |\n| 18 | pass | second |\n"
-    source = tmp_path / "revisions.md"
-    source.write_text(current)
-    monkeypatch.setitem(module.KINDS, "revision", str(source))
-    monkeypatch.setattr(module, "git", lambda *args: old)
-    monkeypatch.setattr(module, "reservations", lambda kind, remote: set())
-    monkeypatch.setattr(module, "origin_text", lambda kind, remote: ("base-sha", old))
-    assert module.next_number("revision", "origin") == (19, "base-sha")
-    assert module.check("revision", "origin", "origin/main") == []
-    source.write_text(old)
-    with pytest.raises(ValueError, match="line 6"):
-        module.check("revision", "origin", "origin/main")
-
-
-def test_a_base_register_row_with_a_code_span_pipe_is_read_on_the_origin_side_only(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """origin/main still carries a row whose code span holds an unescaped pipe (row 70)."""
-    module = _load_module()
-    header = "| # | The question | Argued in | Blocks | Status |\n|---|---|---|---|---|\n"
-    old = header + "| 40 | question | `doc.md#q` | how `a|b` splits | **open** |\n"
-    current = header + "| 40 | question | `doc.md#q` | how `a\\|b` splits | **open** |\n"
-    source = tmp_path / "conformance.md"
-    source.write_text(current)
-    monkeypatch.setitem(module.KINDS, "decision", str(source))
-    monkeypatch.setattr(module, "git", lambda *args: old)
-    monkeypatch.setattr(module, "reservations", lambda kind, remote: set())
-    monkeypatch.setattr(module, "origin_text", lambda kind, remote: ("base-sha", old))
-    # The production reader (check and next) accepts the unescaped base row.
-    assert module.next_number("decision", "origin") == (41, "base-sha")
-    assert module.check("decision", "origin", "origin/main") == []
-    # The worktree side stays strict: the same unescaped row there is refused.
-    source.write_text(old)
-    with pytest.raises(ValueError, match="malformed register row"):
-        module.check("decision", "origin", "origin/main")
-
-
 def test_an_unreasonable_range_is_rejected(clones: tuple[Path, Path, Path]) -> None:
     _, first, _ = clones
     register = first / "docs" / "foundation" / "conformance.md"
@@ -334,3 +292,19 @@ def test_a_bold_or_backticked_number_cell_is_rejected(clones: tuple[Path, Path, 
     revisions = first / "docs" / "foundation" / "revisions.md"
     revisions.write_text(revisions.read_text() + "| `18` | pass | backticked |\n")
     assert "malformed revision row" in run(first, "check", "revision").stderr
+
+
+def test_a_malformed_base_row_is_refused_not_repaired(monkeypatch, tmp_path: Path) -> None:
+    """Both sides are read strictly: the former origin-side compatibility shims are gone."""
+    module = _load_module()
+    header = "| # | The question | Argued in | Blocks | Status |\n|---|---|---|---|---|\n"
+    old = header + "| 40 | question | `doc.md#q` | how `a|b` splits | **open** |\n"
+    current = header + "| 40 | question | `doc.md#q` | how `a\\|b` splits | **open** |\n"
+    source = tmp_path / "conformance.md"
+    source.write_text(current)
+    monkeypatch.setitem(module.KINDS, "decision", str(source))
+    monkeypatch.setattr(module, "git", lambda *args: old)
+    monkeypatch.setattr(module, "reservations", lambda kind, remote: set())
+    with pytest.raises(ValueError, match="malformed register row"):
+        module.check("decision", "origin", "origin/main")
+    assert not hasattr(module, "historical_base_text")
