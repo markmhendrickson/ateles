@@ -313,8 +313,11 @@ def obligation_state(data: dict[str, Any], obligation: str) -> str | None:
     state = entry.get("state")
     if state not in (STATE_INTENT, STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED):
         raise JournalError("payment journal obligation state malformed")
-    if state == STATE_DONE and entry.get("rail") == "wise" and entry.get("outcome_status") != "sent":
-        return STATE_FAILED  # legacy non-sent outcomes were stored as done
+    if state == STATE_DONE and entry.get("rail") == "wise" and (
+        entry.get("outcome_status") != "sent"
+        or entry.get("last_status") != "outgoing_payment_sent"
+    ):
+        return STATE_FAILED  # historical settlement cannot clear a later return
     return state
 
 
@@ -495,6 +498,7 @@ def mark_wise_effects_applied(path: Path, obligation: str, transfer_id: int) -> 
         or entry.get("rail") != "wise"
         or entry.get("transfer_id") != transfer_id
         or entry.get("outcome_status") != "sent"
+        or entry.get("last_status") != "outgoing_payment_sent"
     ):
         raise JournalError("Wise task effects cannot be marked before settlement")
     entry["effects_applied"] = True

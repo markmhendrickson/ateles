@@ -456,6 +456,11 @@ leaves `intent` or `funding_pending`, never a retry. A lost create response with
 no saved transfer ID returns `submission_unknown`: the journal remains at
 `intent`, and the operator checks Wise Activity by date, amount and reference.
 Monedula cannot automatically reconcile that attempt without a transfer ID.
+Task, profile, due-date and session effects require the latest recorded transfer
+status to be `outgoing_payment_sent`. If a transfer check is due, Monedula reads
+it before recovering unapplied effects. A later non-confirming status holds
+unapplied effects and alerts when effects were already applied; it does not
+rewrite the earlier payment history.
 The daemon serializes ticks
 with a lock on the existing first-use marker. BTC `sent` remains its existing
 final handler result. The journal also issues the monotonically

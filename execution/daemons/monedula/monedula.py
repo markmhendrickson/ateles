@@ -1761,7 +1761,9 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                     if any(
                         entry.get("rail") == "wise"
                         and entry.get("session_key") == key
-                        and entry.get("outcome_status") != "sent"
+                        and payment_journal.obligation_state(
+                            {"obligations": {"held": entry}}, "held"
+                        ) != payment_journal.STATE_DONE
                         for entry in data["obligations"].values()
                     ):
                         continue
@@ -1809,12 +1811,22 @@ def _resolve_sessions(triggered: list[tuple], state: str) -> None:
 
 
 def _apply_confirmed_wise_effects(path: Path, obligation: str, entry: dict, handlers: dict) -> bool:
-    """Idempotently finish task and session effects after a transfer read."""
+    """Finish task and session effects only for the latest confirmed status."""
     import payment_journal
     from datetime import datetime, timezone
     from handlers.wise_transfer import _update_task
     from consent_email import obligation_key
 
+    latest = payment_journal.load(path)["obligations"][obligation]
+    if (latest.get("last_status") != "outgoing_payment_sent"
+            or latest.get("outcome_status") != "sent"):
+        _notify(
+            f"monedula: Wise transfer [{obligation[:12]}] no longer confirms payment; "
+            "task and session bookkeeping held; do not pay again.",
+            priority="blocker", dedupe_key=f"monedula:wise_effects_hold:{obligation}",
+        )
+        return False
+    entry = latest
     transfer_id = entry["transfer_id"]
     handler = handlers.get(entry.get("profile_entity_id"))
     profile = getattr(handler, "profile", None)
@@ -1913,14 +1925,6 @@ def _reconcile_wise_entries(handlers: list) -> bool:
             )
             clean = False
             continue
-        # A previously confirmed payment may still need its task/session effects.
-        if entry.get("outcome_status") == "sent" and not entry.get("effects_applied"):
-            try:
-                if not _apply_confirmed_wise_effects(path, obligation, entry, wise_handlers):
-                    clean = False
-            except payment_journal.JournalError as exc:
-                log.error("Wise confirmed effects journal failure: %s", exc)
-                clean = False
         try:
             current = payment_journal.load(path)["obligations"][obligation]
         except payment_journal.JournalError as exc:
@@ -1929,6 +1933,15 @@ def _reconcile_wise_entries(handlers: list) -> bool:
                     dedupe_key=_payment_journal_alert_key(str(exc)), email_eligible=True)
             clean = False
             continue
+        if (current.get("outcome_status") == "sent"
+                and current.get("last_status") != "outgoing_payment_sent"):
+            prior_effects = "already applied" if current.get("effects_applied") else "held"
+            _notify(
+                f"monedula: Wise transfer [{obligation[:12]}] was previously sent, "
+                f"but latest status is {current.get('last_status') or 'unknown'}; "
+                f"task and session effects {prior_effects}; review the return; do not pay again.",
+                priority="blocker", dedupe_key=f"monedula:wise_discrepancy:{obligation}",
+            )
         if current.get("state") == payment_journal.STATE_DONE:
             due = current.get("next_check_at")
             if due is None and "next_check_at" not in current:
@@ -1947,6 +1960,18 @@ def _reconcile_wise_entries(handlers: list) -> bool:
                     continue
                 due = next_due.timestamp() if next_due else None
             if due is None or time.time() < due:
+                # Recover effects after a confirmed read only when no newer
+                # transfer check is due. If due, read it before any writes.
+                if (current.get("last_status") == "outgoing_payment_sent"
+                        and not current.get("effects_applied")):
+                    try:
+                        if not _apply_confirmed_wise_effects(
+                            path, obligation, current, wise_handlers
+                        ):
+                            clean = False
+                    except payment_journal.JournalError as exc:
+                        log.error("Wise confirmed effects journal failure: %s", exc)
+                        clean = False
                 continue
         elif current.get("last_status") == "bounced_back" and time.time() < current.get(
             "next_check_at", 0
@@ -1981,14 +2006,26 @@ def _reconcile_wise_entries(handlers: list) -> bool:
                 priority="blocker", dedupe_key=f"monedula:wise_read:{obligation}",
             )
             continue
+        if status != "outgoing_payment_sent":
+            if entry.get("outcome_status") == "sent":
+                prior_effects = "already applied" if entry.get("effects_applied") else "held"
+                _notify(
+                    f"monedula: Wise transfer [{obligation[:12]}] was previously sent, "
+                    f"but latest status is {status}; task and session effects {prior_effects}; "
+                    "review the return; do not pay again.",
+                    priority="blocker", dedupe_key=f"monedula:wise_discrepancy:{obligation}",
+                )
         if first_paid:
             _notify(
                 f"monedula: Wise transfer confirmed sent [{obligation[:12]}].",
                 priority="warn", dedupe_key=f"monedula:wise_confirmed:{obligation}",
             )
+        if status == "outgoing_payment_sent":
             try:
                 paid_entry = payment_journal.load(path)["obligations"][obligation]
-                if not _apply_confirmed_wise_effects(path, obligation, paid_entry, wise_handlers):
+                if not paid_entry.get("effects_applied") and not _apply_confirmed_wise_effects(
+                    path, obligation, paid_entry, wise_handlers
+                ):
                     clean = False
             except payment_journal.JournalError as exc:
                 log.error("Wise confirmed effects journal failure: %s", exc)

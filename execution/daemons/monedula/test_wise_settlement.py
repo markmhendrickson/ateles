@@ -516,6 +516,160 @@ def test_confirmed_read_changes_real_task_fields_only_once(attempt, monkeypatch,
     assert len(fake.posts) == first_posts
 
 
+@pytest.mark.parametrize("one_off", [False, True], ids=["recurring", "one_off"])
+@pytest.mark.parametrize("history", ["sent_bounced_still_bounced", "sent_bounced_sent",
+                                     "refunded_then_sent", "effects_then_return"])
+def test_latest_wise_status_controls_real_effects(attempt, monkeypatch, one_off, history):
+    import monedula
+    import consent_email
+    from fake_neotoma import FakeNeotoma
+    from handlers import task_writes
+    from handlers.payment_profile import PaymentProfile
+
+    profile = PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", calendar_keywords=[] if one_off else ["synthetic"],
+        payment_type="wise", amount_eur=1, neotoma_task_id="synthetic-task",
+        one_off=one_off, entity_id="synthetic-profile",
+        due_date="2026-01-01" if one_off else "",
+    )
+    _bind_synthetic_attempt(attempt, profile)
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_funding_pending(attempt, "obligation", 3, "COMPLETED")
+    fake = FakeNeotoma({
+        "synthetic-task": {"status": "awaiting_approval", "notes": "prior"},
+        "synthetic-profile": {"status": "active"},
+    })
+    monkeypatch.setattr(consent_email, "STATE_FILE", attempt.parent / "consent.json")
+    monkeypatch.setattr(task_writes, "make_client", fake.connection)
+    monkeypatch.setattr(wise, "_find_next_event_due_date", lambda *_: "2026-12-01")
+    monkeypatch.setattr(wise, "_wise_get", lambda *_: pytest.fail("network read not mocked by scenario"))
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda text, **kw: alerts.append(text))
+
+    if history == "refunded_then_sent":
+        journal.record_wise_status(attempt, "obligation", 3, "funds_refunded",
+                                   "2026-01-01T00:00:00Z")
+        assert monedula._reconcile_wise_entries([wise.WiseTransferHandler(profile)])
+        assert fake.posts == []
+        journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                                   "2026-01-02T00:00:00Z")
+    else:
+        journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                                   "2026-01-01T00:00:00Z")
+        if history == "effects_then_return":
+            assert monedula._reconcile_wise_entries([wise.WiseTransferHandler(profile)])
+        journal.record_wise_status(attempt, "obligation", 3, "bounced_back",
+                                   "2026-01-02T00:00:00Z")
+        journal.schedule_wise_check(attempt, "obligation", time.time() + 86400)
+        if history != "effects_then_return":
+            assert journal.obligation_state(journal.load(attempt), "obligation") == "failed"
+            with pytest.raises(journal.JournalError, match="before settlement"):
+                journal.mark_wise_effects_applied(attempt, "obligation", 3)
+            assert monedula._reconcile_wise_entries([wise.WiseTransferHandler(profile)])
+            assert fake.posts == []
+            assert journal.session_state(journal.load(attempt), "synthetic:session") is None
+        if history == "sent_bounced_sent":
+            journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                                       "2026-01-03T00:00:00Z")
+
+    if history == "sent_bounced_still_bounced":
+        assert any("latest status is bounced_back" in text for text in alerts)
+        assert not journal.load(attempt)["obligations"]["obligation"].get("effects_applied")
+        return
+    if history == "effects_then_return":
+        posts = len(fake.posts)
+        assert monedula._reconcile_wise_entries([wise.WiseTransferHandler(profile)])
+        assert len(fake.posts) == posts
+        assert journal.load(attempt)["obligations"]["obligation"]["effects_applied"] is True
+        assert any("effects already applied" in text for text in alerts)
+        return
+
+    assert monedula._reconcile_wise_entries([wise.WiseTransferHandler(profile)])
+    assert journal.load(attempt)["obligations"]["obligation"]["effects_applied"] is True
+    assert journal.session_state(journal.load(attempt), "synthetic:session") == "settled"
+    assert "transfer_id=3" in fake.entities["synthetic-task"]["notes"]
+    if one_off:
+        assert fake.entities["synthetic-task"]["status"] == "done"
+        assert fake.entities["synthetic-profile"]["status"] == "archived"
+    else:
+        assert fake.entities["synthetic-task"]["due_date"] == "2026-12-01"
+        assert fake.entities["synthetic-task"]["status"] == "awaiting_approval"
+    posts = len(fake.posts)
+    assert monedula._reconcile_wise_entries([wise.WiseTransferHandler(profile)])
+    assert len(fake.posts) == posts
+
+
+@pytest.mark.parametrize("one_off", [False, True], ids=["recurring", "one_off"])
+def test_due_wise_read_checks_return_before_applying_effects(attempt, monkeypatch, one_off):
+    import monedula
+    import consent_email
+    from fake_neotoma import FakeNeotoma
+    from handlers import task_writes
+    from handlers.payment_profile import PaymentProfile
+
+    profile = PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", calendar_keywords=[] if one_off else ["synthetic"],
+        payment_type="wise", amount_eur=1, neotoma_task_id="synthetic-task",
+        one_off=one_off, entity_id="synthetic-profile",
+        due_date="2026-01-01" if one_off else "",
+    )
+    _bind_synthetic_attempt(attempt, profile)
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                               "2026-01-01T00:00:00Z")
+    journal.schedule_wise_check(attempt, "obligation", time.time() - 1)
+    fake = FakeNeotoma({
+        "synthetic-task": {"status": "awaiting_approval", "notes": "prior"},
+        "synthetic-profile": {"status": "active"},
+    })
+    monkeypatch.setattr(consent_email, "STATE_FILE", attempt.parent / "consent.json")
+    monkeypatch.setattr(task_writes, "make_client", fake.connection)
+    monkeypatch.setenv("WISE_API_TOKEN", "synthetic-token")
+    monkeypatch.setattr(wise, "_wise_get", lambda *_: {"statusHistory": [
+        {"status": "bounced_back", "occurred_at": "2026-01-02T00:00:00Z"},
+        {"status": "outgoing_payment_sent", "occurred_at": "2026-01-01T00:00:00Z"},
+    ]})
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda text, **kw: alerts.append(text))
+    assert monedula._reconcile_wise_entries([wise.WiseTransferHandler(profile)])
+    assert fake.posts == []
+    assert journal.session_state(journal.load(attempt), "synthetic:session") is None
+    assert journal.load(attempt)["obligations"]["obligation"]["last_status"] == "bounced_back"
+    assert any("latest status is bounced_back" in text for text in alerts)
+
+
+def test_returned_invoice_due_date_edit_cannot_offer_fresh_consent(approval_env, monkeypatch):
+    import consent_email
+    from handlers.payment_profile import PaymentProfile
+
+    world, approvals = approval_env
+    profile = PaymentProfile(
+        prefix="INVOICE", label="Synthetic invoice", calendar_keywords=[],
+        payment_type="wise", amount_eur=10, due_date="2026-01-01",
+        one_off=True, wise_recipient_id=5, wise_recipient_name="Synthetic",
+        entity_id="synthetic-profile", neotoma_task_id="synthetic-task",
+    )
+    world.handler = wise.WiseTransferHandler(profile)
+    old = consent_email.build_pending_items(
+        [(world.handler, world.handler.matches([]))], "2026-11-18"
+    )[0]
+    path = consent_email.journal_path()
+    journal.record_intent(path, old.obligation, "old-token", generation=1, rail="wise",
+                          handler_name=world.handler.name, profile_entity_id=profile.entity_id,
+                          task_id=profile.neotoma_task_id, payment_date=old.payment_date)
+    journal.record_transfer_created(path, old.obligation, 3)
+    journal.record_wise_status(path, old.obligation, 3, "outgoing_payment_sent",
+                               "2026-01-01T00:00:00Z")
+    journal.record_wise_status(path, old.obligation, 3, "bounced_back",
+                               "2026-01-02T00:00:00Z")
+    journal.schedule_wise_check(path, old.obligation, time.time() + 86400)
+    profile.due_date = "2026-02-01"
+    monkeypatch.setattr(wise, "_wise_get", lambda *a: pytest.fail("unexpected Wise read"))
+    world.tick()
+    assert approvals.writes == 0
+    assert list(journal.load(path)["obligations"]) == [old.obligation]
+
+
 def test_confirmed_older_invoice_updates_only_its_approved_profile(attempt, monkeypatch):
     import monedula
     from fake_neotoma import FakeNeotoma
