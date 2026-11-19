@@ -13,6 +13,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -22,6 +24,14 @@ from lib.daemon_runtime import logging_setup  # noqa: E402
 REAL_LOG_DIR = logging_setup.LOG_DIR
 TEST_LOG_DIR = Path(tempfile.mkdtemp(prefix="monedula-test-logs-"))
 logging_setup.LOG_DIR = TEST_LOG_DIR
+
+
+@pytest.fixture(autouse=True)
+def isolate_default_payment_journal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test may resolve Monedula's default journal to the live file."""
+    import consent_email
+
+    monkeypatch.setattr(consent_email, "STATE_FILE", tmp_path / "consent.json")
 
 
 def initialize_test_journal(directory: Path) -> Path:

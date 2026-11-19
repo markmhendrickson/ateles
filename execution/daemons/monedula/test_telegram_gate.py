@@ -502,6 +502,7 @@ def test_consent_channel_failure_notify_carries_dedupe_key_and_email_eligible(
 def test_consent_channel_failure_body_is_actionable(
     monkeypatch: pytest.MonkeyPatch,
     sent_messages: list[str],
+    escalation_posts: list[tuple[dict, str]],
 ) -> None:
     handler = _RecordingHandler("therapy")
     handler.profile = types.SimpleNamespace(
@@ -707,7 +708,8 @@ def test_partial_approval_executes_only_the_named_handler(
 
 @pytest.mark.parametrize("change", ["amount", "payee", "currency"])
 def test_telegram_changed_terms_hold_without_intent_and_reissue(
-    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str], change: str
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str],
+    escalation_posts: list[tuple[dict, str]], change: str
 ) -> None:
     handler, polls, resolutions, _ = _journal_failure_observers(monkeypatch)
     handler.profile.wise_recipient_name = "synthetic-recipient-a"

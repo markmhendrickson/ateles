@@ -46,6 +46,7 @@ from lib.approval.email_channel import (
 from lib.approval.tokens import subject_marker, token_for
 
 import payment_journal
+from wise_hold_message import hold_text
 
 log = logging.getLogger(__name__)
 
@@ -235,15 +236,12 @@ def payee_identity(handler: Any) -> str:
     return "profile|" + "|".join(str(getattr(profile, f, "") or "") for f in fields)
 
 
-def obligation_key(
+def _base_obligation_key(
     handler: Any,
     payment_date: str,
     match_id: str,
 ) -> str:
-    """Dedup key for one obligation: handler, period/instance, payee, amount,
-    currency (``docs/foundation/payments.md#the-dedup-key-and-what-it-is-keyed-on``).
-    Recomputed from the live handler, so it also serves as the execute-time
-    check that the terms consented to are still the terms that would be paid."""
+    """Base approval hash; the BTC cutover lookup uses the same older shape."""
     _label, amount, _is_cal = _profile_fields(handler)
     basis = "|".join(
         [
@@ -256,6 +254,70 @@ def obligation_key(
         ]
     )
     return hashlib.sha256(basis.encode()).hexdigest()[:32]
+
+
+def obligation_key(handler: Any, payment_date: str, match_id: str) -> str:
+    """Bind a Wise approval to its exact profile, task and transfer terms."""
+    legacy = _base_obligation_key(handler, payment_date, match_id)
+    profile = getattr(handler, "profile", None)
+    if getattr(profile, "payment_type", None) != "wise":
+        return legacy
+    basis = "|".join((
+        legacy,
+        str(getattr(profile, "entity_id", "") or ""),
+        str(getattr(profile, "neotoma_task_id", "") or ""),
+        str(getattr(profile, "wise_reference", "") or ""),
+        str(getattr(profile, "due_date", "") or "") if getattr(profile, "one_off", False) else "",
+    ))
+    return hashlib.sha256(basis.encode()).hexdigest()[:32]
+
+
+def journal_entry_for_item(journal: dict, item: PendingItem) -> dict | None:
+    """Return the Wise profile hold, or the exact settled/current obligation."""
+    profile = getattr(item.handler, "profile", None)
+    if getattr(profile, "payment_type", None) == "wise":
+        held = payment_journal.wise_replay_hold(
+            journal, str(getattr(profile, "entity_id", "") or "")
+        )
+        if held is not None:
+            key, row = held
+            return {**row, "_journal_key": key}
+    return journal["obligations"].get(item.obligation)
+
+
+def journal_state_for_item(journal: dict, item: PendingItem) -> str | None:
+    entry = journal_entry_for_item(journal, item)
+    if entry is None:
+        return None
+    profile = getattr(item.handler, "profile", None)
+    if getattr(profile, "payment_type", None) == "wise" and entry.get("state") == payment_journal.STATE_DONE:
+        row = {key: value for key, value in entry.items() if key != "_journal_key"}
+        if not payment_journal._wise_paid(row, journal):
+            return payment_journal.STATE_INTENT
+    if ("rail" not in entry and entry.get("state") == payment_journal.STATE_DONE
+            and entry.get("outcome_status") != "sent"):
+        return payment_journal.STATE_INTENT
+    state = payment_journal.obligation_state(
+        {"obligations": {item.obligation: entry}, "sessions": journal.get("sessions", {})},
+        item.obligation,
+    )
+    if (entry.get("rail") == "wise" and state == payment_journal.STATE_DONE
+            and "last_status" in entry and entry.get("effects_applied") is not True
+            and item.obligation in journal["obligations"]):
+        # A confirmed rail status is not completion until task and session
+        # bookkeeping have been durably applied. Every consent route uses this.
+        return payment_journal.STATE_INTENT
+    return state
+
+
+def unclassified_wise_attempt_note(entry: dict) -> str:
+    """An unclassified old attempt needs manual reconciliation before any Wise offer."""
+    if (entry.get("rail") not in (None, "wise")
+            or not isinstance(entry.get("profile_entity_id"), str)
+            or not entry["profile_entity_id"].strip()):
+        return (" Old attempt needs to be reconciled by hand first; check Wise "
+                "Activity. Every Wise obligation is held until then.")
+    return ""
 
 
 def _profile_fields(handler: Any) -> tuple[str, int, bool]:
@@ -325,7 +387,7 @@ def legacy_obligation_keys(
                 ids.add(str(candidate))
         # The old code fell back to the match's own position in the list.
         ids.update(str(i) for i, m in enumerate(matches) if m is match)
-    return {obligation_key(handler, d, i) for d in dates for i in ids}
+    return {_base_obligation_key(handler, d, i) for d in dates for i in ids}
 
 
 def build_pending_items(
@@ -351,7 +413,11 @@ def build_pending_items(
                     or (match or {}).get("id")
                     or idx
                 )
-            session_date = event_session_date(match) or yesterday_str
+            one_off_due = (
+                (match or {}).get("due_date") or getattr(handler.profile, "due_date", "")
+                if isinstance(match, dict) and not is_calendar else ""
+            )
+            session_date = event_session_date(match) or one_off_due or yesterday_str
             session = session_date if not match_id else f"{session_date}:{match_id}"
             obligation = obligation_key(handler, session_date, match_id)
             token = token_for(
@@ -382,6 +448,7 @@ def build_request_body(
     superseded: bool,
     settled: set[str] | None = None,
     unknown: set[str] | None = None,
+    held_notes: dict[str, str] | None = None,
 ) -> tuple[str, str]:
     """Plain-text subject + body per Design copy. Never instructs PAID."""
     first_marker = subject_marker(items[0].token) if items else ""
@@ -397,13 +464,16 @@ def build_request_body(
     lines.append("")
     settled = settled or set()
     unknown = unknown or set()
+    held_notes = held_notes or {}
     for item in items:
         marker = subject_marker(item.token)
         note = ""
         if item.obligation in settled:
             note = " | already paid — no reply needed"
         elif item.obligation in unknown:
-            note = " | outcome unknown — held for review, will not be retried"
+            note = " | " + held_notes.get(
+                item.obligation, "outcome unknown; do not pay again"
+            )
         lines.append(
             f"- {item.handler_name} | {item.payment_date} | {item.label} | "
             f"{CURRENCY} {item.amount_eur} | {marker}{note}"
@@ -721,15 +791,35 @@ def request_and_collect(
     settled = {
         i.obligation
         for i in probe
-        if payment_journal.obligation_state(journal, i.obligation)
+        if journal_state_for_item(journal, i)
         == payment_journal.STATE_DONE
     }
     unknown = {
         i.obligation
         for i in probe
-        if payment_journal.obligation_state(journal, i.obligation)
-        == payment_journal.STATE_INTENT
+        if journal_state_for_item(journal, i)
+        in (payment_journal.STATE_INTENT, payment_journal.STATE_FUNDING_PENDING,
+            payment_journal.STATE_FAILED)
     }
+    held_notes = {}
+    for item in probe:
+        if item.obligation not in unknown:
+            continue
+        entry = journal_entry_for_item(journal, item) or {}
+        note = hold_text(entry, email=True)
+        attempt_key = entry.get("_journal_key") or item.obligation
+        held_notes[item.obligation] = (
+            f"Held by Wise attempt [{attempt_key}]; this obligation is not lost. "
+            + note + " Check Wise Activity before any replacement."
+            + unclassified_wise_attempt_note(entry)
+        )
+
+    if len(settled | unknown) == len(probe):
+        result.pending_items = probe
+        for item in probe:
+            result.blocked.add(match_key(item))
+            result.states[match_key(item)] = "blocked"
+        return result
 
     if already_sent:
         generation = mark_gen
@@ -754,6 +844,7 @@ def request_and_collect(
             superseded=bool(prior_fp),
             settled=settled,
             unknown=unknown,
+            held_notes=held_notes,
         )
         ok = send_request(subject, body)
         result.send_count = 1
@@ -866,6 +957,7 @@ def request_and_collect(
             fresh_items = build_pending_items(triggered, yesterday_str, new_generation)
             subject, body = build_request_body(
                 fresh_items, superseded=True, settled=settled, unknown=unknown,
+                held_notes=held_notes,
             )
             body = (
                 "A reply to the previous consent request could not be read. "

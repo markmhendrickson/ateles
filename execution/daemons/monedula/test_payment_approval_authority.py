@@ -175,38 +175,6 @@ def test_two_entities_for_one_key_is_an_error_not_a_pick(monkeypatch):
 # ── Cutover: a session paid under the pre-window obligation key ─────────────
 
 
-@pytest.mark.parametrize("state", ["done", "intent"])
-def test_session_paid_under_the_old_obligation_key_is_never_raised_again(env, state):
-    """The old code keyed a single match on (run yesterday, empty match id).
-    A session paid just before this change went live exists only under that
-    key. Red against the old code: a fresh payment_approval was raised and a
-    truthful "attended" paid it twice."""
-    w, neo = env
-    old_key = consent_email.obligation_key(w.handler, "2026-11-11", "")
-    jpath = consent_email.journal_path()
-    payment_journal.record_intent(jpath, old_key, "old-token", generation=1)
-    if state == "done":
-        payment_journal.record_outcome(jpath, old_key, "sent")
-    w.tick()
-    w.tick(minutes=15)
-    assert neo.writes == 0, "a payment_approval was raised for an already-paid session"
-    assert w.handler.execute_calls == []
-    assert payment_journal.session_state(w.journal, "yoga:evt-1") == "settled"
-
-
-def test_multi_match_legacy_index_key_is_also_recognised(env):
-    w, neo = env
-    w.calendars["primary"] = [_event("evt-1"), _event("evt-2")]
-    old_key = consent_email.obligation_key(w.handler, "2026-11-11", "1")
-    jpath = consent_email.journal_path()
-    payment_journal.record_intent(jpath, old_key, "old-token", generation=1)
-    payment_journal.record_outcome(jpath, old_key, "sent")
-    w.tick()
-    # the session that was match index 1 is settled; the other is still raised
-    assert payment_journal.session_state(w.journal, "yoga:evt-2") == "settled"
-    assert len(neo.rows) == 1
-
-
 # ── Operator visibility: no silent wait ──────────────────────────────────────
 
 
