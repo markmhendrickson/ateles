@@ -560,6 +560,55 @@ def test_same_time_conflicting_latest_status_is_unknown():
         ]})
 
 
+@pytest.mark.parametrize("stamp", [None, "not-a-date", "2026-01-01T00:00:00"])
+def test_untimed_or_unorderable_status_cannot_establish_payment(stamp):
+    body = {"status": "outgoing_payment_sent"}
+    if stamp is not None:
+        body["updated"] = stamp
+    with pytest.raises(wise_reconcile.TransferReadError, match="timestamp"):
+        wise_reconcile.latest_status(body)
+    assert wise_reconcile.discrepancy_report(
+        {"obligation": {"state": "done", "transfer_id": 3}}, {3: body}
+    )[0]["category"] == "unmatched"
+
+
+@pytest.mark.parametrize("prior_status", [None, "bounced_back"])
+def test_untimed_status_read_keeps_wise_outcome_held(attempt, monkeypatch, prior_status):
+    import monedula
+    from handlers.payment_profile import PaymentProfile
+
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_funding_pending(attempt, "obligation", 3, "COMPLETED")
+    if prior_status:
+        journal.record_wise_status(attempt, "obligation", 3, prior_status,
+                                   "2026-01-01T00:00:00Z")
+    before = journal.load(attempt)["obligations"]["obligation"].copy()
+    handler = wise.WiseTransferHandler(PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", calendar_keywords=[],
+        payment_type="wise", amount_eur=1, entity_id="synthetic-profile",
+        neotoma_task_id="synthetic-task",
+    ))
+    monkeypatch.setenv("WISE_API_TOKEN", "synthetic-token")
+    monkeypatch.setattr(wise, "_wise_get", lambda *_: {"status": "outgoing_payment_sent"})
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda text, **kw: alerts.append(text))
+    assert monedula._reconcile_wise_entries([handler]) is False
+    after = journal.load(attempt)["obligations"]["obligation"]
+    assert after == before
+    assert after["state"] == "funding_pending"
+    assert after.get("outcome_status") != "sent"
+    assert any("no orderable Wise timestamp" in text for text in alerts)
+
+
+def test_timestamped_status_still_settles_pending_transfer(attempt):
+    journal.record_transfer_created(attempt, "obligation", 3)
+    status, occurred_at = wise_reconcile.latest_status({
+        "status": "outgoing_payment_sent", "updated": "2026-01-02T00:00:00Z"
+    })
+    assert journal.record_wise_status(attempt, "obligation", 3, status, occurred_at)
+    assert journal.load(attempt)["obligations"]["obligation"]["outcome_status"] == "sent"
+
+
 @pytest.mark.parametrize("status", sorted(wise_reconcile.TRANSFER_STATUSES))
 def test_only_confirmed_transfer_status_records_paid(attempt, status):
     journal.record_transfer_created(attempt, "obligation", 3)

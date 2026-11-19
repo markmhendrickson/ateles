@@ -1915,7 +1915,7 @@ def _reconcile_wise_entries(handlers: list) -> bool:
     """Check every unresolved Wise transfer, independent of calendar matching."""
     import payment_journal
     from consent_email import journal_path
-    from wise_reconcile import RETURN_STATUSES, read_transfer_status
+    from wise_reconcile import RETURN_STATUSES, TransferReadError, read_transfer_status
 
     path = journal_path()
     try:
@@ -2072,9 +2072,13 @@ def _reconcile_wise_entries(handlers: list) -> bool:
         except Exception as exc:  # network, malformed body, 401/5xx, journal write
             log.error("Wise transfer read failed for %s: %s", obligation[:12], type(exc).__name__)
             clean = False
+            detail = (
+                "status has no orderable Wise timestamp; outcome unknown; do not pay again."
+                if isinstance(exc, TransferReadError) and "timestamp" in str(exc)
+                else "read failed; outcome unknown; do not pay again."
+            )
             _notify(
-                f"monedula: Wise transfer [{obligation[:12]}] read failed; "
-                "outcome unknown; do not pay again.",
+                f"monedula: Wise transfer [{obligation[:12]}] {detail}",
                 priority="blocker", dedupe_key=f"monedula:wise_read:{obligation}",
             )
             continue

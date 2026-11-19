@@ -38,7 +38,7 @@ def _stamp(value: Any) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def latest_status(body: Any, *, checked_at: datetime | None = None) -> tuple[str, str]:
+def latest_status(body: Any) -> tuple[str, str]:
     """Choose the latest event by occurred_at, including rollback transitions."""
     if not isinstance(body, dict):
         raise TransferReadError("Wise transfer body malformed")
@@ -63,22 +63,19 @@ def latest_status(body: Any, *, checked_at: datetime | None = None) -> tuple[str
         status = body.get("status")
         if not isinstance(status, str) or not status:
             raise TransferReadError("Wise transfer status missing")
-        occurred = _stamp(body["updated"]) if "updated" in body else (
-            checked_at or datetime.now(timezone.utc)
-        )
+        if "updated" not in body:
+            raise TransferReadError("Wise transfer status cannot be ordered without timestamp")
+        occurred = _stamp(body["updated"])
     # Unknown values are unresolved, never a paid result.
     return status, occurred.isoformat()
 
 
 def read_transfer_status(
     token: str, transfer_id: int, transport: Callable[[str, str], Any],
-    *, checked_at: datetime | None = None,
 ) -> tuple[str, str]:
     if not isinstance(transfer_id, int) or transfer_id <= 0:
         raise TransferReadError("Wise transfer id invalid")
-    return latest_status(
-        transport(token, f"/v1/transfers/{transfer_id}"), checked_at=checked_at
-    )
+    return latest_status(transport(token, f"/v1/transfers/{transfer_id}"))
 
 
 def next_check_at(confirmed_at: datetime, now: datetime) -> datetime | None:
