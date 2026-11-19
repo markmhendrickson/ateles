@@ -1729,6 +1729,30 @@ def _remember_child_environment_credentials(child_env: dict[str, str]) -> None:
 _SPLIT_SECRET_MAX_LINES = 8
 
 
+def _remember_fly_job_secrets(job) -> None:
+    """Remember every secret value a Fly job carries (tokens, and each string inside a signing key
+    document) so output from that run is redacted wherever it is persisted or reported."""
+    import json as _json
+
+    for value in list(getattr(job, "secrets", {}).values()):
+        if not isinstance(value, str):
+            continue
+        _remember_child_credential(value)
+        try:
+            document = _json.loads(value)
+        except ValueError:
+            continue
+        stack = [document]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, dict):
+                stack.extend(item.values())
+            elif isinstance(item, list):
+                stack.extend(item)
+            elif isinstance(item, str) and len(item) >= 16:
+                _remember_child_credential(item)
+
+
 def _known_secret_values() -> list[str]:
     """Every secret value known to this process: the named environment values and the child credentials."""
     values: list[str] = []
@@ -4505,7 +4529,12 @@ async def _run_skill_once(
         try:
             if _fly_job is not None:
                 try:
-                    returncode, stdout, stderr = await fly_runner.get_executor().run(_fly_job)
+                    try:
+                        _remember_fly_job_secrets(_fly_job)
+                        returncode, stdout, stderr = await fly_runner.get_executor().run(_fly_job)
+                    finally:
+                        # The delivery token is minted inside run(): remember it whatever the outcome.
+                        _remember_fly_job_secrets(_fly_job)
                     # Only once the run actually happened on Fly: a token mint
                     # or other refusal inside run() raises before this, and
                     # that run then goes home with its normal tools.

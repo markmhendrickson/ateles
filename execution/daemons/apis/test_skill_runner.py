@@ -3557,6 +3557,35 @@ class TestDispatchFailureDiagnostics:
         body = Path(path).read_text(encoding="utf-8")
         assert twice not in body and fake_value not in body and "keep" in body
 
+    def test_every_secret_a_fly_job_carries_is_remembered_and_redacted(self, tmp_path) -> None:
+        import json
+        from types import SimpleNamespace
+
+        key_document = json.dumps({"kty": "EC", "crv": "P-256", "d": "FAKE-PRIVATE-KEY-COMPONENT-6666", "x": "short"})
+        job = SimpleNamespace(secrets={
+            "ATELES_DELIVERY_GITHUB_TOKEN": "FAKE-DELIVERY-TOKEN-VALUE-7777",
+            "GITHUB_TOKEN": "FAKE-READ-TOKEN-VALUE-8888",
+            "NEOTOMA_AAUTH_PRIVATE_JWK": key_document,
+        })
+        before = dict(skill_runner._CHILD_CREDENTIAL_VALUES)
+        try:
+            skill_runner._remember_fly_job_secrets(job)
+            for blocked in (False, True):
+                with patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"):
+                    path = skill_runner.write_dispatch_failure_log(
+                        skill="cicada", role="cicada", returncode=1,
+                        stdout="a FAKE-DELIVERY-TOKEN-VALUE-7777 b FAKE-READ-TOKEN-VALUE-8888",
+                        stderr="key FAKE-PRIVATE-KEY-COMPONENT-6666 and " + key_document,
+                        blocked_by_agent=blocked,
+                    )
+                body = Path(path).read_text(encoding="utf-8")
+                for secret in ("FAKE-DELIVERY-TOKEN-VALUE-7777", "FAKE-READ-TOKEN-VALUE-8888",
+                               "FAKE-PRIVATE-KEY-COMPONENT-6666"):
+                    assert secret not in body
+        finally:
+            skill_runner._CHILD_CREDENTIAL_VALUES.clear()
+            skill_runner._CHILD_CREDENTIAL_VALUES.update(before)
+
     def test_the_helper_definitions_are_not_duplicated(self) -> None:
         source = Path(skill_runner.__file__).read_text(encoding="utf-8")
         for name in ("_ANSI_ESCAPE_RE = ", "def _strip_terminal_escapes", "def _remember_child_environment_credentials"):

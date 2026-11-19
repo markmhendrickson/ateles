@@ -403,6 +403,32 @@ def test_the_reason_redactor_applies_the_same_effective_redaction_as_the_file(mo
     assert "redacted" in out
 
 
+def test_a_fly_job_secret_is_redacted_from_the_file_and_the_reason(writes, spawn, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    secret = "FAKE-DELIVERY-TOKEN-VALUE-9999"
+    before = dict(skill_runner._CHILD_CREDENTIAL_VALUES)
+    try:
+        skill_runner._remember_fly_job_secrets(SimpleNamespace(secrets={"ATELES_DELIVERY_GITHUB_TOKEN": secret}))
+        spawn.result = _SpawnResult(
+            stdout=f"draft {secret}\n[cicada] pull_request_link: BLOCKED — need {secret} here\n",
+            stderr=f"stderr {secret}",
+            remote_run_id="fly-synthetic-run",
+        )
+
+        _dispatch("ent_saved_blocked_fly_secret", _cicada_task())
+
+        blocked = _with_status(writes, "blocked")
+        assert len(blocked) == 1
+        files = list((tmp_path / "blocked-runs").glob("*.log"))
+        assert len(files) == 1
+        assert secret not in files[0].read_text(encoding="utf-8")
+        assert secret not in blocked[0]["reason"]
+    finally:
+        skill_runner._CHILD_CREDENTIAL_VALUES.clear()
+        skill_runner._CHILD_CREDENTIAL_VALUES.update(before)
+
+
 def test_delivered_artifact_keeps_no_output_file(writes, spawn, tmp_path, monkeypatch):
     monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: True)
     spawn.result = _SpawnResult(stdout=f"draft\n{_PR_HEADER}\n")
