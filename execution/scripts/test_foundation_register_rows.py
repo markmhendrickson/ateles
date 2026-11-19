@@ -16,6 +16,7 @@ import render_decision_state as ds
 import reserve_register_number as reserve
 import check_foundation_register_narrative as narrative
 import check_plan_decision_citations as citations
+import check_register_render_parity as parity
 from foundation_register_rows import candidate_cells, decision_rows, has_digit, revision_rows
 
 
@@ -214,6 +215,28 @@ GFM_SHAPES = {
 
 
 class TestGfmTableBlock(unittest.TestCase):
+    def test_short_gfm_delimiters_fail_closed_across_readers(self):
+        base = "## The register of open design decisions\n" + register(**{"1": "**open**"})
+        for delimiter in ("|-|-|", "| :-: | - |"):
+            outside = f"## Other\n| a | b |\n{delimiter}\n999 lost row\n"
+            decision = base + outside
+            revision = f"## Other\n| a | b |\n{delimiter}\n999 lost row\n"
+            for reader in (
+                lambda: decision_rows(decision),
+                lambda: ds.parse_rows(decision),
+                lambda: reserve.numbers("decision", decision),
+                lambda: narrative.parse_register(decision),
+                lambda: parity.classified_tables("register", decision),
+                lambda: revision_rows(revision),
+                lambda: reserve.numbers("revision", revision),
+                lambda: parity.classified_tables("revision", revision),
+            ):
+                with self.subTest(delimiter=delimiter, reader=reader), self.assertRaises(ValueError):
+                    reader()
+            with unittest.mock.patch.object(citations, "run", return_value=(0, decision)):
+                with self.assertRaises(ValueError):
+                    citations.register_rows()
+
     def test_github_fixture_and_reader_parity(self):
         fixture = json.loads(
             (Path(__file__).parent / "fixtures/gfm_row_fixture.json").read_text()

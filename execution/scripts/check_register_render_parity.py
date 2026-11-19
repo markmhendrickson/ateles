@@ -6,7 +6,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -83,11 +85,22 @@ def classified_tables(kind: str, text: str) -> list[Table]:
     return tables
 
 
+def source_table_count(text: str) -> int:
+    """Count every GFM delimiter pair, including tables outside the register section."""
+    lines = _markdown_lines(text)
+    return sum(
+        bool(cells := candidate_cells(lines[index]))
+        and _table_delimiter(candidate_cells(lines[index + 1]), len(cells))
+        for index in range(len(lines) - 1)
+    )
+
+
 class RenderedTables(HTMLParser):
     def __init__(self, kind: str):
         super().__init__(convert_charrefs=True)
         self.kind = kind
         self.tables: list[list[list[str]]] = []
+        self.total_tables = 0
         self.section = kind == "revision"
         self.heading = False
         self.heading_text: list[str] = []
@@ -99,6 +112,7 @@ class RenderedTables(HTMLParser):
             self.heading = True
             self.heading_text = []
         elif tag == "table":
+            self.total_tables += 1
             self.in_table = self.section
             if self.in_table:
                 self.tables.append([])
@@ -144,6 +158,11 @@ def check_parity(kind: str, source: str, html: str) -> None:
     expected = classified_tables(kind, source)
     rendered = RenderedTables(kind)
     rendered.feed(html)
+    total = source_table_count(source)
+    if rendered.total_tables != total:
+        raise ValueError(
+            f"{kind} total table count: classifier {total}, GitHub {rendered.total_tables}"
+        )
     if len(rendered.tables) != len(expected):
         raise ValueError(
             f"{kind} table count: classifier {len(expected)}, GitHub {len(rendered.tables)}"
@@ -162,30 +181,53 @@ def check_parity(kind: str, source: str, html: str) -> None:
 
 def render_github(text: str) -> str:
     token = os.environ.get("GITHUB_TOKEN")
-    if not token:
-        raise RuntimeError("GITHUB_TOKEN is required for GitHub markdown parity")
     body = json.dumps({"text": text, "mode": "gfm"}).encode()
-    request = urllib.request.Request(
-        "https://api.github.com/markdown",
-        data=body,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "text/html",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            return response.read().decode("utf-8")
-    except urllib.error.HTTPError as error:
-        raise RuntimeError(
-            f"GitHub markdown API returned HTTP {error.code}; parity check cannot pass"
-        ) from error
-    except (urllib.error.URLError, TimeoutError) as error:
-        raise RuntimeError(
-            f"GitHub markdown API failed ({type(error).__name__}); parity check cannot pass"
-        ) from error
+    for attempt in range(2):
+        try:
+            if not token:
+                result = subprocess.run(
+                    ["gh", "api", "markdown", "--method", "POST", "--input", "-"],
+                    input=body, capture_output=True, check=False, timeout=20,
+                )
+                if result.returncode:
+                    detail = result.stderr.decode("utf-8", errors="replace").lower()
+                    if attempt == 0 and any(
+                        marker in detail for marker in (
+                            "rate limit", "429", "502", "503", "504", "timeout",
+                            "could not resolve", "connection", "temporary failure",
+                        )
+                    ):
+                        time.sleep(1)
+                        continue
+                    raise RuntimeError("gh markdown API failed; parity check cannot pass")
+                return result.stdout.decode("utf-8")
+            request = urllib.request.Request(
+                "https://api.github.com/markdown",
+                data=body,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "text/html",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return response.read().decode("utf-8")
+        except urllib.error.HTTPError as error:
+            if attempt == 0 and (error.code == 429 or error.code >= 500 or error.headers.get("X-RateLimit-Remaining") == "0"):
+                time.sleep(1)
+                continue
+            raise RuntimeError(f"GitHub markdown API returned HTTP {error.code}; parity check cannot pass") from error
+        except (urllib.error.URLError, TimeoutError, subprocess.TimeoutExpired) as error:
+            if attempt == 0:
+                time.sleep(1)
+                continue
+            raise RuntimeError(
+                f"GitHub markdown API failed ({type(error).__name__}); parity check cannot pass"
+            ) from error
+        except FileNotFoundError as error:
+            raise RuntimeError("gh CLI is required when GITHUB_TOKEN is unset") from error
+    raise AssertionError("unreachable")
 
 
 def main(renderer: Callable[[str], str] = render_github) -> int:

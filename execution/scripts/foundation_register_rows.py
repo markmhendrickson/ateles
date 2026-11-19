@@ -12,7 +12,7 @@ STATUS_LEAD = re.compile(r"\*\*([^*]+)\*\*(?:[ \t].*)?\Z")
 STATUSES = frozenset(
     {"ruled in part", "not a decision", "withdrawn", "reopened", "open", "ruled"}
 )
-SEPARATOR = re.compile(r":?-{3,}:?\Z")
+SEPARATOR = re.compile(r":?-+:?\Z")
 
 # Existing non-register table labels in conformance.md whose first cells carry
 # digits. All other digit-bearing first cells outside the register fail closed.

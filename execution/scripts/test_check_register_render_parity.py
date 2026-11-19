@@ -8,6 +8,7 @@ import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -43,10 +44,16 @@ class TestRegisterRenderParity(unittest.TestCase):
         self.assertIn("GITHUB_TOKEN: ${{ github.token }}", workflow)
         self.assertNotIn("continue-on-error: true", workflow)
 
-    def test_matching_tables_and_excluded_outside_section_table(self):
+    def test_matching_tables_and_outside_section_table(self):
         outside = "<h2>Other</h2><table><tbody><tr><td>x</td></tr></tbody></table>"
-        parity.check_parity("register", REGISTER, outside + REGISTER_HTML)
+        source = "## Other\n| Label |\n|-|\n| x |\n" + REGISTER
+        parity.check_parity("register", source, outside + REGISTER_HTML)
         parity.check_parity("revision", REVISION, REVISION_HTML)
+
+    def test_extra_table_outside_register_section_fails_total_count(self):
+        outside = "<h2>Other</h2><table><tbody><tr><td>x</td></tr></tbody></table>"
+        with self.assertRaisesRegex(ValueError, "total table count"):
+            parity.check_parity("register", REGISTER, outside + REGISTER_HTML)
 
     def test_extra_and_missing_body_rows_fail(self):
         extra = REGISTER_HTML.replace(
@@ -75,17 +82,54 @@ class TestRegisterRenderParity(unittest.TestCase):
 
     def test_extra_table_in_register_section_fails(self):
         extra = REGISTER_HTML + "<table><tbody><tr><td>2</td></tr></tbody></table>"
-        with self.assertRaisesRegex(ValueError, "register table count"):
+        with self.assertRaisesRegex(ValueError, "table count"):
             parity.check_parity("register", REGISTER, extra)
+
+    def test_cli_fallback_uses_existing_login(self):
+        with patch.dict("os.environ", {"GITHUB_TOKEN": ""}), patch.object(
+            parity.subprocess, "run", return_value=type("Result", (), {"returncode": 0, "stdout": b"<table></table>", "stderr": b""})()
+        ) as runner:
+            self.assertEqual(parity.render_github("|a|\n|-|\n"), "<table></table>")
+        self.assertEqual(runner.call_args.args[0][:3], ["gh", "api", "markdown"])
+
+    def test_transient_http_error_retries_once(self):
+        error = HTTPError("https://api.github.com/markdown", 429, "rate limit", {}, None)
+        response = type("Response", (), {"read": lambda self: b"<table></table>", "__enter__": lambda self: self, "__exit__": lambda self, *args: None})()
+        with patch.dict("os.environ", {"GITHUB_TOKEN": "synthetic"}), patch.object(
+            parity.urllib.request, "urlopen", side_effect=[error, response]
+        ) as request, patch.object(parity.time, "sleep") as sleep:
+            self.assertEqual(parity.render_github("|a|\n|-|\n"), "<table></table>")
+        self.assertEqual(request.call_count, 2)
+        sleep.assert_called_once()
+
+    def test_persistent_rate_limit_fails_after_one_retry(self):
+        error = HTTPError("https://api.github.com/markdown", 429, "rate limit", {}, None)
+        with patch.dict("os.environ", {"GITHUB_TOKEN": "synthetic"}), patch.object(
+            parity.urllib.request, "urlopen", side_effect=[error, error]
+        ) as request, patch.object(parity.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 429"):
+                parity.render_github("|a|\n|-|\n")
+        self.assertEqual(request.call_count, 2)
+
+    def test_cli_network_failure_retries_once(self):
+        failed = type("Result", (), {"returncode": 1, "stdout": b"", "stderr": b"Could not resolve host"})()
+        good = type("Result", (), {"returncode": 0, "stdout": b"<table></table>", "stderr": b""})()
+        with patch.dict("os.environ", {"GITHUB_TOKEN": ""}), patch.object(
+            parity.subprocess, "run", side_effect=[failed, good]
+        ) as runner, patch.object(parity.time, "sleep") as sleep:
+            self.assertEqual(parity.render_github("|a|\n|-|\n"), "<table></table>")
+        self.assertEqual(runner.call_count, 2)
+        sleep.assert_called_once()
 
     def test_api_failure_is_blocking_not_a_skip(self):
         with (
             patch.object(parity, "FILES", (Path("docs/foundation/conformance.md"),)),
             patch.dict("os.environ", {"GITHUB_TOKEN": ""}),
+            patch.object(parity.subprocess, "run", side_effect=FileNotFoundError),
             contextlib.redirect_stderr(io.StringIO()) as error,
         ):
             self.assertEqual(parity.main(), 1)
-        self.assertIn("GITHUB_TOKEN is required", error.getvalue())
+        self.assertIn("gh CLI is required", error.getvalue())
 
 
 if __name__ == "__main__":

@@ -897,7 +897,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--stdout", action="store_true", help="print the projection to stdout")
     parser.add_argument(
-        "--json", action="store_true", help="emit JSON to stdout instead of writing"
+        "--json", action="store_true", help=(
+            "emit JSON to stdout; cells contain Markdown source (for example row 70's "
+            "escaped \\|), so display consumers must unescape Markdown"
+        )
     )
     parser.add_argument(
         "--branches",
