@@ -4031,10 +4031,15 @@ async def _dispatch_task(
                     stderr=result.stderr,
                     task_entity_id=entity_id,
                     blocked_by_agent=True,
+                    output_truncated=bool(getattr(result, "output_truncated", False)),
+                )
+                _what = (
+                    "Run output (the runner kept only its tail)"
+                    if getattr(result, "output_truncated", False) else "Full run output"
                 )
                 output_note = (
-                    f"\nFull run output: {output_path}"
-                    if output_path else "\nFull run output could not be kept."
+                    f"\n{_what}: {output_path}"
+                    if output_path else f"\n{_what} could not be kept."
                 )
                 if output_path:
                     log.info(

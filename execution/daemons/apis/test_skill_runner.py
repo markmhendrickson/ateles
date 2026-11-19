@@ -3367,6 +3367,37 @@ class TestDispatchFailureDiagnostics:
         assert body.count("<redacted:GITHUB_TOKEN>") == 2
         assert "line one\nleaked" in body  # normal line structure is kept
 
+    @pytest.mark.parametrize("blocked", [False, True])
+    def test_a_credential_given_only_to_the_child_is_redacted(self, tmp_path, blocked) -> None:
+        # A per-dispatch credential is injected into the child's environment and is not in
+        # the daemon's own environment; once remembered it is redacted from persisted output.
+        child_only = "CHILD-ONLY-FAKE-VALUE-1234"
+        assert not any(v == child_only for v in os.environ.values())
+        skill_runner._remember_child_credential(child_only)
+        try:
+            with patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"):
+                path = skill_runner.write_dispatch_failure_log(
+                    skill="cicada", role="cicada", returncode=1,
+                    stdout=f"echoed {child_only} here", stderr=f"and {child_only[:9]}\u200b{child_only[9:]}",
+                    blocked_by_agent=blocked,
+                )
+        finally:
+            skill_runner._CHILD_CREDENTIAL_VALUES.pop(child_only, None)
+        body = Path(path).read_text(encoding="utf-8")
+        assert child_only not in body and child_only[:9] not in body.replace("<redacted:child-credential>", "")
+        assert body.count("<redacted:child-credential>") == 2
+
+    def test_the_remembered_child_credentials_are_bounded(self) -> None:
+        before = dict(skill_runner._CHILD_CREDENTIAL_VALUES)
+        try:
+            for i in range(skill_runner._CHILD_CREDENTIAL_LIMIT + 10):
+                skill_runner._remember_child_credential(f"FAKE-BOUND-VALUE-{i:04d}")
+            assert len(skill_runner._CHILD_CREDENTIAL_VALUES) == skill_runner._CHILD_CREDENTIAL_LIMIT
+            assert "FAKE-BOUND-VALUE-0000" not in skill_runner._CHILD_CREDENTIAL_VALUES
+        finally:
+            skill_runner._CHILD_CREDENTIAL_VALUES.clear()
+            skill_runner._CHILD_CREDENTIAL_VALUES.update(before)
+
     def test_output_file_is_private_from_creation(self, tmp_path) -> None:
         import stat
 

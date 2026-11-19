@@ -1673,6 +1673,24 @@ def _redacted_env_var_names() -> list[str]:
     return names
 
 
+# Credentials injected into a child's environment for one dispatch (the per-agent
+# GitHub token) are absent from the daemon's own environment, so they are
+# remembered here and redacted from anything persisted or reported from that run.
+# Bounded: only the most recent values are kept; a value is a short-lived token.
+_CHILD_CREDENTIAL_VALUES: dict[str, None] = {}
+_CHILD_CREDENTIAL_LIMIT = 64
+
+
+def _remember_child_credential(value: str | None) -> None:
+    """Remember a credential value handed to a child so output redaction covers it."""
+    if not value or len(value) < 8:
+        return
+    _CHILD_CREDENTIAL_VALUES.pop(value, None)
+    _CHILD_CREDENTIAL_VALUES[value] = None
+    while len(_CHILD_CREDENTIAL_VALUES) > _CHILD_CREDENTIAL_LIMIT:
+        _CHILD_CREDENTIAL_VALUES.pop(next(iter(_CHILD_CREDENTIAL_VALUES)))
+
+
 def _redact_secrets(text: str) -> str:
     """Replace any known secret value appearing in child output."""
     out = text
@@ -1680,6 +1698,8 @@ def _redact_secrets(text: str) -> str:
         secret = os.environ.get(var, "")
         if secret and len(secret) >= 8:
             out = out.replace(secret, f"<redacted:{var}>")
+    for secret in list(_CHILD_CREDENTIAL_VALUES):
+        out = out.replace(secret, "<redacted:child-credential>")
     return out
 
 
@@ -1715,9 +1735,13 @@ def write_dispatch_failure_log(
     cwd: str | None = None,
     duration_ms: int | None = None,
     blocked_by_agent: bool = False,
+    output_truncated: bool = False,
 ) -> str:
     """
-    Persist the COMPLETE stdout and stderr of a failed or agent-blocked run.
+    Persist the stdout and stderr of a failed or agent-blocked run: COMPLETE unless
+    ``output_truncated`` (the Fly runner keeps only the last 256 KiB of stdout and a
+    stderr tail), in which case the sections and header say plainly that it is only
+    the retained tail.
 
     Returns the absolute path written, or ``""`` when the write could not be
     made. NEVER raises — diagnostics must not be able to break a dispatch.
@@ -1748,16 +1772,19 @@ def write_dispatch_failure_log(
             f"duration_ms: {duration_ms if duration_ms is not None else '(unknown)'}",
             f"stdout_bytes: {len(stdout)}",
             f"stderr_bytes: {len(stderr)}",
+            *([ "output_truncated: true (the runner kept only the tail of the output; "
+                "the beginning is not available)"] if output_truncated else []),
         ]
+        scope = "retained tail only" if output_truncated else "complete"
         if cmd:
             header.append(f"command: {_summarize_command(list(cmd))}")
 
         body = (
             "\n".join(header)
-            + "\n\n===== STDOUT (complete) =====\n"
+            + f"\n\n===== STDOUT ({scope}) =====\n"
             + _redact_secrets(sanitize_text(stdout, keep_newlines=True))
             + "\n===== END STDOUT =====\n"
-            + "\n===== STDERR (complete) =====\n"
+            + f"\n===== STDERR ({scope}) =====\n"
             + _redact_secrets(sanitize_text(stderr, keep_newlines=True))
             + "\n===== END STDERR =====\n"
         )
@@ -4094,6 +4121,7 @@ async def _run_skill_once(
     if github_token:
         subprocess_env["GITHUB_TOKEN"] = github_token
         subprocess_env["GH_TOKEN"] = github_token
+        _remember_child_credential(github_token)
     if agent_git_env:
         apply_agent_git_identity(subprocess_env, agent_git_env)
 
