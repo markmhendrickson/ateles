@@ -518,6 +518,18 @@ DELIVERY_ONLY_CLASSES: frozenset[str] = frozenset({"open_or_merge_pr"})
 # and argv placeholders the job runner fills in (deploy/fly-runner/run_job.py
 # defines the same names; a test pins them together).
 DELIVERY_TOKEN_NAME = "ATELES_DELIVERY_GITHUB_TOKEN"
+
+# Callbacks told of every credential minted for a job the moment it exists (the job's secrets are
+# cleared after the run, so a late look finds nothing). skill_runner registers its output redaction.
+CHILD_CREDENTIAL_HOOKS: list[Callable[[str], None]] = []
+
+
+def _announce_child_credential(value: str | None) -> None:
+    for hook in list(CHILD_CREDENTIAL_HOOKS):
+        try:
+            hook(value)
+        except Exception:  # noqa: BLE001 -- redaction bookkeeping must never break a launch
+            log.warning("[fly] a child-credential hook failed (non-fatal)")
 WORKSPACE_PLACEHOLDER = "@@ATELES_JOB_WORKSPACE@@"
 PR_FILE_PLACEHOLDER = "@@ATELES_JOB_PR_FILE@@"
 # argv placeholders for the checkout's .git directory and the directory that
@@ -3197,6 +3209,7 @@ class FlyExecutor:
             # A refused or mismatched mint raises FlyIneligible here, before
             # any reservation or machine: the builder runs locally instead.
             job.secrets[DELIVERY_TOKEN_NAME] = await self._mint_delivery_owned(job, tokens)
+            _announce_child_credential(job.secrets[DELIVERY_TOKEN_NAME])
         elif job.github_delivery_contract:
             # Defence in depth behind build_job: a delivering job never takes the
             # read-class path, whatever built it.
@@ -3204,6 +3217,7 @@ class FlyExecutor:
                                 "plan or not at all")
         elif job.needs_github:
             token = await self._mint_owned(job, tokens)
+            _announce_child_credential(token)
             job.secrets["GITHUB_TOKEN"] = token
             job.secrets["GH_TOKEN"] = token
             for name in ("GITHUB_TOKEN", "GH_TOKEN"):

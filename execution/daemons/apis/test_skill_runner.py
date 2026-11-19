@@ -3620,6 +3620,58 @@ class TestDispatchFailureDiagnostics:
         assert "keep one" in body and "keep two" in body
         assert "redacted" in body and "redacted" in reason
 
+    def test_a_blocked_run_is_not_written_when_its_directory_cannot_be_made_private(self, tmp_path) -> None:
+        log_dir = tmp_path / "blocked-runs"
+        log_dir.mkdir(mode=0o755)
+        os.chmod(log_dir, 0o755)
+        with (
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"),
+            patch("skill_runner.os.chmod", side_effect=PermissionError("denied")),
+        ):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1, stdout="draft", stderr="", blocked_by_agent=True,
+            )
+        assert path == ""
+        assert list(log_dir.glob("*.log")) == []
+
+    def test_a_blocked_run_is_not_written_into_a_directory_that_stays_open(self, tmp_path) -> None:
+        log_dir = tmp_path / "blocked-runs"
+        log_dir.mkdir(mode=0o755)
+        os.chmod(log_dir, 0o755)
+        with (
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"),
+            patch("skill_runner.os.chmod", side_effect=lambda *a, **k: None),  # reports success, changes nothing
+        ):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1, stdout="draft", stderr="", blocked_by_agent=True,
+            )
+        assert path == ""
+        assert list(log_dir.glob("*.log")) == []
+
+    def test_a_new_blocked_runs_directory_is_created_private_under_a_permissive_umask(self, tmp_path) -> None:
+        import stat
+
+        old = os.umask(0)
+        try:
+            with patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"):
+                path = skill_runner.write_dispatch_failure_log(
+                    skill="cicada", role="cicada", returncode=1, stdout="x", stderr="", blocked_by_agent=True,
+                )
+        finally:
+            os.umask(old)
+        assert path and stat.S_IMODE(Path(path).parent.stat().st_mode) == 0o700
+
+    def test_a_credential_announced_by_the_fly_runner_is_remembered(self) -> None:
+        import fly_runner
+
+        before = dict(skill_runner._CHILD_CREDENTIAL_VALUES)
+        try:
+            fly_runner._announce_child_credential("ANNOUNCED-FAKE-VALUE-1212")
+            assert "ANNOUNCED-FAKE-VALUE-1212" in skill_runner._CHILD_CREDENTIAL_VALUES
+        finally:
+            skill_runner._CHILD_CREDENTIAL_VALUES.clear()
+            skill_runner._CHILD_CREDENTIAL_VALUES.update(before)
+
     def test_the_blocked_runs_directory_is_private(self, tmp_path) -> None:
         import stat
 

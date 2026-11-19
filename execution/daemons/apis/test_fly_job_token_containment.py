@@ -181,6 +181,30 @@ def test_a_plain_read_class_job_still_takes_the_read_class_mint(fly_env):
     assert minted == [REPO]
 
 
+def test_the_minted_read_class_token_is_remembered_for_output_redaction_across_the_real_lifecycle(fly_env):
+    # The job's secrets are cleared after the run; the token must be remembered at mint so a later
+    # saved run output (a blocked-run file) redacts it.
+    import skill_runner
+
+    before = dict(skill_runner._CHILD_CREDENTIAL_VALUES)
+    skill_runner._CHILD_CREDENTIAL_VALUES.clear()
+    try:
+        fake = FakeFly()
+        executor, minted, _ = make_executor(fake, record={"exit_code": 0, "stdout": "x"})
+        job = _delivery_contract_job()
+        asyncio.run(executor.run(job))
+        assert minted == [REPO]
+        assert job.secrets == {}  # cleared after the run: nothing left to look at
+        remembered = list(skill_runner._CHILD_CREDENTIAL_VALUES)
+        assert len(remembered) == 1, remembered  # exactly the token minted for this job
+        token = remembered[0]
+        assert token.startswith("ghs_")
+        assert token not in skill_runner._redact_output_text(f"echo {token} done")
+    finally:
+        skill_runner._CHILD_CREDENTIAL_VALUES.clear()
+        skill_runner._CHILD_CREDENTIAL_VALUES.update(before)
+
+
 def test_the_default_read_class_prefix_is_never_given_to_a_delivery_contract(fly_env):
     # The reviewer App is the default for the read-class mint. The only job
     # that may use it is one with no delivery contract.

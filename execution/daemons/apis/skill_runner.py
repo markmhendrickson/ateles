@@ -1729,6 +1729,9 @@ def _remember_child_environment_credentials(child_env: dict[str, str]) -> None:
 _SPLIT_SECRET_MAX_LINES = 8
 
 
+fly_runner.CHILD_CREDENTIAL_HOOKS.append(_remember_child_credential)
+
+
 def _remember_fly_job_secrets(job) -> None:
     """Remember every secret value a Fly job carries (tokens, and each string inside a signing key
     document) so output from that run is redacted wherever it is persisted or reported."""
@@ -1911,12 +1914,16 @@ def write_dispatch_failure_log(
             DISPATCH_FAILURE_LOG_DIR.parent / "blocked-runs"
             if blocked_by_agent else DISPATCH_FAILURE_LOG_DIR
         )
-        log_dir.mkdir(parents=True, exist_ok=True)
         if blocked_by_agent:
-            try:
-                os.chmod(log_dir, 0o700)  # the file names (skill and time) are private too
-            except OSError:
-                pass
+            # The file names (skill and time) are private too: create the directory private, and if it
+            # already exists with a wider mode the mode must be corrected and VERIFIED, or nothing is
+            # written (the caller then reports that the output could not be kept).
+            log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(log_dir, 0o700)
+            if (log_dir.stat().st_mode & 0o077) != 0:
+                raise OSError("blocked-runs directory is not private")
+        else:
+            log_dir.mkdir(parents=True, exist_ok=True)
         path = log_dir / f"{_slug(skill)}-{ts}.log"
 
         header = [
