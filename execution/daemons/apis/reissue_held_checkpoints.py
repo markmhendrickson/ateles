@@ -29,6 +29,12 @@ non-zero when any task ``failed`` (a read or the replacement write did not
 succeed), is ``unknown`` (whether its hold was retired could not be told) or is
 ``incomplete`` (a stale brief could not be retired), so an
 operator can re-run (the operation is idempotent) until it is zero.
+
+``--gate-hold-only`` instead inspects one bounded page of recent gate holds.
+It leaves the broader explicit reissue behavior untouched. In this mode,
+``--apply`` writes eligible missing checkpoints and the default dry run writes
+nothing. The summary includes skip reasons. Exit status is 1 whenever any
+task is unreconstructable, including during dry run.
 """
 
 from __future__ import annotations
@@ -38,7 +44,7 @@ import collections
 import itertools
 import json
 
-from apis import iter_held_task_ids, reissue_held_task_checkpoint
+from apis import iter_held_task_ids, reissue_held_task_checkpoint, sweep_missing_gate_checkpoints
 
 
 def _positive_int(value: str) -> int:
@@ -56,7 +62,7 @@ def main() -> int:
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="write checkpoints (default: dry run, no writes)",
+        help="write eligible missing checkpoints; default is a dry run that writes nothing",
     )
     parser.add_argument(
         "--task",
@@ -75,7 +81,29 @@ def main() -> int:
             "enumerated; must be a positive integer"
         ),
     )
+    parser.add_argument(
+        "--gate-hold-only", action="store_true",
+        help=("inspect one bounded page of recent gate holds missing a checkpoint; "
+              "default is a dry run that writes nothing; "
+              "exit 1 if any hold is unreconstructable, including in dry run"),
+    )
     args = parser.parse_args()
+
+    if args.gate_hold_only:
+        if args.task or args.limit is not None:
+            parser.error("--gate-hold-only cannot be combined with --task or --limit")
+        candidates: list[dict[str, str]] = []
+        skip_reasons: dict[str, int] = {}
+        counts, next_offset = sweep_missing_gate_checkpoints(
+            apply=args.apply, candidates=candidates, skip_reasons=skip_reasons
+        )
+        for candidate in candidates:
+            print(json.dumps(candidate, sort_keys=True))
+        print(json.dumps({
+            "counts": counts, "next_offset": next_offset,
+            "skip_reasons": skip_reasons,
+        }, sort_keys=True))
+        return 1 if counts["unreconstructable"] else 0
 
     # One meaning for --limit in both modes: the first N tasks, in order.  The
     # limit also bounds the enumeration itself, so a small batch never pages

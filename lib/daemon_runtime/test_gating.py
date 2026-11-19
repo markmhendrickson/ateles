@@ -1890,6 +1890,106 @@ def test_exact_retry_is_an_idempotent_replay_of_one_checkpoint(monkeypatch):
     assert len(server.entities) == 1
 
 
+def test_one_hold_uses_one_key_and_identity_when_summaries_differ(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+    monkeypatch.setattr(
+        gating_module, "checkpoints_for_task",
+        lambda task_id, *, strict: [
+            server.fetch_entity(entity_id)
+            for entity_id, item in server.entities.items()
+            if item["fields"]["task_entity_id"] == task_id
+        ],
+    )
+    policy = ExecutionPolicy(entity_id="default", loaded=True)
+    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+    record = {
+        "entity_id": "ent_task", "entity_type": "task", "observation_count": 4,
+        "last_observation_at": "2026-09-21T00:00:00Z",
+        "snapshot": {"title": "Bounded work", "status": "awaiting_approval"},
+    }
+
+    def write(summary, title):
+        return write_checkpoint_brief(
+            task_entity_id="ent_task", decision=decision, title=title,
+            plan_summary=summary, handler="apis", user_id="tenant-a",
+            action_type="local_edit", idempotency_context="hold-obs-1",
+            task_record=record, policy=policy,
+        )
+
+    first = write("Scored 0.30 by producer. Scorer's assessment: missing target.", "Live title")
+    second = write("Gate hold for cicada. Action: local_edit.", "Recovery title")
+
+    assert first is not None
+    assert second == first
+    assert len(server.entities) == 1
+    first_body, second_body = (entry["body"] for entry in server.stores)
+    assert first_body["idempotency_key"] == second_body["idempotency_key"]
+    assert first_body["entities"][0]["title"].startswith("PLAN checkpoint: Live title [ent_task] #")
+    assert second_body["entities"][0]["title"].startswith("PLAN checkpoint: Recovery title [ent_task] #")
+    assert first_body["entities"][0]["title"].rsplit(" #", 1)[1] == second_body["entities"][0]["title"].rsplit(" #", 1)[1]
+    assert server.entities[first]["fields"]["plan_summary"].startswith("Scored 0.30")
+
+
+@pytest.mark.parametrize("context", ["hold-obs-1", "fresh-reissue-1"])
+def test_contextual_checkpoint_title_names_task_for_live_and_reissue(monkeypatch, context):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    brief_id = _hold(title="Review the held release", idempotency_context=context)
+
+    assert brief_id is not None
+    assert server.entities[brief_id]["fields"]["title"].startswith(
+        "PLAN checkpoint: Review the held release [ent_task] #"
+    )
+
+
+@pytest.mark.parametrize("failure", ["unreadable", "malformed_list", "malformed_readback"])
+def test_conflicting_replay_without_readable_existing_brief_fails_closed(monkeypatch, failure):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+    policy = ExecutionPolicy(entity_id="default", loaded=True)
+    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+    record = {
+        "entity_id": "ent_task", "entity_type": "task", "observation_count": 4,
+        "last_observation_at": "2026-09-21T00:00:00Z",
+        "snapshot": {"status": "awaiting_approval"},
+    }
+
+    def write(summary):
+        return write_checkpoint_brief(
+            task_entity_id="ent_task", decision=decision, title="Task",
+            plan_summary=summary, handler="apis", user_id="tenant-a",
+            action_type="local_edit", idempotency_context="hold-obs-1",
+            task_record=record, policy=policy,
+        )
+
+    first = write("Live summary")
+    rows = None if failure == "unreadable" else [server.fetch_entity(first)]
+    if failure == "malformed_list":
+        rows.append({"entity_id": "ent_malformed", "snapshot": {"task_entity_id": "ent_task"}})
+    if failure == "malformed_readback":
+        original_fetch = server.fetch_entity
+        monkeypatch.setattr(gating_module, "_fetch_entity", lambda entity_id: {
+            **original_fetch(entity_id),
+            "snapshot": {**original_fetch(entity_id)["snapshot"], "status": []},
+        })
+    monkeypatch.setattr(gating_module, "checkpoints_for_task", lambda *_a, **_kw: rows)
+
+    assert first is not None
+    assert write("Recovery summary") is None
+    assert len(server.entities) == 1
+
+
+def test_distinct_hold_observations_keep_distinct_checkpoint_identities(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    first = _hold(idempotency_context="hold-obs-1")
+    second = _hold(idempotency_context="hold-obs-2")
+
+    assert first and second and first != second
+    first_body, second_body = (entry["body"] for entry in server.stores)
+    assert first_body["idempotency_key"] != second_body["idempotency_key"]
+    assert first_body["entities"][0]["title"] != second_body["entities"][0]["title"]
+
+
 def test_replacement_for_a_changed_hold_is_distinct_and_never_the_one_it_retires(
     monkeypatch,
 ):
