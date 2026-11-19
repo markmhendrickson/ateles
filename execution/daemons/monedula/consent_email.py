@@ -773,9 +773,9 @@ def request_and_collect(
         if entry.get("state") == payment_journal.STATE_FUNDING_PENDING:
             note = "submitted, not confirmed; Monedula is checking; do not pay again"
         elif entry.get("failure_status") == "not_submitted":
-            note = "not submitted; no payment was made; new approval required"
+            note = "not submitted; no payment was made. " + payment_journal.REPLACEMENT_HOLD_MESSAGE
         elif entry.get("state") == payment_journal.STATE_FAILED:
-            note = "returned or cancelled; new approval required before paying again"
+            note = "returned or cancelled. " + payment_journal.REPLACEMENT_HOLD_MESSAGE
         elif entry.get("transfer_id"):
             note = "transfer exists, outcome unknown; Monedula is checking; do not pay again"
         else:
