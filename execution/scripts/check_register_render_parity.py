@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Callable
 
 from foundation_register_rows import (
-    REGISTER_HEADING,
     _blank,
+    _heading_positions,
     _markdown_lines,
     _section_bounds,
     _table_delimiter,
@@ -35,20 +35,30 @@ FILES = (ROOT / "docs/foundation/conformance.md", ROOT / "docs/foundation/revisi
 class Table:
     name: str
     rows: tuple[tuple[str, ...], ...]
+    heading: str
+    source_index: int
 
 
 def classified_tables(kind: str, text: str) -> list[Table]:
     """Find the validated register/revision table blocks in source order."""
     lines = _markdown_lines(text)
+    headings = _heading_positions(lines)
     if kind == "register":
         decision_rows(text)
         start, end = _section_bounds(lines)
+        row_headings: dict[int, str] = {}
     else:
-        revision_rows(text)
+        row_headings = {row.line - 1: row.table for row in revision_rows(text)}
         start, end = 0, len(lines)
     tables: list[Table] = []
     position = start
+    current_heading = "<before first heading>"
+    for heading_position in sorted(headings):
+        if heading_position < position:
+            current_heading = headings[heading_position]
     while position + 1 < end:
+        if position in headings:
+            current_heading = headings[position]
         cells = candidate_cells(lines[position])
         target = "#" if kind == "register" else "Revision"
         if (
@@ -58,18 +68,22 @@ def classified_tables(kind: str, text: str) -> list[Table]:
         ):
             position += 1
             continue
+        source_index = source_table_count("\n".join(lines[:position]))
         position += 2
         body: list[tuple[str, ...]] = []
+        table_heading = current_heading
         while (
             position < end
             and not _blank(lines[position])
-            and not lines[position].startswith("## ")
+            and position not in headings
         ):
             row = candidate_cells(lines[position])
             if row is None:
                 raise ValueError(
                     f"{kind} table {len(tables) + 1} row {len(body) + 1}: malformed row"
                 )
+            if position in row_headings:
+                table_heading = row_headings[position]
             body.append(row)
             position += 1
         tables.append(
@@ -78,6 +92,8 @@ def classified_tables(kind: str, text: str) -> list[Table]:
                 if kind == "register"
                 else f"revision table {len(tables) + 1}",
                 tuple(body),
+                table_heading,
+                source_index,
             )
         )
     if not tables:
@@ -96,12 +112,11 @@ def source_table_count(text: str) -> int:
 
 
 class RenderedTables(HTMLParser):
-    def __init__(self, kind: str):
+    def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.kind = kind
-        self.tables: list[list[list[str]]] = []
+        self.tables: list[tuple[str, list[list[str]]]] = []
         self.total_tables = 0
-        self.section = kind == "revision"
+        self.current_heading = "<before first heading>"
         self.heading = False
         self.heading_text: list[str] = []
         self.in_table = self.in_body = self.in_row = self.in_cell = False
@@ -113,14 +128,13 @@ class RenderedTables(HTMLParser):
             self.heading_text = []
         elif tag == "table":
             self.total_tables += 1
-            self.in_table = self.section
-            if self.in_table:
-                self.tables.append([])
+            self.in_table = True
+            self.tables.append((self.current_heading, []))
         elif tag == "tbody" and self.in_table:
             self.in_body = True
         elif tag == "tr" and self.in_body:
             self.in_row = True
-            self.tables[-1].append([])
+            self.tables[-1][1].append([])
         elif tag == "td" and self.in_row:
             self.in_cell = True
             self.cell_text = []
@@ -133,13 +147,10 @@ class RenderedTables(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "h2" and self.heading:
-            self.section = (
-                self.kind == "revision"
-                or "".join(self.heading_text).strip() == REGISTER_HEADING[3:]
-            )
+            self.current_heading = "".join(self.heading_text).strip()
             self.heading = False
         elif tag == "td" and self.in_cell:
-            self.tables[-1][-1].append("".join(self.cell_text).strip(" \t\n\r"))
+            self.tables[-1][1][-1].append("".join(self.cell_text).strip(" \t\n\r"))
             self.in_cell = False
         elif tag == "tr":
             self.in_row = False
@@ -156,18 +167,20 @@ def _number(cell: str) -> str:
 
 def check_parity(kind: str, source: str, html: str) -> None:
     expected = classified_tables(kind, source)
-    rendered = RenderedTables(kind)
+    rendered = RenderedTables()
     rendered.feed(html)
     total = source_table_count(source)
     if rendered.total_tables != total:
         raise ValueError(
             f"{kind} total table count: classifier {total}, GitHub {rendered.total_tables}"
         )
-    if len(rendered.tables) != len(expected):
-        raise ValueError(
-            f"{kind} table count: classifier {len(expected)}, GitHub {len(rendered.tables)}"
-        )
-    for table, actual_rows in zip(expected, rendered.tables):
+    for table in expected:
+        actual_heading, actual_rows = rendered.tables[table.source_index]
+        if table.heading != actual_heading:
+            raise ValueError(
+                f"{kind} table {table.source_index + 1} heading differs: "
+                f"classifier {table.heading!r}, GitHub {actual_heading!r}"
+            )
         if len(table.rows) != len(actual_rows):
             raise ValueError(
                 f"{table.name} row count: classifier {len(table.rows)}, GitHub {len(actual_rows)}"

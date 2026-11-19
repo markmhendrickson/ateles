@@ -13,6 +13,9 @@ STATUSES = frozenset(
     {"ruled in part", "not a decision", "withdrawn", "reopened", "open", "ruled"}
 )
 SEPARATOR = re.compile(r":?-+:?\Z")
+HEADING = re.compile(r"^ {0,3}##(?:[ \t]+(.*))?\Z")
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+HTML_BLOCK = re.compile(r"^ {0,3}<(?:/?[A-Za-z][\w-]*(?:\s|>|/>)|[!?])")
 
 # Existing non-register table labels in conformance.md whose first cells carry
 # digits. All other digit-bearing first cells outside the register fail closed.
@@ -92,6 +95,43 @@ def _blank(line: str) -> bool:
     return line.strip(" \t") == ""
 
 
+def _heading_positions(lines: list[str]) -> dict[int, str]:
+    """Recognize visible h2 lines; reject heading-shaped lines in opaque blocks."""
+    headings: dict[int, str] = {}
+    fence: tuple[str, int] | None = None
+    html: str | None = None
+    for position, line in enumerate(lines):
+        match = HEADING.match(line)
+        if fence:
+            if match:
+                raise ValueError(f"line {position + 1}: hidden heading inside fenced code block")
+            if re.match(rf"^ {{0,3}}{re.escape(fence[0])}{{{fence[1]},}}[ \t]*$", line):
+                fence = None
+            continue
+        if html:
+            if match:
+                raise ValueError(f"line {position + 1}: hidden heading inside HTML block")
+            if html == "comment" and "-->" in line:
+                html = None
+            elif html == "block" and _blank(line):
+                html = None
+            continue
+        opening = FENCE.match(line)
+        if opening:
+            fence = (opening.group(1)[0], len(opening.group(1)))
+            continue
+        if HTML_BLOCK.match(line):
+            if line.lstrip(" ").startswith("<!--"):
+                html = None if "-->" in line.split("<!--", 1)[1] else "comment"
+            else:
+                html = "block"
+            continue
+        if match:
+            # GitHub renders code span delimiters as markup, not heading text.
+            headings[position] = (match.group(1) or "").strip().replace("`", "")
+    return headings
+
+
 def _row_error(kind: str, index: int, reason: str = "malformed") -> ValueError:
     return ValueError(f"line {index}: {reason} {kind} row")
 
@@ -119,11 +159,12 @@ def has_digit(cell: str) -> bool:
 
 
 def _section_bounds(lines: list[str]) -> tuple[int, int]:
-    start = next((i for i, line in enumerate(lines) if line == REGISTER_HEADING), None)
+    headings = _heading_positions(lines)
+    start = next((i for i, heading in headings.items() if heading == REGISTER_HEADING[3:]), None)
     if start is None:
         return 0, len(lines)  # bare table fixtures
     end = next(
-        (i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")),
+        (i for i in range(start + 1, len(lines)) if i in headings),
         len(lines),
     )
     return start, end
@@ -149,6 +190,7 @@ def decision_rows(text: str) -> dict[str, dict[str, str]]:
     """Validate every line of the register table block, including pipe-less lines."""
     lines = _markdown_lines(text)
     start, end = _section_bounds(lines)
+    headings = _heading_positions(lines)
     rows: dict[str, dict[str, str]] = {}
     header = separator = in_table = outside_table = False
     for index, line in enumerate(lines):
@@ -156,7 +198,7 @@ def decision_rows(text: str) -> dict[str, dict[str, str]]:
         inside = start <= index < end
         cells = candidate_cells(line)
         if not inside:
-            if _blank(line) or line.startswith("## "):
+            if _blank(line) or index in headings:
                 outside_table = False
             elif _outside_table_start(lines, index, cells):
                 outside_table = True
@@ -230,12 +272,13 @@ def revision_rows(text: str) -> list[NumberedRow]:
     header = separator = in_table = other_table = False
     current_heading = "<before first heading>"
     lines = _markdown_lines(text)
+    headings = _heading_positions(lines)
     for position, line in enumerate(lines):
         index = position + 1
-        if _blank(line) or line.startswith("## "):
+        if _blank(line) or position in headings:
             in_table = other_table = False
-            if line.startswith("## "):
-                current_heading = line[3:].strip()
+            if position in headings:
+                current_heading = headings[position]
                 header = separator = False
             continue
         cells = candidate_cells(line)

@@ -33,6 +33,25 @@ def register(**rows: str) -> str:
 class TestRegisterCandidateAccounting(unittest.TestCase):
     """Every table candidate is parsed once or rejected on every reader surface."""
 
+    def test_revision_heading_identity_rejects_opaque_blocks_and_reads_visible_variants(self):
+        table = "| Revision | Pass | Change |\n|---|---|---|\n| 900 | p | c |\n"
+        for hidden in (
+            "<!--\n## Spoof\n-->\n",
+            "```\n## Spoof\n```\n",
+            "~~~\n## Spoof\n~~~\n",
+            "<div>\n## Spoof\n</div>\n",
+            "<div><!-- closed -->\n## Spoof\n</div>\n",
+            "<!--\n## \n-->\n",
+        ):
+            source = "## Doc\n" + table + "\n" + hidden + table
+            with self.subTest(hidden=hidden), self.assertRaisesRegex(ValueError, "hidden heading"):
+                revision_rows(source)
+            with self.subTest(hidden=hidden), self.assertRaisesRegex(ValueError, "hidden heading"):
+                reserve.table_counts(source)
+        for heading in (" ## Second", "   ## Second", "##\tSecond"):
+            source = "## Doc\n" + table + "\n" + heading + "\n" + table
+            with self.subTest(heading=heading):
+                self.assertEqual([row.table for row in revision_rows(source)], ["Doc", "Second"])
     SPELLINGS = (
         "999",
         "**999**",

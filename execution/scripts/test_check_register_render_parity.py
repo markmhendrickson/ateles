@@ -13,6 +13,7 @@ from urllib.error import HTTPError
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import check_register_render_parity as parity
+import reserve_register_number as reserve
 
 
 REGISTER = (
@@ -34,7 +35,67 @@ REVISION_HTML = (
 )
 
 
+def revision_table(number: int) -> str:
+    return (
+        "| Revision | Pass | Change |\n|---|---|---|\n"
+        f"| {number} | p | c |\n"
+    )
+
+
+def rendered_revision_table(number: int) -> str:
+    return (
+        "<table><thead><tr><th>Revision</th><th>Pass</th><th>Change</th></tr></thead>"
+        f"<tbody><tr><td>{number}</td><td>p</td><td>c</td></tr></tbody></table>"
+    )
+
+
 class TestRegisterRenderParity(unittest.TestCase):
+    def test_hidden_heading_between_revision_tables_fails_closed(self):
+        html = "<h2>Doc</h2>" + rendered_revision_table(900) * 2
+        for hidden in (
+            "<!--\n## Spoof\n-->\n",
+            "```md\n## Spoof\n```\n",
+            "~~~md\n## Spoof\n~~~\n",
+            "<div>\n## Spoof\n</div>\n",
+            "<div><!-- closed -->\n## Spoof\n</div>\n",
+            "<!--\n## \n-->\n",
+        ):
+            source = "## Doc\n" + revision_table(900) + "\n" + hidden + revision_table(900)
+            with self.subTest(hidden=hidden), self.assertRaisesRegex(ValueError, "line .*hidden heading"):
+                parity.revision_rows(source)
+            with self.subTest(hidden=hidden), self.assertRaisesRegex(ValueError, "line .*hidden heading"):
+                reserve.table_counts(source)
+            with self.subTest(hidden=hidden), self.assertRaisesRegex(ValueError, "line .*hidden heading"):
+                parity.check_parity("revision", source, html)
+
+    def test_hidden_heading_in_decision_register_fails_closed(self):
+        source = REGISTER + "\n<!--\n## Spoof\n-->\n" + (
+            "| 2 | q | a | b | **open** |\n"
+        )
+        with self.assertRaisesRegex(ValueError, "hidden heading"):
+            parity.decision_rows(source)
+        with self.assertRaisesRegex(ValueError, "hidden heading"):
+            parity.check_parity("register", source, REGISTER_HTML)
+
+    def test_rendered_heading_identity_must_match_source_on_both_files(self):
+        for kind, source, html in (
+            ("revision", REVISION, REVISION_HTML.replace("<h2>Doc</h2>", "<h2>Other</h2>")),
+            ("register", REGISTER, REGISTER_HTML.replace(
+                "<h2>The register of open design decisions</h2>",
+                "<h2>Other</h2>")),
+        ):
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "table 1.*heading.*GitHub"):
+                parity.check_parity(kind, source, html)
+
+    def test_indented_and_tab_headings_are_read_as_github_renders_them(self):
+        for heading in (" ## Second", "   ## Second", "##\tSecond"):
+            source = "## Doc\n" + revision_table(1) + "\n" + heading + "\n" + revision_table(2)
+            html = ("<h2>Doc</h2>" + rendered_revision_table(1)
+                    + "<h2>Second</h2>" + rendered_revision_table(2))
+            with self.subTest(heading=heading):
+                self.assertEqual([row.table for row in parity.revision_rows(source)], ["Doc", "Second"])
+                parity.check_parity("revision", source, html)
+
     def test_workflow_binds_the_real_file_check(self):
         workflow = (parity.ROOT / ".github/workflows/foundation-checks.yml").read_text()
         self.assertIn("Register tables — GitHub GFM render parity", workflow)
