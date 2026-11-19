@@ -1674,19 +1674,26 @@ def _redacted_env_var_names() -> list[str]:
 
 
 # Credentials injected into a child's environment for one dispatch (the per-agent
-# GitHub token) are absent from the daemon's own environment, so they are
-# remembered here and redacted from anything persisted or reported from that run.
-# Bounded: only the most recent values are kept; a value is a short-lived token.
-_CHILD_CREDENTIAL_VALUES: dict[str, None] = {}
-_CHILD_CREDENTIAL_LIMIT = 64
+# GitHub token, the role's Neotoma bearer) are absent from the daemon's own
+# environment, so they are remembered here and redacted from anything persisted or
+# reported from that run. A value is kept for longer than the longest possible run
+# (an active child must never lose its redaction before its log is written), then
+# dropped by age; a large hard cap only guards memory.
+_CHILD_CREDENTIAL_VALUES: dict[str, float] = {}
+_CHILD_CREDENTIAL_TTL_SECONDS = 6 * 60 * 60
+_CHILD_CREDENTIAL_LIMIT = 4096
 
 
 def _remember_child_credential(value: str | None) -> None:
     """Remember a credential value handed to a child so output redaction covers it."""
     if not value or len(value) < 8:
         return
+    now = time.monotonic()
+    for old_value, stamp in list(_CHILD_CREDENTIAL_VALUES.items()):
+        if now - stamp > _CHILD_CREDENTIAL_TTL_SECONDS:
+            _CHILD_CREDENTIAL_VALUES.pop(old_value, None)
     _CHILD_CREDENTIAL_VALUES.pop(value, None)
-    _CHILD_CREDENTIAL_VALUES[value] = None
+    _CHILD_CREDENTIAL_VALUES[value] = now
     while len(_CHILD_CREDENTIAL_VALUES) > _CHILD_CREDENTIAL_LIMIT:
         _CHILD_CREDENTIAL_VALUES.pop(next(iter(_CHILD_CREDENTIAL_VALUES)))
 

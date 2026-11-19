@@ -3387,13 +3387,43 @@ class TestDispatchFailureDiagnostics:
         assert child_only not in body and child_only[:9] not in body.replace("<redacted:child-credential>", "")
         assert body.count("<redacted:child-credential>") == 2
 
-    def test_the_remembered_child_credentials_are_bounded(self) -> None:
+    def test_an_active_childs_credential_survives_many_later_dispatches(self, tmp_path) -> None:
+        # Redaction state must outlive the run: registering many later credentials must not
+        # evict the first child's, whether its log is a failure log or a blocked-run log.
+        first = "FIRST-CHILD-FAKE-VALUE-5555"
         before = dict(skill_runner._CHILD_CREDENTIAL_VALUES)
         try:
-            for i in range(skill_runner._CHILD_CREDENTIAL_LIMIT + 10):
-                skill_runner._remember_child_credential(f"FAKE-BOUND-VALUE-{i:04d}")
-            assert len(skill_runner._CHILD_CREDENTIAL_VALUES) == skill_runner._CHILD_CREDENTIAL_LIMIT
-            assert "FAKE-BOUND-VALUE-0000" not in skill_runner._CHILD_CREDENTIAL_VALUES
+            skill_runner._remember_child_credential(first)
+            for i in range(200):
+                skill_runner._remember_child_credential(f"LATER-CHILD-FAKE-VALUE-{i:04d}")
+            assert first in skill_runner._CHILD_CREDENTIAL_VALUES
+            for blocked in (False, True):
+                with patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"):
+                    path = skill_runner.write_dispatch_failure_log(
+                        skill="cicada", role="cicada", returncode=1,
+                        stdout=f"echo {first}", stderr="", blocked_by_agent=blocked,
+                    )
+                assert first not in Path(path).read_text(encoding="utf-8")
+        finally:
+            skill_runner._CHILD_CREDENTIAL_VALUES.clear()
+            skill_runner._CHILD_CREDENTIAL_VALUES.update(before)
+
+    def test_remembered_child_credentials_expire_by_age_and_are_capped(self, monkeypatch) -> None:
+        before = dict(skill_runner._CHILD_CREDENTIAL_VALUES)
+        try:
+            clock = [1000.0]
+            monkeypatch.setattr(skill_runner.time, "monotonic", lambda: clock[0])
+            skill_runner._remember_child_credential("OLD-CHILD-FAKE-VALUE-0001")
+            clock[0] += skill_runner._CHILD_CREDENTIAL_TTL_SECONDS - 1
+            skill_runner._remember_child_credential("NEW-CHILD-FAKE-VALUE-0002")
+            assert "OLD-CHILD-FAKE-VALUE-0001" in skill_runner._CHILD_CREDENTIAL_VALUES
+            clock[0] += 2
+            skill_runner._remember_child_credential("NEWER-CHILD-FAKE-VALUE-0003")
+            assert "OLD-CHILD-FAKE-VALUE-0001" not in skill_runner._CHILD_CREDENTIAL_VALUES
+            monkeypatch.setattr(skill_runner, "_CHILD_CREDENTIAL_LIMIT", 5)
+            for i in range(20):
+                skill_runner._remember_child_credential(f"CAP-CHILD-FAKE-VALUE-{i:04d}")
+            assert len(skill_runner._CHILD_CREDENTIAL_VALUES) == 5
         finally:
             skill_runner._CHILD_CREDENTIAL_VALUES.clear()
             skill_runner._CHILD_CREDENTIAL_VALUES.update(before)
