@@ -8,6 +8,12 @@ the calling agent. Structured analysis (action items, recap email drafts,
 proposed issues) is handled by the /analyze-meeting skill, auto-invoked by
 /import-audio on each transcript.
 
+The local FluidAudio route compares two extracted 16 kHz channels before
+transcription. A confident dual-mono match is mixed to one stream and marked
+in the speaker header; distinct channels retain separate labels. Adjust the
+conservative similarity bounds in local_fluid.py only with synthetic boundary
+cases and a check that independent voices still split.
+
 Default scan sources (in order):
   1. ~/Desktop
   2. ~/Library/Group Containers/group.com.apple.VoiceMemos.shared/Recordings/

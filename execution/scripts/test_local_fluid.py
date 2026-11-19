@@ -1,4 +1,7 @@
 import json
+import math
+import random
+import wave
 from pathlib import Path
 from unittest.mock import patch
 
@@ -227,3 +230,110 @@ def test_invalid_fluid_compute_units_fail_before_inference(tmp_path, monkeypatch
         with pytest.raises(lf.LocalFluidUnavailable, match="COMPUTE_UNITS"):
             lf.transcribe_fluid(audio)
     run.assert_not_called()
+
+
+def _synthetic_stereo(path, left, right):
+    """Write tiny 16 kHz PCM input; no recorded audio is used by these tests."""
+    from array import array
+
+    samples = array("h", (value for pair in zip(left, right) for value in pair))
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(2)
+        wav.setsampwidth(2)
+        wav.setframerate(lf.DUAL_MONO_RATE)
+        wav.writeframes(samples.tobytes())
+
+
+def _voice_like(length=16000):
+    rng = random.Random(41)
+    return [
+        int((4000 * math.sin(2 * math.pi * 170 * n / 16000)
+             + 1500 * math.sin(2 * math.pi * 430 * n / 16000)
+             + rng.randrange(-500, 501)) * (0.5 + 0.5 * math.sin(2 * math.pi * 3 * n / 16000) ** 2))
+        for n in range(length)
+    ]
+
+
+@pytest.mark.parametrize("variant", ["identical", "offset_noise", "different", "extra_voice", "silent", "one_silent", "short", "near_zero"])
+def test_dual_mono_audio_decision_and_transcription_effect(tmp_path, monkeypatch, variant):
+    left = _voice_like(16000 if variant != "short" else 80)
+    rng = random.Random(57)
+    right = left.copy()
+    if variant == "offset_noise":
+        right = [0] * 16 + [max(-32768, min(32767, value + rng.randrange(-80, 81))) for value in left[:-16]]
+    elif variant == "different":
+        right = [int(4300 * math.sin(2 * math.pi * 330 * n / 16000)) for n in range(len(left))]
+    elif variant == "extra_voice":
+        right = [
+            max(-32768, min(32767, value + int(2500 * math.sin(2 * math.pi * 330 * n / 16000))))
+            if 6000 <= n < 9000 else value
+            for n, value in enumerate(left)
+        ]
+    elif variant == "silent":
+        left = right = [0] * len(left)
+    elif variant == "one_silent":
+        right = [0] * len(left)
+    elif variant == "near_zero":
+        left = right = [value // 100 for value in left]
+    audio = tmp_path / "synthetic-stereo.wav"
+    _synthetic_stereo(audio, left, right)
+    monkeypatch.setattr(lf, "resolve_fluid_cli", lambda: "synthetic-fluid")
+    paths = []
+    decoded = []
+
+    def model(cli, args, output):
+        source = Path(args[1])
+        assert source.is_file()
+        if args[0] == "process":
+            return {"durationSeconds": 1, "segments": [
+                {"startTimeSeconds": 0, "endTimeSeconds": 1, "speakerId": "Speaker_1"}
+            ]}
+        paths.append(source)
+        with wave.open(str(source), "rb") as wav:
+            decoded.append((wav.getnchannels(), wav.getframerate(), wav.readframes(1)))
+        return {"text": "Synthetic", "wordTimings": [
+            {"word": "Synthetic", "startTime": 0.1, "endTime": 0.5}
+        ]}
+
+    monkeypatch.setattr(lf, "_run_json", model)
+    result = lf.transcribe_fluid(audio, channel_count=2)
+    collapsed = variant in {"identical", "offset_noise"}
+    assert len(paths) == (1 if collapsed else 2)
+    assert len(result["raw_response"]["tracks"]) == len(paths)
+    if collapsed:
+        assert paths[0].name == "dual-mono.wav"
+        assert decoded[0][0:2] == (1, 16000)
+        assert abs(int.from_bytes(decoded[0][2], "little", signed=True) - (left[0] + right[0]) / 2) <= 1
+        assert result["transcription_text"].count("Synthetic") == 1
+        assert result["transcription_text"].splitlines()[0].startswith("[Speakers: 1,")
+        assert "dual-mono, collapsed; correlation=" in result["transcription_text"]
+        assert "[Speaker_1]" in result["transcription_text"]
+        assert "Channel_" not in result["transcription_text"]
+    else:
+        assert [path.name for path in paths] == ["channel-0.wav", "channel-1.wav"]
+        assert "dual-mono, collapsed" not in result["transcription_text"]
+        assert "[Channel_0/Speaker_1]" in result["transcription_text"]
+        assert "[Channel_1/Speaker_1]" in result["transcription_text"]
+
+
+def test_dual_mono_threshold_boundaries():
+    correlation = lf.DUAL_MONO_MIN_CORRELATION
+    difference = lf.DUAL_MONO_MAX_DIFFERENCE_RATIO
+    assert lf._is_dual_mono((correlation, difference))
+    assert lf._is_dual_mono((correlation + 0.000001, difference - 0.000001))
+    assert not lf._is_dual_mono((correlation - 0.000001, difference))
+    assert not lf._is_dual_mono((correlation, difference + 0.000001))
+    assert not lf._is_dual_mono(None)
+
+
+def test_mono_skips_dual_mono_measurement(tmp_path, monkeypatch):
+    audio = tmp_path / "synthetic.wav"
+    audio.write_bytes(b"synthetic")
+    monkeypatch.setattr(lf, "resolve_fluid_cli", lambda: "synthetic-fluid")
+    monkeypatch.setattr(lf, "_dual_mono_similarity", lambda *args: pytest.fail("mono measured"))
+    monkeypatch.setattr(lf, "_run_json", lambda cli, args, output: (
+        {"durationSeconds": 1, "segments": []} if args[0] == "process"
+        else {"wordTimings": []}
+    ))
+    result = lf.transcribe_fluid(audio)
+    assert result["silence"]
