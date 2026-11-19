@@ -3511,6 +3511,22 @@ class TestDispatchFailureDiagnostics:
         assert "keep one" in body and "keep two" in body
         assert "split form" in body
 
+    @pytest.mark.parametrize("blocked", [False, True])
+    def test_a_twice_percent_encoded_credential_is_redacted(self, tmp_path, blocked) -> None:
+        fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+        twice = fake_value.replace("-", "%252D")  # a dash encoded twice
+        assert twice != fake_value and "%25" in twice
+        with (
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"),
+            patch.dict("os.environ", {"GITHUB_TOKEN": fake_value}, clear=False),
+        ):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1,
+                stdout=f"keep\nurl {twice} end", stderr="", blocked_by_agent=blocked,
+            )
+        body = Path(path).read_text(encoding="utf-8")
+        assert twice not in body and fake_value not in body and "keep" in body
+
     def test_the_helper_definitions_are_not_duplicated(self) -> None:
         source = Path(skill_runner.__file__).read_text(encoding="utf-8")
         for name in ("_ANSI_ESCAPE_RE = ", "def _strip_terminal_escapes", "def _remember_child_environment_credentials"):

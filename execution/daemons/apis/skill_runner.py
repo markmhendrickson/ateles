@@ -1739,7 +1739,12 @@ def _output_skeleton(line: str) -> str:
     import unicodedata
     from urllib.parse import unquote
 
-    text = unquote(_strip_terminal_escapes(line))
+    text = _strip_terminal_escapes(line)
+    for _ in range(4):  # repeated percent-encoding; stops as soon as a pass changes nothing
+        decoded = unquote(text)
+        if decoded == text:
+            break
+        text = decoded
     text = unicodedata.normalize("NFKC", text)
     text = "".join(ch for ch in text if unicodedata.category(ch) not in {"Cf", "Mn", "Me", "Cc"})
     return text.casefold()

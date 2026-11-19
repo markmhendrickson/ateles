@@ -693,6 +693,7 @@ import producer_confidence  # noqa: E402
 from red_conditions import ApisNotifier  # noqa: E402
 from skill_runner import (  # noqa: E402
     SkillResult,
+    _redact_output_text,
     _redact_secrets,
     run_skill,
     write_dispatch_failure_log,
@@ -772,7 +773,7 @@ def _redact_agent_text(text: str) -> str:
     defeats a plain substring redaction, so those are stripped before the
     redactor runs.
     """
-    return _redact_secrets(sanitize_text(text))
+    return _redact_output_text(sanitize_text(text))
 
 
 _gate_reason = functools.partial(artifact_gate_reason, redact=_redact_agent_text)

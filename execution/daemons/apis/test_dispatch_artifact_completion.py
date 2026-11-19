@@ -387,6 +387,22 @@ def test_a_fly_run_labels_stderr_as_a_tail_even_when_stdout_is_whole(writes, spa
     assert "the runner kept only its tail" in blocked[0]["reason"]
 
 
+@pytest.mark.parametrize("disguise", ["percent", "twice", "combining", "split", "case"])
+def test_the_reason_redactor_applies_the_same_effective_redaction_as_the_file(monkeypatch, disguise):
+    fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+    monkeypatch.setenv("GITHUB_TOKEN", fake_value)
+    forms = {
+        "percent": fake_value.replace("-", "%2D"),
+        "twice": fake_value.replace("-", "%252D"),
+        "combining": fake_value[:9] + "\u0301" + fake_value[9:],
+        "split": fake_value[:13] + "\n" + fake_value[13:],
+        "case": fake_value.lower(),
+    }
+    out = apis._redact_agent_text(f"needs {forms[disguise]} now")
+    assert forms[disguise] not in out and fake_value not in out
+    assert "redacted" in out
+
+
 def test_delivered_artifact_keeps_no_output_file(writes, spawn, tmp_path, monkeypatch):
     monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: True)
     spawn.result = _SpawnResult(stdout=f"draft\n{_PR_HEADER}\n")
