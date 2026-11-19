@@ -778,6 +778,31 @@ class TestCodexGuardEffect(unittest.TestCase):
             checked = run("--check")
             self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
 
+    def test_credential_guard_judges_exec_payloads_given_as_source_or_code(self) -> None:
+        script = REPO_ROOT / ".claude" / "hooks" / "credential_read_guard.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            credential = home / ".config" / "neotoma" / ".env"
+            credential.parent.mkdir(parents=True)
+            credential.write_text("SYNTHETIC_KEY=not_a_secret\n", encoding="utf-8")
+            path = os.fspath(credential)
+            for field in ("source", "code"):
+                with self.subTest(refused=field):
+                    result = _run(f"python3 {shlex.quote(os.fspath(script))}", {
+                        "hook_event_name": "PreToolUse", "tool_name": "exec",
+                        "tool_input": {field: f"cat {path}"}, "cwd": os.fspath(home),
+                    }, env={"HOME": os.fspath(home)})
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertTrue(result.stderr.strip(), "a refusal without a stderr reason is not honoured by Codex")
+                    self.assertEqual(
+                        json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
+                with self.subTest(allowed=field):
+                    result = _run(f"python3 {shlex.quote(os.fspath(script))}", {
+                        "hook_event_name": "PreToolUse", "tool_name": "exec",
+                        "tool_input": {field: "printf safe"}, "cwd": os.fspath(home),
+                    }, env={"HOME": os.fspath(home)})
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_credential_guard_budget_refusal_carries_a_reason_on_stderr_for_codex(self) -> None:
         # Codex honours a refusal only when stderr carries a reason: exit 2 with an empty stderr is a FAILED hook
         # and the tool call still runs. The inspection-budget refusal must therefore also write its reason.
