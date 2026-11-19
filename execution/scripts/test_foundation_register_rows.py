@@ -418,6 +418,35 @@ class TestGfmTableBlock(unittest.TestCase):
             r"`left\|right` and more",
         )
 
+    def test_double_backslash_pipe_uses_github_table_boundaries(self):
+        fixture = json.loads((Path(__file__).parent / "fixtures/gfm_row_fixture.json").read_text())
+        row = fixture["double_backslash_pipe"]
+        register_text = (
+            "| # | The question | Argued in | Blocks | Status |\n"
+            "|---|---|---|---|---|\n"
+            + row["register_row"] + "\n"
+        )
+        revision_text = (
+            "| Revision | Pass | Change |\n|---|---|---|\n"
+            + row["revision_row"] + "\n"
+        )
+        self.assertEqual(len(candidate_cells(row["register_row"])), 4)
+        self.assertEqual(len(candidate_cells(row["revision_row"])), 2)
+        with self.assertRaisesRegex(ValueError, "malformed register row"):
+            decision_rows(register_text)
+        with self.assertRaisesRegex(ValueError, "malformed revision row"):
+            revision_rows(revision_text)
+        with self.assertRaisesRegex(ValueError, "malformed register row"):
+            decision_rows(register_text.replace("a \\\\| b", "`a \\\\| b`"))
+        with self.assertRaisesRegex(ValueError, "malformed revision row"):
+            revision_rows(revision_text.replace("a \\\\| b", "`a \\\\| b`"))
+
+    def test_backslash_run_before_pipe_splits_only_without_immediate_escape(self):
+        for count in range(5):
+            row = f"| 1 | a {'\\' * count}| b |"
+            with self.subTest(backslashes=count):
+                self.assertEqual(len(candidate_cells(row)), 3 if count == 0 else 2)
+
     def test_real_row_70_has_five_cells_and_full_blocks_text(self):
         source = Path("docs/foundation/conformance.md").read_text()
         line = next(line for line in source.splitlines() if line.startswith("| 70 |"))

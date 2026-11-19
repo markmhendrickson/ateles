@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import html as html_module
 import json
 import os
 import re
@@ -34,6 +35,7 @@ FILES = (ROOT / "docs/foundation/conformance.md", ROOT / "docs/foundation/revisi
 @dataclass(frozen=True)
 class Table:
     name: str
+    header: tuple[str, ...]
     rows: tuple[tuple[str, ...], ...]
     heading: str
     source_index: int
@@ -91,6 +93,7 @@ def classified_tables(kind: str, text: str) -> list[Table]:
                 "register"
                 if kind == "register"
                 else f"revision table {len(tables) + 1}",
+                cells,
                 tuple(body),
                 table_heading,
                 source_index,
@@ -114,12 +117,13 @@ def source_table_count(text: str) -> int:
 class RenderedTables(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.tables: list[tuple[str, list[list[str]]]] = []
+        self.tables: list[tuple[str, list[str], list[list[str]]]] = []
         self.total_tables = 0
         self.current_heading = "<before first heading>"
         self.heading = False
         self.heading_text: list[str] = []
         self.in_table = self.in_body = self.in_row = self.in_cell = False
+        self.cell_tag: str | None = None
         self.cell_text: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -129,14 +133,15 @@ class RenderedTables(HTMLParser):
         elif tag == "table":
             self.total_tables += 1
             self.in_table = True
-            self.tables.append((self.current_heading, []))
+            self.tables.append((self.current_heading, [], []))
         elif tag == "tbody" and self.in_table:
             self.in_body = True
         elif tag == "tr" and self.in_body:
             self.in_row = True
-            self.tables[-1][1].append([])
-        elif tag == "td" and self.in_row:
+            self.tables[-1][2].append([])
+        elif tag in ("td", "th") and self.in_table:
             self.in_cell = True
+            self.cell_tag = tag
             self.cell_text = []
 
     def handle_data(self, data: str) -> None:
@@ -149,9 +154,14 @@ class RenderedTables(HTMLParser):
         if tag == "h2" and self.heading:
             self.current_heading = "".join(self.heading_text).strip()
             self.heading = False
-        elif tag == "td" and self.in_cell:
-            self.tables[-1][1][-1].append("".join(self.cell_text).strip(" \t\n\r"))
+        elif tag == self.cell_tag and self.in_cell:
+            cell = "".join(self.cell_text)
+            if tag == "th":
+                self.tables[-1][1].append(cell)
+            else:
+                self.tables[-1][2][-1].append(cell)
             self.in_cell = False
+            self.cell_tag = None
         elif tag == "tr":
             self.in_row = False
         elif tag == "tbody":
@@ -165,6 +175,56 @@ def _number(cell: str) -> str:
     return match.group(0) if match else cell
 
 
+def _collapsed(text: str) -> str:
+    """The comparison contract is visible text with runs of whitespace collapsed."""
+    return " ".join(text.split())
+
+
+def _source_cell_text(cell: str) -> str | None:
+    """Derive visible text only for inline Markdown forms this reader understands.
+
+    Unknown inline syntax is left unproved instead of guessed. The row width,
+    number and full register status are still mandatory comparisons.
+    """
+    # GFM's table pass removes the immediate escape before a pipe. A second
+    # slash is then consumed by inline Markdown, as measured for \\| by GitHub.
+    cell = re.sub(r"\\{1,2}\|", "|", cell)
+    cell = html_module.unescape(cell)
+    code_spans: list[str] = []
+
+    def hold_code(match: re.Match[str]) -> str:
+        code_spans.append(match.group(1).strip())
+        return f"\ue000{len(code_spans) - 1}\ue001"
+
+    cell = re.sub(r"`([^`]+)`", hold_code, cell)
+    cell = re.sub(r"\[([^\[\]]+)\]\([^()]+\)", r"\1", cell)
+    cell = re.sub(r"<\/?[A-Za-z][^>]*>", "", cell)
+    if re.search(r"(?<!\w)_\S(?:.*?\S)?_(?!\w)", cell):
+        return None
+    for marker in (r"\*\*", r"~~", r"\*"):
+        cell = re.sub(rf"{marker}([^\n]+?){marker}", r"\1", cell)
+    # Unparsed markup can render differently. The parity gate still checks
+    # the table shape and all cells whose text is derivable.
+    if any(char in cell for char in "`[]<*\\"):
+        return None
+    for index, value in enumerate(code_spans):
+        cell = cell.replace(f"\ue000{index}\ue001", value)
+    return _collapsed(cell)
+
+
+def _check_cells(label: str, source: tuple[str, ...], actual: list[str], *, status: bool) -> None:
+    if len(source) != len(actual):
+        raise ValueError(f"{label}: cell count differs")
+    for position, (raw, rendered) in enumerate(zip(source, actual), 1):
+        expected = _source_cell_text(raw)
+        if expected is None:
+            if status and position == len(source):
+                raise ValueError(f"{label}: status cell text cannot be derived")
+            continue
+        if expected != _collapsed(rendered):
+            raise ValueError(f"{label}: cell {position} text differs")
+
+
 def check_parity(kind: str, source: str, html: str) -> None:
     expected = classified_tables(kind, source)
     rendered = RenderedTables()
@@ -175,7 +235,7 @@ def check_parity(kind: str, source: str, html: str) -> None:
             f"{kind} total table count: classifier {total}, GitHub {rendered.total_tables}"
         )
     for table in expected:
-        actual_heading, actual_rows = rendered.tables[table.source_index]
+        actual_heading, actual_header, actual_rows = rendered.tables[table.source_index]
         if table.heading != actual_heading:
             raise ValueError(
                 f"{kind} table {table.source_index + 1} heading differs: "
@@ -185,11 +245,13 @@ def check_parity(kind: str, source: str, html: str) -> None:
             raise ValueError(
                 f"{table.name} row count: classifier {len(table.rows)}, GitHub {len(actual_rows)}"
             )
+        _check_cells(f"{table.name} header", table.header, actual_header, status=False)
         for index, (cells, actual) in enumerate(zip(table.rows, actual_rows), 1):
             if len(cells) != len(actual):
                 raise ValueError(f"{table.name} row {index}: cell count differs")
             if not actual or _number(cells[0]) != _number(actual[0]):
                 raise ValueError(f"{table.name} row {index}: number cell differs")
+            _check_cells(f"{table.name} row {index}", cells, actual, status=kind == "register")
 
 
 def render_github(text: str) -> str:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -25,7 +26,7 @@ REGISTER = (
 REVISION = "## Doc\n| Revision | Pass | Change |\n|---|---|---|\n| 1 | p | c |\n"
 REGISTER_HTML = (
     "<h2>The register of open design decisions</h2><table><thead><tr>"
-    "<th>#</th><th>Question</th><th>Argued in</th><th>Blocks</th><th>Status</th>"
+    "<th>#</th><th>The question</th><th>Argued in</th><th>Blocks</th><th>Status</th>"
     "</tr></thead><tbody><tr><td>1</td><td>q</td><td>a</td><td>b</td>"
     "<td><strong>open</strong></td></tr></tbody></table>"
 )
@@ -140,6 +141,40 @@ class TestRegisterRenderParity(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, f"register row 1: {message}"):
                 parity.check_parity("register", REGISTER, html)
+
+    def test_changed_body_text_fails_even_with_matching_number_and_width(self):
+        html = REGISTER_HTML.replace("<td>b</td>", "<td>different</td>")
+        with self.assertRaisesRegex(ValueError, "register row 1: cell 4 text differs"):
+            parity.check_parity("register", REGISTER, html)
+
+    def test_changed_status_text_fails_even_with_matching_number_and_width(self):
+        html = REGISTER_HTML.replace("<strong>open</strong>", "<strong>ruled</strong>")
+        with self.assertRaisesRegex(ValueError, "register row 1: cell 5 text differs"):
+            parity.check_parity("register", REGISTER, html)
+
+    def test_header_text_and_revision_body_text_are_compared(self):
+        with self.assertRaisesRegex(ValueError, "register header: cell 2 text differs"):
+            parity.check_parity(
+                "register", REGISTER, REGISTER_HTML.replace("<th>The question</th>", "<th>Question</th>")
+            )
+        with self.assertRaisesRegex(ValueError, "revision table 1 row 1: cell 2 text differs"):
+            parity.check_parity("revision", REVISION, REVISION_HTML.replace("<td>p</td>", "<td>x</td>"))
+
+    def test_visible_text_collapses_whitespace_inside_cells(self):
+        parity.check_parity("register", REGISTER, REGISTER_HTML.replace("<td>q</td>", "<td>  q\n </td>"))
+
+    def test_double_backslash_fixture_fails_closed_on_both_tables(self):
+        row = json.loads((Path(__file__).parent / "fixtures/gfm_row_fixture.json").read_text())[
+            "double_backslash_pipe"
+        ]
+        register_source = REGISTER.rsplit("| 1 |", 1)[0] + row["register_row"] + "\n"
+        revision_source = REVISION.rsplit("| 1 |", 1)[0] + row["revision_row"] + "\n"
+        for kind, source, html in (
+            ("register", register_source, row["register_html"]),
+            ("revision", revision_source, row["revision_html"]),
+        ):
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "malformed"):
+                parity.check_parity(kind, source, html)
 
     def test_extra_table_in_register_section_fails(self):
         extra = REGISTER_HTML + "<table><tbody><tr><td>2</td></tr></tbody></table>"

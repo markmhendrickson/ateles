@@ -76,10 +76,10 @@ def _visible_line(line: str) -> str:
 
 
 def _pipe_is_unescaped(line: str, index: int) -> bool:
-    backslashes = 0
-    while index - backslashes - 1 >= 0 and line[index - backslashes - 1] == "\\":
-        backslashes += 1
-    return backslashes % 2 == 0
+    # GitHub's GFM table splitter treats the slash immediately before a pipe
+    # as its escape, even when another slash precedes that slash. It splits
+    # before inline Markdown interprets the backslash run.
+    return index == 0 or line[index - 1] != "\\"
 
 
 def _has_unescaped_pipe(line: str) -> bool:
