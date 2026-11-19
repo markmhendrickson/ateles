@@ -342,6 +342,23 @@ def _text(value: Any, *, nullable: bool = False, empty: bool = False) -> bool:
             and len(value) <= 256 and (empty or bool(value.strip())))
 
 
+def _wise_binding_problem(row: dict[str, Any]) -> str | None:
+    """Validate the approval identity shared by writers and row readers."""
+    for field in ("handler_name", "profile_entity_id", "task_id",
+                  "approved_terms_hash", "match_id"):
+        if not _text(row.get(field)):
+            return f"{field} malformed"
+    payment_date = row.get("payment_date")
+    if (not isinstance(payment_date, str)
+            or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", payment_date)):
+        return "payment_date malformed"
+    try:
+        date.fromisoformat(payment_date)
+    except ValueError:
+        return "payment_date malformed"
+    return None
+
+
 def classify_journal_row(
     row: object, data: dict[str, Any] | None = None
 ) -> tuple[str, str]:
@@ -376,21 +393,11 @@ def classify_journal_row(
         return "btc_valid_unresolved", "untagged historical non-settlement"
     if row.get("rail") != "wise" or not _WISE_BASE_FIELDS <= keys or not keys <= _WISE_BASE_FIELDS | _WISE_OPTIONAL_FIELDS:
         return "invalid", "Wise field set or rail malformed"
-    for field in ("handler_name", "session_key"):
-        if not _text(row[field], nullable=True):
-            return "invalid", f"{field} malformed"
-    for field in ("profile_entity_id", "task_id", "approved_terms_hash", "match_id"):
-        if not _text(row[field], empty=field != "profile_entity_id"):
-            return "invalid", f"{field} malformed"
-    if not isinstance(row["payment_date"], str):
-        return "invalid", "payment_date malformed"
-    if row["payment_date"]:
-        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", row["payment_date"]):
-            return "invalid", "payment_date malformed"
-        try:
-            date.fromisoformat(row["payment_date"])
-        except ValueError:
-            return "invalid", "payment_date malformed"
+    if not _text(row["session_key"], nullable=True):
+        return "invalid", "session_key malformed"
+    binding_problem = _wise_binding_problem(row)
+    if binding_problem:
+        return "invalid", binding_problem
     if not isinstance(row["customer_transaction_id"], str):
         return "invalid", "customer_transaction_id malformed"
     try:
@@ -534,8 +541,14 @@ def record_intent(
         raise JournalError("obligation already recorded — refusing a second attempt")
     if token in data["consumed_tokens"]:
         raise JournalError("approval token already consumed")
-    if rail == "wise" and (not isinstance(profile_entity_id, str) or not profile_entity_id.strip()):
-        raise JournalError("Wise profile ID required before intent")
+    if rail == "wise":
+        binding_problem = _wise_binding_problem({
+            "handler_name": handler_name, "profile_entity_id": profile_entity_id,
+            "task_id": task_id, "approved_terms_hash": approved_terms_hash,
+            "payment_date": payment_date, "match_id": match_id,
+        })
+        if binding_problem:
+            raise JournalError(f"Wise intent binding {binding_problem}")
     if rail == "wise":
         held = wise_replay_hold(data, profile_entity_id)
         if held is not None:
@@ -559,6 +572,8 @@ def record_intent(
             payment_date=payment_date,
             match_id=match_id,
         )
+        if classify_journal_row(entry, data)[0] != "wise_modern_unresolved":
+            raise JournalError("Wise intent binding malformed")
     data["obligations"][obligation] = entry
     data["consumed_tokens"][token] = obligation
     _write(path, data)
@@ -791,6 +806,8 @@ def record_approved_replacement_intent(
         match_id=previous.get("match_id", ""),
         attempts=attempts,
     )
+    if classify_journal_row(entry, data)[0] != "wise_modern_unresolved":
+        raise JournalError("Wise replacement binding malformed")
     data["consumed_tokens"][token] = obligation
     _write(path, data)
     back = load(path)["obligations"][obligation]

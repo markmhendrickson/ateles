@@ -245,7 +245,7 @@ def test_email_request_holds_terminal_attempt_without_offering_reapproval(
         rail="wise", handler_name=held.name,
         profile_entity_id=held.profile.entity_id,
         task_id=held.profile.neotoma_task_id,
-    )
+    approved_terms_hash="synthetic-hash", payment_date="2026-01-01", match_id="2026-01-01")
     if status == "not_submitted":
         payment_journal.record_wise_not_submitted(jpath, item.obligation)
     else:

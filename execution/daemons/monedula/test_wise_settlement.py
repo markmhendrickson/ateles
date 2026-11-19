@@ -220,8 +220,55 @@ def attempt(tmp_path):
     journal.record_intent(path, "obligation", "approval", generation=1, rail="wise",
                           handler_name="synthetic", session_key="synthetic:session",
                           profile_entity_id="synthetic-profile", task_id="synthetic-task",
-                          approved_terms_hash="synthetic-hash", payment_date="2026-01-01")
+                          approved_terms_hash="synthetic-hash", payment_date="2026-01-01", match_id="2026-01-01")
     return path
+
+
+_WISE_BINDING = {
+    "handler_name": "synthetic", "profile_entity_id": "synthetic-profile",
+    "task_id": "synthetic-task", "approved_terms_hash": "synthetic-hash",
+    "payment_date": "2026-01-01", "match_id": "synthetic-match",
+}
+
+
+@pytest.mark.parametrize("field", sorted(_WISE_BINDING))
+@pytest.mark.parametrize("value", ["", None, 42, "x" * 257])
+def test_wise_intent_requires_complete_binding_before_write(tmp_path, field, value):
+    path = tmp_path / journal.JOURNAL_NAME
+    journal.init_journal(path)
+    binding = {**_WISE_BINDING, field: value}
+    with pytest.raises(journal.JournalError, match="binding"):
+        journal.record_intent(path, "obligation", "approval", generation=1,
+                              rail="wise", **binding)
+    data = journal.load(path)
+    assert data["obligations"] == {}
+    assert data["consumed_tokens"] == {}
+
+
+@pytest.mark.parametrize("field", sorted(_WISE_BINDING))
+@pytest.mark.parametrize("value", ["", None, 42, "x" * 257])
+@pytest.mark.parametrize("route", ["create", "fund"])
+def test_incomplete_stored_wise_binding_cannot_reach_post(
+    attempt, monkeypatch, field, value, route
+):
+    if route == "fund":
+        journal.record_transfer_created(attempt, "obligation", 3)
+    data = journal.load(attempt)
+    entry = data["obligations"]["obligation"]
+    if value is None:
+        entry.pop(field)
+    else:
+        entry[field] = value
+    journal._write(attempt, data)
+    posts = []
+    monkeypatch.setattr(wise, "_wise_post", lambda *args: posts.append(args))
+    with pytest.raises(journal.JournalError, match="intent unavailable"):
+        if route == "create":
+            wise._create_transfer("token", 2, "quote", "ref", (attempt, "obligation"),
+                                  entry["customer_transaction_id"])
+        else:
+            wise._fund_transfer("token", 1, 3, (attempt, "obligation"))
+    assert posts == []
 
 
 def _bind_synthetic_attempt(path, profile, payment_date="2026-01-01"):
@@ -235,7 +282,7 @@ def _bind_synthetic_attempt(path, profile, payment_date="2026-01-01"):
             wise.WiseTransferHandler(profile), payment_date, ""
         ),
         payment_date=payment_date,
-        match_id="",
+        match_id=payment_date,
     )
     data = journal.load(path)
     data["obligations"]["obligation"] = entry
@@ -276,7 +323,7 @@ def test_confirmed_wise_effect_failure_keeps_session_pending_through_sweep(
         attempt, obligation, "approval", generation=1, rail="wise",
         handler_name=handler.name, session_key="synthetic:session",
         profile_entity_id=profile.entity_id, task_id=profile.neotoma_task_id,
-        approved_terms_hash=obligation, payment_date=payment_date, match_id="session",
+        approved_terms_hash=obligation, payment_date=payment_date, match_id=("session" or payment_date),
     )
     data = journal.load(attempt)
     entry = data["obligations"][obligation]
@@ -343,7 +390,7 @@ def test_settled_wise_event_with_new_id_offers_next_occurrence(approval_env, mon
         path, old.obligation, "old-token", generation=1, rail="wise",
         handler_name=world.handler.name, profile_entity_id=profile.entity_id,
         task_id=profile.neotoma_task_id, payment_date=old.payment_date,
-        match_id=old.match_id, approved_terms_hash=old.obligation,
+        match_id=(old.match_id or old.payment_date), approved_terms_hash=old.obligation,
     )
     journal.record_transfer_created(path, old.obligation, 3)
     journal.record_wise_status(path, old.obligation, 3, "outgoing_payment_sent",
@@ -406,7 +453,7 @@ def test_rejected_or_missing_funding_status_holds_existing_transfer(attempt, mon
     assert entry["state"] == "intent" and entry["transfer_id"] == 3
     with pytest.raises(journal.JournalError, match="already recorded"):
         journal.record_intent(attempt, "obligation", "approval", generation=1, rail="wise",
-                              profile_entity_id="synthetic-profile")
+                              profile_entity_id="synthetic-profile", handler_name="synthetic", task_id="synthetic-task", approved_terms_hash="synthetic-hash", payment_date="2026-01-01", match_id="2026-01-01")
 
 
 def test_rejected_funding_names_rejection_and_holds_transfer(attempt, monkeypatch):
@@ -936,7 +983,7 @@ def test_returned_invoice_due_date_edit_cannot_offer_fresh_consent(approval_env,
     journal.record_intent(path, old.obligation, "old-token", generation=1, rail="wise",
                           handler_name=world.handler.name, profile_entity_id=profile.entity_id,
                           task_id=profile.neotoma_task_id, payment_date=old.payment_date,
-                          approved_terms_hash=old.obligation)
+                          approved_terms_hash=old.obligation, match_id=old.payment_date)
     journal.record_transfer_created(path, old.obligation, 3)
     journal.record_wise_status(path, old.obligation, 3, "outgoing_payment_sent",
                                "2026-01-01T00:00:00Z")
@@ -1135,7 +1182,7 @@ def test_telegram_lost_create_response_warns_without_promising_reconciliation(
         prefix="SYNTHETIC", label="Synthetic", calendar_keywords=["synthetic"],
         payment_type="wise", amount_eur=1, wise_reference="ref",
         wise_recipient_id=5, wise_recipient_name="Synthetic",
-        entity_id="synthetic-profile",
+        entity_id="synthetic-profile", neotoma_task_id="synthetic-task",
     ))
     handler.recipient_status_lookup = lambda token, rid: {"id": rid, "active": True}
     _install_handlers(monkeypatch, [handler])
@@ -1236,7 +1283,7 @@ def test_settled_older_invoice_does_not_hide_later_invoice(approval_env, monkeyp
     journal.record_intent(path, old_key, "old-token", generation=1,
                           rail="wise", handler_name=world.handler.name,
                           profile_entity_id="older-profile", task_id="older-task",
-                          payment_date="2026-01-01", approved_terms_hash=old_key)
+                          payment_date="2026-01-01", approved_terms_hash=old_key, match_id="2026-01-01")
     journal.record_transfer_created(path, old_key, 3)
     journal.record_wise_status(path, old_key, 3, "outgoing_payment_sent",
                                datetime.now(timezone.utc).isoformat())
@@ -1266,7 +1313,7 @@ def test_later_invoice_same_profile_is_offered_after_prior_settlement(approval_e
     journal.record_intent(path, old.obligation, "old-token", generation=1, rail="wise",
                           handler_name=world.handler.name, profile_entity_id=profile.entity_id,
                           task_id=profile.neotoma_task_id,
-                          payment_date=old.payment_date, match_id=old.match_id,
+                          payment_date=old.payment_date, match_id=(old.match_id or old.payment_date),
                           approved_terms_hash=old.obligation)
     journal.record_transfer_created(path, old.obligation, 3)
     journal.record_wise_status(path, old.obligation, 3, "outgoing_payment_sent",
@@ -1303,7 +1350,7 @@ def test_calendar_hold_does_not_capture_another_profile_on_same_event(tmp_path):
     journal.record_intent(path, first_item.obligation, "old-token", generation=1,
                           rail="wise", handler_name=first.name,
                           profile_entity_id=profiles[0].entity_id,
-                          match_id=first_item.match_id, payment_date=first_item.payment_date)
+                          match_id=(first_item.match_id or first_item.payment_date), payment_date=first_item.payment_date, task_id="synthetic-task", approved_terms_hash="synthetic-hash")
     assert consent_email.journal_state_for_item(journal.load(path), second_item) is None
 
 
@@ -1360,7 +1407,7 @@ def test_wise_submission_boundary_and_alert(attempt, monkeypatch, failure):
         assert "rejected funding" in alert and calls == ["create", "fund"]
     with pytest.raises(journal.JournalError, match="already recorded"):
         journal.record_intent(attempt, "obligation", "new-approval", generation=2, rail="wise",
-                              profile_entity_id="synthetic-profile")
+                              profile_entity_id="synthetic-profile", handler_name="synthetic", task_id="synthetic-task", approved_terms_hash="synthetic-hash", payment_date="2026-01-01", match_id="2026-01-01")
 
 
 def test_mixed_offset_status_and_recovered_discrepancy(attempt):
@@ -1434,7 +1481,7 @@ def test_reconcile_read_failure_makes_main_nonclean(tmp_path, monkeypatch, caplo
     journal.init_journal(path)
     journal.record_intent(path, "obligation", "approval", generation=1,
                           rail="wise", handler_name="synthetic",
-                          profile_entity_id="synthetic-profile")
+                          profile_entity_id="synthetic-profile", task_id="synthetic-task", approved_terms_hash="synthetic-hash", payment_date="2026-01-01", match_id="2026-01-01")
     journal.record_transfer_created(path, "obligation", 3)
     journal.record_funding_pending(path, "obligation", 3, "COMPLETED")
     handler = wise.WiseTransferHandler(PaymentProfile(
@@ -1518,7 +1565,7 @@ def test_email_second_tick_pending_sends_no_new_consent(world, monkeypatch):
         calendar_keywords=[],
         amount_eur=1, due_date="2026-01-01", one_off=True,
         wise_recipient_id=5, wise_recipient_name="Synthetic",
-        entity_id="synthetic-profile",
+        entity_id="synthetic-profile", neotoma_task_id="synthetic-task",
     ))
     world.handler.recipient_status_lookup = lambda token, rid: {"id": rid, "active": True}
     monkeypatch.setenv("WISE_API_TOKEN", "synthetic-token")
@@ -1708,7 +1755,7 @@ def test_unresolved_profile_holds_changed_obligation_on_every_route(
         path, old.obligation, "old-token", generation=1, rail="wise",
         handler_name=world.handler.name, profile_entity_id=profile.entity_id,
         task_id=profile.neotoma_task_id, payment_date=old.payment_date,
-        match_id=old.match_id, approved_terms_hash=old.obligation,
+        match_id=(old.match_id or old.payment_date), approved_terms_hash=old.obligation,
     )
     if attempt_state == "submission_unknown":
         data = journal.load(path)
@@ -1783,7 +1830,7 @@ def test_wise_hold_is_scoped_to_profile_and_unapplied_sent_blocks_later_obligati
     )[0]
     path = consent_email.journal_path()
     journal.record_intent(path, old.obligation, "old-token", generation=1,
-                          rail="wise", profile_entity_id=old_profile.entity_id)
+                          rail="wise", profile_entity_id=old_profile.entity_id, handler_name="synthetic", task_id="synthetic-task", approved_terms_hash="synthetic-hash", payment_date="2026-01-01", match_id="2026-01-01")
     other_profile = PaymentProfile(
         prefix="SECOND", label="Second", payment_type="wise", calendar_keywords=["yoga"],
         amount_eur=10, entity_id="profile-q", wise_recipient_id=5,
@@ -1916,7 +1963,7 @@ def test_settled_modern_wise_row_missing_field_holds_profile(attempt, missing_fi
         assert journal.wise_replay_hold(loaded, "synthetic-profile")[0] == "obligation"
     with pytest.raises(journal.JournalError):
         journal.record_intent(attempt, "later", "later-token", generation=2,
-                              rail="wise", profile_entity_id="synthetic-profile")
+                              rail="wise", profile_entity_id="synthetic-profile", handler_name="synthetic", task_id="synthetic-task", approved_terms_hash="synthetic-hash", payment_date="2026-01-01", match_id="2026-01-01")
     assert "later" not in data["obligations"]
 
 
@@ -1933,7 +1980,7 @@ def test_modern_without_any_status_history_keeps_profile_held(attempt):
     assert journal.wise_replay_hold(journal.load(attempt), "synthetic-profile")[0] == "obligation"
     with pytest.raises(journal.JournalError, match="obligation"):
         journal.record_intent(attempt, "later", "later-token", generation=2,
-                              rail="wise", profile_entity_id="synthetic-profile")
+                              rail="wise", profile_entity_id="synthetic-profile", handler_name="synthetic", task_id="synthetic-task", approved_terms_hash="synthetic-hash", payment_date="2026-01-01", match_id="2026-01-01")
 
 
 @pytest.mark.parametrize("mutation", [
@@ -1959,7 +2006,7 @@ def test_nonlegacy_settled_row_holds_every_profile(tmp_path, mutation):
         assert journal.wise_replay_hold(loaded, "any-profile")[0] == "old-paid"
     with pytest.raises(journal.JournalError, match="old-paid"):
         journal.record_intent(path, "later", "later-token", generation=2,
-                              rail="wise", profile_entity_id="any-profile")
+                              rail="wise", profile_entity_id="any-profile", handler_name="synthetic", task_id="synthetic-task", approved_terms_hash="synthetic-hash", payment_date="2026-01-01", match_id="2026-01-01")
 
 
 def test_wise_hold_census_matches_journal_for_synthetic_rows(tmp_path, capsys):
@@ -1972,7 +2019,7 @@ def test_wise_hold_census_matches_journal_for_synthetic_rows(tmp_path, capsys):
     journal.record_intent(path, "new-paid", "new-token", generation=2, rail="wise",
                           handler_name="synthetic", profile_entity_id="profile-p",
                           task_id="synthetic-task", approved_terms_hash="synthetic-hash",
-                          payment_date="2026-01-01")
+                          payment_date="2026-01-01", match_id="2026-01-01")
     journal.record_transfer_created(path, "new-paid", 3)
     journal.record_wise_status(path, "new-paid", 3, "outgoing_payment_sent",
                                "2026-11-11T21:00:00Z")
@@ -2001,7 +2048,7 @@ def test_reconciliation_skips_only_exact_legacy_paid_row(tmp_path, monkeypatch, 
     journal.init_journal(path)
     if shape == "stripped_modern":
         journal.record_intent(path, "held-key", "token", generation=1, rail="wise",
-                              profile_entity_id="profile-p")
+                              profile_entity_id="profile-p", handler_name="synthetic", task_id="synthetic-task", approved_terms_hash="synthetic-hash", payment_date="2026-01-01", match_id="2026-01-01")
         journal.record_transfer_created(path, "held-key", 3)
         journal.record_wise_status(path, "held-key", 3, "outgoing_payment_sent",
                                    "2026-11-11T21:00:00Z")
@@ -2050,7 +2097,7 @@ def test_contradictory_wise_row_loads_but_holds_profile(attempt, changes):
     assert journal.wise_replay_hold(loaded, "synthetic-profile")[0] == "obligation"
     with pytest.raises(journal.JournalError, match="obligation"):
         journal.record_intent(attempt, "new-obligation", "new-token", generation=2,
-                              rail="wise", profile_entity_id="synthetic-profile")
+                              rail="wise", profile_entity_id="synthetic-profile", handler_name="synthetic", task_id="synthetic-task", approved_terms_hash="synthetic-hash", payment_date="2026-01-01", match_id="2026-01-01")
 
 
 @pytest.mark.parametrize("route", ["payment_approval", "email", "telegram"])
@@ -2126,7 +2173,7 @@ def test_stripped_modern_row_cannot_settle_calendar_or_request_payment(
     path = consent_email.journal_path()
     journal.record_intent(path, key, "modern-token", generation=1, rail="wise",
                           handler_name=world.handler.name,
-                          profile_entity_id="synthetic-profile")
+                          profile_entity_id="synthetic-profile", task_id="synthetic-task", approved_terms_hash="synthetic-hash", payment_date="2026-01-01", match_id="2026-01-01")
     journal.record_transfer_created(path, key, 3)
     journal.record_wise_status(path, key, 3, "outgoing_payment_sent",
                                "2026-11-11T21:00:00Z")
@@ -2171,23 +2218,23 @@ def test_unreadable_wise_profile_identity_holds_all_profiles(tmp_path, bad_id):
     path = tmp_path / journal.JOURNAL_NAME
     journal.init_journal(path)
     journal.record_intent(path, "old-attempt", "old-token", generation=1,
-                          rail="wise", profile_entity_id="profile-p")
+                          rail="wise", profile_entity_id="profile-p", handler_name="synthetic", task_id="synthetic-task", approved_terms_hash="synthetic-hash", payment_date="2026-01-01", match_id="2026-01-01")
     data = journal.load(path)
     data["obligations"]["old-attempt"]["profile_entity_id"] = bad_id
     journal._write(path, data)
     assert journal.wise_replay_hold(journal.load(path), "profile-q")[0] == "old-attempt"
     with pytest.raises(journal.JournalError, match="old-attempt"):
         journal.record_intent(path, "new-attempt", "new-token", generation=2,
-                              rail="wise", profile_entity_id="profile-q")
+                              rail="wise", profile_entity_id="profile-q", handler_name="synthetic", task_id="synthetic-task", approved_terms_hash="synthetic-hash", payment_date="2026-01-01", match_id="2026-01-01")
 
 
 def test_handler_durable_intent_refuses_another_unresolved_profile_attempt(tmp_path):
     path = tmp_path / journal.JOURNAL_NAME
     journal.init_journal(path)
     journal.record_intent(path, "first", "first-token", generation=1,
-                          rail="wise", profile_entity_id="profile-p")
+                          rail="wise", profile_entity_id="profile-p", handler_name="synthetic", task_id="synthetic-task", approved_terms_hash="synthetic-hash", payment_date="2026-01-01", match_id="2026-01-01")
     journal.record_intent(path, "second", "second-token", generation=2,
-                          rail="wise", profile_entity_id="profile-q")
+                          rail="wise", profile_entity_id="profile-q", handler_name="synthetic", task_id="synthetic-task", approved_terms_hash="synthetic-hash", payment_date="2026-01-01", match_id="2026-01-01")
     data = journal.load(path)
     data["obligations"]["second"]["profile_entity_id"] = "profile-p"
     journal._write(path, data)

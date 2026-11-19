@@ -1878,7 +1878,9 @@ def _apply_confirmed_wise_effects(path: Path, obligation: str, entry: dict, hand
         and profile.entity_id == entry["profile_entity_id"]
         and profile.neotoma_task_id == entry["task_id"]
         and (not profile.one_off or profile.due_date == entry["payment_date"])
-        and obligation_key(handler, entry["payment_date"], entry.get("match_id", ""))
+        and obligation_key(handler, entry["payment_date"],
+                           "" if entry.get("match_id") == entry["payment_date"]
+                           else entry.get("match_id", ""))
         == entry["approved_terms_hash"]
     )
     if not bound:
@@ -2541,7 +2543,7 @@ def main() -> bool:
                     task_id=handler.profile.neotoma_task_id if wise else "",
                     approved_terms_hash=item.obligation if wise else "",
                     payment_date=item.payment_date if wise else "",
-                    match_id=item.match_id if wise else "",
+                    match_id=(item.match_id or item.payment_date) if wise else "",
                     session_key=(
                         payment_journal.session_key(handler.name, item.match_id)
                         if wise and item.match_id else None
@@ -2842,7 +2844,7 @@ def main() -> bool:
                     task_id=handler.profile.neotoma_task_id if wise else "",
                     approved_terms_hash=item.obligation if wise else "",
                     payment_date=item.payment_date if wise else "",
-                    match_id=item.match_id if wise else "",
+                    match_id=(item.match_id or item.payment_date) if wise else "",
                     session_key=(
                         payment_journal.session_key(handler.name, item.match_id)
                         if wise and item.match_id else None
