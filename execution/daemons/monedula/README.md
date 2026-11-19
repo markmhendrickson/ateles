@@ -446,11 +446,26 @@ payment profile ID. While any attempt for that profile lacks a confirmed paid
 latest transfer status, every obligation of that profile is held across all
 term, date, event, prefix and handler edits. An unresolved old row with no
 profile ID holds all Wise profiles; the alert names its journal key and asks
-the operator to reconcile it in Wise Activity. Old rows with no transfer-status
-history and `done/sent` are settled and hold nothing. A status-bearing row is
-settled only when its latest status by time is `outgoing_payment_sent`.
+the operator to reconcile it in Wise Activity. The single row validator is
+`payment_journal.classify_journal_row`, shared by consent, replay, session,
+effects, reconciliation and the read-only census. Only the exact historical
+six-field row (`state`, `token`, `generation`, `intent_at`, `outcome_status`,
+`outcome_at`) with `done/sent`, a nonempty token, a nonnegative integer
+generation and finite positive epoch times is legacy settled. Stripped,
+mixed, extended and value-invalid rows stay held, with the journal key in the
+alert. An invalid row holds its profile, or all Wise profiles if it has no
+usable profile ID. BTC rows are exempt only after their own historical writer
+shape and values validate; a Wise-shaped row tagged BTC is invalid and held.
+A modern Wise row accepts only its writer's closed field set: IDs and attempt
+numbers have the expected types and positive values, required identifiers
+are nonempty and bounded, statuses and states are known, epoch times are
+finite, and transfer occurrence times parse as timezone-aware ISO-8601.
+A modern `done/sent` row releases its profile only when the latest recorded
+status is `outgoing_payment_sent` (not older than the row's prior-attempt
+history), there is no discrepancy, effects are durably applied, and its
+session is settled when linked. Presence of a status field alone is not proof.
 Later obligations are offered after confirmation. Precise obligation-level
-matching and legacy classification are deferred to a separate work unit.
+matching remains deferred to a separate work unit.
 Wise order:
 record intent and attempt key (fsynced)
 → create transfer → record transfer ID and read back → fund → record
