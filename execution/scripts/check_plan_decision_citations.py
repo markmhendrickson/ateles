@@ -68,20 +68,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+from foundation_register_rows import decision_rows
+
 FOUNDATION_DIR = Path("docs/foundation")
 REGISTER_DOC = "conformance.md"
 MAIN_REF = "origin/main"
 
-ROW_RE = re.compile(r"^\|\s*(\d+(?:[–-]\d+)?)\s*\|(.*)\|\s*$")
-STATUS_LEAD_RE = re.compile(r"^\s*\*\*([^*]+?)\*\*")
-STATUS_ORDER = (
-    "ruled in part",
-    "not a decision",
-    "withdrawn",
-    "reopened",
-    "open",
-    "ruled",
-)
 RULED_STATUSES = frozenset({"ruled", "ruled in part"})
 
 # "decision 78", "decisions 73, 76, 77 and 78", "#101". The plural form is
@@ -125,22 +117,7 @@ def register_rows(ref: str = MAIN_REF) -> dict[str, str]:
         if not path.is_file():
             return {}
         out = path.read_text(encoding="utf-8")
-    rows: dict[str, str] = {}
-    for line in out.split("\n"):
-        m = ROW_RE.match(line)
-        if not m:
-            continue
-        cells = [c.strip() for c in m.group(2).split("|")]
-        if len(cells) < 4:
-            continue
-        lead = STATUS_LEAD_RE.match(cells[-1])
-        if not lead:
-            continue
-        status_lead = lead.group(1).strip().lower()
-        rows[m.group(1)] = next(
-            (k for k in STATUS_ORDER if status_lead.startswith(k)), status_lead
-        )
-    return rows
+    return {number: row["status"] for number, row in decision_rows(out).items()}
 
 
 def rows_on_branches() -> dict[str, list[str]]:
@@ -162,10 +139,8 @@ def rows_on_branches() -> dict[str, list[str]]:
         code, text = run(["git", "show", f"{ref}:{FOUNDATION_DIR}/{REGISTER_DOC}"])
         if code != 0 or not text.strip():
             continue
-        for line2 in text.split("\n"):
-            m = ROW_RE.match(line2)
-            if m:
-                found.setdefault(m.group(1), []).append(ref)
+        for number in decision_rows(text):
+            found.setdefault(number, []).append(ref)
     return found
 
 

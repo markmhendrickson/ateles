@@ -14,6 +14,9 @@ from __future__ import annotations
 import sys
 import unittest
 import unittest.mock
+import contextlib
+import io
+import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -373,6 +376,10 @@ class FakeGit:
 
     def __call__(self, args: list[str]) -> tuple[int, str]:
         self.calls.append(args)
+        if args[:2] == ["git", "ls-tree"]:
+            ref = args[2]
+            return ((0, f"100644 blob {'a' * 40}\tdocs/foundation/conformance.md\n")
+                    if ref in self.registers else (0, ""))
         if args[:2] == ["git", "show"]:
             ref = args[2].split(":", 1)[0]
             text = self.registers.get(ref)
@@ -382,6 +389,121 @@ class FakeGit:
             return (0, lines)
         raise AssertionError(f"unmocked git call in FakeGit: {args!r}")
 
+
+
+class TestBranchRegistersAreReadStrictly(unittest.TestCase):
+    """`--branches` must not silently omit a malformed numbered row of a branch copy."""
+
+    GOOD = register(**{"1": "**open**", "2": "**open**"})
+
+    def test_a_malformed_branch_row_is_an_error_naming_the_ref(self):
+        bad = self.GOOD + "\n| 999 | question | `x#q` | \u2014 | plain open |\n"
+        fake = FakeGit({ds.MAIN_REF: self.GOOD, "origin/feature": bad}, ["origin/feature"])
+        with unittest.mock.patch.object(ds, "run", fake):
+            with self.assertRaises(ValueError) as ctx:
+                ds.collect_branches(["origin/feature"])
+        self.assertIn("origin/feature", str(ctx.exception))
+        self.assertIn("malformed register row", str(ctx.exception))
+
+    def test_a_well_formed_branch_register_is_still_read(self):
+        fake = FakeGit({ds.MAIN_REF: self.GOOD, "origin/feature": self.GOOD}, ["origin/feature"])
+        with unittest.mock.patch.object(ds, "run", fake):
+            rows, read, stale, collisions = ds.collect_branches(["origin/feature"])
+        self.assertEqual(read, ["origin/feature"])
+
+    def test_branches_mode_exits_nonzero_on_a_malformed_branch_row(self):
+        import contextlib
+        import io
+
+        bad = self.GOOD + "\n| **999** | question | `x#q` | \u2014 | **ruled** |\n"
+        fake = FakeGit({ds.MAIN_REF: self.GOOD, "origin/feature": bad}, ["origin/feature"])
+        err = io.StringIO()
+        with unittest.mock.patch.object(ds, "run", fake), contextlib.redirect_stderr(err):
+            code = ds.main(["--branches"])
+        self.assertEqual(code, 1)
+        self.assertIn("origin/feature", err.getvalue())
+
+    def test_branch_enumeration_failure_is_not_zero_branches(self):
+        def failed(args):
+            if tuple(args) == ds.BRANCH_LIST_ARGS:
+                return 1, "injected failure"
+            raise AssertionError(args)
+
+        err = io.StringIO()
+        with unittest.mock.patch.object(ds, "run", failed), contextlib.redirect_stderr(err):
+            self.assertEqual(ds.main(["--branches"]), 1)
+        self.assertIn("cannot enumerate remote branches", err.getvalue())
+
+    def test_absent_branch_is_reported_but_unreadable_branch_fails(self):
+        class BranchGit(FakeGit):
+            def __init__(self, failure):
+                super().__init__({ds.MAIN_REF: TestBranchRegistersAreReadStrictly.GOOD}, ["origin/old"])
+                self.failure = failure
+
+            def __call__(self, args):
+                if args[:3] == ["git", "ls-tree", "origin/old"]:
+                    if self.failure == "tree":
+                        return 1, "corrupt tree"
+                    if self.failure == "absent":
+                        return 0, ""
+                    return 0, f"100644 blob {'b' * 40}\tdocs/foundation/conformance.md\n"
+                if args[:2] == ["git", "show"] and args[2].startswith("origin/old:"):
+                    return 1, "corrupt blob"
+                return super().__call__(args)
+
+        for failure in ("absent", "tree", "blob"):
+            with self.subTest(failure=failure):
+                out, err = io.StringIO(), io.StringIO()
+                with unittest.mock.patch.object(ds, "run", BranchGit(failure)), \
+                     contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = ds.main(["--branches", "--json"])
+                if failure == "absent":
+                    self.assertEqual(code, 0, err.getvalue())
+                    self.assertEqual(json.loads(out.getvalue())["refs_absent"], ["origin/old"])
+                    report = io.StringIO()
+                    with unittest.mock.patch.object(ds, "run", BranchGit(failure)), \
+                         contextlib.redirect_stdout(report):
+                        self.assertEqual(ds.main(["--branches"]), 0)
+                    self.assertIn("origin/old: absent", report.getvalue())
+                else:
+                    self.assertEqual(code, 1)
+                    self.assertIn("origin/old", err.getvalue())
+                    self.assertIn("register object", err.getvalue())
+
+
+class TestBranchCandidateAccounting(unittest.TestCase):
+    SPELLINGS = (
+        "999", "**999**", "_999_", "`999`", "~~999~~", "[999](x)",
+        "<b>999</b>", "\\999", "９９９", "٩٩٩", "𝟡𝟡𝟡", "999-", "999.", "999x",
+        "99 9", "999–1000", "", "label",
+    )
+
+    def test_branch_copy_matrix_has_no_silent_omission(self):
+        base = register(**{"1": "**open**"})
+        heading = "## The register of open design decisions\n"
+        for cell in self.SPELLINGS:
+            for indent in ("", " ", "   ", "    ", "     ", "\t"):
+                candidate = indent + f"| {cell} | question | `doc.md#q` | — | **open** |\n"
+                for place in ("inside", "before", "after"):
+                    if place == "inside":
+                        branch = heading + base + candidate
+                    elif place == "before":
+                        branch = candidate + heading + base
+                    else:
+                        branch = heading + base + "## Later\n" + candidate
+                    fake = FakeGit({ds.MAIN_REF: base, "origin/feature": branch}, ["origin/feature"])
+                    out, err = io.StringIO(), io.StringIO()
+                    with unittest.mock.patch.object(ds, "run", fake), \
+                         contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        code = ds.main(["--branches", "--json"])
+                    valid = cell in ("999", "999–1000") and place == "inside" and indent in ("", " ", "   ")
+                    no_digit = cell in ("", "label") and place != "inside"
+                    if valid or no_digit:
+                        self.assertEqual(code, 0, (cell, indent, place, err.getvalue()))
+                        self.assertEqual(len(json.loads(out.getvalue())["rows"]), 1)
+                    else:
+                        self.assertEqual(code, 1, (cell, indent, place))
+                        self.assertIn("origin/feature", err.getvalue())
 
 class TestCommittedProjectionIsBranchIndependent(unittest.TestCase):
     """An open PR's --check result must not move when an unrelated branch does.
@@ -654,246 +776,258 @@ class TestCommittedOutputIsByteStableForACommit(unittest.TestCase):
         )
 
 
-class TestRowAddingPRRegeneratesFromItsOwnMergeResult(unittest.TestCase):
-    """ateles#1138 round two: a PR adding a register row must be able to
-    regenerate `decision_state.md` correctly BEFORE it merges.
-
-    The scenario is ateles#1300 exactly: a PR's branch adds register row 118
-    (and rules it) while `origin/main`'s own register still tops out at 111.
-    On a `pull_request` CI run, `actions/checkout` has already materialized
-    base-plus-PR as the working tree, so `--source worktree` (the default)
-    reads THAT content -- row 118 included -- while `--source main` re-fetches
-    `origin/main` via `git show` and can never see a row that exists only on
-    the PR's own branch.
-
-    `register_at(ds.WORKTREE_SOURCE)` reads `ds.FOUNDATION_DIR / ds.REGISTER_DOC`
-    off the real filesystem, so this test points those module globals at a
-    temp directory standing in for the checked-out working tree, rather than
-    touching this repo's own corpus.
-    """
+class TestRenderCleanly(unittest.TestCase):
+    """A PR changing only the register can pass without a generated file."""
 
     def setUp(self):
         import tempfile
 
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
-        self.worktree_foundation_dir = Path(self.tmpdir.name) / "docs" / "foundation"
-        self.worktree_foundation_dir.mkdir(parents=True)
-        self.out = self.worktree_foundation_dir / "decision_state.md"
+        self.foundation = Path(self.tmpdir.name)
+        patch = unittest.mock.patch.object(ds, "FOUNDATION_DIR", self.foundation)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.register = self.foundation / ds.REGISTER_DOC
 
-        # origin/main: the base branch, unaware of row 118.
-        self.main_text = register(**{"1–12": "**ruled** (2026-01-01)", "111": "**open**"})
-        # The PR's own working tree: everything main has, PLUS row 118, ruled
-        # -- exactly what #1300's branch looked like before it merged.
-        self.pr_worktree_text = register(
-            **{
-                "1–12": "**ruled** (2026-01-01)",
-                "111": "**open**",
-                "118": "**ruled** (2026-09-26)",
-            }
-        )
+    def test_new_row_renders_without_output_file(self):
+        self.register.write_text(register(**{"1": "**open**", "2": "**ruled**"}))
+        self.assertEqual(ds.main(["--check", "--source", "worktree"]), 0)
+        self.assertFalse((self.foundation / "decision_state.md").exists())
 
-        patch_dir = unittest.mock.patch.object(
-            ds, "FOUNDATION_DIR", self.worktree_foundation_dir
-        )
-        patch_dir.start()
-        self.addCleanup(patch_dir.stop)
-
-        # register_at(MAIN_REF) goes through `ds.run` (git show); stub it to
-        # return the base branch's register regardless of what the PR's
-        # working tree says, exactly as a real `git show origin/main:...`
-        # would on a checkout whose working tree carries the PR's own diff.
-        fake_git = FakeGit({ds.MAIN_REF: self.main_text}, [])
-        patch_run = unittest.mock.patch.object(ds, "run", fake_git)
-        patch_run.start()
-        self.addCleanup(patch_run.stop)
-
-    def _write_conformance(self, text: str) -> None:
-        (self.worktree_foundation_dir / ds.REGISTER_DOC).write_text(
-            text, encoding="utf-8"
-        )
-
-    def test_worktree_source_sees_the_pr_added_row_before_merge(self):
-        """The mechanism this PR adds: register_at(WORKTREE_SOURCE) reads the
-        PR's own working-tree register, row 118 included."""
-        self._write_conformance(self.pr_worktree_text)
-        rows = ds.collect_main(ds.WORKTREE_SOURCE)
-        row_118 = next(r for r in rows if r.number == "118")
-        self.assertEqual(row_118.ruled, "yes")
-        self.assertEqual(row_118.merged, "yes")
-
-    def test_check_fails_before_regeneration_then_passes_after_from_the_pr(self):
-        """`--check --source worktree`, run on the PR's own branch: red
-        against a committed file that predates row 118, green once the PR
-        regenerates against its own working tree."""
-        self._write_conformance(self.pr_worktree_text)
-
-        # The committed file the PR branched FROM -- rendered from main
-        # before row 118 existed anywhere, i.e. main's own last-good
-        # decision_state.md. This is what ships on the PR's branch until the
-        # PR regenerates it.
-        stale_committed = ds.render(ds.collect_main(ds.MAIN_REF))
-        self.out.write_text(stale_committed, encoding="utf-8")
-
-        code_before = ds.main(
-            ["--check", "--source", "worktree", "--out", str(self.out)]
-        )
-        self.assertEqual(
-            code_before,
-            1,
-            "a PR that added row 118 but has not yet regenerated "
-            "decision_state.md must fail --check",
-        )
-
-        code_write = ds.main(["--source", "worktree", "--out", str(self.out)])
-        self.assertEqual(code_write, 0)
-
-        code_after = ds.main(
-            ["--check", "--source", "worktree", "--out", str(self.out)]
-        )
-        self.assertEqual(
-            code_after,
-            0,
-            "regenerating with --source worktree (the PR's own merge "
-            "result) must make --check pass on the PR's own content, "
-            "before it ever merges",
-        )
-        # And the regenerated file actually carries the new row -- the
-        # acceptance criterion is not merely "exits 0" but "contains 118".
-        self.assertIn("| 118 |", self.out.read_text(encoding="utf-8"))
-
-    def test_source_main_mechanism_cannot_pass_this_from_the_pr(self):
-        """The CURRENT (pre-fix) mechanism, exercised the same way, must fail:
-        this is the regression test for main's own mechanism, not just for
-        the absence of a fix. `--source main` re-fetches `origin/main` (via
-        the stubbed `git show`), which never has row 118 -- so no amount of
-        regenerating with `--source main` can produce a file that both (a)
-        contains row 118 and (b) passes `--check --source main`, because the
-        two are mutually exclusive on this branch: writing forgets row 118 by
-        construction, and checking then trivially matches what it just wrote
-        while never having asserted anything about the PR's own new row."""
-        self._write_conformance(self.pr_worktree_text)
-
-        # Regenerate the OLD way: purely from origin/main, blind to the
-        # working tree the PR actually carries.
-        code_write = ds.main(["--source", "main", "--out", str(self.out)])
-        self.assertEqual(code_write, 0)
-        regenerated_old_way = self.out.read_text(encoding="utf-8")
-
-        # This is the failure this PR exists to fix, made mechanically
-        # explicit: main's own render mechanism is structurally incapable of
-        # putting the PR's own new row in the committed file at all.
-        self.assertNotIn(
-            "| 118 |",
-            regenerated_old_way,
-            "if this assertion ever fails, --source main has started "
-            "seeing the PR's own branch content, and this test (along with "
-            "the defect it documents) is obsolete",
-        )
-
-
-WRITE_COMMAND = "python3 execution/scripts/render_decision_state.py"
-
-
-class TestCheckExit(unittest.TestCase):
-    """ateles#1138's UX section, verbatim: the CLI's own hints must be runnable.
-
-    A hint that says `python` on a repo whose own CI comment states the
-    harness shell has only `python3` is a silent-failure trap for exactly the
-    persona this command serves -- someone who copy-pastes the printed
-    command rather than re-deriving it. Both error messages must also name
-    the write command directly rather than a vaguer "run without --check".
-    """
-
-    def setUp(self):
-        import tempfile
-
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        self.out = Path(self.tmpdir.name) / "decision_state.md"
-        self.main_text = register(**{"1": "**open**"})
-
-    def _run_check(self):
+    def test_malformed_row_fails(self):
         import contextlib
         import io
 
-        fake = FakeGit({ds.MAIN_REF: self.main_text}, [])
-        stdout, stderr = io.StringIO(), io.StringIO()
-        with unittest.mock.patch.object(ds, "run", fake):
-            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                code = ds.main(
-                    ["--check", "--source", "main", "--out", str(self.out)]
-                )
-        return code, stdout.getvalue(), stderr.getvalue()
+        self.register.write_text(register(**{"1": "**open**"}) + "| 2 | malformed |\n")
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            self.assertEqual(ds.main(["--check", "--source", "worktree"]), 1)
+        self.assertIn("malformed register row", error.getvalue())
 
-    def test_missing_file_exits_1_and_names_the_write_command_with_python3(self):
-        self.assertFalse(self.out.exists())
-        code, out, err = self._run_check()
-        self.assertEqual(code, 1)
-        self.assertEqual(out, "")
-        self.assertIn(str(self.out), err)
-        self.assertIn("does not exist", err)
-        self.assertIn(WRITE_COMMAND, err)
-        # The exact python-vs-python3 gap ateles#1138's UX section names: the
-        # write command must not appear as bare "python " (a Python-2-or-
-        # absent interpreter on the harness shell this repo's own CI comment
-        # documents).
-        self.assertNotIn("python execution", err)
-
-    def test_differ_exits_1_and_names_python3_regenerate(self):
-        self.out.write_text("stale content, not a real render\n", encoding="utf-8")
-        code, out, err = self._run_check()
-        self.assertEqual(code, 1)
-        self.assertEqual(out, "")
-        self.assertIn("differs from a fresh render", err)
-        self.assertIn("Do not edit it in place", err)
-        self.assertIn(WRITE_COMMAND, err)
-        self.assertNotIn("python execution", err)
-        # File on disk must be unchanged by a --check run (compare-only).
-        self.assertEqual(self.out.read_text(encoding="utf-8"), "stale content, not a real render\n")
-
-    def test_match_prints_success_on_stdout_and_exits_0(self):
-        fake = FakeGit({ds.MAIN_REF: self.main_text}, [])
-        with unittest.mock.patch.object(ds, "run", fake):
-            rendered = ds.render(ds.collect_main())
-        self.out.write_text(rendered, encoding="utf-8")
-        code, out, err = self._run_check()
-        self.assertEqual(code, 0)
-        self.assertEqual(err, "")
-        self.assertIn(f"decision state: {self.out} matches its source", out)
-        self.assertEqual(self.out.read_text(encoding="utf-8"), rendered)
-
-    def test_second_check_after_match_still_exits_0(self):
-        fake = FakeGit({ds.MAIN_REF: self.main_text}, [])
-        with unittest.mock.patch.object(ds, "run", fake):
-            rendered = ds.render(ds.collect_main())
-        self.out.write_text(rendered, encoding="utf-8")
-        code1, _, _ = self._run_check()
-        code2, _, _ = self._run_check()
-        self.assertEqual(code1, 0)
-        self.assertEqual(code2, 0)
-
-    def test_help_states_no_write_exit_1_and_the_write_command(self):
+    def test_optional_leading_pipe_renders(self):
         import contextlib
         import io
 
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            with self.assertRaises(SystemExit) as ctx:
-                ds.main(["--help"])
-        self.assertEqual(ctx.exception.code, 0)
-        help_text = out.getvalue()
-        self.assertIn("does not write", help_text)
-        self.assertIn("exit", help_text.lower())
-        self.assertIn("1", help_text)
-        # argparse wraps help text to terminal width, which can fall exactly
-        # between "python3" and "execution/scripts/..." depending on how many
-        # other options are registered -- collapse whitespace (including the
-        # line break argparse inserts) before matching the write command, so
-        # this assertion tracks the CONTENT and not one incidental wrap point.
-        self.assertIn(WRITE_COMMAND, " ".join(help_text.split()))
-        self.assertIn("never", help_text)
-        self.assertNotIn("python execution", " ".join(help_text.split()))
+        self.register.write_text(register(**{"1": "**open**"}) +
+                                 "2 | broken prefix | `doc.md#q` | — | **open** |\n")
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            self.assertEqual(ds.main(["--check", "--source", "worktree"]), 0)
+        self.assertIn("2", ds.parse_rows(self.register.read_text()))
+
+    def _check_error(self, text: str) -> tuple[int, str]:
+        import contextlib
+        import io
+
+        self.register.write_text(text)
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            code = ds.main(["--check", "--source", "worktree"])
+        return code, error.getvalue()
+
+    def test_unknown_status_fails_the_clean_render(self):
+        for bad in ("**rulled**", "**ruled out**", "**ruled-ish**", "**done**", "**OPEN!**"):
+            with self.subTest(status=bad):
+                code, err = self._check_error(register(**{"1": "**open**", "2": bad}))
+                self.assertEqual(code, 1)
+                self.assertIn("unknown status", err)
+
+    def test_a_row_after_a_blank_line_is_validated_like_any_other(self):
+        """The projection reads every numbered row; the check must validate the same set."""
+        text = register(**{"1": "**open**"}) + "\n" + "| 2 | later row | `doc.md#q` | \u2014 | **rulled** |\n"
+        code, err = self._check_error(text)
+        self.assertEqual(code, 1)
+        self.assertIn("malformed register row", err)
+
+    def test_a_duplicate_number_after_a_blank_line_fails(self):
+        text = register(**{"1": "**open**"}) + "\n" + "| 1 | again | `doc.md#q` | \u2014 | **open** |\n"
+        code, err = self._check_error(text)
+        self.assertEqual(code, 1)
+        self.assertIn("malformed register row", err)
+
+    def test_a_malformed_numbered_row_after_a_blank_line_fails(self):
+        """Not just a bad status: a row with no bold status at all must not be silently omitted."""
+        for bad_row in (
+            "| 999 | question | `x#q` | \u2014 | plain open |",      # no bold status
+            "999 | question | `x#q` | \u2014 | **open** |",          # no leading pipe
+            "| 999 | question | `x#q` | **open** |",                 # a cell short
+        ):
+            with self.subTest(row=bad_row):
+                text = register(**{"1": "**open**"}) + "\n" + bad_row + "\n"
+                code, err = self._check_error(text)
+                self.assertEqual(code, 1)
+                self.assertIn("malformed register row", err)
+
+    def _run_mode(self, text: str, *flags: str) -> tuple[int, str]:
+        import contextlib
+        import io
+
+        self.register.write_text(text)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ds.main([*flags, "--source", "worktree"])
+        return code, out.getvalue() + err.getvalue()
+
+    def test_every_output_mode_rejects_a_malformed_register(self):
+        """One validated row reader for every mode: no mode may omit a malformed row and exit 0."""
+        for bad_row in (
+            "| 999 | question | `x#q` | \u2014 | plain open |",       # no bold status
+            "| **999** | question | `x#q` | \u2014 | **ruled** |",    # bold number
+            "| `999` | question | `x#q` | \u2014 | **ruled** |",      # backticked number
+        ):
+            for flags in (("--check",), ("--json",), ("--stdout",)):
+                with self.subTest(row=bad_row, mode=flags[0]):
+                    text = register(**{"1": "**open**"}) + "\n" + bad_row + "\n"
+                    code, output = self._run_mode(text, *flags)
+                    self.assertEqual(code, 1, output[:200])
+                    self.assertIn("malformed register row", output)
+
+    def test_out_mode_rejects_a_malformed_register_and_writes_nothing(self):
+        """`--out` is a documented way to read the projection: it validates like the others."""
+        target = self.foundation / "projection_out.md"
+        for bad_row in (
+            "| 999 | question | `x#q` | \u2014 | plain open |",
+            "| **999** | question | `x#q` | \u2014 | **ruled** |",
+        ):
+            with self.subTest(row=bad_row):
+                text = register(**{"1": "**open**"}) + "\n" + bad_row + "\n"
+                code, output = self._run_mode(text, "--out", str(target))
+                self.assertEqual(code, 1, output[:200])
+                self.assertIn("malformed register row", output)
+                self.assertFalse(target.exists())
+
+    def test_a_well_formed_register_still_renders_in_every_mode(self):
+        text = register(**{"1": "**open**", "2": "**ruled**"})
+        for flags in (("--check",), ("--json",), ("--stdout",)):
+            with self.subTest(mode=flags[0]):
+                code, output = self._run_mode(text, *flags)
+                self.assertEqual(code, 0, output[:200])
+
+    def test_a_heading_inside_the_register_cannot_drop_later_rows(self):
+        """A `## ` heading between rows ends the section early; the check must notice the rows after it."""
+        head = "## The register of open design decisions\n\n"
+        rows = register(**{"1": "**open**", "2": "**ruled**"})
+        lines = rows.splitlines()
+        # table header + separator + row 1, then a heading, then row 2
+        broken = head + "\n".join(lines[:3]) + "\n\n## An inserted heading\n\n" + "\n".join(lines[3:]) + "\n"
+        for flags in (("--check",), ("--json",), ("--stdout",)):
+            with self.subTest(mode=flags[0]):
+                code, output = self._run_mode(broken, *flags)
+                self.assertEqual(code, 1, output[:200])
+                self.assertIn("outside the register section", output)
+
+    def test_a_decorated_register_row_after_a_heading_is_not_silently_omitted(self):
+        """The outside-the-section scan uses the same row-like test as the in-section one."""
+        head = "## The register of open design decisions\n\n"
+        rows = register(**{"1": "**open**"})
+        for after in (
+            "| **999** | question | `x#q` | \u2014 | **open** |",
+            "| `999` | question | `x#q` | \u2014 | **ruled** |",
+            "   | 999 | question | `x#q` | \u2014 | **open** |",
+        ):
+            text = head + rows + "\n## An inserted heading\n\n" + after + "\n"
+            for flags in (("--check",), ("--json",), ("--stdout",)):
+                with self.subTest(row=after, mode=flags[0]):
+                    code, output = self._run_mode(text, *flags)
+                    self.assertEqual(code, 1, output[:200])
+                    self.assertIn("outside the register section", output)
+
+    def test_out_mode_rejects_a_decorated_row_after_a_heading_and_writes_nothing(self):
+        head = "## The register of open design decisions\n\n"
+        rows = register(**{"1": "**open**"})
+        target = self.foundation / "projection_out.md"
+        for after in (
+            "| **999** | question | `x#q` | \u2014 | **ruled** |",
+            "| `999` | question | `x#q` | \u2014 | **ruled** |",
+        ):
+            with self.subTest(row=after):
+                text = head + rows + "\n## An inserted heading\n\n" + after + "\n"
+                code, output = self._run_mode(text, "--out", str(target))
+                self.assertEqual(code, 1, output[:200])
+                self.assertIn("outside the register section", output)
+                self.assertFalse(target.exists())
+
+    def test_plain_and_unbolded_numbered_rows_after_a_heading_are_caught_too(self):
+        """Not only rows that look like register rows: any numbered table row outside the section."""
+        head = "## The register of open design decisions\n\n"
+        rows = register(**{"1": "**open**"})
+        for after in (
+            "| 999 | question | `x#q` | \u2014 | plain open |",
+            "999 | question | `x#q` | \u2014 | plain open |",
+            "   | 999 | question | `x#q` | \u2014 | plain open |",
+            "| 5 | plain |",
+        ):
+            text = head + rows + "\n## An inserted heading\n\n" + after + "\n"
+            for flags in (("--check",), ("--json",), ("--stdout",)):
+                with self.subTest(row=after, mode=flags[0]):
+                    code, output = self._run_mode(text, *flags)
+                    self.assertEqual(code, 1, output[:200])
+                    self.assertIn("outside the register section", output)
+
+    def test_prose_and_unnumbered_tables_in_other_sections_are_not_flagged(self):
+        head = "## The register of open design decisions\n\n"
+        text = head + register(**{"1": "**open**"}) + "\n## Another section\n| a | b |\n|---|---|\n| x | plain |\n\nSome prose.\n"
+        code, output = self._run_mode(text, "--check")
+        self.assertEqual(code, 0, output[:200])
+
+    def test_status_spelling_is_exact(self):
+        for bad in ("**Open**", "**open **", "**RULED**", "**ruled **"):
+            with self.subTest(status=bad):
+                code, err = self._check_error(register(**{"1": "**open**", "2": bad}))
+                self.assertEqual(code, 1)
+                self.assertIn("unknown status", err)
+
+    def test_validation_and_projection_select_the_same_rows(self):
+        text = register(**{"1": "**open**", "2": "**ruled**"})
+        self.assertEqual(sorted(ds.parse_rows(text)), ["1", "2"])
+        with_prose_table = "## The register of open design decisions\n" + text + "\n## Another section\n| 5 | q | `a#b` | \u2014 | **open** |\n"
+        with self.assertRaisesRegex(ValueError, "outside the register section"):
+            ds.parse_rows(with_prose_table)
+
+    def test_every_declared_status_passes_the_clean_render(self):
+        rows = {str(i + 1): f"**{status}**" for i, status in enumerate(ds.STATUS_ORDER)}
+        code, err = self._check_error(register(**rows))
+        self.assertEqual((code, err), (0, ""))
+
+    def test_a_prefixed_status_is_never_read_as_ruled(self):
+        with self.assertRaisesRegex(ValueError, "unknown status"):
+            ds.parse_rows(register(**{"1": "**ruled out**", "2": "**ruled**"}))
+
+    def test_duplicate_row_fails(self):
+        import contextlib
+        import io
+
+        self.register.write_text(register(**{"1": "**open**", "2": "**ruled**"}) +
+                                 "| 2 | another question | `doc.md#other` | — | **open** |\n")
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            self.assertEqual(ds.main(["--check", "--source", "worktree"]), 1)
+        self.assertIn("duplicate register row 2", error.getvalue())
+
+    def test_deterministic_stdout(self):
+        import contextlib
+        import io
+
+        self.register.write_text(register(**{"1": "**open**", "2": "**ruled**"}))
+        outputs = []
+        for _ in range(2):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(ds.main(["--stdout", "--source", "worktree"]), 0)
+            outputs.append(output.getvalue())
+        self.assertEqual(outputs[0].encode(), outputs[1].encode())
+        self.assertIn("| 2 |", outputs[0])
+
+    def test_unreadable_register_fails(self):
+        self.assertEqual(ds.main(["--check", "--source", "worktree"]), 1)
+
+    def test_incomplete_projection_fails(self):
+        self.register.write_text(register(**{"1": "**open**"}))
+        output = self.foundation / "decision_state.md"
+        output.write_text("")
+        with unittest.mock.patch.object(ds, "render", return_value=""):
+            self.assertEqual(ds.main(["--check", "--source", "worktree", "--out", str(output)]), 1)
 
 
 if __name__ == "__main__":

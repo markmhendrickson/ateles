@@ -10,9 +10,9 @@ naming which rows are open goes stale the moment the next pass rules one, and a
 "next free number is N" line was found wrong on five consecutive passes, each
 pass correcting it and the next finding it stale again.
 
-That last line is now fixed the right way — it states the *sweep* that finds the
-number and writes no number at all (principle 9: a number written in prose is a
-second source for something the table already answers). This check makes the
+That last line is now fixed the right way — it names the reservation command
+and writes no number at all (principle 9: a number written in prose is a
+second source for something the table and origin refs already answer). This check makes the
 same discipline mechanical for the shapes that keep recurring.
 
 What it reports:
@@ -25,8 +25,8 @@ What it reports:
 
 ``next-free-number``
     any prose stating a *next free number* as a value. There is no correct value
-    to state: the number is established by sweeping every branch's copy of the
-    table, and a concurrent branch can take it between the write and the read.
+    to state: the number is established by an atomic reservation on origin,
+    and a concurrent branch can take an unreserved number between reads.
     Reported unconditionally, right or wrong.
 
 ``status-contradiction``
@@ -60,23 +60,10 @@ import re
 import sys
 from pathlib import Path
 
+from foundation_register_rows import candidate_cells, decision_rows
+
 FOUNDATION_DIR = Path("docs/foundation")
 REGISTER_DOC = "conformance.md"
-
-# A register row: "| 73 | question | pointer | scope | **open** (date) |" or the
-# combined "| 1–12 |" row. The status is the LAST cell.
-ROW_RE = re.compile(r"^\|\s*(\d+(?:[–-]\d+)?)\s*\|(.*)\|\s*$")
-
-# Status keywords, longest-first: "ruled in part" must beat "ruled".
-STATUS_ORDER = ("ruled in part", "not a decision", "withdrawn", "open", "ruled")
-
-# The status is the BOLD LEAD of the last cell — "**ruled** (2026-09-06): …" —
-# never a word appearing later in that cell's prose. Matching by containment
-# instead read "never reopened" and "before the step opens" as an open status
-# and mislabelled nine ruled rows; the whole point of this check is that the
-# table is authoritative, so parsing it loosely would be the same defect class
-# one layer down.
-STATUS_LEAD_RE = re.compile(r"^\s*\*\*([^*]+?)\*\*")
 
 # A sentence is HISTORY, not a present claim, when it carries one of these.
 # "were then" / "after this pass" / "at this pass's start" date the statement to
@@ -112,32 +99,13 @@ STATUS_CLAIM_RE = re.compile(
 # Numbers inside a captured list, ignoring "in part" parentheticals.
 NUM_RE = re.compile(r"\b(\d+)\b")
 
-# A markdown table row, so narrative scanning skips the table itself.
-TABLE_LINE = re.compile(r"^\s*\|")
-
 # "zero" as an open-row list is a real, checkable claim.
 ZERO_RE = re.compile(r"^\W*(?:zero|none)\W*", re.IGNORECASE)
 
 
 def parse_register(text: str) -> dict[str, str]:
     """Return {row number as written: status keyword} for every register row."""
-    rows: dict[str, str] = {}
-    for line in text.split("\n"):
-        m = ROW_RE.match(line)
-        if not m:
-            continue
-        cells = [c.strip() for c in m.group(2).split("|")]
-        if not cells:
-            continue
-        lead = STATUS_LEAD_RE.match(cells[-1])
-        if not lead:
-            continue
-        status_lead = lead.group(1).strip().lower()
-        for keyword in STATUS_ORDER:
-            if status_lead.startswith(keyword):
-                rows[m.group(1)] = keyword
-                break
-    return rows
+    return {number: row["status"] for number, row in decision_rows(text).items()}
 
 
 def open_numbers(rows: dict[str, str]) -> set[int]:
@@ -154,7 +122,7 @@ def narrative_lines(text: str) -> list[tuple[int, str]]:
     return [
         (i + 1, line)
         for i, line in enumerate(text.split("\n"))
-        if not TABLE_LINE.match(line)
+        if candidate_cells(line) is None
     ]
 
 
@@ -171,7 +139,10 @@ def check(root: Path) -> list[str]:
         return [f"{path}: register document absent"]
 
     text = path.read_text(encoding="utf-8")
-    rows = parse_register(text)
+    try:
+        rows = parse_register(text)
+    except ValueError as exc:
+        return [f"{path}: {exc}"]
     if not rows:
         return [f"{path}: no register rows parsed — the table's shape changed"]
 
@@ -184,9 +155,8 @@ def check(root: Path) -> list[str]:
             problems.append(
                 f"{path}:{lineno}: next-free-number — prose states the next free "
                 f"number is {m.group(1)}. No value is correct here: the number is "
-                f"established by sweeping every branch's copy of the table, and a "
-                f"concurrent branch can take it between the write and the read. "
-                f"State the sweep, not a number (principle 9)."
+                f"established by reserve_register_number.py on origin. "
+                f"State the command, not a number (principle 9)."
             )
 
         # --- present-tense open-row lists ---

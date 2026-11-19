@@ -1,0 +1,168 @@
+{
+ "header_rows": 1,
+ "note": "rows = body rows GitHub's /markdown API (gfm) renders, header excluded; row 1 is always present, so rows == 2 means the shape was rendered as an extra table row",
+ "cases": {
+  "pipe_led:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "pipe_led:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "bare:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "bare:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "bold:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "bold:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "dash:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "dash:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "dot:directly_after": {
+   "rows": 1,
+   "in_table": true
+  },
+  "dot:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "x:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "x:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "link:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "link:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "strike:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "strike:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "html_s:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "html_s:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "escaped:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "escaped:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "arabic_digits:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "arabic_digits:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "fullwidth:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "fullwidth:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "zwsp_pipe:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "zwsp_pipe:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "blockquote:directly_after": {
+   "rows": 1,
+   "in_table": true
+  },
+  "blockquote:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "html_tr:directly_after": {
+   "rows": 1,
+   "in_table": true
+  },
+  "html_tr:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "no_pipe_text:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "no_pipe_text:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "label_only_pipe_end:directly_after": {
+   "rows": 2,
+   "in_table": true
+  },
+  "label_only_pipe_end:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "indent4_pipe:directly_after": {
+   "rows": 1,
+   "in_table": true
+  },
+  "indent4_pipe:after_blank": {
+   "rows": 1,
+   "in_table": true
+  },
+  "tab_pipe:directly_after": {
+   "rows": 1,
+   "in_table": true
+  },
+  "tab_pipe:after_blank": {
+   "rows": 1,
+   "in_table": true
+  }
+ },
+ "additional_inputs_note": "These inputs extend local parser regressions. GitHub HTML for the new Unicode probes could not be recorded in this worker environment; regenerate with gh api markdown --method POST -f mode=gfm -f text=\"<fixture markdown>\" once an ateles-agent token and network are available.",
+ "unescaped_code_pipe": {"row": "| 999 | q | `a | b` | **ruled** | **open** |", "gfm_cell_count": 6},
+ "double_backslash_pipe": {
+  "source": "GitHub /markdown gfm observation supplied with finding E; refresh when network is available",
+  "register_row": "| 2 | q | a \\\\| b | **open** |",
+  "register_html": "<h2>The register of open design decisions</h2><table><thead><tr><th>#</th><th>The question</th><th>Argued in</th><th>Blocks</th><th>Status</th></tr></thead><tbody><tr><td>2</td><td>q</td><td>a | b</td><td>open</td><td></td></tr></tbody></table>",
+  "revision_row": "| 2 | a \\\\| b |",
+  "revision_html": "<h2>Doc</h2><table><thead><tr><th>Revision</th><th>Pass</th><th>Change</th></tr></thead><tbody><tr><td>2</td><td>a | b</td><td></td></tr></tbody></table>"
+ },
+ "unicode_probe_inputs": [{"name": "nbsp", "position": "own_line", "text": "\u00a0\n999 plain pipeless"}, {"name": "nbsp", "position": "in_row", "text": "\u00a0999 plain pipeless"}, {"name": "em_space", "position": "own_line", "text": "\u2003\n999 plain pipeless"}, {"name": "em_space", "position": "in_row", "text": "\u2003999 plain pipeless"}, {"name": "ideographic_space", "position": "own_line", "text": "\u3000\n999 plain pipeless"}, {"name": "ideographic_space", "position": "in_row", "text": "\u3000999 plain pipeless"}, {"name": "form_feed", "position": "own_line", "text": "\f\n999 plain pipeless"}, {"name": "form_feed", "position": "in_row", "text": "\f999 plain pipeless"}, {"name": "next_line", "position": "own_line", "text": "\u0085\n999 plain pipeless"}, {"name": "next_line", "position": "in_row", "text": "\u0085999 plain pipeless"}, {"name": "vertical_tab", "position": "own_line", "text": "\u000b\n999 plain pipeless"}, {"name": "vertical_tab", "position": "in_row", "text": "\u000b999 plain pipeless"}, {"name": "line_separator", "position": "own_line", "text": "\u2028\n999 plain pipeless"}, {"name": "line_separator", "position": "in_row", "text": "\u2028999 plain pipeless"}]
+}
