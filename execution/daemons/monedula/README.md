@@ -111,9 +111,12 @@ ruling 2026-11-12). The default and only automatic channel is `payment_approval`
   operator's notification channel (the alert path depends on the notifier having a
   working transport; an undeliverable alert is logged at error level). Record the
   result. Until that is shown, sessions can sit in `awaiting` unnoticed.
-- **After payment:** the operator is told the outcome per payment: a warning-level notice when sent (the Notifier drops INFO, so no INFO alert is promised anywhere);
-  a blocker when manual action is needed or the transfer did not complete (it is
-  never retried automatically). Payee account details are never put in an alert.
+- **After a Wise funding response:** the operator sees “submitted; not confirmed;
+  do not pay again.” Funding `CREATED`, `COMPLETED`, `PROCESSING`, and `PENDING`
+  do not count as paid. Every later tick reconciles the journaled transfer ID;
+  only `outgoing_payment_sent` triggers the separate confirmed alert and task
+  effects. A first `bounced_back` is held for a next-day read, never resent.
+  Payee account details are never put in an alert.
 - **Calendars:** every calendar the account can read is scanned, including shared
   calendars others can write to. Events on them can raise approval requests;
   nothing is paid without the operator's per-payment answer.
@@ -308,7 +311,7 @@ chmod +x install.sh
 | `payment_outcome_unknown` | A transfer was attempted and its outcome never recorded (crash or rail error mid-transfer). Held and never retried automatically; check the rail, then resolve by hand |
 | `payment_approval_not_accepted` | A record exists but does not permit payment: not written by the configured approver, approved with no answer, answer does not name the session (a bare yes does not approve), or it does not match the payment. The alert names the reason and the record's short key; fix the SAME record (correct `operator_answer` as the resolver) |
 | `invalid_wise_recipient_id` | A profile's `wise_recipient_id` is not a positive integer (Neotoma profile or env `<PREFIX>_WISE_RECIPIENT_ID`). Stranded alert; payments for it are held until it is fixed |
-| `payment_outcome` (alert key `monedula:payment_outcome:<obligation>`) | After an approved payment ran: a warning-level notice for `sent` (the lowest priority the Notifier delivers); blocker for `manual_required`, failed or unreported, saying it was NOT paid and will not be retried. Pay by hand from the payment profile, then reconcile |
+| `payment_outcome` (alert key `monedula:payment_outcome:<obligation>`) | BTC and other final handler outcomes; `sent` stays unchanged. Wise uses separate `monedula:wise_pending:<obligation>` and `monedula:wise_confirmed:<obligation>` keys. Pending says “submitted; not confirmed; do not pay again.” A return uses `monedula:wise_return:<obligation>:<status>` and requires review. |
 | `payment_terms_changed` | The payee, amount, or currency changed after approval on either consent route, so the approval no longer applies; nothing paid; a fresh request is raised |
 | `payment_profiles_stranded` | Fix the named payment_profile config; Notifier key `monedula:stranded:<fp>` |
 
@@ -437,10 +440,15 @@ ends. The default channel keeps no such file; its state is the Neotoma
 
 Payment journal: `.monedula_payment_journal.json` — durable and never cleared
 by the consent flow. Keyed on a hash of the obligation (handler, session,
-payee, amount, currency). Order per payment: record intent (fsynced) → execute
-→ record outcome. An obligation with a recorded outcome is never paid again;
-one with intent but no outcome is `payment_outcome_unknown` — held and
-escalated, never retried. The journal also issues the monotonically
+payee, amount, currency). Wise order: record intent and attempt key (fsynced)
+→ create transfer → record transfer ID and read back → fund → record
+`funding_pending` → read transfer status on later ticks → record `done/sent`
+only for `outgoing_payment_sent`. `funds_refunded` and `cancelled` are confirmed
+failure states that remain held for a new operator decision. `bounced_back` is
+nonterminal and is checked again the next day. A lost create or funding response
+leaves `intent` or `funding_pending`, never a retry. The daemon serializes ticks
+with a lock on the existing first-use marker. BTC `sent` remains its existing
+final handler result. The journal also issues the monotonically
 increasing request generation. A missing journal and marker hold every payment
 on both the default approval and Telegram routes. **First use or deliberate
 fresh start:** reconcile against the chain and wallet, then run from the repo
@@ -460,6 +468,22 @@ deliberate fresh start. Restoring an older backup is the operator's
 reconciliation, not an automatic recovery. A valid legacy journal without a
 marker keeps working and gains the marker on its first valid read.
 Stranded Notifier dedupe: `monedula:stranded:<sorted keys fp>`.
+
+### Read-only Wise discrepancy report
+
+The operator must authorize a real report run. Prepare a complete Wise transfer
+snapshot export for the review window using a **read-only Wise token**. Its JSON
+shape is `{"coverage":{"from":"YYYY-MM-DD","to":"YYYY-MM-DD","complete":true},
+"transfers":{"<transfer-id>":{"status":"...","updated":"..."}}}`. The report
+does not fetch Wise or infer a match for legacy rows without transfer IDs. It
+reads both input files without changing the payment journal or first-use marker:
+
+```bash
+python3 execution/daemons/monedula/wise_reconcile.py report --journal /path/to/journal-copy.json --transfer-snapshots /path/to/wise-read-only-snapshots.json
+```
+
+Review `coverage` and every `unmatched` row before deciding any payment action.
+The report has no daemon hook and never unlocks a retry.
 
 ## Constraints
 
