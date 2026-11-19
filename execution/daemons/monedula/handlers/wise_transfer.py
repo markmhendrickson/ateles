@@ -13,8 +13,8 @@ Wise API flow:
   4. POST /v1/transfers → create transfer with quote_uuid + target_account_id
   5. POST /v3/profiles/{profile_id}/transfers/{transfer_id}/payments → fund
 
-On any Wise step failure, returns status="manual_required" with full payment
-details so the operator can execute manually.
+Transfer creation and funding require a durable Wise intent. An absent or
+unreadable journal holds the payment without making a Wise call.
 """
 
 from __future__ import annotations
@@ -213,11 +213,15 @@ class WiseTransferHandler(PaymentHandler):
         log.info(f"[{self.name}] Executing Wise payment...")
 
         journal_context = match.get("_wise_journal")
+        if not _valid_journal_context(journal_context):
+            return {
+                "status": "not_submitted", "handler": self.name,
+                "error": "Wise journal context missing; no Wise call made. Payment held; do not pay again.",
+            }
 
         def not_submitted(error: str) -> dict[str, Any]:
-            if journal_context is not None:
-                import payment_journal
-                payment_journal.record_wise_not_submitted(*journal_context)
+            import payment_journal
+            payment_journal.record_wise_not_submitted(*journal_context)
             return {"status": "not_submitted", "handler": self.name, "error": error}
 
         rid = self.profile.wise_recipient_id
@@ -226,45 +230,18 @@ class WiseTransferHandler(PaymentHandler):
         else:
             contact = _load_contact(self.profile)
         if not contact:
-            if journal_context is not None:
-                return not_submitted("Could not load contact")
-            return {
-                "status": "manual_required",
-                "handler": self.name,
-                "error": "Could not load contact",
-                "amount_eur": self.profile.amount_eur,
-                "reference": self.profile.wise_reference,
-            }
+            return not_submitted("Could not load contact")
 
         iban = contact.get("iban", "")
         recipient_name = contact.get("name", "")
 
         if not iban and not rid:
-            if journal_context is not None:
-                return not_submitted("No IBAN found in contact")
-            return {
-                "status": "manual_required",
-                "handler": self.name,
-                "error": "No IBAN found in contact",
-                "amount_eur": self.profile.amount_eur,
-                "reference": self.profile.wise_reference,
-                "recipient_name": recipient_name,
-            }
+            return not_submitted("No IBAN found in contact")
 
         token = os.environ.get("WISE_API_TOKEN", "").strip()
         if not token:
             log.error(f"[{self.name}] WISE_API_TOKEN not set")
-            if journal_context is not None:
-                return not_submitted("WISE_API_TOKEN not set")
-            return {
-                "status": "manual_required",
-                "handler": self.name,
-                "error": "WISE_API_TOKEN not set",
-                "amount_eur": self.profile.amount_eur,
-                "iban": iban,
-                "recipient_name": recipient_name,
-                "reference": self.profile.wise_reference,
-            }
+            return not_submitted("WISE_API_TOKEN not set")
 
         try:
             result = _execute_wise_transfer(
@@ -282,37 +259,25 @@ class WiseTransferHandler(PaymentHandler):
         except WiseNotSubmittedError as exc:
             return not_submitted(str(exc))
         except WiseRecipientError as exc:
-            if journal_context is not None:
-                return not_submitted(str(exc))
-            raise
+            return not_submitted(str(exc))
         except Exception as exc:
             log.error(f"[{self.name}] Wise transfer exception: {exc}")
             # Once intent is durable, an exception may follow a successful
             # create or funding POST. Never suggest a second manual payment.
-            if journal_context is not None:
-                import payment_journal
-                try:
-                    entry = payment_journal.load(journal_context[0])["obligations"].get(
-                        journal_context[1], {}
-                    )
-                    transfer_id = entry.get("transfer_id")
-                except payment_journal.JournalError:
-                    transfer_id = None
-                return {
-                    "status": (STATUS_FUNDING_PENDING if transfer_id
-                               else STATUS_SUBMISSION_UNKNOWN),
-                    "handler": self.name,
-                    "transfer_id": transfer_id,
-                    "error": "Wise outcome unknown; do not pay again",
-                }
-            result = {
-                "status": "manual_required",
+            import payment_journal
+            try:
+                entry = payment_journal.load(journal_context[0])["obligations"].get(
+                    journal_context[1], {}
+                )
+                transfer_id = entry.get("transfer_id")
+            except payment_journal.JournalError:
+                transfer_id = None
+            return {
+                "status": (STATUS_FUNDING_PENDING if transfer_id
+                           else STATUS_SUBMISSION_UNKNOWN),
                 "handler": self.name,
-                "error": str(exc),
-                "amount_eur": self.profile.amount_eur,
-                "iban": iban,
-                "recipient_name": recipient_name,
-                "reference": self.profile.wise_reference,
+                "transfer_id": transfer_id,
+                "error": "Wise outcome unknown; do not pay again",
             }
 
         result["handler"] = self.name
@@ -349,6 +314,9 @@ class WiseTransferHandler(PaymentHandler):
             )
         elif status in ("not_submitted", "funds_refunded", "cancelled"):
             import payment_journal
+            if result.get("error", "").startswith("Wise journal context missing"):
+                return (f"⚠️ {self.profile.label}: Wise journal context missing; "
+                        "no Wise call made. Payment held; do not pay again.")
             detail = {
                 "not_submitted": "not submitted; no payment was made",
                 "funds_refunded": "funds were returned",
@@ -700,16 +668,46 @@ def _create_quote(token: str, profile_id: int, amount_eur: int) -> str:
     return str(quote_uuid)
 
 
+def _valid_journal_context(context: Any) -> bool:
+    return (isinstance(context, tuple) and len(context) == 2
+            and isinstance(context[0], Path)
+            and isinstance(context[1], str) and bool(context[1]))
+
+
+def _require_wise_intent(
+    journal_context: tuple[Path, str] | None, *, transfer_id: int | None = None
+) -> dict:
+    import payment_journal
+
+    if not _valid_journal_context(journal_context):
+        raise payment_journal.JournalError("Wise journal context missing; payment held")
+    path, obligation = journal_context
+    data = payment_journal.load(path)
+    entry = data["obligations"].get(obligation)
+    if (not isinstance(entry, dict) or entry.get("rail") != "wise"
+            or entry.get("state") != payment_journal.STATE_INTENT
+            or not entry.get("customer_transaction_id")
+            or data["consumed_tokens"].get(entry.get("token")) != obligation):
+        raise payment_journal.JournalError("Wise intent unavailable before submission")
+    if transfer_id is None and entry.get("transfer_id") is not None:
+        raise payment_journal.JournalError("Wise transfer already created")
+    if transfer_id is not None and entry.get("transfer_id") != transfer_id:
+        raise payment_journal.JournalError("Wise transfer id not durable before funding")
+    return entry
+
+
 def _create_transfer(
     token: str, target_account_id: int, quote_uuid: str, reference: str,
-    customer_transaction_id: str | None = None,
+    journal_context: tuple[Path, str], customer_transaction_id: str,
 ) -> int:
-    import uuid as _uuid
+    entry = _require_wise_intent(journal_context)
+    if customer_transaction_id != entry["customer_transaction_id"]:
+        raise RuntimeError("Wise customer transaction ID does not match journal intent")
 
     body = {
         "targetAccount": target_account_id,
         "quoteUuid": quote_uuid,
-        "customerTransactionId": customer_transaction_id or str(_uuid.uuid4()),
+        "customerTransactionId": customer_transaction_id,
         "details": {
             "reference": reference,
             "transferPurpose": "personal.family.support",
@@ -723,7 +721,11 @@ def _create_transfer(
     return int(transfer_id)
 
 
-def _fund_transfer(token: str, profile_id: int, transfer_id: int) -> dict:
+def _fund_transfer(
+    token: str, profile_id: int, transfer_id: int,
+    journal_context: tuple[Path, str],
+) -> dict:
+    _require_wise_intent(journal_context, transfer_id=transfer_id)
     body = {"type": "BALANCE"}
     return _wise_post(
         token, f"/v3/profiles/{profile_id}/transfers/{transfer_id}/payments", body
@@ -747,6 +749,7 @@ def _execute_wise_transfer(
     journal_context: tuple[Path, str] | None = None,
 ) -> dict:
     """Full Wise transfer flow. Returns result dict with status and details."""
+    _require_wise_intent(journal_context)
     log.info(
         f"[{label}] Starting Wise transfer: €{amount_eur} to "
         + ("pinned recipient" if recipient_id else f"IBAN {iban[:10]}…")
@@ -775,34 +778,27 @@ def _execute_wise_transfer(
         log.info(f"[{label}] Wise quote_uuid: {quote_uuid}")
 
     except Exception as exc:
-        if journal_context is not None:
-            raise WiseNotSubmittedError(str(exc)) from exc
-        raise
+        raise WiseNotSubmittedError(str(exc)) from exc
 
-    if journal_context is not None:
-        import payment_journal
+    import payment_journal
 
-        journal_path, obligation = journal_context
-        entry = payment_journal.load(journal_path)["obligations"].get(obligation)
-        if not isinstance(entry, dict) or entry.get("rail") != "wise":
-            raise payment_journal.JournalError("Wise intent unavailable before create")
-        transfer_id = _create_transfer(
-            token, account_id, quote_uuid, reference, entry["customer_transaction_id"]
-        )
-        payment_journal.record_transfer_created(journal_path, obligation, transfer_id)
-    else:
-        transfer_id = _create_transfer(token, account_id, quote_uuid, reference)
+    journal_path, obligation = journal_context
+    entry = _require_wise_intent(journal_context)
+    transfer_id = _create_transfer(
+        token, account_id, quote_uuid, reference,
+        journal_context, entry["customer_transaction_id"]
+    )
+    payment_journal.record_transfer_created(journal_path, obligation, transfer_id)
     log.info(f"[{label}] Wise transfer_id: {transfer_id}")
 
-    funding_result = _fund_transfer(token, profile_id, transfer_id)
+    funding_result = _fund_transfer(token, profile_id, transfer_id, journal_context)
     log.info(f"[{label}] Wise funding result: {funding_result}")
 
     status = funding_result.get("status", "")
     if status in ("CREATED", "COMPLETED", "PROCESSING", "PENDING"):
-        if journal_context is not None:
-            payment_journal.record_funding_pending(
-                journal_context[0], journal_context[1], transfer_id, status
-            )
+        payment_journal.record_funding_pending(
+            journal_context[0], journal_context[1], transfer_id, status
+        )
         return {
             "status": STATUS_FUNDING_PENDING,
             "transfer_id": transfer_id,

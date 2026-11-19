@@ -30,6 +30,120 @@ def test_pending_obligation_state_is_distinct_from_intent():
     assert journal.obligation_state(data, "synthetic") == "funding_pending"
 
 
+def test_wise_execute_without_journal_context_never_calls_wise(monkeypatch):
+    from handlers.payment_profile import PaymentProfile
+
+    handler = wise.WiseTransferHandler(PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", calendar_keywords=[],
+        payment_type="wise", amount_eur=1, wise_recipient_id=5,
+        wise_recipient_name="Synthetic",
+    ))
+    monkeypatch.setattr(wise, "_wise_get", lambda *a, **kw:
+                        pytest.fail("Wise read without journal"))
+    monkeypatch.setattr(wise, "_wise_post", lambda *a, **kw:
+                        pytest.fail("Wise write without journal"))
+    monkeypatch.setattr(wise, "_create_transfer", lambda *a, **kw:
+                        pytest.fail("Wise create without journal"))
+    monkeypatch.setattr(wise, "_fund_transfer", lambda *a, **kw:
+                        pytest.fail("Wise fund without journal"))
+    for _ in range(2):
+        result = handler.execute({})
+        assert result["status"] == "not_submitted"
+        assert "journal context missing" in result["error"]
+        assert "do not pay again" in result["error"]
+        assert "no Wise call made" in handler.format_confirmation(result)
+
+
+def test_wise_direct_helper_requires_durable_intent_before_network(monkeypatch):
+    monkeypatch.setattr(wise, "_wise_get", lambda *a, **kw:
+                        pytest.fail("Wise read without journal"))
+    monkeypatch.setattr(wise, "_wise_post", lambda *a, **kw:
+                        pytest.fail("Wise write without journal"))
+    with pytest.raises(journal.JournalError, match="journal context missing"):
+        wise._execute_wise_transfer("synthetic-token", "", "Synthetic", 1, "ref")
+
+
+def test_wise_create_and_fund_helpers_require_durable_intent(tmp_path, monkeypatch):
+    path = tmp_path / journal.JOURNAL_NAME
+    journal.init_journal(path)
+    monkeypatch.setattr(wise, "_wise_post", lambda *a, **kw:
+                        pytest.fail("Wise write without durable intent"))
+    with pytest.raises(journal.JournalError, match="intent unavailable"):
+        wise._create_transfer("token", 2, "quote", "ref", (path, "absent"), "id")
+    with pytest.raises(journal.JournalError, match="intent unavailable"):
+        wise._fund_transfer("token", 1, 3, (path, "absent"))
+
+
+def test_wise_same_journal_context_cannot_submit_twice(attempt, monkeypatch):
+    from handlers.payment_profile import PaymentProfile
+
+    handler = wise.WiseTransferHandler(PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", calendar_keywords=[],
+        payment_type="wise", amount_eur=1, wise_recipient_id=5,
+        wise_recipient_name="Synthetic",
+    ))
+    handler.recipient_status_lookup = lambda token, rid: {"id": rid, "active": True}
+    monkeypatch.setenv("WISE_API_TOKEN", "synthetic-token")
+    monkeypatch.setattr(wise, "_get_wise_profile_id", lambda token: 1)
+    writes = []
+
+    def post(token, path, body):
+        writes.append(path)
+        if path.endswith("/quotes"):
+            return {"id": "quote"}
+        if path == "/v1/transfers":
+            return {"id": 3}
+        return {"status": "COMPLETED"}
+
+    monkeypatch.setattr(wise, "_wise_post", post)
+    first = handler.execute({"_wise_journal": (attempt, "obligation")})
+    assert first["status"] == "funding_pending"
+    assert writes.count("/v1/transfers") == 1
+    assert len([path for path in writes if path.endswith("/payments")]) == 1
+    second = handler.execute({"_wise_journal": (attempt, "obligation")})
+    assert second["status"] == "funding_pending"
+    assert "do not pay again" in second["error"]
+    assert writes.count("/v1/transfers") == 1
+    assert len([path for path in writes if path.endswith("/payments")]) == 1
+
+
+def test_wise_write_helpers_only_called_inside_guarded_flow():
+    import ast
+
+    root = Path(__file__).resolve().parents[3]
+    helpers = {"_create_transfer", "_fund_transfer", "_execute_wise_transfer"}
+    calls = []
+    for path in root.rglob("*.py"):
+        if path.name.startswith("test_") or ".git" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(), filename=str(path))
+
+        def visit(node, owner=""):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                owner = node.name
+            if isinstance(node, ast.Call):
+                name = node.func.id if isinstance(node.func, ast.Name) else (
+                    node.func.attr if isinstance(node.func, ast.Attribute) else ""
+                )
+                if name in helpers:
+                    calls.append((path.relative_to(root).as_posix(), owner, name,
+                                  {n.id for arg in node.args for n in ast.walk(arg)
+                                   if isinstance(n, ast.Name)}))
+            for child in ast.iter_child_nodes(node):
+                visit(child, owner)
+
+        visit(tree)
+    source = "execution/daemons/monedula/handlers/wise_transfer.py"
+    assert {(path, owner, name) for path, owner, name, _ in calls} == {
+        (source, "execute", "_execute_wise_transfer"),
+        (source, "_execute_wise_transfer", "_create_transfer"),
+        (source, "_execute_wise_transfer", "_fund_transfer"),
+    }
+    for _, owner, name, names in calls:
+        if name in {"_create_transfer", "_fund_transfer"}:
+            assert owner == "_execute_wise_transfer" and "journal_context" in names
+
+
 def test_wise_approval_key_changes_with_profile_task_and_reference():
     import consent_email
     from handlers.payment_profile import PaymentProfile

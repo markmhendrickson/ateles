@@ -63,8 +63,7 @@ def test_inactive_pinned_recipient_fails_closed_and_raises(monkeypatch):
     monkeypatch.setattr(wt, "_wise_post", lambda *a, **k: pytest.fail("no create/transfer"))
     with pytest.raises(wt.WiseRecipientError, match="inactive"):
         h.preflight({})
-    with pytest.raises(wt.WiseRecipientError, match="inactive"):
-        h.execute({})
+    assert h.execute({})["status"] == "not_submitted"
 
 
 def test_unknown_pinned_recipient_fails_closed_and_raises(monkeypatch):
@@ -91,7 +90,13 @@ def test_pinned_recipient_is_used_exactly_and_never_looked_up_by_iban(monkeypatc
     assert got == 777
 
 
-def test_pinned_recipient_happy_path_transfers_to_that_account(monkeypatch):
+def test_pinned_recipient_happy_path_transfers_to_that_account(monkeypatch, tmp_path):
+    import payment_journal
+
+    path = tmp_path / payment_journal.JOURNAL_NAME
+    payment_journal.init_journal(path)
+    payment_journal.record_intent(path, "synthetic", "approval", generation=1,
+                                  rail="wise", handler_name="synthetic")
     monkeypatch.setenv("WISE_API_TOKEN", "fake-token")
     h = wt.WiseTransferHandler(_profile(wise_recipient_id="555"))
     h.recipient_status_lookup = lambda token, rid: {"id": rid, "active": True}
@@ -99,14 +104,14 @@ def test_pinned_recipient_happy_path_transfers_to_that_account(monkeypatch):
     monkeypatch.setattr(wt, "_create_quote", lambda *a, **k: "q")
     seen = {}
 
-    def create_transfer(token, target, quote, ref):
+    def create_transfer(token, target, quote, ref, context, customer_id):
         seen["target"] = target
         return 1
 
     monkeypatch.setattr(wt, "_create_transfer", create_transfer)
     monkeypatch.setattr(wt, "_fund_transfer", lambda *a, **k: {"status": "COMPLETED"})
     monkeypatch.setattr(wt, "_update_task", lambda *a, **k: None)
-    res = h.execute({})
+    res = h.execute({"_wise_journal": (path, "synthetic")})
     assert res["status"] == "funding_pending"
     assert seen["target"] == 555
 
