@@ -3661,6 +3661,19 @@ class TestDispatchFailureDiagnostics:
             os.umask(old)
         assert path and stat.S_IMODE(Path(path).parent.stat().st_mode) == 0o700
 
+    def test_a_registration_failure_refuses_the_fly_launch_instead_of_going_on_unredacted(self) -> None:
+        import fly_runner
+
+        def failing(value):
+            raise RuntimeError("registry unavailable")
+
+        fly_runner.CHILD_CREDENTIAL_HOOKS.append(failing)
+        try:
+            with pytest.raises(fly_runner.FlyIneligible, match="could not be registered"):
+                fly_runner._announce_child_credential("MINTED-FAKE-VALUE-3434")
+        finally:
+            fly_runner.CHILD_CREDENTIAL_HOOKS.remove(failing)
+
     def test_a_credential_announced_by_the_fly_runner_is_remembered(self) -> None:
         import fly_runner
 

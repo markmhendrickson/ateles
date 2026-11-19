@@ -429,6 +429,48 @@ def test_a_fly_job_secret_is_redacted_from_the_file_and_the_reason(writes, spawn
         skill_runner._CHILD_CREDENTIAL_VALUES.update(before)
 
 
+def test_missing_artifact_header_does_not_emit_percent_encoded_credential_in_reason_or_alert(
+    writes, spawn, tmp_path, monkeypatch
+):
+    fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+    monkeypatch.setenv("GITHUB_TOKEN", fake_value)
+    encoded = fake_value.replace("-", "%2D")
+    spawn.result = _SpawnResult(stdout=f"I looked at {encoded} and found nothing to report\n", stderr="")
+    notifier = _Notifier()
+
+    _dispatch("ent_missing_header_encoded", _cicada_task(), notifier=notifier)
+
+    reasons = [w.get("reason", "") for w in writes if w.get("reason")]
+    assert reasons and all(encoded not in r and fake_value not in r for r in reasons), reasons
+    assert any("redacted" in r for r in reasons)
+    assert notifier.sent
+    assert all(encoded not in str(m) and fake_value not in str(m) for m in notifier.sent)
+
+
+@pytest.mark.parametrize("disguise", ["combining", "case", "percent"])
+def test_a_disguised_credential_on_the_blocked_header_never_changes_the_classification(
+    writes, spawn, tmp_path, monkeypatch, disguise
+):
+    fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+    monkeypatch.setenv("GITHUB_TOKEN", fake_value)
+    forms = {
+        "combining": fake_value[:9] + "\u0301" + fake_value[9:],
+        "case": fake_value.lower(),
+        "percent": fake_value.replace("-", "%2D"),
+    }
+    spawn.result = _SpawnResult(
+        stdout=f"draft\n[cicada] pull_request_link: BLOCKED \u2014 need {forms[disguise]} to continue\n",
+        stderr="",
+    )
+
+    _dispatch("ent_blocked_disguised_classification", _cicada_task())
+
+    blocked = _with_status(writes, "blocked")
+    failed = _with_status(writes, "failed")
+    assert len(blocked) == 1 and failed == [], (blocked, failed)
+    assert fake_value not in blocked[0]["reason"] and forms[disguise] not in blocked[0]["reason"]
+
+
 def test_delivered_artifact_keeps_no_output_file(writes, spawn, tmp_path, monkeypatch):
     monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: True)
     spawn.result = _SpawnResult(stdout=f"draft\n{_PR_HEADER}\n")

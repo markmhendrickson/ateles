@@ -3969,6 +3969,10 @@ async def _dispatch_task(
                     artifact_kind=contract.artifact_kind,
                 )
 
+            # Decisions (is it blocked, what shape, which reference) are taken on the ORIGINAL header:
+            # redacting a line that holds a credential replaces the whole line, which must never change
+            # how the agent's outcome is classified. Only what is stored or shown is redacted.
+            header_original = header
             if header is not None:
                 # Redact the agent-controlled header ONCE, here, so nothing
                 # downstream (the reason, the alert, the run thread, a printed
@@ -3986,7 +3990,7 @@ async def _dispatch_task(
                 # output has held tokens, and it is agent-controlled text.
                 tail = stdout_tail_for_reason(
                     sanitize_text(
-                        _redact_secrets(
+                        _redact_output_text(
                             sanitize_text(
                                 getattr(result, "stdout", "") or "", keep_newlines=True
                             )
@@ -4006,7 +4010,7 @@ async def _dispatch_task(
                 )
                 return None
 
-            body_class = classify_artifact_body(header.body)
+            body_class = classify_artifact_body(header_original.body)
             if body_class == "empty":
                 _artifact_fail(
                     TaskStatus.FAILED,
@@ -4072,7 +4076,7 @@ async def _dispatch_task(
                 role=contract.role,
                 dispatch_mode=_dispatch_mode_from_snapshot(snapshot),
             )
-            shape = infer_body_shape(header.body)
+            shape = infer_body_shape(header_original.body)
             if shape not in accepted:
                 # Before any resolve: an eng-spec section on a direct impl
                 # dispatch answered a different question, and there is nothing
@@ -4101,7 +4105,7 @@ async def _dispatch_task(
                 # that verified reference, without changing the header body.
                 stored_line += "\n" + build_delivery.fly_delivery_summary(result)
 
-            if shape == "eng_spec_section" and not eng_spec_has_content(header.body):
+            if shape == "eng_spec_section" and not eng_spec_has_content(header_original.body):
                 # A bare token names no authored section.
                 _artifact_fail(
                     TaskStatus.FAILED,
@@ -4126,7 +4130,7 @@ async def _dispatch_task(
             # No inner handler: anything `parse_github_ref` raises is an unexpected
             # gate error, and the catch-all at the call site turns it into BLOCKED
             # (`gate_error`), not a FAILED the watchdog would re-run.
-            parsed = parse_github_ref(header.body, dispatch_repo=dispatch_repo)
+            parsed = parse_github_ref(header_original.body, dispatch_repo=dispatch_repo)
             offered = header.body
             if isinstance(parsed, InvalidRef):
                 # `ref_unverifiable` (no repo recorded on the task, a malformed
@@ -4423,7 +4427,7 @@ async def _dispatch_task(
             job.failed(f"task {entity_id} → {skill} Fly delivery ended")
         elif (getattr(result, "fly_delivery_not_launched", False)
               and getattr(result, "fly_delivery_cleanup", "") in {"released", "not_reserved"}):
-            reason = _redact_secrets(build_delivery.fly_prelaunch_failure_summary(result))
+            reason = _redact_output_text(build_delivery.fly_prelaunch_failure_summary(result))
             _run_stage("assistant", reason, stage="blocked")
             if run_session:
                 update_run_session_status(run_session, status="failed")

@@ -525,11 +525,15 @@ CHILD_CREDENTIAL_HOOKS: list[Callable[[str], None]] = []
 
 
 def _announce_child_credential(value: str | None) -> None:
+    """Tell the redaction registry of a minted credential. If it cannot be registered the job is NOT
+    launched: its output could not be redacted, and the token is cleared with the job's secrets."""
     for hook in list(CHILD_CREDENTIAL_HOOKS):
         try:
             hook(value)
-        except Exception:  # noqa: BLE001 -- redaction bookkeeping must never break a launch
-            log.warning("[fly] a child-credential hook failed (non-fatal)")
+        except Exception:  # noqa: BLE001
+            raise FlyIneligible(
+                "a credential minted for this job could not be registered for output redaction"
+            ) from None
 WORKSPACE_PLACEHOLDER = "@@ATELES_JOB_WORKSPACE@@"
 PR_FILE_PLACEHOLDER = "@@ATELES_JOB_PR_FILE@@"
 # argv placeholders for the checkout's .git directory and the directory that
