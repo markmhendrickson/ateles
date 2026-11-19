@@ -1651,6 +1651,7 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
         journal_path,
         legacy_obligation_keys,
         journal_entry_for_item,
+        journal_state_for_item,
         obligation_key,
     )
 
@@ -1665,9 +1666,13 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
             for match, item in zip(matches, items):
                 eid = event_id_of(match)
                 entry = journal_entry_for_item(data, item)
-                if entry is not None and entry.get("rail") == "wise":
-                    state = payment_journal.obligation_state(
-                        {"obligations": {item.obligation: entry}}, item.obligation
+                if entry is not None and (
+                    entry.get("rail") == "wise"
+                    or (isinstance(handler, WiseTransferHandler)
+                        and not item.is_calendar and "rail" not in entry)
+                ):
+                    state = journal_state_for_item(
+                        {"obligations": {item.obligation: entry}}, item
                     )
                     if state == payment_journal.STATE_DONE:
                         if eid:
@@ -1676,7 +1681,10 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                                 payment_journal.note_pending(jpath, key, ended_at=_match_ended_at(match))
                             payment_journal.set_session_state(jpath, key, payment_journal.SESSION_SETTLED)
                     else:
-                        _notify_wise_hold(entry, item.obligation)
+                        if entry.get("rail") == "wise":
+                            _notify_wise_hold(entry, item.obligation)
+                        else:
+                            _notify_unknown_outcome([handler.name], item.payment_date)
                         if eid:
                             seen_keys.add(payment_journal.session_key(handler.name, eid))
                     continue
@@ -1787,16 +1795,38 @@ def _resolve_sessions(triggered: list[tuple], state: str) -> None:
                 log.error(f"could not record session {state}: {exc}")
 
 
-def _apply_confirmed_wise_effects(path: Path, obligation: str, entry: dict, profiles: dict) -> bool:
+def _apply_confirmed_wise_effects(path: Path, obligation: str, entry: dict, handlers: dict) -> bool:
     """Idempotently finish task and session effects after a transfer read."""
     import payment_journal
     from datetime import datetime, timezone
     from handlers.wise_transfer import _update_task
+    from consent_email import obligation_key
 
     transfer_id = entry["transfer_id"]
-    profile = profiles.get(entry.get("handler_name"))
+    handler = handlers.get(entry.get("profile_entity_id"))
+    profile = getattr(handler, "profile", None)
+    bound = (
+        profile is not None
+        and handler.name == entry.get("handler_name")
+        and bool(entry.get("profile_entity_id"))
+        and bool(entry.get("task_id"))
+        and bool(entry.get("approved_terms_hash"))
+        and bool(entry.get("payment_date"))
+        and profile.entity_id == entry["profile_entity_id"]
+        and profile.neotoma_task_id == entry["task_id"]
+        and (not profile.one_off or profile.due_date == entry["payment_date"])
+        and obligation_key(handler, entry["payment_date"], entry.get("match_id", ""))
+        == entry["approved_terms_hash"]
+    )
+    if not bound:
+        _notify(
+            f"monedula: confirmed Wise transfer [{obligation[:12]}] cannot be tied "
+            "to its approved profile and task; bookkeeping held; do not pay again.",
+            priority="blocker", dedupe_key=f"monedula:wise_binding:{obligation}",
+        )
+        return False
     paid_date = datetime.fromtimestamp(entry["outcome_at"], timezone.utc).date().isoformat()
-    task_ok = bool(profile) and _update_task(
+    task_ok = _update_task(
         profile, {"status": "sent", "transfer_id": transfer_id, "paid_at_date": paid_date}
     )
     session_key = entry.get("session_key")
@@ -1838,8 +1868,8 @@ def _reconcile_wise_entries(handlers: list) -> bool:
         return True
     from handlers.wise_transfer import _wise_get
 
-    profiles = {
-        h.name: h.profile for h in handlers
+    wise_handlers = {
+        h.profile.entity_id: h for h in handlers
         if isinstance(h, WiseTransferHandler)
     }
     clean = True
@@ -1869,7 +1899,7 @@ def _reconcile_wise_entries(handlers: list) -> bool:
         # A previously confirmed payment may still need its task/session effects.
         if entry.get("outcome_status") == "sent" and not entry.get("effects_applied"):
             try:
-                if not _apply_confirmed_wise_effects(path, obligation, entry, profiles):
+                if not _apply_confirmed_wise_effects(path, obligation, entry, wise_handlers):
                     clean = False
             except payment_journal.JournalError as exc:
                 log.error("Wise confirmed effects journal failure: %s", exc)
@@ -1941,7 +1971,7 @@ def _reconcile_wise_entries(handlers: list) -> bool:
             )
             try:
                 paid_entry = payment_journal.load(path)["obligations"][obligation]
-                if not _apply_confirmed_wise_effects(path, obligation, paid_entry, profiles):
+                if not _apply_confirmed_wise_effects(path, obligation, paid_entry, wise_handlers):
                     clean = False
             except payment_journal.JournalError as exc:
                 log.error("Wise confirmed effects journal failure: %s", exc)
@@ -2231,6 +2261,8 @@ def main() -> bool:
             clear_consent_state,
             journal_path,
             match_key,
+            journal_entry_for_item,
+            journal_state_for_item,
             request_and_collect,
         )
 
@@ -2336,14 +2368,14 @@ def main() -> bool:
                 journal = payment_journal.load(jpath)
             except payment_journal.JournalError as exc:
                 return _journal_failure(str(exc))
-            state = payment_journal.obligation_state(journal, item.obligation)
+            state = journal_state_for_item(journal, item)
             if state == payment_journal.STATE_DONE:
                 log.info(f"Already paid {label} — at-most-once skip.")
                 settled.add(key)
                 continue
             if state in (payment_journal.STATE_INTENT, payment_journal.STATE_FUNDING_PENDING,
                          payment_journal.STATE_FAILED):
-                entry = journal["obligations"].get(item.obligation, {})
+                entry = journal_entry_for_item(journal, item) or {}
                 if entry.get("rail") == "wise":
                     _notify_wise_hold(entry, item.obligation)
                     continue
@@ -2381,6 +2413,11 @@ def main() -> bool:
                     jpath, item.obligation, key, generation=item.generation,
                     rail="wise" if wise else None,
                     handler_name=handler.name if wise else None,
+                    profile_entity_id=handler.profile.entity_id if wise else "",
+                    task_id=handler.profile.neotoma_task_id if wise else "",
+                    approved_terms_hash=item.obligation if wise else "",
+                    payment_date=item.payment_date if wise else "",
+                    match_id=item.match_id if wise else "",
                     session_key=(
                         payment_journal.session_key(handler.name, item.match_id)
                         if wise and item.match_id else None
@@ -2495,7 +2532,8 @@ def main() -> bool:
 
     # channel == "telegram" — break-glass path (unchanged attendance phrases)
     import payment_journal
-    from consent_email import build_pending_items, journal_path
+    from consent_email import (build_pending_items, journal_path,
+                               journal_entry_for_item, journal_state_for_item)
 
     jpath = journal_path()
 
@@ -2525,12 +2563,12 @@ def main() -> bool:
         remaining = []
         for match in matches:
             item = item_by_match[id(match)]
-            state = payment_journal.obligation_state(journal, item.obligation)
+            state = journal_state_for_item(journal, item)
             if state == payment_journal.STATE_DONE:
                 _resolve_sessions([(handler, [match])], "settled")
             elif state in (payment_journal.STATE_INTENT, payment_journal.STATE_FUNDING_PENDING,
                            payment_journal.STATE_FAILED):
-                entry = journal["obligations"].get(item.obligation, {})
+                entry = journal_entry_for_item(journal, item) or {}
                 if entry.get("rail") == "wise":
                     _notify_wise_hold(entry, item.obligation)
                 else:
@@ -2648,13 +2686,13 @@ def main() -> bool:
                 journal = payment_journal.load(jpath)
             except payment_journal.JournalError as exc:
                 return _telegram_journal_failure(str(exc))
-            state = payment_journal.obligation_state(journal, obligation)
+            state = journal_state_for_item(journal, item)
             if state == payment_journal.STATE_DONE:
                 _resolve_sessions([(handler, [match])], "settled")
                 continue
             if state in (payment_journal.STATE_INTENT, payment_journal.STATE_FUNDING_PENDING,
                          payment_journal.STATE_FAILED):
-                entry = journal["obligations"].get(obligation, {})
+                entry = journal_entry_for_item(journal, item) or {}
                 if entry.get("rail") == "wise":
                     _notify_wise_hold(entry, obligation)
                     continue
@@ -2675,6 +2713,11 @@ def main() -> bool:
                     jpath, obligation, token, generation=0,
                     rail="wise" if wise else None,
                     handler_name=handler.name if wise else None,
+                    profile_entity_id=handler.profile.entity_id if wise else "",
+                    task_id=handler.profile.neotoma_task_id if wise else "",
+                    approved_terms_hash=item.obligation if wise else "",
+                    payment_date=item.payment_date if wise else "",
+                    match_id=item.match_id if wise else "",
                     session_key=(
                         payment_journal.session_key(handler.name, item.match_id)
                         if wise and item.match_id else None

@@ -235,15 +235,12 @@ def payee_identity(handler: Any) -> str:
     return "profile|" + "|".join(str(getattr(profile, f, "") or "") for f in fields)
 
 
-def obligation_key(
+def _legacy_obligation_key(
     handler: Any,
     payment_date: str,
     match_id: str,
 ) -> str:
-    """Dedup key for one obligation: handler, period/instance, payee, amount,
-    currency (``docs/foundation/payments.md#the-dedup-key-and-what-it-is-keyed-on``).
-    Recomputed from the live handler, so it also serves as the execute-time
-    check that the terms consented to are still the terms that would be paid."""
+    """Pre-binding key, used only to recognize an earlier journaled session."""
     _label, amount, _is_cal = _profile_fields(handler)
     basis = "|".join(
         [
@@ -255,6 +252,22 @@ def obligation_key(
             CURRENCY,
         ]
     )
+    return hashlib.sha256(basis.encode()).hexdigest()[:32]
+
+
+def obligation_key(handler: Any, payment_date: str, match_id: str) -> str:
+    """Bind a Wise approval to its exact profile, task and transfer terms."""
+    legacy = _legacy_obligation_key(handler, payment_date, match_id)
+    profile = getattr(handler, "profile", None)
+    if getattr(profile, "payment_type", None) != "wise":
+        return legacy
+    basis = "|".join((
+        legacy,
+        str(getattr(profile, "entity_id", "") or ""),
+        str(getattr(profile, "neotoma_task_id", "") or ""),
+        str(getattr(profile, "wise_reference", "") or ""),
+        str(getattr(profile, "due_date", "") or "") if getattr(profile, "one_off", False) else "",
+    ))
     return hashlib.sha256(basis.encode()).hexdigest()[:32]
 
 
@@ -271,7 +284,18 @@ def journal_entry_for_item(journal: dict, item: PendingItem) -> dict | None:
         return None
     candidates = [row for row in journal["obligations"].values()
                   if row.get("rail") == "wise"
-                  and row.get("handler_name") == item.handler_name]
+                  and row.get("handler_name") == item.handler_name
+                  and row.get("state") != payment_journal.STATE_DONE
+                  and (not row.get("payment_date")
+                       or row.get("payment_date") == item.payment_date)]
+    # Before Wise attempt metadata existed, the writer recorded only state,
+    # token, generation and intent_at. Its tick-date key cannot be reconstructed
+    # later. An unclassified unresolved intent may be this invoice.
+    candidates.extend(row for row in journal["obligations"].values()
+                      if "rail" not in row and "handler_name" not in row
+                      and (row.get("state") == payment_journal.STATE_INTENT
+                           or (row.get("state") == payment_journal.STATE_DONE
+                               and row.get("outcome_status") != "sent")))
     return candidates[0] if candidates else None
 
 
@@ -279,6 +303,10 @@ def journal_state_for_item(journal: dict, item: PendingItem) -> str | None:
     entry = journal_entry_for_item(journal, item)
     if entry is None:
         return None
+    if ("rail" not in entry and "handler_name" not in entry
+            and entry.get("state") == payment_journal.STATE_DONE
+            and entry.get("outcome_status") != "sent"):
+        return payment_journal.STATE_INTENT
     return payment_journal.obligation_state(
         {"obligations": {item.obligation: entry}}, item.obligation
     )
@@ -351,7 +379,7 @@ def legacy_obligation_keys(
                 ids.add(str(candidate))
         # The old code fell back to the match's own position in the list.
         ids.update(str(i) for i, m in enumerate(matches) if m is match)
-    return {obligation_key(handler, d, i) for d in dates for i in ids}
+    return {_legacy_obligation_key(handler, d, i) for d in dates for i in ids}
 
 
 def build_pending_items(

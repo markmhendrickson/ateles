@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import sys
 import json
+import hashlib
 import time
 import copy
 from datetime import datetime, timedelta, timezone
@@ -29,6 +30,26 @@ def test_pending_obligation_state_is_distinct_from_intent():
     assert journal.obligation_state(data, "synthetic") == "funding_pending"
 
 
+def test_wise_approval_key_changes_with_profile_task_and_reference():
+    import consent_email
+    from handlers.payment_profile import PaymentProfile
+
+    profile = PaymentProfile(
+        prefix="INVOICE", label="Synthetic invoice", calendar_keywords=[],
+        payment_type="wise", amount_eur=1, due_date="2026-01-01", one_off=True,
+        wise_recipient_id=5, wise_recipient_name="Synthetic", wise_reference="first",
+        entity_id="first-profile", neotoma_task_id="first-task",
+    )
+    original = consent_email.obligation_key(wise.WiseTransferHandler(profile), "2026-01-01", "")
+    profile.entity_id = "second-profile"
+    changed_profile = consent_email.obligation_key(wise.WiseTransferHandler(profile), "2026-01-01", "")
+    profile.neotoma_task_id = "second-task"
+    changed_task = consent_email.obligation_key(wise.WiseTransferHandler(profile), "2026-01-01", "")
+    profile.wise_reference = "second"
+    changed_reference = consent_email.obligation_key(wise.WiseTransferHandler(profile), "2026-01-01", "")
+    assert len({original, changed_profile, changed_task, changed_reference}) == 4
+
+
 @pytest.fixture
 def attempt(tmp_path):
     path = tmp_path / journal.JOURNAL_NAME
@@ -36,6 +57,32 @@ def attempt(tmp_path):
     journal.record_intent(path, "obligation", "approval", generation=1, rail="wise",
                           handler_name="synthetic", session_key="synthetic:session")
     return path
+
+
+def _bind_synthetic_attempt(path, profile, payment_date="2026-01-01"):
+    import consent_email
+
+    entry = journal.load(path)["obligations"]["obligation"]
+    entry.update(
+        profile_entity_id=profile.entity_id,
+        task_id=profile.neotoma_task_id,
+        approved_terms_hash=consent_email.obligation_key(
+            wise.WiseTransferHandler(profile), payment_date, ""
+        ),
+        payment_date=payment_date,
+        match_id="",
+    )
+    data = journal.load(path)
+    data["obligations"]["obligation"] = entry
+    journal._write(path, data)
+
+
+def _old_obligation_key(handler, payment_date):
+    import consent_email
+
+    basis = "|".join((handler.name, payment_date, "", consent_email.payee_identity(handler),
+                      str(handler.profile.amount_eur), consent_email.CURRENCY))
+    return hashlib.sha256(basis.encode()).hexdigest()[:32]
 
 
 @pytest.mark.parametrize("status", ["CREATED", "COMPLETED", "PROCESSING", "PENDING"])
@@ -402,8 +449,10 @@ def test_reconciliation_confirms_and_applies_effects_once(attempt, monkeypatch):
         prefix="SYNTHETIC", label="Synthetic", calendar_keywords=["synthetic"],
         payment_type="wise", amount_eur=1, wise_recipient_id=5,
         wise_recipient_name="Synthetic", neotoma_task_id="synthetic-task",
+        entity_id="synthetic-profile",
     )
     handler = wise.WiseTransferHandler(profile)
+    _bind_synthetic_attempt(attempt, profile)
     journal.record_transfer_created(attempt, "obligation", 3)
     journal.record_funding_pending(attempt, "obligation", 3, "COMPLETED")
     statuses = iter(["incoming_payment_waiting", "outgoing_payment_sent"])
@@ -441,8 +490,10 @@ def test_confirmed_read_changes_real_task_fields_only_once(attempt, monkeypatch,
     profile = PaymentProfile(
         prefix="SYNTHETIC", label="Synthetic", calendar_keywords=[] if one_off else ["synthetic"],
         payment_type="wise", amount_eur=1, neotoma_task_id="synthetic-task",
-        one_off=one_off, entity_id="synthetic-profile" if one_off else "",
+        one_off=one_off, entity_id="synthetic-profile",
+        due_date="2026-01-01" if one_off else "",
     )
+    _bind_synthetic_attempt(attempt, profile)
     journal.record_transfer_created(attempt, "obligation", 3)
     journal.record_funding_pending(attempt, "obligation", 3, "COMPLETED")
     monkeypatch.setenv("WISE_API_TOKEN", "synthetic-token")
@@ -463,6 +514,52 @@ def test_confirmed_read_changes_real_task_fields_only_once(attempt, monkeypatch,
     first_posts = len(fake.posts)
     assert monedula._reconcile_wise_entries([wise.WiseTransferHandler(profile)])
     assert len(fake.posts) == first_posts
+
+
+def test_confirmed_older_invoice_updates_only_its_approved_profile(attempt, monkeypatch):
+    import monedula
+    from fake_neotoma import FakeNeotoma
+    from handlers import task_writes
+    from handlers.payment_profile import PaymentProfile
+
+    old = PaymentProfile(
+        prefix="SYNTHETIC", label="Old invoice", calendar_keywords=[],
+        payment_type="wise", amount_eur=1, due_date="2026-01-01", one_off=True,
+        entity_id="old-profile", neotoma_task_id="old-task", wise_recipient_id=5,
+        wise_recipient_name="Synthetic",
+    )
+    new = PaymentProfile(
+        prefix="SYNTHETIC", label="New invoice", calendar_keywords=[],
+        payment_type="wise", amount_eur=1, due_date="2026-02-01", one_off=True,
+        entity_id="new-profile", neotoma_task_id="new-task", wise_recipient_id=5,
+        wise_recipient_name="Synthetic",
+    )
+    _bind_synthetic_attempt(attempt, old)
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                               datetime.now(timezone.utc).isoformat())
+    fake = FakeNeotoma({
+        "old-task": {"status": "awaiting_approval", "notes": "old"},
+        "old-profile": {"status": "active"},
+        "new-task": {"status": "awaiting_approval", "notes": "new"},
+        "new-profile": {"status": "active"},
+    })
+    alerts = []
+    monkeypatch.setattr(task_writes, "make_client", fake.connection)
+    monkeypatch.setattr(monedula, "_notify", lambda text, **kw: alerts.append(text))
+    assert not monedula._reconcile_wise_entries([wise.WiseTransferHandler(new)])
+    assert fake.posts == []
+    assert not journal.load(attempt)["obligations"]["obligation"].get("effects_applied")
+    assert any("cannot be tied" in text for text in alerts)
+
+    assert monedula._reconcile_wise_entries([
+        wise.WiseTransferHandler(old), wise.WiseTransferHandler(new)
+    ])
+    assert fake.entities["old-task"]["status"] == "done"
+    assert fake.entities["old-profile"]["status"] == "archived"
+    assert fake.entities["new-task"] == {"status": "awaiting_approval", "notes": "new"}
+    assert fake.entities["new-profile"] == {"status": "active"}
+    assert journal.load(attempt)["obligations"]["obligation"]["effects_applied"] is True
 
 
 @pytest.mark.parametrize("failure", [TimeoutError("timeout"), RuntimeError("HTTP 401"),
@@ -489,7 +586,7 @@ def test_default_approval_pending_then_confirmed_updates_session_once(
         prefix="YOGA", label="Synthetic", calendar_keywords=["yoga"],
         payment_type="wise", amount_eur=10, wise_reference="ref",
         wise_recipient_id=5, wise_recipient_name="Synthetic",
-        neotoma_task_id="synthetic-task",
+        neotoma_task_id="synthetic-task", entity_id="synthetic-profile",
     ))
     world.handler.recipient_status_lookup = lambda token, rid: {"id": rid, "active": True}
     monkeypatch.setenv("WISE_API_TOKEN", "synthetic-token")
@@ -638,7 +735,7 @@ def test_old_tick_date_oneoff_key_still_holds(monkeypatch, tmp_path):
     import monedula
     from handlers.payment_profile import PaymentProfile
     from handlers.wise_transfer import WiseTransferHandler
-    from consent_email import obligation_key
+    from consent_email import _legacy_obligation_key
 
     handler = WiseTransferHandler(PaymentProfile(
         prefix="SYNTHETIC", label="Synthetic", calendar_keywords=[],
@@ -646,7 +743,7 @@ def test_old_tick_date_oneoff_key_still_holds(monkeypatch, tmp_path):
     ))
     attempt = tmp_path / journal.JOURNAL_NAME
     journal.init_journal(attempt)
-    old_key = obligation_key(handler, "2026-01-02", "")
+    old_key = _legacy_obligation_key(handler, "2026-01-02", "")
     journal.record_intent(attempt, old_key, "old", generation=2,
                           rail="wise", handler_name=handler.name)
     journal.record_transfer_created(attempt, old_key, 3)
@@ -659,6 +756,79 @@ def test_old_tick_date_oneoff_key_still_holds(monkeypatch, tmp_path):
         reconcile=True,
     ) == []
     assert any("do not pay again" in text for text in alerts)
+
+
+@pytest.mark.parametrize("legacy_outcome", [None, "funding_pending"])
+@pytest.mark.parametrize("channel", ["payment_approval", "checkpoint", "email", "telegram"])
+def test_unclassified_legacy_oneoff_intent_holds_before_every_consent_route(
+    approval_env, monkeypatch, channel, legacy_outcome
+):
+    import consent_email
+    import monedula
+    import payment_approval
+    from handlers.payment_profile import PaymentProfile
+
+    world, approvals = approval_env
+    world.handler = wise.WiseTransferHandler(PaymentProfile(
+        prefix="INVOICE", label="Synthetic invoice", calendar_keywords=[],
+        payment_type="wise", amount_eur=10, due_date="2026-01-01",
+        one_off=True, wise_recipient_id=5, wise_recipient_name="Synthetic",
+        entity_id="old-profile", neotoma_task_id="old-task",
+    ))
+    old_key = _old_obligation_key(world.handler, "2026-01-02")
+    path = consent_email.journal_path()
+    journal.record_intent(path, old_key, "old-token", generation=1)
+    assert set(journal.load(path)["obligations"][old_key]) == {
+        "state", "token", "generation", "intent_at"
+    }
+    if legacy_outcome:
+        data = journal.load(path)
+        data["obligations"][old_key].update(
+            state=journal.STATE_DONE, outcome_status=legacy_outcome, outcome_at=time.time()
+        )
+        journal._write(path, data)
+    old = journal.load(path)["obligations"][old_key]
+    item = consent_email.build_pending_items(
+        [(world.handler, world.handler.matches([]))], "2026-11-18"
+    )[0]
+    assert consent_email.journal_state_for_item(journal.load(path), item) == journal.STATE_INTENT
+    monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", channel)
+    monkeypatch.setattr(payment_approval, "collect", lambda *a, **k:
+                        pytest.fail("default consent offered a second attempt"))
+    monkeypatch.setattr(consent_email, "request_and_collect", lambda *a, **k:
+                        pytest.fail("email offered a second attempt"))
+    monkeypatch.setattr(monedula, "telegram_send", lambda *a, **k:
+                        pytest.fail("Telegram offered a second attempt"))
+    monkeypatch.setattr(wise, "_create_transfer", lambda *a, **k:
+                        pytest.fail("second Wise transfer created"))
+    world.tick()
+    assert approvals.writes == 0
+    assert journal.load(path)["obligations"][old_key] == old
+
+
+def test_settled_older_invoice_does_not_hide_later_invoice(approval_env, monkeypatch):
+    import consent_email
+    from handlers.payment_profile import PaymentProfile
+
+    world, approvals = approval_env
+    world.handler = wise.WiseTransferHandler(PaymentProfile(
+        prefix="INVOICE", label="Later invoice", calendar_keywords=[],
+        payment_type="wise", amount_eur=10, due_date="2026-02-01",
+        one_off=True, wise_recipient_id=5, wise_recipient_name="Synthetic",
+        entity_id="later-profile", neotoma_task_id="later-task",
+    ))
+    old_key = _old_obligation_key(world.handler, "2026-01-01")
+    path = consent_email.journal_path()
+    journal.record_intent(path, old_key, "old-token", generation=1,
+                          rail="wise", handler_name=world.handler.name,
+                          payment_date="2026-01-01")
+    journal.record_transfer_created(path, old_key, 3)
+    journal.record_wise_status(path, old_key, 3, "outgoing_payment_sent",
+                               datetime.now(timezone.utc).isoformat())
+    monkeypatch.setattr(wise, "_wise_get", lambda *a: pytest.fail("Wise read not due"))
+    world.tick()
+    assert approvals.writes == 1
+    assert approvals.only["payment_key"] != old_key
 
 
 @pytest.mark.parametrize("failure", ["account", "quote", "token", "create", "rejected"])
