@@ -2732,15 +2732,9 @@ def run_entrypoint() -> int:
         if clean:
             _notify("monedula run complete", priority="info")
         else:
-            # False covers two distinct availability failures: a stranded
-            # payment profile (ateles#553) and a Telegram consent-channel
-            # failure while a payment was pending (ateles#554). Either way, a
-            # payment that should have been possible — or askable — was not.
-            # Exiting 0 here is what let sixteen consecutive days of #553 and
-            # ten weeks of #554 read as clean runs.
             log.error(
-                "Monedula run completed with a STRANDED payment profile or a "
-                "FAILED consent channel — see the escalations filed in Neotoma."
+                "Monedula run incomplete — check payment reconciliation, "
+                "profile, and consent alerts."
             )
         _record_notify_health()
         if not clean:

@@ -726,7 +726,7 @@ def test_entrypoint_journal_failure_uses_fixed_alert_and_nonzero(
     assert not any("fatal error" in msg for msg, _ in alerts)
 
 
-def test_reconcile_read_failure_makes_main_nonclean(tmp_path, monkeypatch):
+def test_reconcile_read_failure_makes_main_nonclean(tmp_path, monkeypatch, caplog):
     import monedula
     import consent_email
     import types
@@ -743,6 +743,7 @@ def test_reconcile_read_failure_makes_main_nonclean(tmp_path, monkeypatch):
         amount_eur=1, calendar_keywords=[], due_date="",
     ))
     monkeypatch.setattr(consent_email, "STATE_FILE", tmp_path / "consent.json")
+    monkeypatch.setattr(monedula, "STATE_FILE", tmp_path / "last_run")
     monkeypatch.setitem(sys.modules, "handlers", types.SimpleNamespace(
         load_handlers=lambda rows: [handler]
     ))
@@ -756,6 +757,10 @@ def test_reconcile_read_failure_makes_main_nonclean(tmp_path, monkeypatch):
     monkeypatch.setattr(monedula, "escalate_strandings", lambda rows: rows)
     assert monedula.main() is False
     assert any("read failed" in msg and "do not pay again" in msg for msg in alerts)
+    monkeypatch.setattr(monedula, "_record_notify_health", lambda: None)
+    assert monedula.run_entrypoint() == 1
+    assert "Monedula run incomplete" in caplog.text
+    assert "monedula run complete" not in alerts
 
 
 def test_reconcile_schedule_write_failure_uses_journal_alert(attempt, monkeypatch):
