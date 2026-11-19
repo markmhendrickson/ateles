@@ -5718,50 +5718,56 @@ _held_checkpoint_unreconstructable_warned: dict[tuple[str, str], None] = {}
 HELD_CHECKPOINT_WARNING_CACHE_LIMIT = 1024
 
 
-def _reconcile_missing_checkpoint(task_id: str, *, apply: bool, now: datetime | None = None) -> str:
+def _reconcile_missing_checkpoint(
+    task_id: str, *, apply: bool, now: datetime | None = None,
+    skip_reasons: dict[str, int] | None = None,
+) -> str:
     """Recover one gate hold only when its present lifecycle decision is provable."""
+    def unknown(reason: str) -> str:
+        if skip_reasons is not None:
+            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+        return "unreconstructable"
+
     if _gate_hold_is_in_flight(task_id):
         return "skipped_in_flight"
     first = fetch_task_record(task_id)
     snapshot = _record_snapshot(first)
     if snapshot is None:
-        return "unreconstructable"
+        return unknown("task_snapshot_unreadable")
     if normalize_status(snapshot.get("status")) != TaskStatus.AWAITING_APPROVAL.value:
         return "skipped_by_reason"
     # last_observation_at is at or after the hold observation. A later task
     # update can only delay recovery, never make a fresh hold look old.
     observed_at = first.get("last_observation_at")
     if not isinstance(observed_at, str):
-        return "unreconstructable"
+        return unknown("hold_time_missing")
     try:
         hold_time = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
     except ValueError:
-        return "unreconstructable"
+        return unknown("hold_time_invalid")
     if hold_time.tzinfo is None:
-        return "unreconstructable"
+        return unknown("hold_time_invalid")
     if ((now or datetime.now(timezone.utc)) - hold_time).total_seconds() < HELD_CHECKPOINT_SWEEP_MIN_AGE_SECONDS:
         return "skipped_fresh"
     existing = checkpoints_for_task(task_id, strict=True)
     if existing is None or any(_malformed_checkpoint_row(row, task_id) for row in existing):
-        return "unreconstructable"
+        return unknown("checkpoint_collection_unreadable")
     pending, answered, _superseded, unknown_answer = _classify_checkpoints_for_hold(
         existing, first, hold_time=hold_time.astimezone(timezone.utc),
         hold_observation_id=(first.get("provenance") or {}).get("blocked_reason"),
     )
     if unknown_answer:
-        return "unreconstructable"
+        return unknown("checkpoint_answer_unknown")
     if pending:
-        return (
-            "held_with_checkpoint"
-            if any(_checkpoint_authority_state(row["entity_id"], first) == "current" for row in pending)
-            else "unreconstructable"
-        )
+        if any(_checkpoint_authority_state(row["entity_id"], first) == "current" for row in pending):
+            return "held_with_checkpoint"
+        return unknown("pending_checkpoint_authority_unknown")
     if answered:
         return "skipped_by_reason"
     reason = snapshot.get("blocked_reason")
     observation_id = (first.get("provenance") or {}).get("blocked_reason")
     if not isinstance(reason, str) or not reason or not isinstance(observation_id, str) or not observation_id:
-        return "unreconstructable"
+        return unknown("hold_observation_missing")
     skill, action_type, policy, decision = _task_gate_context(snapshot)
     action_resolution = _resolve_gate_action_type(skill or "", snapshot, policy)
     if action_resolution.note and decision.action != GateAction.AUTO_EXECUTE:
@@ -5776,13 +5782,13 @@ def _reconcile_missing_checkpoint(task_id: str, *, apply: bool, now: datetime | 
         or decision.action == GateAction.AUTO_EXECUTE
         or decision.reason != reason
     ):
-        return "skipped_by_reason" if policy.loaded and decision.reason != reason else "unreconstructable"
+        return "skipped_by_reason" if policy.loaded and decision.reason != reason else unknown("gate_context_unavailable")
     # A producer score used only in the dispatch process is absent from the
     # held task. Its numeric value cannot be recovered from a generic reason.
     # The explicit "not scored" reason is the one case that proves the gate
     # used the deterministic mechanical estimate instead.
     if not _confidence_is_explicit(snapshot) and not reason.startswith("not scored by a producer"):
-        return "unreconstructable"
+        return unknown("producer_confidence_unavailable")
     if not apply:
         return "candidate"
 
@@ -5790,7 +5796,7 @@ def _reconcile_missing_checkpoint(task_id: str, *, apply: bool, now: datetime | 
         return "skipped_in_flight"
     tenant_id = str(fetch_entity_user_id(task_id) or "").strip()
     if not tenant_id:
-        return "unreconstructable"
+        return unknown("tenant_unavailable")
     # A desk may cancel or release this task while the checkpoint listing is
     # being read. Bind the signed brief to a fresh, still-held task revision.
     current = fetch_task_record(task_id)
@@ -5809,13 +5815,13 @@ def _reconcile_missing_checkpoint(task_id: str, *, apply: bool, now: datetime | 
     # restore a resolved checkpoint from a stale listing.
     refreshed = checkpoints_for_task(task_id, strict=True)
     if refreshed is None or any(_malformed_checkpoint_row(row, task_id) for row in refreshed):
-        return "unreconstructable"
+        return unknown("checkpoint_collection_unreadable")
     refreshed_pending, refreshed_answered, _, refreshed_unknown = _classify_checkpoints_for_hold(
         refreshed, current, hold_time=hold_time.astimezone(timezone.utc),
         hold_observation_id=observation_id,
     )
     if refreshed_pending or refreshed_answered or refreshed_unknown:
-        return "skipped_by_reason" if not refreshed_unknown else "unreconstructable"
+        return "skipped_by_reason" if not refreshed_unknown else unknown("checkpoint_answer_unknown")
     held_title, summary, alternatives = _gate_hold_write_details(
         current_snapshot, skill, action_type, decision
     )
@@ -5833,7 +5839,7 @@ def _reconcile_missing_checkpoint(task_id: str, *, apply: bool, now: datetime | 
         alternatives=alternatives,
     )
     if not brief_id:
-        return "unreconstructable"
+        return unknown("checkpoint_write_unproven")
     readback = fetch_checkpoint_record(brief_id)
     after_task = fetch_task_record(task_id)
     if (
@@ -5844,7 +5850,7 @@ def _reconcile_missing_checkpoint(task_id: str, *, apply: bool, now: datetime | 
         != TaskStatus.AWAITING_APPROVAL.value
         or _checkpoint_authority_state(brief_id, after_task) != "current"
     ):
-        return "unreconstructable"
+        return unknown("checkpoint_readback_unproven")
     return "raised"
 
 
@@ -5852,6 +5858,7 @@ def sweep_missing_gate_checkpoints(
     *, apply: bool = False, offset: int = 0, clock=time.monotonic,
     now=lambda: datetime.now(timezone.utc),
     candidates: list[dict[str, str]] | None = None,
+    skip_reasons: dict[str, int] | None = None,
 ) -> tuple[dict[str, int], int]:
     """One bounded page of recent held tasks; return counts and next offset."""
     counts = {key: 0 for key in (
@@ -5870,6 +5877,8 @@ def sweep_missing_gate_checkpoints(
     )
     if page is None or not isinstance(page.get("entities"), list):
         counts["unreconstructable"] += 1
+        if skip_reasons is not None:
+            skip_reasons["task_page_unreadable"] = skip_reasons.get("task_page_unreadable", 0) + 1
         return counts, offset
     rows = page["entities"]
     total = page.get("total")
@@ -5882,6 +5891,8 @@ def sweep_missing_gate_checkpoints(
         or ("has_more" in page and page["has_more"] != (offset + len(rows) < total))
     ):
         counts["unreconstructable"] += 1
+        if skip_reasons is not None:
+            skip_reasons["task_page_incomplete_or_malformed"] = skip_reasons.get("task_page_incomplete_or_malformed", 0) + 1
         return counts, offset
     for row in rows:
         if clock() >= deadline:
@@ -5890,13 +5901,21 @@ def sweep_missing_gate_checkpoints(
         task_id = row.get("entity_id") if isinstance(row, dict) else None
         if not isinstance(task_id, str) or not task_id:
             counts["unreconstructable"] += 1
+            if skip_reasons is not None:
+                skip_reasons["task_id_missing"] = skip_reasons.get("task_id_missing", 0) + 1
             continue
         try:
-            outcome = _reconcile_missing_checkpoint(task_id, apply=apply, now=now())
+            outcome = _reconcile_missing_checkpoint(
+                task_id, apply=apply, now=now(), skip_reasons=skip_reasons
+            )
         except Exception as exc:  # noqa: BLE001 — one task cannot stop recovery
             log.debug("[%s] held-checkpoint sweep read failed for %s: %s", DAEMON_NAME, task_id, type(exc).__name__)
             outcome = "unreconstructable"
+            if skip_reasons is not None:
+                skip_reasons["task_reconciliation_error"] = skip_reasons.get("task_reconciliation_error", 0) + 1
         counts[outcome] += 1
+        if outcome.startswith("skipped_") and skip_reasons is not None:
+            skip_reasons[outcome] = skip_reasons.get(outcome, 0) + 1
         if outcome == "unreconstructable":
             try:
                 current_record = fetch_task_record(task_id)

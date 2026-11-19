@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 import sys
 from pathlib import Path
 
@@ -345,6 +346,24 @@ def test_gate_hold_cli_dry_run_exits_one_on_unreconstructable(monkeypatch, capsy
     monkeypatch.setattr(sys, "argv", ["reissue_held_checkpoints.py", "--gate-hold-only"])
     assert cli.main() == 1
     assert '"unreconstructable": 1' in capsys.readouterr().out
+
+
+def test_gate_hold_cli_summary_counts_unreconstructable_skip_reasons(
+    recovery, monkeypatch, capsys
+):
+    state, _, _ = recovery
+    state["task"] = task(observation="")
+    monkeypatch.setattr(apis, "query_entities", lambda *a, **kw: {
+        "entities": [{"entity_id": "ent_task"}], "total": 1,
+    })
+    monkeypatch.setattr(sys, "argv", ["reissue_held_checkpoints.py", "--gate-hold-only"])
+
+    assert cli.main() == 1
+
+    summary = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert summary["skip_reasons"]["hold_observation_missing"] == 1
+    assert summary["counts"]["unreconstructable"] == 1
+    assert state["writes"] == 0
 
 
 def test_gate_hold_recovery_has_one_cli_entry_point():

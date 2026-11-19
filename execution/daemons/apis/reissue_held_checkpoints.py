@@ -93,12 +93,16 @@ def main() -> int:
         if args.task or args.limit is not None:
             parser.error("--gate-hold-only cannot be combined with --task or --limit")
         candidates: list[dict[str, str]] = []
+        skip_reasons: dict[str, int] = {}
         counts, next_offset = sweep_missing_gate_checkpoints(
-            apply=args.apply, candidates=candidates
+            apply=args.apply, candidates=candidates, skip_reasons=skip_reasons
         )
         for candidate in candidates:
             print(json.dumps(candidate, sort_keys=True))
-        print(json.dumps({"counts": counts, "next_offset": next_offset}, sort_keys=True))
+        print(json.dumps({
+            "counts": counts, "next_offset": next_offset,
+            "skip_reasons": skip_reasons,
+        }, sort_keys=True))
         return 1 if counts["unreconstructable"] else 0
 
     # One meaning for --limit in both modes: the first N tasks, in order.  The
