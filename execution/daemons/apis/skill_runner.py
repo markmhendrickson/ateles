@@ -1764,21 +1764,46 @@ def _known_secret_values() -> list[str]:
     return values
 
 
-def _output_skeleton(line: str) -> str:
-    """A line reduced to its visible letters: escapes, format and combining characters removed,
-    compatibility forms folded, percent-escapes decoded, case folded."""
-    import unicodedata
+_BACKSLASH_ESCAPE_RE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2}))")
+
+
+def _decode_escapes(text: str) -> str:
+    """Decode percent-escapes (repeatedly), HTML entities and backslash-u/x escapes until stable."""
+    import html
     from urllib.parse import unquote
 
-    text = _strip_terminal_escapes(line)
-    for _ in range(4):  # repeated percent-encoding; stops as soon as a pass changes nothing
+    for _ in range(4):
         decoded = unquote(text)
+        decoded = html.unescape(decoded)
+        decoded = _BACKSLASH_ESCAPE_RE.sub(lambda m: chr(int(m.group(1) or m.group(2), 16)), decoded)
         if decoded == text:
             break
         text = decoded
+    return text
+
+
+def _output_skeleton(line: str) -> str:
+    """A line reduced to its visible letters: escapes, format, combining characters and inner spacing
+    removed, compatibility forms folded, percent / entity / backslash escapes decoded, case folded."""
+    import unicodedata
+
+    text = _decode_escapes(_strip_terminal_escapes(line))
     text = unicodedata.normalize("NFKC", text)
-    text = "".join(ch for ch in text if unicodedata.category(ch) not in {"Cf", "Mn", "Me", "Cc"})
-    return text.casefold()
+    text = "".join(ch for ch in text if unicodedata.category(ch) not in {"Cf", "Mn", "Me", "Cc", "Zs"})
+    return "".join(text.split()).casefold()
+
+
+def _encoded_secret_forms(secret: str) -> list[str]:
+    """Other encodings of a secret that must not appear in persisted output (case-sensitive forms)."""
+    import base64
+
+    raw = secret.encode("utf-8", "replace")
+    forms = {
+        base64.b64encode(raw).decode(), base64.urlsafe_b64encode(raw).decode(),
+        base64.b64encode(raw).decode().rstrip("="), base64.urlsafe_b64encode(raw).decode().rstrip("="),
+        raw.hex(), raw.hex().upper(), secret[::-1],
+    }
+    return [f for f in forms if len(f) >= 8]
 
 
 def _redact_output_text(text: str) -> str:
@@ -1787,10 +1812,14 @@ def _redact_output_text(text: str) -> str:
     form can hide the exact value) is replaced as a whole, so nothing recoverable is kept."""
     secrets = _known_secret_values()
     skeleton_secrets = [sk for sk in (_output_skeleton(secret) for secret in secrets) if sk]
+    encoded_forms = [form for secret in secrets for form in _encoded_secret_forms(secret)]
     lines = _redact_secrets(_strip_terminal_escapes(text or "")).splitlines(keepends=True)
     bodies = [line.rstrip("\r\n") for line in lines]
-    skeletons = ["".join(_output_skeleton(body).split()) for body in bodies]
-    hidden: set[int] = set()
+    skeletons = [_output_skeleton(body) for body in bodies]
+    hidden: set[int] = {
+        index for index, body in enumerate(bodies)
+        if any(form in body or form in "".join(_decode_escapes(body).split()) for form in encoded_forms)
+    }
     for sk in skeleton_secrets:
         needle = "".join(sk.split())
         if not needle:
@@ -1883,6 +1912,11 @@ def write_dispatch_failure_log(
             if blocked_by_agent else DISPATCH_FAILURE_LOG_DIR
         )
         log_dir.mkdir(parents=True, exist_ok=True)
+        if blocked_by_agent:
+            try:
+                os.chmod(log_dir, 0o700)  # the file names (skill and time) are private too
+            except OSError:
+                pass
         path = log_dir / f"{_slug(skill)}-{ts}.log"
 
         header = [

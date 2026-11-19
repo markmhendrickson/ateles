@@ -3586,6 +3586,49 @@ class TestDispatchFailureDiagnostics:
             skill_runner._CHILD_CREDENTIAL_VALUES.clear()
             skill_runner._CHILD_CREDENTIAL_VALUES.update(before)
 
+    @pytest.mark.parametrize("blocked", [False, True])
+    @pytest.mark.parametrize("form", ["html_entity", "backslash_u", "backslash_x", "spaced", "base64", "base64_urlsafe",
+                                      "hex", "reversed", "mixed"])
+    def test_other_disguises_of_a_credential_never_survive(self, tmp_path, blocked, form) -> None:
+        import base64
+
+        fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+        raw = fake_value.encode()
+        forms = {
+            "html_entity": fake_value[:5] + "&#x54;" + fake_value[6:],
+            "backslash_u": fake_value[:5] + "\\u0054" + fake_value[6:],
+            "backslash_x": fake_value[:5] + "\\x54" + fake_value[6:],
+            "spaced": " ".join(fake_value),
+            "base64": base64.b64encode(raw).decode(),
+            "base64_urlsafe": base64.urlsafe_b64encode(raw).decode(),
+            "hex": raw.hex(),
+            "reversed": fake_value[::-1],
+            "mixed": "%46AKE-" + "&#84;EST-" + "TOKEN-VALUE-0000",
+        }
+        disguised = forms[form]
+        with (
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"),
+            patch.dict("os.environ", {"GITHUB_TOKEN": fake_value}, clear=False),
+        ):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1,
+                stdout=f"keep one\nleak {disguised} end\nkeep two", stderr="", blocked_by_agent=blocked,
+            )
+            reason = skill_runner._redact_output_text(f"needs {disguised} now")
+        body = Path(path).read_text(encoding="utf-8")
+        assert disguised not in body and disguised not in reason
+        assert "keep one" in body and "keep two" in body
+        assert "redacted" in body and "redacted" in reason
+
+    def test_the_blocked_runs_directory_is_private(self, tmp_path) -> None:
+        import stat
+
+        with patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="cicada", role="cicada", returncode=1, stdout="x", stderr="", blocked_by_agent=True,
+            )
+        assert stat.S_IMODE(Path(path).parent.stat().st_mode) == 0o700
+
     def test_the_helper_definitions_are_not_duplicated(self) -> None:
         source = Path(skill_runner.__file__).read_text(encoding="utf-8")
         for name in ("_ANSI_ESCAPE_RE = ", "def _strip_terminal_escapes", "def _remember_child_environment_credentials"):
