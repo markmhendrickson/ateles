@@ -39,12 +39,16 @@ NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
 # ---------------------------------------------------------------------------
 
 _NEOTOMA_ENV_FILE = Path.home() / ".config" / "neotoma" / ".env"
-if _NEOTOMA_ENV_FILE.exists():
-    for _line in _NEOTOMA_ENV_FILE.read_text().splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _, _v = _line.partition("=")
-            os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
+
+
+def _load_daemon_env() -> None:
+    """Load private daemon configuration only at the real CLI entry point."""
+    if _NEOTOMA_ENV_FILE.exists():
+        for line in _NEOTOMA_ENV_FILE.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 # ---------------------------------------------------------------------------
 # lib/notify integration (path bootstrap required before import)
@@ -54,7 +58,9 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from lib.daemon_runtime.logging_setup import configure_daemon_logging
+from lib.daemon_runtime.logging_setup import configure_daemon_logging  # noqa: E402
+from handlers.wise_transfer import WiseTransferHandler  # noqa: E402
+from handler_base import STATUS_FUNDING_PENDING  # noqa: E402
 
 # The notifier is built lazily and RETRIED on every use while it is missing.
 # It used to be built once at import with the failure swallowed, so a Neotoma
@@ -253,7 +259,7 @@ def _notify(
 # The lowest priority the Notifier actually delivers is WARN: INFO is dropped
 # there unconditionally (lib/notify/notifier.py, _send_locked), so the "payment
 # sent" confirmation is sent as WARN, not INFO.
-_OUTCOME_CATEGORIES = {"sent", "manual_required", "failed"}
+_OUTCOME_CATEGORIES = {"sent", STATUS_FUNDING_PENDING, "manual_required", "failed"}
 
 
 def _outcome_alert(item: Any, result: Any) -> tuple[str, str]:
@@ -279,6 +285,12 @@ def _outcome_alert(item: Any, result: Any) -> tuple[str, str]:
     )
     if category == "sent":
         return "warn", f"monedula: payment SENT for {who}."
+    if category == STATUS_FUNDING_PENDING:
+        return (
+            "blocker",
+            f"monedula: payment submitted; not confirmed; do not pay again for {who}. "
+            "The existing Wise transfer will be checked on later ticks.",
+        )
     if category == "manual_required":
         return (
             "blocker",
@@ -1636,14 +1648,14 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                 state = payment_journal.session_state(data, key)
                 if state in payment_journal.SESSION_TERMINAL:
                     continue
-                if state is None and any(
-                    payment_journal.obligation_state(data, legacy) is not None
+                legacy_states = {
+                    payment_journal.obligation_state(data, legacy)
                     for legacy in legacy_obligation_keys(
                         handler, match, matches, _yesterday().isoformat()
                     )
-                ):
-                    # Cutover guard: paid (or intent recorded) under the key the
-                    # pre-session-window code used. Never raise it again.
+                }
+                if state is None and payment_journal.STATE_DONE in legacy_states:
+                    # Only a settled legacy obligation closes the session.
                     log.warning(
                         f"session {key} already has a journaled obligation under "
                         "the legacy key — marking settled, not raising"
@@ -1654,6 +1666,14 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                     payment_journal.set_session_state(
                         jpath, key, payment_journal.SESSION_SETTLED
                     )
+                    continue
+                if legacy_states & {
+                    payment_journal.STATE_INTENT, payment_journal.STATE_FUNDING_PENDING,
+                    payment_journal.STATE_FAILED,
+                }:
+                    seen_keys.add(key)
+                    if state is None:
+                        payment_journal.note_pending(jpath, key, ended_at=_match_ended_at(match))
                     continue
                 seen_keys.add(key)
                 if state is None:
@@ -1666,6 +1686,13 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
         if reconcile:
             for key in payment_journal.pending_sessions(data):
                 if key not in seen_keys:
+                    if any(
+                        entry.get("rail") == "wise"
+                        and entry.get("session_key") == key
+                        and entry.get("outcome_status") != "sent"
+                        for entry in data["obligations"].values()
+                    ):
+                        continue
                     log.warning(
                         "Pending session no longer matches an event/profile — dropping."
                     )
@@ -1709,6 +1736,145 @@ def _resolve_sessions(triggered: list[tuple], state: str) -> None:
                 log.error(f"could not record session {state}: {exc}")
 
 
+def _apply_confirmed_wise_effects(path: Path, obligation: str, entry: dict, profiles: dict) -> bool:
+    """Idempotently finish task and session effects after a transfer read."""
+    import payment_journal
+    from datetime import datetime, timezone
+    from handlers.wise_transfer import _update_task
+
+    transfer_id = entry["transfer_id"]
+    profile = profiles.get(entry.get("handler_name"))
+    paid_date = datetime.fromtimestamp(entry["outcome_at"], timezone.utc).date().isoformat()
+    task_ok = bool(profile) and _update_task(
+        profile, {"status": "sent", "transfer_id": transfer_id, "paid_at_date": paid_date}
+    )
+    session_key = entry.get("session_key")
+    if session_key:
+        payment_journal.set_session_state(path, session_key, payment_journal.SESSION_SETTLED)
+    if task_ok:
+        payment_journal.mark_wise_effects_applied(path, obligation, transfer_id)
+        return True
+    _notify(
+        f"monedula: confirmed Wise transfer [{obligation[:12]}] "
+        "needs task bookkeeping; do not pay again.",
+        priority="blocker", dedupe_key=f"monedula:wise_task:{obligation}",
+    )
+    return False
+
+
+def _reconcile_wise_entries(handlers: list) -> bool:
+    """Check every unresolved Wise transfer, independent of calendar matching."""
+    import payment_journal
+    from consent_email import journal_path
+    from wise_reconcile import RETURN_STATUSES, read_transfer_status
+
+    path = journal_path()
+    try:
+        data = payment_journal.load(path)
+    except payment_journal.JournalError as exc:
+        log.error("payment_journal_unreadable during Wise reconciliation: %s", exc)
+        return False
+    wise_entries = {
+        obligation: entry for obligation, entry in data["obligations"].items()
+        if entry.get("rail") == "wise"
+    }
+    if not wise_entries:
+        return True
+    from handlers.wise_transfer import _wise_get
+
+    profiles = {
+        h.name: h.profile for h in handlers
+        if isinstance(h, WiseTransferHandler)
+    }
+    clean = True
+    for obligation, entry in wise_entries.items():
+        transfer_id = entry.get("transfer_id")
+        if not transfer_id:
+            _notify(
+                f"monedula: Wise attempt [{obligation[:12]}] has no confirmed transfer id; "
+                "outcome unknown; do not pay again.",
+                priority="blocker", dedupe_key=f"monedula:wise_unknown:{obligation}",
+            )
+            clean = False
+            continue
+        # A previously confirmed payment may still need its task/session effects.
+        if entry.get("outcome_status") == "sent" and not entry.get("effects_applied"):
+            try:
+                if not _apply_confirmed_wise_effects(path, obligation, entry, profiles):
+                    clean = False
+            except payment_journal.JournalError as exc:
+                log.error("Wise confirmed effects journal failure: %s", exc)
+                clean = False
+        current = payment_journal.load(path)["obligations"][obligation]
+        if current.get("state") == payment_journal.STATE_DONE:
+            due = current.get("next_check_at")
+            if due is None or time.time() < due:
+                continue
+        elif current.get("last_status") == "bounced_back" and time.time() < current.get(
+            "next_check_at", 0
+        ):
+            continue
+        token = os.environ.get("WISE_API_TOKEN", "").strip()
+        if not token:
+            clean = False
+            _notify(
+                f"monedula: Wise transfer [{obligation[:12]}] could not be checked; "
+                "outcome unknown; do not pay again.",
+                priority="blocker", dedupe_key=f"monedula:wise_read:{obligation}",
+            )
+            continue
+        try:
+            status, occurred_at = read_transfer_status(token, transfer_id, _wise_get)
+            latest_recorded = payment_journal.load(path)["obligations"][obligation].get(
+                "last_occurred_at"
+            )
+            if latest_recorded and occurred_at < latest_recorded:
+                continue
+            first_paid = payment_journal.record_wise_status(
+                path, obligation, transfer_id, status, occurred_at
+            )
+        except Exception as exc:  # network, malformed body, 401/5xx, journal write
+            log.error("Wise transfer read failed for %s: %s", obligation[:12], type(exc).__name__)
+            clean = False
+            _notify(
+                f"monedula: Wise transfer [{obligation[:12]}] read failed; "
+                "outcome unknown; do not pay again.",
+                priority="blocker", dedupe_key=f"monedula:wise_read:{obligation}",
+            )
+            continue
+        if first_paid:
+            _notify(
+                f"monedula: Wise transfer confirmed sent [{obligation[:12]}].",
+                priority="warn", dedupe_key=f"monedula:wise_confirmed:{obligation}",
+            )
+            try:
+                paid_entry = payment_journal.load(path)["obligations"][obligation]
+                if not _apply_confirmed_wise_effects(path, obligation, paid_entry, profiles):
+                    clean = False
+            except payment_journal.JournalError as exc:
+                log.error("Wise confirmed effects journal failure: %s", exc)
+                clean = False
+        elif status in RETURN_STATUSES:
+            _notify(
+                f"monedula: Wise transfer [{obligation[:12]}] status {status}; "
+                "operator review required; do not pay again.",
+                priority="blocker", dedupe_key=f"monedula:wise_return:{obligation}:{status}",
+            )
+        if status == "bounced_back":
+            payment_journal.schedule_wise_check(path, obligation, time.time() + 86400)
+        elif status == "outgoing_payment_sent":
+            from datetime import datetime, timezone
+            from wise_reconcile import next_check_at
+
+            fresh = payment_journal.load(path)["obligations"][obligation]
+            confirmed = datetime.fromtimestamp(fresh["outcome_at"], timezone.utc)
+            next_due = next_check_at(confirmed, datetime.now(timezone.utc))
+            payment_journal.schedule_wise_check(
+                path, obligation, next_due.timestamp() if next_due else None
+            )
+    return clean
+
+
 def main() -> bool:
     """Run one Monedula tick. Returns True for a clean run.
 
@@ -1740,6 +1906,7 @@ def main() -> bool:
     # nothing due. Escalated below (ateles#553).
     strandings: list = []
     all_handlers = load_handlers(strandings)
+    _reconcile_wise_entries(all_handlers)
 
     # Escalate before any early return below. A stranded profile is an
     # operational defect regardless of whether the rest of the run had
@@ -1938,7 +2105,6 @@ def main() -> bool:
             clear_consent_state,
             journal_path,
             match_key,
-            obligation_key,
             request_and_collect,
         )
 
@@ -2049,7 +2215,8 @@ def main() -> bool:
                 log.info(f"Already paid {label} — at-most-once skip.")
                 settled.add(key)
                 continue
-            if state == payment_journal.STATE_INTENT:
+            if state in (payment_journal.STATE_INTENT, payment_journal.STATE_FUNDING_PENDING,
+                         payment_journal.STATE_FAILED):
                 log.error(
                     f"payment_outcome_unknown {label} — a transfer was attempted "
                     "and its outcome was never recorded; holding, not retrying."
@@ -2079,8 +2246,15 @@ def main() -> bool:
                 held_preflight.append(label)
                 continue
             try:
+                wise = isinstance(handler, WiseTransferHandler)
                 payment_journal.record_intent(
-                    jpath, item.obligation, key, generation=item.generation
+                    jpath, item.obligation, key, generation=item.generation,
+                    rail="wise" if wise else None,
+                    handler_name=handler.name if wise else None,
+                    session_key=(
+                        payment_journal.session_key(handler.name, item.match_id)
+                        if wise and item.match_id else None
+                    ),
                 )
             except payment_journal.JournalError as exc:
                 return _journal_failure(str(exc))
@@ -2091,6 +2265,8 @@ def main() -> bool:
                 else None
             )
             try:
+                if wise:
+                    match["_wise_journal"] = (jpath, item.obligation)
                 result = handler.execute(match)
             except Exception as _exc:
                 # The rail may or may not have moved money. The intent stays
@@ -2107,21 +2283,29 @@ def main() -> bool:
                 if isinstance(result, dict)
                 else "unreported"
             )
-            try:
-                payment_journal.record_outcome(jpath, item.obligation, status)
-            except payment_journal.JournalError as exc:
-                unknown.append(label)
-                _notify_unknown_outcome(unknown, yesterday_str)
-                return _journal_failure(str(exc))
+            if wise:
+                if status != STATUS_FUNDING_PENDING:
+                    unknown.append(label)
+                    _notify_unknown_outcome(unknown, yesterday_str)
+                    return _journal_failure("Wise handler returned without pending settlement")
+            else:
+                try:
+                    payment_journal.record_outcome(jpath, item.obligation, status)
+                except payment_journal.JournalError as exc:
+                    unknown.append(label)
+                    _notify_unknown_outcome(unknown, yesterday_str)
+                    return _journal_failure(str(exc))
             all_results.append((handler, result))
-            newly_executed.add(key)
-            if not (isinstance(result, dict) and result.get("status") == "sent"):
+            if not wise:
+                newly_executed.add(key)
+            if status not in ("sent", STATUS_FUNDING_PENDING):
                 log.error(f"payment_not_completed {label}: {result}")
             _outcome_priority, _outcome_body = _outcome_alert(item, result)
             _notify(
                 _outcome_body,
                 priority=_outcome_priority,
-                dedupe_key=f"monedula:payment_outcome:{item.obligation}",
+                dedupe_key=(f"monedula:wise_pending:{item.obligation}" if wise
+                            else f"monedula:payment_outcome:{item.obligation}"),
                 email_eligible=True,
             )
             log.info(f"{label} result: {result}")
@@ -2214,7 +2398,8 @@ def main() -> bool:
             state = payment_journal.obligation_state(journal, item.obligation)
             if state == payment_journal.STATE_DONE:
                 _resolve_sessions([(handler, [match])], "settled")
-            elif state == payment_journal.STATE_INTENT:
+            elif state in (payment_journal.STATE_INTENT, payment_journal.STATE_FUNDING_PENDING,
+                           payment_journal.STATE_FAILED):
                 held_unknown.append(f"{handler.name}:{item.match_id or 'solo'}")
             else:
                 remaining.append(match)
@@ -2333,7 +2518,8 @@ def main() -> bool:
             if state == payment_journal.STATE_DONE:
                 _resolve_sessions([(handler, [match])], "settled")
                 continue
-            if state == payment_journal.STATE_INTENT:
+            if state in (payment_journal.STATE_INTENT, payment_journal.STATE_FUNDING_PENDING,
+                         payment_journal.STATE_FAILED):
                 log.error(f"payment_outcome_unknown {label} — holding, not retrying.")
                 unknown.append(label)
                 _notify_unknown_outcome(unknown, yesterday_str)
@@ -2346,12 +2532,23 @@ def main() -> bool:
                 continue
             token = f"telegram:{obligation}"
             try:
-                payment_journal.record_intent(jpath, obligation, token, generation=0)
+                wise = isinstance(handler, WiseTransferHandler)
+                payment_journal.record_intent(
+                    jpath, obligation, token, generation=0,
+                    rail="wise" if wise else None,
+                    handler_name=handler.name if wise else None,
+                    session_key=(
+                        payment_journal.session_key(handler.name, item.match_id)
+                        if wise and item.match_id else None
+                    ),
+                )
             except payment_journal.JournalError as exc:
                 return _telegram_journal_failure(str(exc))
             log.info(f"Executing {handler.name} payment...")
             _job = _activity.started(f"executing {handler.name} payment") if _activity else None
             try:
+                if wise:
+                    match["_wise_journal"] = (jpath, obligation)
                 result = handler.execute(match)
             except Exception as _exc:
                 if _job:
@@ -2363,12 +2560,17 @@ def main() -> bool:
                 if isinstance(result, dict)
                 else "unreported"
             )
-            try:
-                payment_journal.record_outcome(jpath, obligation, status)
-            except payment_journal.JournalError as exc:
-                _notify_unknown_outcome([label], yesterday_str)
-                return _telegram_journal_failure(str(exc))
-            _resolve_sessions([(handler, [match])], "settled")
+            if wise:
+                if status != STATUS_FUNDING_PENDING:
+                    _notify_unknown_outcome([label], yesterday_str)
+                    return _telegram_journal_failure("Wise handler returned without pending settlement")
+            else:
+                try:
+                    payment_journal.record_outcome(jpath, obligation, status)
+                except payment_journal.JournalError as exc:
+                    _notify_unknown_outcome([label], yesterday_str)
+                    return _telegram_journal_failure(str(exc))
+                _resolve_sessions([(handler, [match])], "settled")
             all_results.append((handler, result))
             log.info(f"{handler.name} result: {result}")
             if _job:
@@ -2423,7 +2625,11 @@ def run_entrypoint() -> int:
     """
     _notify("monedula started", priority="info")
     try:
-        clean = main()
+        import payment_journal
+        from consent_email import journal_path
+
+        with payment_journal.single_writer(journal_path()):
+            clean = main()
         if clean:
             _notify("monedula run complete", priority="info")
         else:
@@ -2461,4 +2667,5 @@ def run_entrypoint() -> int:
 
 
 if __name__ == "__main__":
+    _load_daemon_env()
     sys.exit(run_entrypoint())

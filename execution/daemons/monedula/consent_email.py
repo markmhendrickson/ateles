@@ -403,7 +403,7 @@ def build_request_body(
         if item.obligation in settled:
             note = " | already paid — no reply needed"
         elif item.obligation in unknown:
-            note = " | outcome unknown — held for review, will not be retried"
+            note = " | submitted; not confirmed; do not pay again"
         lines.append(
             f"- {item.handler_name} | {item.payment_date} | {item.label} | "
             f"{CURRENCY} {item.amount_eur} | {marker}{note}"
@@ -728,7 +728,8 @@ def request_and_collect(
         i.obligation
         for i in probe
         if payment_journal.obligation_state(journal, i.obligation)
-        == payment_journal.STATE_INTENT
+        in (payment_journal.STATE_INTENT, payment_journal.STATE_FUNDING_PENDING,
+            payment_journal.STATE_FAILED)
     }
 
     if already_sent:

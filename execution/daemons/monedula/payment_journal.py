@@ -37,11 +37,14 @@ operator reconciliation, never automatic recovery.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import stat
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +57,9 @@ NOT_INITIALIZED = "payment journal not initialized; reconcile and initialize bef
 INIT_REFUSED = "payment journal initialization refused; journal or marker already exists"
 
 STATE_INTENT = "intent"
+STATE_FUNDING_PENDING = "funding_pending"
 STATE_DONE = "done"
+STATE_FAILED = "failed"
 
 
 class JournalError(Exception):
@@ -104,6 +109,26 @@ def load(path: Path) -> dict[str, Any]:
         data["sessions"] = {}
     elif not isinstance(data["sessions"], dict):
         raise JournalError("payment journal malformed")
+    for obligation, entry in data["obligations"].items():
+        if not isinstance(obligation, str) or not isinstance(entry, dict):
+            raise JournalError("payment journal obligation malformed")
+        if entry.get("state") not in (STATE_INTENT, STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED):
+            raise JournalError("payment journal obligation state malformed")
+        if entry.get("rail") == "wise":
+            if (
+                not isinstance(entry.get("customer_transaction_id"), str)
+                or not isinstance(entry.get("attempt"), int)
+                or entry["attempt"] < 1
+                or not isinstance(entry.get("token"), str)
+                or data["consumed_tokens"].get(entry["token"]) != obligation
+            ):
+                raise JournalError("payment journal Wise attempt malformed")
+            transfer_id = entry.get("transfer_id")
+            if entry["state"] in (STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED) and (
+                not isinstance(transfer_id, int) or isinstance(transfer_id, bool)
+                or transfer_id <= 0
+            ):
+                raise JournalError("payment journal Wise transfer id missing")
     try:
         _ensure_marker(marker)
     except JournalError:
@@ -224,6 +249,25 @@ def _write(path: Path, data: dict[str, Any]) -> None:
     _atomic_write(path, data)
 
 
+@contextlib.contextmanager
+def single_writer(path: Path):
+    """Serialize daemon ticks on the existing stable first-use marker inode."""
+    load(path)  # also establishes the marker for a valid legacy journal
+    marker = path.with_name(MARKER_NAME)
+    try:
+        fd = os.open(marker, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if "fd" in locals():
+            os.close(fd)
+        raise JournalError(f"payment journal writer unavailable: {type(exc).__name__}") from exc
+    try:
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def current_generation(path: Path) -> int:
     return int(load(path)["generation"])
 
@@ -239,21 +283,28 @@ def next_generation(path: Path) -> int:
 
 
 def obligation_state(data: dict[str, Any], obligation: str) -> str | None:
-    """``None`` (never attempted), ``intent`` (unknown outcome) or ``done``."""
+    """Return the durable state; an invalid entry always holds or raises."""
     entry = data["obligations"].get(obligation)
-    if not isinstance(entry, dict):
+    if entry is None:
         return None
+    if not isinstance(entry, dict):
+        raise JournalError("payment journal obligation malformed")
     state = entry.get("state")
-    # Anything other than a recorded outcome is treated as unknown — never
-    # as "not attempted" — so a damaged entry cannot license a retry.
-    return STATE_DONE if state == STATE_DONE else STATE_INTENT
+    if state not in (STATE_INTENT, STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED):
+        raise JournalError("payment journal obligation state malformed")
+    if state == STATE_DONE and entry.get("outcome_status") != "sent":
+        return STATE_FAILED  # legacy non-sent outcomes were stored as done
+    return state
 
 
 def token_consumed(data: dict[str, Any], token: str) -> bool:
     return token in data["consumed_tokens"]
 
 
-def record_intent(path: Path, obligation: str, token: str, *, generation: int) -> None:
+def record_intent(
+    path: Path, obligation: str, token: str, *, generation: int, rail: str | None = None,
+    handler_name: str | None = None, session_key: str | None = None,
+) -> None:
     """Durably record intent-to-pay BEFORE the transfer, and read it back.
 
     Refuses (``JournalError``) if the obligation already has an entry or the
@@ -264,12 +315,21 @@ def record_intent(path: Path, obligation: str, token: str, *, generation: int) -
         raise JournalError("obligation already recorded — refusing a second attempt")
     if token in data["consumed_tokens"]:
         raise JournalError("approval token already consumed")
-    data["obligations"][obligation] = {
+    entry = {
         "state": STATE_INTENT,
         "token": token,
         "generation": int(generation),
         "intent_at": time.time(),
     }
+    if rail == "wise":
+        entry.update(
+            rail="wise",
+            attempt=1,
+            customer_transaction_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"wise:{obligation}:1")),
+            handler_name=handler_name,
+            session_key=session_key,
+        )
+    data["obligations"][obligation] = entry
     data["consumed_tokens"][token] = obligation
     _write(path, data)
     back = load(path)
@@ -277,6 +337,183 @@ def record_intent(path: Path, obligation: str, token: str, *, generation: int) -
         back, token
     ):
         raise JournalError("payment intent did not persist")
+    if rail == "wise" and any(
+        back["obligations"][obligation].get(field) != entry[field]
+        for field in ("token", "generation", "attempt", "customer_transaction_id")
+    ):
+        raise JournalError("Wise attempt identity did not persist")
+
+
+def record_transfer_created(path: Path, obligation: str, transfer_id: int) -> None:
+    """Persist the Wise transfer id before the funding POST can begin."""
+    data = load(path)
+    entry = data["obligations"].get(obligation)
+    if (
+        not isinstance(entry, dict)
+        or entry.get("rail") != "wise"
+        or entry.get("state") != STATE_INTENT
+        or entry.get("transfer_id") is not None
+        or not isinstance(transfer_id, int)
+        or isinstance(transfer_id, bool)
+        or transfer_id <= 0
+    ):
+        raise JournalError("Wise transfer id cannot be recorded")
+    entry["transfer_id"] = transfer_id
+    _write(path, data)
+    back = load(path)["obligations"][obligation]
+    if any(back.get(field) != entry[field] for field in (
+        "state", "token", "generation", "attempt", "customer_transaction_id", "transfer_id"
+    )):
+        raise JournalError("Wise transfer id did not persist")
+
+
+def record_funding_pending(
+    path: Path, obligation: str, transfer_id: int, funding_status: str
+) -> None:
+    """Record submission without claiming that the transfer was paid."""
+    data = load(path)
+    entry = data["obligations"].get(obligation)
+    if (
+        not isinstance(entry, dict)
+        or entry.get("rail") != "wise"
+        or entry.get("state") != STATE_INTENT
+        or entry.get("transfer_id") != transfer_id
+        or funding_status not in ("CREATED", "COMPLETED", "PROCESSING", "PENDING")
+    ):
+        raise JournalError("Wise funding pending transition refused")
+    entry["state"] = STATE_FUNDING_PENDING
+    entry["funding_status"] = funding_status
+    entry["funding_at"] = time.time()
+    _write(path, data)
+    back = load(path)["obligations"][obligation]
+    if any(back.get(field) != entry[field] for field in (
+        "state", "token", "generation", "attempt", "customer_transaction_id",
+        "transfer_id", "funding_status",
+    )):
+        raise JournalError("Wise funding pending did not persist")
+
+
+def record_wise_status(
+    path: Path, obligation: str, transfer_id: int, status: str, occurred_at: str
+) -> bool:
+    """Append a checked transfer observation; return True on first paid confirmation."""
+    data = load(path)
+    entry = data["obligations"].get(obligation)
+    if (
+        not isinstance(entry, dict)
+        or entry.get("rail") != "wise"
+        or entry.get("transfer_id") != transfer_id
+        or entry.get("state") not in (STATE_INTENT, STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED)
+        or not occurred_at
+    ):
+        raise JournalError("Wise status transition refused")
+    previous = entry.get("last_occurred_at")
+    if previous and occurred_at < previous:
+        return False  # an older observation must never roll current state back
+    first_paid = status == "outgoing_payment_sent" and entry.get("outcome_status") != "sent"
+    entry["last_status"] = status[:64]
+    entry["last_occurred_at"] = occurred_at
+    entry["last_checked_at"] = time.time()
+    if first_paid:
+        entry["state"] = STATE_DONE
+        entry["outcome_status"] = "sent"
+        entry["outcome_at"] = time.time()
+    elif status in ("funds_refunded", "cancelled") and entry.get("outcome_status") != "sent":
+        entry["state"] = STATE_FAILED
+        entry["outcome_status"] = "failed"
+        entry["failure_status"] = status
+    elif entry.get("state") == STATE_DONE and status != "outgoing_payment_sent":
+        entry["discrepancy_status"] = status[:64]
+    elif entry.get("state") == STATE_INTENT:
+        entry["state"] = STATE_FUNDING_PENDING
+    _write(path, data)
+    back = load(path)["obligations"][obligation]
+    if (back.get("last_status"), back.get("last_occurred_at")) != (status[:64], occurred_at):
+        raise JournalError("Wise status did not persist")
+    if first_paid and back.get("outcome_status") != "sent":
+        raise JournalError("Wise settlement did not persist")
+    return first_paid
+
+
+def mark_wise_effects_applied(path: Path, obligation: str, transfer_id: int) -> None:
+    """Read back the marker after task and session effects were confirmed."""
+    data = load(path)
+    entry = data["obligations"].get(obligation)
+    if (
+        not isinstance(entry, dict)
+        or entry.get("rail") != "wise"
+        or entry.get("transfer_id") != transfer_id
+        or entry.get("outcome_status") != "sent"
+    ):
+        raise JournalError("Wise task effects cannot be marked before settlement")
+    entry["effects_applied"] = True
+    _write(path, data)
+    if load(path)["obligations"][obligation].get("effects_applied") is not True:
+        raise JournalError("Wise task effects marker did not persist")
+
+
+def schedule_wise_check(path: Path, obligation: str, due_at: float | None) -> None:
+    data = load(path)
+    entry = data["obligations"].get(obligation)
+    if not isinstance(entry, dict) or entry.get("rail") != "wise":
+        raise JournalError("Wise check schedule has no attempt")
+    entry["next_check_at"] = due_at
+    _write(path, data)
+    if load(path)["obligations"][obligation].get("next_check_at") != due_at:
+        raise JournalError("Wise check schedule did not persist")
+
+
+def record_approved_replacement_intent(
+    path: Path, obligation: str, token: str, *, generation: int
+) -> None:
+    """Reserve a numbered replacement after the caller verifies fresh approval.
+
+    This does not authorize or execute a transfer. A consent adapter must
+    authenticate the new operator answer before calling it; no automatic
+    path calls this function.
+    """
+    data = load(path)
+    entry = data["obligations"].get(obligation)
+    if (
+        not isinstance(entry, dict)
+        or entry.get("rail") != "wise"
+        or entry.get("state") != STATE_FAILED
+        or entry.get("failure_status") not in ("funds_refunded", "cancelled")
+        or token in data["consumed_tokens"]
+        or token == entry.get("token")
+        or generation <= entry.get("generation", 0)
+    ):
+        raise JournalError("Wise replacement requires terminal failure and fresh approval")
+    attempt = entry.get("attempt")
+    if not isinstance(attempt, int) or attempt < 1:
+        raise JournalError("Wise attempt number malformed")
+    previous = {key: value for key, value in entry.items() if key != "attempts"}
+    attempts = entry.get("attempts", [])
+    if not isinstance(attempts, list):
+        raise JournalError("Wise attempt history malformed")
+    attempts.append(previous)
+    entry.clear()
+    entry.update(
+        state=STATE_INTENT, rail="wise", token=token,
+        generation=generation, intent_at=time.time(), attempt=attempt + 1,
+        customer_transaction_id=str(uuid.uuid5(
+            uuid.NAMESPACE_URL, f"wise:{obligation}:{attempt + 1}"
+        )),
+        handler_name=previous.get("handler_name"),
+        session_key=previous.get("session_key"),
+        attempts=attempts,
+    )
+    data["consumed_tokens"][token] = obligation
+    _write(path, data)
+    back = load(path)["obligations"][obligation]
+    if (
+        back.get("state") != STATE_INTENT
+        or back.get("attempt") != attempt + 1
+        or back.get("token") != token
+        or len(back.get("attempts", [])) != len(attempts)
+        or not token_consumed(load(path), token)
+    ):
+        raise JournalError("Wise replacement intent did not persist")
 
 
 def record_outcome(path: Path, obligation: str, status: str) -> None:
@@ -285,11 +522,13 @@ def record_outcome(path: Path, obligation: str, status: str) -> None:
     entry = data["obligations"].get(obligation)
     if not isinstance(entry, dict):
         raise JournalError("outcome for an obligation with no recorded intent")
-    entry["state"] = STATE_DONE
+    if entry.get("rail") == "wise":
+        raise JournalError("Wise outcome requires a confirmed transfer read")
+    entry["state"] = STATE_DONE if status == "sent" else STATE_FAILED
     entry["outcome_status"] = str(status)[:64]
     entry["outcome_at"] = time.time()
     _write(path, data)
-    if obligation_state(load(path), obligation) != STATE_DONE:
+    if obligation_state(load(path), obligation) != entry["state"]:
         raise JournalError("payment outcome did not persist")
 
 

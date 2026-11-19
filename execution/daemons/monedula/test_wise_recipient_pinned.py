@@ -107,7 +107,7 @@ def test_pinned_recipient_happy_path_transfers_to_that_account(monkeypatch):
     monkeypatch.setattr(wt, "_fund_transfer", lambda *a, **k: {"status": "COMPLETED"})
     monkeypatch.setattr(wt, "_update_task", lambda *a, **k: None)
     res = h.execute({})
-    assert res["status"] == "sent"
+    assert res["status"] == "funding_pending"
     assert seen["target"] == 555
 
 
