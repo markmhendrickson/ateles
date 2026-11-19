@@ -16,15 +16,16 @@ import payment_journal
 
 
 def classify(row: object, data: dict) -> str:
-    if not isinstance(row, dict):
-        return "unreadable_UNRESOLVED"
-    if row.get("rail") == "btc":
+    kind, _ = payment_journal.classify_journal_row(row, data)
+    if isinstance(row, dict) and row.get("rail") == "btc" and kind in {
+        "btc_valid_settled", "btc_valid_unresolved"
+    }:
         return "btc"
-    if payment_journal.is_legacy_settled_wise_row(row):
+    if kind == "legacy_settled":
         return "legacy_settled_sent"
-    if row.get("rail") == "wise" and payment_journal._wise_paid(row, data):
+    if kind == "wise_modern_resolved":
         return "wise_new_resolved_paid"
-    if row.get("rail") == "wise" and isinstance(row.get("profile_entity_id"), str) and row["profile_entity_id"].strip():
+    if isinstance(row, dict) and row.get("rail") == "wise" and isinstance(row.get("profile_entity_id"), str) and row["profile_entity_id"].strip():
         return "wise_new_UNRESOLVED_with_profile_id"
     return "unclassified_UNRESOLVED_all_profiles"
 

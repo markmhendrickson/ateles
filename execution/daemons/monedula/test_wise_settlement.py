@@ -26,7 +26,7 @@ from test_session_payments import _event, world  # noqa: E402,F401
 
 def test_pending_obligation_state_is_distinct_from_intent():
     data = {"obligations": {"synthetic": {"state": "funding_pending"}}}
-    assert journal.obligation_state(data, "synthetic") == "funding_pending"
+    assert journal.obligation_state(data, "synthetic") == "failed"
 
 
 def test_wise_execute_without_journal_context_never_calls_wise(monkeypatch):
@@ -219,7 +219,8 @@ def attempt(tmp_path):
     journal.init_journal(path)
     journal.record_intent(path, "obligation", "approval", generation=1, rail="wise",
                           handler_name="synthetic", session_key="synthetic:session",
-                          profile_entity_id="synthetic-profile")
+                          profile_entity_id="synthetic-profile", task_id="synthetic-task",
+                          approved_terms_hash="synthetic-hash", payment_date="2026-01-01")
     return path
 
 
@@ -241,12 +242,13 @@ def _bind_synthetic_attempt(path, profile, payment_date="2026-01-01"):
     journal._write(path, data)
 
 
-def test_wise_malformed_handler_name_makes_journal_unreadable(attempt):
+def test_wise_malformed_handler_name_holds_profile(attempt):
     data = journal.load(attempt)
     data["obligations"]["obligation"]["handler_name"] = 42
     journal._write(attempt, data)
-    with pytest.raises(journal.JournalError, match="handler name malformed"):
-        journal.load(attempt)
+    loaded = journal.load(attempt)
+    assert journal.classify_journal_row(loaded["obligations"]["obligation"])[0] == "invalid"
+    assert journal.wise_replay_hold(loaded, "synthetic-profile")[0] == "obligation"
 
 
 def test_confirmed_wise_effect_failure_keeps_session_pending_through_sweep(
@@ -341,7 +343,7 @@ def test_settled_wise_event_with_new_id_offers_next_occurrence(approval_env, mon
         path, old.obligation, "old-token", generation=1, rail="wise",
         handler_name=world.handler.name, profile_entity_id=profile.entity_id,
         task_id=profile.neotoma_task_id, payment_date=old.payment_date,
-        match_id=old.match_id,
+        match_id=old.match_id, approved_terms_hash=old.obligation,
     )
     journal.record_transfer_created(path, old.obligation, 3)
     journal.record_wise_status(path, old.obligation, 3, "outgoing_payment_sent",
@@ -483,8 +485,9 @@ def test_malformed_replacement_history_holds(attempt):
     data = journal.load(attempt)
     data["obligations"]["obligation"]["attempts"] = "broken"
     attempt.write_text(json.dumps(data))
-    with pytest.raises(journal.JournalError, match="attempt history malformed"):
-        journal.load(attempt)
+    loaded = journal.load(attempt)
+    assert journal.classify_journal_row(loaded["obligations"]["obligation"])[0] == "invalid"
+    assert journal.wise_replay_hold(loaded, "synthetic-profile")[0] == "obligation"
 
 
 def test_existing_marker_serializes_ticks(attempt):
@@ -932,7 +935,8 @@ def test_returned_invoice_due_date_edit_cannot_offer_fresh_consent(approval_env,
     path = consent_email.journal_path()
     journal.record_intent(path, old.obligation, "old-token", generation=1, rail="wise",
                           handler_name=world.handler.name, profile_entity_id=profile.entity_id,
-                          task_id=profile.neotoma_task_id, payment_date=old.payment_date)
+                          task_id=profile.neotoma_task_id, payment_date=old.payment_date,
+                          approved_terms_hash=old.obligation)
     journal.record_transfer_created(path, old.obligation, 3)
     journal.record_wise_status(path, old.obligation, 3, "outgoing_payment_sent",
                                "2026-01-01T00:00:00Z")
@@ -1232,7 +1236,7 @@ def test_settled_older_invoice_does_not_hide_later_invoice(approval_env, monkeyp
     journal.record_intent(path, old_key, "old-token", generation=1,
                           rail="wise", handler_name=world.handler.name,
                           profile_entity_id="older-profile", task_id="older-task",
-                          payment_date="2026-01-01")
+                          payment_date="2026-01-01", approved_terms_hash=old_key)
     journal.record_transfer_created(path, old_key, 3)
     journal.record_wise_status(path, old_key, 3, "outgoing_payment_sent",
                                datetime.now(timezone.utc).isoformat())
@@ -1262,7 +1266,8 @@ def test_later_invoice_same_profile_is_offered_after_prior_settlement(approval_e
     journal.record_intent(path, old.obligation, "old-token", generation=1, rail="wise",
                           handler_name=world.handler.name, profile_entity_id=profile.entity_id,
                           task_id=profile.neotoma_task_id,
-                          payment_date=old.payment_date, match_id=old.match_id)
+                          payment_date=old.payment_date, match_id=old.match_id,
+                          approved_terms_hash=old.obligation)
     journal.record_transfer_created(path, old.obligation, 3)
     journal.record_wise_status(path, old.obligation, 3, "outgoing_payment_sent",
                                datetime.now(timezone.utc).isoformat())
@@ -1373,10 +1378,10 @@ def test_mixed_offset_status_and_recovered_discrepancy(attempt):
     assert journal.load(attempt)["obligations"]["obligation"]["last_status"] == "outgoing_payment_sent"
 
 
-def test_btc_legacy_done_non_sent_stays_done():
+def test_incomplete_btc_legacy_done_non_sent_holds():
     assert journal.obligation_state({"obligations": {"btc": {
         "state": "done", "outcome_status": "manual_required"
-    }}}, "btc") == "done"
+    }}}, "btc") == "failed"
 
 
 @pytest.mark.parametrize("journal_condition", ["not_initialized", "missing", "malformed", "locked"])
@@ -1703,7 +1708,7 @@ def test_unresolved_profile_holds_changed_obligation_on_every_route(
         path, old.obligation, "old-token", generation=1, rail="wise",
         handler_name=world.handler.name, profile_entity_id=profile.entity_id,
         task_id=profile.neotoma_task_id, payment_date=old.payment_date,
-        match_id=old.match_id,
+        match_id=old.match_id, approved_terms_hash=old.obligation,
     )
     if attempt_state == "submission_unknown":
         data = journal.load(path)
@@ -1965,7 +1970,9 @@ def test_wise_hold_census_matches_journal_for_synthetic_rows(tmp_path, capsys):
     journal.record_intent(path, "old-paid", "old-token", generation=1)
     journal.record_outcome(path, "old-paid", "sent")
     journal.record_intent(path, "new-paid", "new-token", generation=2, rail="wise",
-                          handler_name="synthetic", profile_entity_id="profile-p")
+                          handler_name="synthetic", profile_entity_id="profile-p",
+                          task_id="synthetic-task", approved_terms_hash="synthetic-hash",
+                          payment_date="2026-01-01")
     journal.record_transfer_created(path, "new-paid", 3)
     journal.record_wise_status(path, "new-paid", 3, "outgoing_payment_sent",
                                "2026-11-11T21:00:00Z")
@@ -2092,7 +2099,10 @@ def test_legacy_done_sent_wise_row_settles_same_calendar_event_without_new_conse
     assert list(journal.load(path)["obligations"]) == [old_key]
 
 
-@pytest.mark.parametrize("missing_field", ["last_status", "last_occurred_at", "both"])
+@pytest.mark.parametrize("missing_field", [
+    "last_status", "last_occurred_at", "both", "malformed_timestamp",
+    "btc_tag", "mixed_btc", "unknown_key",
+])
 @pytest.mark.parametrize("route", ["payment_approval", "email", "telegram"])
 def test_stripped_modern_row_cannot_settle_calendar_or_request_payment(
     approval_env, monkeypatch, route, missing_field
@@ -2121,9 +2131,19 @@ def test_stripped_modern_row_cannot_settle_calendar_or_request_payment(
     journal.record_wise_status(path, key, 3, "outgoing_payment_sent",
                                "2026-11-11T21:00:00Z")
     data = journal.load(path)
-    for field in (("last_status", "last_occurred_at") if missing_field == "both"
-                  else (missing_field,)):
-        data["obligations"][key].pop(field)
+    if missing_field == "malformed_timestamp":
+        data["obligations"][key]["last_occurred_at"] = "not-a-date"
+        data["obligations"][key]["next_check_at"] = time.time() + 86400
+    elif missing_field in {"btc_tag", "mixed_btc"}:
+        data["obligations"][key]["rail"] = "btc"
+        if missing_field == "mixed_btc":
+            data["obligations"][key]["unknown_extra"] = True
+    elif missing_field == "unknown_key":
+        data["obligations"][key]["unknown_extra"] = True
+    else:
+        for field in (("last_status", "last_occurred_at") if missing_field == "both"
+                      else (missing_field,)):
+            data["obligations"][key].pop(field)
     journal._write(path, data)
     messages = []
     monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", route)
@@ -2173,6 +2193,160 @@ def test_handler_durable_intent_refuses_another_unresolved_profile_attempt(tmp_p
     journal._write(path, data)
     with pytest.raises(journal.JournalError, match="first"):
         wise._require_wise_intent((path, "second"))
+
+
+def _minimal_sent_row(path):
+    journal.record_transfer_created(path, "obligation", 3)
+    journal.record_wise_status(path, "obligation", 3, "outgoing_payment_sent",
+                               "2026-11-11T21:00:00Z")
+    journal.mark_wise_effects_applied(path, "obligation", 3)
+    journal.set_session_state(path, "synthetic:session", journal.SESSION_SETTLED)
+    return journal.load(path)["obligations"]["obligation"]
+
+
+@pytest.mark.parametrize("field", sorted(journal._MODERN_SETTLED_WISE_FIELDS | {"effects_applied"}))
+@pytest.mark.parametrize("change", ["remove", "wrong_type"])
+def test_every_modern_sent_field_is_validated(attempt, field, change):
+    row = copy.deepcopy(_minimal_sent_row(attempt))
+    assert journal.classify_journal_row(row, journal.load(attempt))[0] == "wise_modern_resolved"
+    if change == "remove":
+        row.pop(field)
+    else:
+        row[field] = []
+    assert journal.classify_journal_row(row, journal.load(attempt))[0] in {
+        "invalid", "wise_modern_unresolved"
+    }, field
+    data = journal.load(attempt)
+    data["obligations"]["obligation"] = row
+    assert journal.wise_replay_hold(data, "synthetic-profile")[0] == "obligation"
+
+
+@pytest.mark.parametrize("field", ["intent_at", "outcome_at", "last_checked_at", "last_occurred_at"])
+@pytest.mark.parametrize("value", ["not-a-date", "2026-11-11T21:00:00", "", 0, float("nan")])
+def test_modern_sent_timestamp_values_hold(attempt, field, value):
+    row = copy.deepcopy(_minimal_sent_row(attempt))
+    row[field] = value
+    assert journal.classify_journal_row(row)[0] == "invalid"
+    data = journal.load(attempt)
+    data["obligations"]["obligation"] = row
+    assert journal.wise_replay_hold(data, "synthetic-profile")[0] == "obligation"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("attempt", True), ("attempt", 0), ("transfer_id", "3"),
+    ("transfer_id", -1), ("generation", True), ("generation", -1),
+    ("token", ""), ("profile_entity_id", ""),
+    ("last_status", "not-a-status"), ("outcome_status", "pending"),
+    ("effects_applied", "true"), ("unknown_extra", "surprise"),
+    ("next_check_at", float("inf")),
+])
+def test_modern_sent_out_of_range_and_extra_fields_hold(attempt, field, value):
+    row = copy.deepcopy(_minimal_sent_row(attempt))
+    row[field] = value
+    assert journal.classify_journal_row(row)[0] == "invalid"
+    data = journal.load(attempt)
+    data["obligations"]["obligation"] = row
+    assert journal.wise_replay_hold(data, "synthetic-profile")[0] == "obligation"
+
+
+@pytest.mark.parametrize("field", sorted(journal._WISE_OPTIONAL_FIELDS))
+def test_every_optional_wise_field_rejects_a_wrong_type(attempt, field):
+    row = copy.deepcopy(_minimal_sent_row(attempt))
+    row[field] = "broken" if field == "attempts" else []
+    assert journal.classify_journal_row(row)[0] == "invalid", field
+
+
+@pytest.mark.parametrize("corruption", ["btc_tag", "missing_btc_field", "mixed_btc", "valid_btc"])
+def test_btc_rows_are_exempt_only_with_their_own_valid_shape(attempt, corruption):
+    row = copy.deepcopy(_minimal_sent_row(attempt))
+    if corruption == "valid_btc":
+        row = {key: row[key] for key in journal._LEGACY_SETTLED_WISE_FIELDS}
+        row["rail"] = "btc"
+    elif corruption == "missing_btc_field":
+        row = {key: row[key] for key in journal._LEGACY_SETTLED_WISE_FIELDS}
+        row["rail"] = "btc"
+        row.pop("outcome_at")
+    elif corruption == "mixed_btc":
+        row["rail"] = "btc"
+        row["extra"] = "mixed"
+    else:
+        row["rail"] = "btc"
+    data = journal.load(attempt)
+    data["obligations"]["obligation"] = row
+    kind, _ = journal.classify_journal_row(row, data)
+    if corruption == "valid_btc":
+        assert kind == "btc_valid_settled"
+        assert journal.wise_replay_hold(data, "synthetic-profile") is None
+    else:
+        assert kind == "invalid"
+        assert journal.wise_replay_hold(data, "synthetic-profile")[0] == "obligation"
+
+
+def test_malformed_modern_status_timestamp_holds_and_cannot_apply_effects(
+    attempt, monkeypatch
+):
+    import consent_email
+    import monedula
+
+    _minimal_sent_row(attempt)
+    data = journal.load(attempt)
+    row = data["obligations"]["obligation"]
+    row["last_occurred_at"] = "not-a-date"
+    row["next_check_at"] = time.time() + 86400
+    row.pop("effects_applied")
+    data["sessions"]["synthetic:session"]["state"] = journal.SESSION_PENDING
+    journal._write(attempt, data)
+    assert journal.classify_journal_row(journal.load(attempt)["obligations"]["obligation"])[0] == "invalid"
+    monkeypatch.setattr(consent_email, "STATE_FILE", attempt.parent / "consent.json")
+    monkeypatch.setattr(wise, "_wise_get", lambda *a, **kw: pytest.fail("invalid row contacted Wise"))
+    monkeypatch.setattr(wise, "_update_task", lambda *a, **kw: pytest.fail("invalid row updated task"))
+    monkeypatch.setattr(monedula, "_notify", lambda *a, **kw: None)
+    assert not monedula._apply_confirmed_wise_effects(attempt, "obligation", row, {})
+    assert not monedula._reconcile_wise_entries([])
+    loaded = journal.load(attempt)
+    assert not loaded["obligations"]["obligation"].get("effects_applied")
+    assert journal.session_state(loaded, "synthetic:session") == journal.SESSION_PENDING
+
+
+@pytest.mark.parametrize("field", sorted(journal._MODERN_SETTLED_WISE_FIELDS))
+def test_corrupt_sent_field_never_updates_task_or_settles_session(
+    attempt, monkeypatch, field
+):
+    import monedula
+    from handlers.payment_profile import PaymentProfile
+
+    profile = PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", payment_type="wise",
+        calendar_keywords=["synthetic"], amount_eur=1,
+        entity_id="synthetic-profile", neotoma_task_id="synthetic-task",
+    )
+    handler = wise.WiseTransferHandler(profile)
+    _bind_synthetic_attempt(attempt, profile)
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                               "2026-11-11T21:00:00Z")
+    data = journal.load(attempt)
+    data["obligations"]["obligation"][field] = []
+    journal._write(attempt, data)
+    calls = []
+    monkeypatch.setattr(wise, "_update_task", lambda *a, **kw: calls.append("task") or True)
+    monkeypatch.setattr(monedula, "_notify", lambda *a, **kw: None)
+    if field == "state":
+        with pytest.raises(journal.JournalError):
+            monedula._apply_confirmed_wise_effects(
+                attempt, "obligation", data["obligations"]["obligation"],
+                {profile.entity_id: handler},
+            )
+        loaded = data
+    else:
+        assert not monedula._apply_confirmed_wise_effects(
+            attempt, "obligation", data["obligations"]["obligation"],
+            {profile.entity_id: handler},
+        )
+        loaded = journal.load(attempt)
+    assert calls == []
+    assert not loaded["obligations"]["obligation"].get("effects_applied")
+    assert journal.session_state(loaded, "synthetic:session") != journal.SESSION_SETTLED
 
 
 def test_wise_hold_has_one_decider_and_all_offer_paths_reach_it():

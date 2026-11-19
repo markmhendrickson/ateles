@@ -692,7 +692,9 @@ def _require_wise_intent(
             raise payment_journal.JournalError(
                 f"Wise attempt {held[0]} holds this profile; check Wise Activity; do not pay again"
             )
-    if (not isinstance(entry, dict) or entry.get("rail") != "wise"
+    if (not isinstance(entry, dict)
+            or payment_journal.classify_journal_row(entry, data)[0] != "wise_modern_unresolved"
+            or entry.get("rail") != "wise"
             or entry.get("state") != payment_journal.STATE_INTENT
             or not isinstance(entry.get("profile_entity_id"), str)
             or not entry["profile_entity_id"].strip()

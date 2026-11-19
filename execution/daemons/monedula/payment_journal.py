@@ -41,11 +41,14 @@ import contextlib
 import fcntl
 import json
 import logging
+import math
 import os
+import re
 import stat
 import tempfile
 import time
 import uuid
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -121,36 +124,11 @@ def load(path: Path) -> dict[str, Any]:
             raise JournalError("payment journal obligation malformed")
         if entry.get("state") not in (STATE_INTENT, STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED):
             raise JournalError("payment journal obligation state malformed")
-        if entry.get("rail") == "wise":
-            if entry.get("handler_name") is not None and not isinstance(
-                entry["handler_name"], str
-            ):
-                raise JournalError("payment journal Wise handler name malformed")
-            if any(field in entry and not isinstance(entry[field], str) for field in (
-                "task_id", "approved_terms_hash", "payment_date", "match_id"
-            )):
-                raise JournalError("payment journal Wise approval binding malformed")
-            if not is_legacy_settled_wise_row(entry) and (
-                not isinstance(entry.get("customer_transaction_id"), str)
-                or not isinstance(entry.get("attempt"), int)
-                or entry["attempt"] < 1
-                or not isinstance(entry.get("token"), str)
-                or data["consumed_tokens"].get(entry["token"]) != obligation
-            ):
-                raise JournalError(f"payment journal Wise attempt {obligation} malformed")
-            attempts = entry.get("attempts", [])
-            if not isinstance(attempts, list) or any(
-                not isinstance(prior, dict)
-                or prior.get("failure_status") not in ("funds_refunded", "cancelled", "not_submitted")
-                or (prior.get("failure_status") != "not_submitted"
-                    and not isinstance(prior.get("transfer_id"), int))
-                or (prior.get("failure_status") == "not_submitted"
-                    and prior.get("transfer_id") is not None)
-                for prior in attempts
-            ):
-                raise JournalError("payment journal Wise attempt history malformed")
-            if not _wise_row_consistent(entry):
-                log.warning("payment journal Wise attempt %s has contradictory outcome; held", obligation)
+        kind, reason = classify_journal_row(entry, data)
+        if kind.startswith("wise_modern") and data["consumed_tokens"].get(entry["token"]) != obligation:
+            raise JournalError(f"payment journal Wise attempt {obligation} malformed")
+        if kind == "invalid":
+            log.warning("payment journal attempt %s invalid (%s); held", obligation, reason)
     try:
         _ensure_marker(marker)
     except JournalError:
@@ -314,93 +292,201 @@ def obligation_state(data: dict[str, Any], obligation: str) -> str | None:
     state = entry.get("state")
     if state not in (STATE_INTENT, STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED):
         raise JournalError("payment journal obligation state malformed")
-    if state == STATE_DONE and entry.get("rail") == "wise" and not _wise_paid(entry, data):
-        return STATE_FAILED  # historical settlement cannot clear a later return
+    kind, _ = classify_journal_row(entry, data)
+    if kind == "invalid" or state == STATE_DONE and entry.get("rail") == "wise" and kind != "wise_modern_resolved":
+        return STATE_FAILED  # malformed or incomplete settlement never clears a hold
     return state
 
 
 _LEGACY_SETTLED_WISE_FIELDS = frozenset({
     "state", "token", "generation", "intent_at", "outcome_status", "outcome_at",
 })
-_MODERN_SETTLED_WISE_FIELDS = frozenset({
-    "rail", "attempt", "customer_transaction_id", "handler_name", "session_key",
-    "profile_entity_id", "task_id", "approved_terms_hash", "payment_date", "match_id",
-    "transfer_id", "last_status", "last_occurred_at", "last_checked_at",
-    "outcome_at",
+_WISE_BASE_FIELDS = frozenset({
+    "state", "token", "generation", "intent_at", "rail", "attempt",
+    "customer_transaction_id", "handler_name", "session_key", "profile_entity_id",
+    "task_id", "approved_terms_hash", "payment_date", "match_id",
 })
+_WISE_OPTIONAL_FIELDS = frozenset({
+    "transfer_id", "create_entered", "funding_status", "funding_at",
+    "last_status", "last_occurred_at", "last_checked_at", "outcome_status",
+    "outcome_at", "failure_status", "discrepancy_status", "effects_applied",
+    "next_check_at", "attempts",
+})
+_MODERN_SETTLED_WISE_FIELDS = _WISE_BASE_FIELDS | frozenset({
+    "transfer_id", "last_status", "last_occurred_at", "last_checked_at",
+    "outcome_status", "outcome_at",
+})
+
+
+def _epoch(value: Any) -> bool:
+    if type(value) not in (int, float) or value <= 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _stamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value or len(value) > 64:
+        return None
+    try:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return stamp if stamp.tzinfo is not None and stamp.utcoffset() is not None else None
+    except ValueError:
+        return None
+
+
+def _text(value: Any, *, nullable: bool = False, empty: bool = False) -> bool:
+    return (nullable and value is None or isinstance(value, str)
+            and len(value) <= 256 and (empty or bool(value.strip())))
+
+
+def classify_journal_row(
+    row: object, data: dict[str, Any] | None = None
+) -> tuple[str, str]:
+    """Classify one complete writer shape; unknown values and keys always hold.
+
+    Session state is needed to call a session-bound Wise payment resolved.
+    The separate BTC branch recognizes only its historical six-field writer
+    shape, with an optional explicit rail tag on migrated rows.
+    """
+    if not isinstance(row, dict):
+        return "invalid", "row is not an object"
+    from wise_reconcile import TRANSFER_STATUSES
+    keys = row.keys()
+    common = {"state", "token", "generation", "intent_at"}
+    if not common <= keys or not _text(row["token"]) or type(row["generation"]) is not int or row["generation"] < 0 or not _epoch(row["intent_at"]):
+        return "invalid", "common fields malformed"
+    if "rail" not in row or row.get("rail") == "btc":
+        base = common | ({"rail"} if row.get("rail") == "btc" else set())
+        allowed = _LEGACY_SETTLED_WISE_FIELDS | ({"rail"} if row.get("rail") == "btc" else set())
+        if "rail" not in row and keys == base and row.get("state") == STATE_INTENT:
+            return "btc_valid_unresolved", "outcome unknown"
+        if keys != allowed or row.get("state") not in (STATE_DONE, STATE_FAILED) or not _text(row.get("outcome_status")) or not _epoch(row.get("outcome_at")):
+            return "invalid", "historical row shape or values malformed"
+        if (row["state"] == STATE_DONE and row["outcome_status"] != "sent"
+                or row["state"] == STATE_FAILED and row["outcome_status"] not in {"failed", "manual_required"}):
+            return "invalid", "historical outcome malformed"
+        if row.get("rail") == "btc":
+            return ("btc_valid_settled" if row["state"] == STATE_DONE and row["outcome_status"] == "sent" else "btc_valid_unresolved"), ""
+        if row["state"] == STATE_DONE and row["outcome_status"] == "sent":
+            return "legacy_settled", ""
+        # Untagged old BTC failures retain the historical all-profile hold.
+        return "btc_valid_unresolved", "untagged historical non-settlement"
+    if row.get("rail") != "wise" or not _WISE_BASE_FIELDS <= keys or not keys <= _WISE_BASE_FIELDS | _WISE_OPTIONAL_FIELDS:
+        return "invalid", "Wise field set or rail malformed"
+    for field in ("handler_name", "session_key"):
+        if not _text(row[field], nullable=True):
+            return "invalid", f"{field} malformed"
+    for field in ("profile_entity_id", "task_id", "approved_terms_hash", "match_id"):
+        if not _text(row[field], empty=field != "profile_entity_id"):
+            return "invalid", f"{field} malformed"
+    if not isinstance(row["payment_date"], str):
+        return "invalid", "payment_date malformed"
+    if row["payment_date"]:
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", row["payment_date"]):
+            return "invalid", "payment_date malformed"
+        try:
+            date.fromisoformat(row["payment_date"])
+        except ValueError:
+            return "invalid", "payment_date malformed"
+    if not isinstance(row["customer_transaction_id"], str):
+        return "invalid", "customer_transaction_id malformed"
+    try:
+        uuid.UUID(row["customer_transaction_id"])
+    except (ValueError, TypeError, AttributeError):
+        return "invalid", "customer_transaction_id malformed"
+    if type(row["attempt"]) is not int or row["attempt"] <= 0:
+        return "invalid", "attempt malformed"
+    if "transfer_id" in row and (type(row["transfer_id"]) is not int or row["transfer_id"] <= 0):
+        return "invalid", "transfer_id malformed"
+    if "create_entered" in row and row["create_entered"] is not True:
+        return "invalid", "create_entered malformed"
+    if "effects_applied" in row and type(row["effects_applied"]) is not bool:
+        return "invalid", "effects_applied malformed"
+    for field in ("intent_at", "outcome_at", "funding_at", "last_checked_at"):
+        if field in row and not _epoch(row[field]):
+            return "invalid", f"{field} malformed"
+    if "next_check_at" in row and row["next_check_at"] is not None and not _epoch(row["next_check_at"]):
+        return "invalid", "next_check_at malformed"
+    status_fields = {"last_status", "last_occurred_at", "last_checked_at"}
+    if keys & status_fields and not status_fields <= keys:
+        return "invalid", "transfer status fields incomplete"
+    if status_fields <= keys:
+        if not isinstance(row.get("last_status"), str) or row["last_status"] not in TRANSFER_STATUSES or _stamp(row.get("last_occurred_at")) is None or not _epoch(row.get("last_checked_at")):
+            return "invalid", "transfer status history malformed"
+        if "transfer_id" not in row:
+            return "invalid", "transfer status lacks transfer id"
+    if "funding_status" in row and (not isinstance(row["funding_status"], str) or row["funding_status"] not in {"CREATED", "COMPLETED", "PROCESSING", "PENDING"} or not _epoch(row.get("funding_at"))):
+        return "invalid", "funding status malformed"
+    if "funding_at" in row and "funding_status" not in row:
+        return "invalid", "funding timestamp without status"
+    if "outcome_status" in row and (not isinstance(row["outcome_status"], str) or row["outcome_status"] not in {"sent", "failed"}):
+        return "invalid", "outcome status malformed"
+    if "outcome_at" in row and ("outcome_status" not in row or not _epoch(row["outcome_at"])) or row.get("outcome_status") == "sent" and not _epoch(row.get("outcome_at")):
+        return "invalid", "outcome timestamp malformed"
+    if "failure_status" in row and (not isinstance(row["failure_status"], str) or row["failure_status"] not in {"funds_refunded", "cancelled", "not_submitted"}):
+        return "invalid", "failure status malformed"
+    if "discrepancy_status" in row and (not isinstance(row["discrepancy_status"], str) or row["discrepancy_status"] not in TRANSFER_STATUSES or row["discrepancy_status"] == "outgoing_payment_sent"):
+        return "invalid", "discrepancy status malformed"
+    if "discrepancy_status" in row and (row.get("state") != STATE_DONE or row.get("outcome_status") != "sent" or row.get("last_status") != row["discrepancy_status"]):
+        return "invalid", "discrepancy contradicts latest status"
+    if "effects_applied" in row and row.get("outcome_status") != "sent":
+        return "invalid", "effects without sent outcome"
+    attempts = row.get("attempts", [])
+    if not isinstance(attempts, list) or len(attempts) != row["attempt"] - 1:
+        return "invalid", "attempt history malformed"
+    for index, prior in enumerate(attempts):
+        if (not isinstance(prior, dict)
+                or not isinstance(prior.get("failure_status"), str)
+                or prior["failure_status"] not in {"funds_refunded", "cancelled", "not_submitted"}):
+            return "invalid", "prior attempt malformed"
+        prior_kind, _ = classify_journal_row({**prior, "attempts": attempts[:index]})
+        if prior_kind != "wise_modern_unresolved":
+            return "invalid", "prior attempt malformed"
+    if attempts and any(_stamp(prior.get("last_occurred_at")) and _stamp(row.get("last_occurred_at")) and _stamp(row["last_occurred_at"]) < _stamp(prior["last_occurred_at"]) for prior in attempts):
+        return "invalid", "latest status predates attempt history"
+    state, outcome, status = row["state"], row.get("outcome_status"), row.get("last_status")
+    if state == STATE_DONE and outcome == "sent":
+        if not all(_text(row.get(field)) for field in (
+            "handler_name", "task_id", "approved_terms_hash", "payment_date"
+        )):
+            return "invalid", "sent attempt binding incomplete"
+        if not _MODERN_SETTLED_WISE_FIELDS <= keys or "failure_status" in row or row.get("discrepancy_status") or status != "outgoing_payment_sent":
+            return "wise_modern_unresolved", "sent outcome lacks current confirmation"
+        if row.get("effects_applied") is not True:
+            return "wise_modern_unresolved", "effects not applied"
+        session = row.get("session_key")
+        if session and (data is None or session_state(data, session) != SESSION_SETTLED):
+            return "wise_modern_unresolved", "session not settled"
+        return "wise_modern_resolved", ""
+    if state == STATE_FAILED and outcome == "failed":
+        if row.get("failure_status") == "not_submitted" and "transfer_id" not in row and "create_entered" not in row and status is None:
+            return "wise_modern_unresolved", "not submitted"
+        if row.get("failure_status") in {"funds_refunded", "cancelled"} and status == row["failure_status"] and "transfer_id" in row:
+            return "wise_modern_unresolved", "terminal failure"
+    if state in (STATE_INTENT, STATE_FUNDING_PENDING) and outcome is None and "failure_status" not in row and "discrepancy_status" not in row and row.get("effects_applied") is not True:
+        if state == STATE_INTENT and status is None or state == STATE_FUNDING_PENDING and "transfer_id" in row:
+            return "wise_modern_unresolved", "awaiting confirmation"
+    return "invalid", "state and outcome contradict"
 
 
 def is_legacy_settled_wise_row(entry: dict[str, Any]) -> bool:
     """Recognize only the settled row emitted by the pre-funding-states writer."""
-    return (
-        isinstance(entry, dict)
-        and entry.keys() == _LEGACY_SETTLED_WISE_FIELDS
-        and entry.get("state") == STATE_DONE
-        and entry.get("outcome_status") == "sent"
-        and isinstance(entry.get("token"), str)
-        and bool(entry["token"])
-        and type(entry.get("generation")) is int
-        and type(entry.get("intent_at")) in (int, float)
-        and type(entry.get("outcome_at")) in (int, float)
-    )
+    return classify_journal_row(entry)[0] == "legacy_settled"
 
 
 def _wise_row_consistent(entry: dict[str, Any]) -> bool:
     """Classify contradictory Wise outcomes as unresolved without hiding the row."""
-    if is_legacy_settled_wise_row(entry):
-        return True
-    if entry.get("rail") != "wise":
-        return False
-    state = entry.get("state")
-    outcome = entry.get("outcome_status")
-    status = entry.get("last_status")
-    discrepancy = entry.get("discrepancy_status")
-    failure = entry.get("failure_status")
-    effects = entry.get("effects_applied")
-    transfer_id = entry.get("transfer_id")
-    has_id = isinstance(transfer_id, int) and not isinstance(transfer_id, bool) and transfer_id > 0
-    if effects is not None and not isinstance(effects, bool) or (effects is True and outcome != "sent"):
-        return False
-    if status is None and "last_occurred_at" not in entry:
-        if state == STATE_FAILED and failure == "not_submitted":
-            return outcome == "failed" and not has_id and not entry.get("create_entered")
-        return (state in (STATE_INTENT, STATE_FUNDING_PENDING)
-                and (state == STATE_INTENT or has_id)
-                and outcome is None and failure is None and discrepancy is None)
-    if not isinstance(status, str) or not status or not entry.get("last_occurred_at"):
-        return False
-    if not has_id:
-        return False
-    if outcome == "sent":
-        if not _MODERN_SETTLED_WISE_FIELDS <= entry.keys():
-            return False
-        return (state == STATE_DONE and failure is None and
-                (status == "outgoing_payment_sent" and discrepancy is None or
-                 status != "outgoing_payment_sent" and discrepancy == status))
-    if outcome == "failed":
-        return (state == STATE_FAILED and status in ("funds_refunded", "cancelled")
-                and failure == status and discrepancy is None)
-    return (outcome is None and state == STATE_FUNDING_PENDING
-            and failure is None and discrepancy is None and effects is not True)
+    return classify_journal_row(entry)[0] in {
+        "legacy_settled", "wise_modern_resolved", "wise_modern_unresolved"
+    }
 
 
 def _wise_paid(entry: dict[str, Any], data: dict[str, Any] | None = None) -> bool:
     """Only a consistent, fully applied and session-settled attempt releases its profile."""
-    if not _wise_row_consistent(entry):
-        return False
-    if is_legacy_settled_wise_row(entry):
-        return True
-    return (
-        entry.get("state") == STATE_DONE
-        and entry.get("outcome_status") == "sent"
-        and entry.get("last_status") == "outgoing_payment_sent"
-        and isinstance(entry.get("last_occurred_at"), str)
-        and bool(entry["last_occurred_at"])
-        and entry.get("discrepancy_status") is None
-        and entry.get("effects_applied") is True
-        and (not entry.get("session_key") or
-             data is not None and session_state(data, entry["session_key"]) == SESSION_SETTLED)
-    )
+    return classify_journal_row(entry, data)[0] in {"legacy_settled", "wise_modern_resolved"}
 
 
 def wise_replay_hold(
@@ -413,12 +499,13 @@ def wise_replay_hold(
     """
     profile_hold = None
     for key, entry in data["obligations"].items():
-        if key == exclude_obligation or entry.get("rail") == "btc":
+        if key == exclude_obligation:
+            continue
+        kind, _ = classify_journal_row(entry, data)
+        if entry.get("rail") == "btc" and kind in {"btc_valid_settled", "btc_valid_unresolved"}:
             continue
         if _wise_paid(entry, data):
             continue
-        if entry.get("rail") not in (None, "wise"):
-            return key, entry
         row_profile = entry.get("profile_entity_id")
         if not isinstance(row_profile, str) or not row_profile.strip():
             return key, entry
@@ -495,6 +582,7 @@ def record_transfer_created(path: Path, obligation: str, transfer_id: int) -> No
     entry = data["obligations"].get(obligation)
     if (
         not isinstance(entry, dict)
+        or classify_journal_row(entry, data)[0] != "wise_modern_unresolved"
         or entry.get("rail") != "wise"
         or entry.get("state") != STATE_INTENT
         or entry.get("transfer_id") is not None
@@ -516,7 +604,9 @@ def mark_wise_create_entered(path: Path, obligation: str) -> None:
     """Durably mark an entered transfer POST before it can be sent."""
     data = load(path)
     entry = data["obligations"].get(obligation)
-    if (not isinstance(entry, dict) or entry.get("rail") != "wise"
+    if (not isinstance(entry, dict)
+            or classify_journal_row(entry, data)[0] != "wise_modern_unresolved"
+            or entry.get("rail") != "wise"
             or entry.get("state") != STATE_INTENT or entry.get("transfer_id") is not None
             or entry.get("create_entered") is not None):
         raise JournalError("Wise create cannot be entered")
@@ -530,7 +620,9 @@ def record_wise_not_submitted(path: Path, obligation: str) -> None:
     """Close an attempt only when transfer creation was never entered."""
     data = load(path)
     entry = data["obligations"].get(obligation)
-    if (not isinstance(entry, dict) or entry.get("rail") != "wise"
+    if (not isinstance(entry, dict)
+            or classify_journal_row(entry, data)[0] != "wise_modern_unresolved"
+            or entry.get("rail") != "wise"
             or entry.get("state") != STATE_INTENT or entry.get("transfer_id") is not None
             or entry.get("create_entered") is not None):
         raise JournalError("Wise not-submitted transition refused")
@@ -551,6 +643,7 @@ def record_funding_pending(
     entry = data["obligations"].get(obligation)
     if (
         not isinstance(entry, dict)
+        or classify_journal_row(entry, data)[0] != "wise_modern_unresolved"
         or entry.get("rail") != "wise"
         or entry.get("state") != STATE_INTENT
         or entry.get("transfer_id") != transfer_id
@@ -575,18 +668,21 @@ def record_wise_status(
     """Append a checked transfer observation; return True on first paid confirmation."""
     data = load(path)
     entry = data["obligations"].get(obligation)
+    from wise_reconcile import TRANSFER_STATUSES
     if (
         not isinstance(entry, dict)
+        or classify_journal_row(entry, data)[0] not in {"wise_modern_resolved", "wise_modern_unresolved"}
         or entry.get("rail") != "wise"
         or entry.get("transfer_id") != transfer_id
         or entry.get("state") not in (STATE_INTENT, STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED)
-        or not occurred_at
+        or not isinstance(status, str) or status not in TRANSFER_STATUSES
+        or _stamp(occurred_at) is None
     ):
         raise JournalError("Wise status transition refused")
-    from wise_reconcile import _stamp
-    current_stamp = _stamp(occurred_at)
+    from wise_reconcile import _stamp as _wise_stamp
+    current_stamp = _wise_stamp(occurred_at)
     previous = entry.get("last_occurred_at")
-    if previous and current_stamp < _stamp(previous):
+    if previous and current_stamp < _wise_stamp(previous):
         return False  # an older observation must never roll current state back
     first_paid = status == "outgoing_payment_sent" and entry.get("outcome_status") != "sent"
     entry["last_status"] = status[:64]
@@ -623,6 +719,7 @@ def mark_wise_effects_applied(path: Path, obligation: str, transfer_id: int) -> 
     entry = data["obligations"].get(obligation)
     if (
         not isinstance(entry, dict)
+        or classify_journal_row(entry)[1] != "effects not applied"
         or entry.get("rail") != "wise"
         or entry.get("transfer_id") != transfer_id
         or entry.get("outcome_status") != "sent"
@@ -638,7 +735,9 @@ def mark_wise_effects_applied(path: Path, obligation: str, transfer_id: int) -> 
 def schedule_wise_check(path: Path, obligation: str, due_at: float | None) -> None:
     data = load(path)
     entry = data["obligations"].get(obligation)
-    if not isinstance(entry, dict) or entry.get("rail") != "wise":
+    if (not isinstance(entry, dict) or entry.get("rail") != "wise"
+            or classify_journal_row(entry, data)[0] not in {"wise_modern_resolved", "wise_modern_unresolved"}
+            or due_at is not None and not _epoch(due_at)):
         raise JournalError("Wise check schedule has no attempt")
     entry["next_check_at"] = due_at
     _write(path, data)
@@ -659,6 +758,7 @@ def record_approved_replacement_intent(
     entry = data["obligations"].get(obligation)
     if (
         not isinstance(entry, dict)
+        or classify_journal_row(entry, data)[0] != "wise_modern_unresolved"
         or entry.get("rail") != "wise"
         or entry.get("state") != STATE_FAILED
         or entry.get("failure_status") not in ("funds_refunded", "cancelled", "not_submitted")

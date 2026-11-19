@@ -1694,7 +1694,7 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                 if isinstance(handler, WiseTransferHandler):
                     legacy_paid = any(
                         (row := data["obligations"].get(legacy)) is not None
-                        and payment_journal.is_legacy_settled_wise_row(row)
+                        and payment_journal.classify_journal_row(row, data)[0] == "legacy_settled"
                         for legacy in legacy_obligation_keys(
                             handler, match, matches, _yesterday().isoformat()
                         )
@@ -1709,11 +1709,12 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                 entry = journal_entry_for_item(data, item)
                 if entry is not None and isinstance(handler, WiseTransferHandler):
                     state = journal_state_for_item(data, item)
+                    clean_entry = {key: value for key, value in entry.items()
+                                   if key != "_journal_key"}
                     if (state == payment_journal.STATE_DONE
-                            and (entry.get("effects_applied") is True
-                                 or payment_journal.is_legacy_settled_wise_row(
-                                     {key: value for key, value in entry.items()
-                                      if key != "_journal_key"}))):
+                            and payment_journal.classify_journal_row(
+                                clean_entry, data
+                            )[0] in {"legacy_settled", "wise_modern_resolved"}):
                         if eid:
                             key = payment_journal.session_key(handler.name, eid)
                             if payment_journal.session_state(data, key) is None:
@@ -1793,12 +1794,12 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                     if payment_journal.session_state(current, key) != payment_journal.SESSION_PENDING:
                         continue
                     wise_rows = [entry for entry in current["obligations"].values()
-                                 if entry.get("rail") == "wise"
-                                 and entry.get("session_key") == key]
+                                 if entry.get("session_key") == key]
                     if wise_rows:
-                        if any(entry.get("effects_applied") is True
-                               and entry.get("last_status") == "outgoing_payment_sent"
-                               and payment_journal._wise_row_consistent(entry)
+                        if any(payment_journal.classify_journal_row(entry)[0]
+                               == "wise_modern_unresolved"
+                               and payment_journal.classify_journal_row(entry)[1]
+                               == "session not settled"
                                for entry in wise_rows):
                             payment_journal.set_session_state(
                                 jpath, key, payment_journal.SESSION_SETTLED
@@ -1855,8 +1856,8 @@ def _apply_confirmed_wise_effects(path: Path, obligation: str, entry: dict, hand
     from consent_email import obligation_key
 
     latest = payment_journal.load(path)["obligations"][obligation]
-    if (latest.get("last_status") != "outgoing_payment_sent"
-            or latest.get("outcome_status") != "sent"):
+    kind, reason = payment_journal.classify_journal_row(latest)
+    if kind != "wise_modern_unresolved" or reason != "effects not applied":
         _notify(
             f"monedula: Wise transfer [{obligation[:12]}] no longer confirms payment; "
             "task and session bookkeeping held; do not pay again.",
@@ -1924,7 +1925,9 @@ def _reconcile_wise_entries(handlers: list) -> bool:
         return False
     wise_entries = {
         obligation: entry for obligation, entry in data["obligations"].items()
-        if entry.get("rail") != "btc"
+        if not (entry.get("rail") == "btc" and
+                payment_journal.classify_journal_row(entry, data)[0]
+                in {"btc_valid_settled", "btc_valid_unresolved"})
     }
     if not wise_entries:
         return True
@@ -1936,13 +1939,14 @@ def _reconcile_wise_entries(handlers: list) -> bool:
     }
     clean = True
     for obligation, entry in wise_entries.items():
-        if payment_journal.is_legacy_settled_wise_row(entry):
+        kind, reason = payment_journal.classify_journal_row(entry, data)
+        if kind == "legacy_settled":
             # Old paid rows have no transfer-status history or monitoring ID.
             continue
-        if entry.get("rail") != "wise":
+        if kind not in {"wise_modern_resolved", "wise_modern_unresolved"}:
             _notify(
-                f"monedula: journal row [{obligation}] has an unclassified rail or shape; "
-                "all Wise payments held; reconcile before paying again.",
+                f"monedula: journal row [{obligation}] is not a valid Wise attempt ({reason}); "
+                "affected Wise payments held; reconcile before paying again.",
                 priority="blocker", dedupe_key=f"monedula:wise_unclassified:{obligation}",
             )
             clean = False
@@ -1991,9 +1995,17 @@ def _reconcile_wise_entries(handlers: list) -> bool:
                 priority="blocker", dedupe_key=f"monedula:wise_discrepancy:{obligation}",
             )
         session_key = current.get("session_key")
-        if (session_key and current.get("effects_applied") is True
-                and current.get("last_status") == "outgoing_payment_sent"
-                and payment_journal._wise_row_consistent(current)
+        current_kind, current_reason = payment_journal.classify_journal_row(current)
+        if current_kind == "invalid":
+            _notify(
+                f"monedula: journal row [{obligation}] became invalid during reconciliation; "
+                "payments held; reconcile before paying again.",
+                priority="blocker", dedupe_key=f"monedula:wise_unclassified:{obligation}",
+            )
+            clean = False
+            continue
+        if (session_key and current_kind == "wise_modern_unresolved"
+                and current_reason == "session not settled"
                 and payment_journal.session_state(
                     payment_journal.load(path), session_key
                 ) == payment_journal.SESSION_PENDING):
@@ -2020,8 +2032,8 @@ def _reconcile_wise_entries(handlers: list) -> bool:
             if due is None or time.time() < due:
                 # Recover effects after a confirmed read only when no newer
                 # transfer check is due. If due, read it before any writes.
-                if (current.get("last_status") == "outgoing_payment_sent"
-                        and not current.get("effects_applied")):
+                if (current_kind == "wise_modern_unresolved"
+                        and current_reason == "effects not applied"):
                     try:
                         if not _apply_confirmed_wise_effects(
                             path, obligation, current, wise_handlers
