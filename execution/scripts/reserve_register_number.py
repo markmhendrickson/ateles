@@ -58,6 +58,8 @@ def historical_base_text(kind: str, content: str) -> str:
 
     The current worktree is always parsed unchanged. This removes only a blank
     line between two pipe-led rows in the older base copy, not malformed rows.
+    Remove this shim once origin/main includes this PR's removal of the two
+    blank lines in revisions.md; then both base and worktree use the strict reader.
     """
     if kind != "revision":
         return content

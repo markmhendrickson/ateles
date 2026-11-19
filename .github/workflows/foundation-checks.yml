@@ -39,6 +39,8 @@ on:
       - "execution/scripts/render_reading_projection.py"
       - "execution/scripts/render_decision_state.py"
       - "execution/scripts/foundation_register_rows.py"
+      - "execution/scripts/check_register_render_parity.py"
+      - "execution/scripts/test_check_register_render_parity.py"
       - "execution/scripts/reserve_register_number.py"
       - "execution/scripts/test_reserve_register_number.py"
       - "execution/scripts/check_plan_decision_citations.py"
@@ -207,6 +209,14 @@ jobs:
         run: |
           python3 execution/scripts/reserve_register_number.py check decision
           python3 execution/scripts/reserve_register_number.py check revision
+      # GitHub's renderer is the authority for table boundaries and cells. A
+      # rate limit or network failure is a red check, never a skipped check.
+      - name: Register tables — GitHub GFM render parity
+        if: always() && steps.corpus.outputs.present == 'true'
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 execution/scripts/check_register_render_parity.py
       # Register narrative: the decision register's prose held to its own table.
       # The rule-coverage contract binds a decision opened in a DOCUMENT to a
       # register row; nothing read the narrative around the table, so the prose

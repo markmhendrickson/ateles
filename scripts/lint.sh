@@ -163,10 +163,13 @@ python3 execution/scripts/render_decision_state.py --check --source worktree || 
 
 if [ "${ATELES_OFFLINE:-0}" = "1" ]; then
   echo "  - Skipping register reservations (ATELES_OFFLINE=1; CI check remains required)"
+  echo "  - Skipping GitHub GFM render parity (ATELES_OFFLINE=1; CI checks the real files)"
 else
   echo "  - Checking added register numbers have origin reservations..."
   python3 execution/scripts/reserve_register_number.py check decision || ERRORS=$((ERRORS + 1))
   python3 execution/scripts/reserve_register_number.py check revision || ERRORS=$((ERRORS + 1))
+  echo "  - Checking register tables against GitHub's GFM renderer..."
+  python3 execution/scripts/check_register_render_parity.py || ERRORS=$((ERRORS + 1))
 fi
 
 # Skill inventory: docs/foundation/skill_inventory.md is stage 0 of the skill
