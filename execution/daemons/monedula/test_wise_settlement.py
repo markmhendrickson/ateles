@@ -347,6 +347,31 @@ def test_monitor_schedule_extends_to_day_thirty():
     assert wise_reconcile.next_check_at(confirmed, datetime(2026, 2, 1, tzinfo=timezone.utc)) is None
 
 
+def test_reconciliation_recovers_unscheduled_confirmed_transfer(attempt, monkeypatch):
+    import monedula
+
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_wise_status(
+        attempt, "obligation", 3, "outgoing_payment_sent", datetime.now(timezone.utc).isoformat()
+    )
+    journal.mark_wise_effects_applied(attempt, "obligation", 3)
+    monkeypatch.setattr("consent_email.STATE_FILE", attempt.parent / "consent.json")
+    monkeypatch.setenv("WISE_API_TOKEN", "synthetic-token")
+    reads = []
+    monkeypatch.setattr(wise, "_wise_get", lambda *_: reads.append(3) or {
+        "status": "outgoing_payment_sent", "updated": datetime.now(timezone.utc).isoformat()
+    })
+    monkeypatch.setattr(monedula, "_notify", lambda *a, **kw: None)
+
+    assert monedula._reconcile_wise_entries([])
+    due = journal.load(attempt)["obligations"]["obligation"]["next_check_at"]
+    assert due > time.time()
+    assert reads == []
+    journal.schedule_wise_check(attempt, "obligation", time.time() - 1)
+    assert monedula._reconcile_wise_entries([])
+    assert reads == [3]
+
+
 def test_reconciliation_confirms_and_applies_effects_once(attempt, monkeypatch):
     import monedula
     from handlers.payment_profile import PaymentProfile
