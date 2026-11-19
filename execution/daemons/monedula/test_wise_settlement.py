@@ -1885,13 +1885,139 @@ def test_many_legacy_sent_rows_never_hold_later_wise_offers(approval_env, monkey
 def test_legacy_wise_done_sent_without_status_history_never_holds(tmp_path):
     path = tmp_path / journal.JOURNAL_NAME
     journal.init_journal(path)
-    data = journal.load(path)
-    data["obligations"]["old-paid"] = {
-        "rail": "wise", "state": "done", "outcome_status": "sent"
-    }
-    journal._write(path, data)
+    journal.record_intent(path, "old-paid", "old-token", generation=1)
+    journal.record_outcome(path, "old-paid", "sent")
+    assert journal.is_legacy_settled_wise_row(journal.load(path)["obligations"]["old-paid"])
     assert journal.obligation_state(journal.load(path), "old-paid") == journal.STATE_DONE
     assert journal.wise_replay_hold(journal.load(path), "profile-p") is None
+
+
+@pytest.mark.parametrize("missing_field", sorted(journal._MODERN_SETTLED_WISE_FIELDS))
+def test_settled_modern_wise_row_missing_field_holds_profile(attempt, missing_field):
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                               "2026-11-11T21:00:00Z")
+    journal.mark_wise_effects_applied(attempt, "obligation", 3)
+    journal.set_session_state(attempt, "synthetic:session", journal.SESSION_SETTLED)
+    data = journal.load(attempt)
+    assert journal.wise_replay_hold(data, "synthetic-profile") is None
+    data["obligations"]["obligation"].pop(missing_field)
+    journal._write(attempt, data)
+    try:
+        loaded = journal.load(attempt)
+    except journal.JournalError as exc:
+        assert "obligation" in str(exc)
+    else:
+        assert journal.wise_replay_hold(loaded, "synthetic-profile")[0] == "obligation"
+    with pytest.raises(journal.JournalError):
+        journal.record_intent(attempt, "later", "later-token", generation=2,
+                              rail="wise", profile_entity_id="synthetic-profile")
+    assert "later" not in data["obligations"]
+
+
+def test_modern_without_any_status_history_keeps_profile_held(attempt):
+    journal.record_transfer_created(attempt, "obligation", 3)
+    journal.record_wise_status(attempt, "obligation", 3, "outgoing_payment_sent",
+                               "2026-11-11T21:00:00Z")
+    journal.mark_wise_effects_applied(attempt, "obligation", 3)
+    journal.set_session_state(attempt, "synthetic:session", journal.SESSION_SETTLED)
+    data = journal.load(attempt)
+    data["obligations"]["obligation"].pop("last_status")
+    data["obligations"]["obligation"].pop("last_occurred_at")
+    journal._write(attempt, data)
+    assert journal.wise_replay_hold(journal.load(attempt), "synthetic-profile")[0] == "obligation"
+    with pytest.raises(journal.JournalError, match="obligation"):
+        journal.record_intent(attempt, "later", "later-token", generation=2,
+                              rail="wise", profile_entity_id="synthetic-profile")
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda row: row.update(rail="unknown"),
+    lambda row: row.update(unexpected_field=True),
+    lambda row: row.update(rail="wise"),
+    lambda row: row.update(attempt=1, transfer_id=3),
+])
+def test_nonlegacy_settled_row_holds_every_profile(tmp_path, mutation):
+    path = tmp_path / journal.JOURNAL_NAME
+    journal.init_journal(path)
+    journal.record_intent(path, "old-paid", "old-token", generation=1)
+    journal.record_outcome(path, "old-paid", "sent")
+    data = journal.load(path)
+    mutation(data["obligations"]["old-paid"])
+    journal._write(path, data)
+    assert not journal.is_legacy_settled_wise_row(data["obligations"]["old-paid"])
+    try:
+        loaded = journal.load(path)
+    except journal.JournalError as exc:
+        assert "old-paid" in str(exc)
+    else:
+        assert journal.wise_replay_hold(loaded, "any-profile")[0] == "old-paid"
+    with pytest.raises(journal.JournalError, match="old-paid"):
+        journal.record_intent(path, "later", "later-token", generation=2,
+                              rail="wise", profile_entity_id="any-profile")
+
+
+def test_wise_hold_census_matches_journal_for_synthetic_rows(tmp_path, capsys):
+    import wise_journal_hold_census as census
+
+    path = tmp_path / journal.JOURNAL_NAME
+    journal.init_journal(path)
+    journal.record_intent(path, "old-paid", "old-token", generation=1)
+    journal.record_outcome(path, "old-paid", "sent")
+    journal.record_intent(path, "new-paid", "new-token", generation=2, rail="wise",
+                          handler_name="synthetic", profile_entity_id="profile-p")
+    journal.record_transfer_created(path, "new-paid", 3)
+    journal.record_wise_status(path, "new-paid", 3, "outgoing_payment_sent",
+                               "2026-11-11T21:00:00Z")
+    journal.mark_wise_effects_applied(path, "new-paid", 3)
+    data = journal.load(path)
+    assert census.classify(data["obligations"]["old-paid"], data) == "legacy_settled_sent"
+    assert census.classify(data["obligations"]["new-paid"], data) == "wise_new_resolved_paid"
+    data["obligations"]["new-paid"].pop("last_status")
+    data["obligations"]["unknown"] = {
+        **data["obligations"]["old-paid"], "rail": "unexpected"
+    }
+    journal._write(path, data)
+    assert census.main(["census", str(path)]) == 0
+    output = capsys.readouterr().out
+    assert "wise_new_UNRESOLVED_with_profile_id: 1" in output
+    assert "unclassified_UNRESOLVED_all_profiles: 1" in output
+    assert "legacy_settled_sent: 1" in output
+
+
+@pytest.mark.parametrize("shape", ["legacy", "unknown_rail", "stripped_modern"])
+def test_reconciliation_skips_only_exact_legacy_paid_row(tmp_path, monkeypatch, shape):
+    import consent_email
+    import monedula
+
+    path = tmp_path / journal.JOURNAL_NAME
+    journal.init_journal(path)
+    if shape == "stripped_modern":
+        journal.record_intent(path, "held-key", "token", generation=1, rail="wise",
+                              profile_entity_id="profile-p")
+        journal.record_transfer_created(path, "held-key", 3)
+        journal.record_wise_status(path, "held-key", 3, "outgoing_payment_sent",
+                                   "2026-11-11T21:00:00Z")
+        data = journal.load(path)
+        data["obligations"]["held-key"].pop("last_status")
+        data["obligations"]["held-key"].pop("transfer_id")
+        journal._write(path, data)
+    else:
+        journal.record_intent(path, "held-key", "token", generation=1)
+        journal.record_outcome(path, "held-key", "sent")
+        if shape == "unknown_rail":
+            data = journal.load(path)
+            data["obligations"]["held-key"]["rail"] = "unexpected"
+            journal._write(path, data)
+    monkeypatch.setattr(consent_email, "STATE_FILE", tmp_path / "consent.json")
+    monkeypatch.setattr(wise, "_wise_get", lambda *a, **kw:
+                        pytest.fail("no Wise network permitted"))
+    messages = []
+    monkeypatch.setattr(monedula, "_notify", lambda message, **kw: messages.append(message))
+    result = monedula._reconcile_wise_entries([])
+    assert result is (shape == "legacy")
+    if shape != "legacy":
+        assert any("held-key" in message for message in messages)
 
 
 @pytest.mark.parametrize("changes", [
@@ -1946,9 +2072,7 @@ def test_legacy_done_sent_wise_row_settles_same_calendar_event_without_new_conse
     path = consent_email.journal_path()
     journal.record_intent(path, old_key, "legacy-token", generation=1)
     journal.record_outcome(path, old_key, "sent")
-    data = journal.load(path)
-    data["obligations"][old_key]["rail"] = "wise"
-    journal._write(path, data)
+    assert journal.is_legacy_settled_wise_row(journal.load(path)["obligations"][old_key])
     monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", route)
     monkeypatch.setattr(monedula, "_reconcile_wise_entries", lambda *a: True)
     monkeypatch.setattr(payment_approval, "collect", lambda *a, **kw:
@@ -1966,6 +2090,60 @@ def test_legacy_done_sent_wise_row_settles_same_calendar_event_without_new_conse
     assert journal.session_state(journal.load(path), session) == journal.SESSION_SETTLED
     assert approvals.writes == 0 and world.sends == []
     assert list(journal.load(path)["obligations"]) == [old_key]
+
+
+@pytest.mark.parametrize("missing_field", ["last_status", "last_occurred_at", "both"])
+@pytest.mark.parametrize("route", ["payment_approval", "email", "telegram"])
+def test_stripped_modern_row_cannot_settle_calendar_or_request_payment(
+    approval_env, monkeypatch, route, missing_field
+):
+    import consent_email
+    import monedula
+    import payment_approval
+    from handlers.payment_profile import PaymentProfile
+
+    world, approvals = approval_env
+    world.handler = wise.WiseTransferHandler(PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", payment_type="wise",
+        calendar_keywords=["yoga"], amount_eur=10, wise_recipient_id=5,
+        wise_recipient_name="Synthetic", entity_id="synthetic-profile",
+    ))
+    event = world.calendars["primary"][0]
+    match = world.handler.matches([event])[0]
+    key = consent_email._base_obligation_key(
+        world.handler, consent_email.event_session_date(match), ""
+    )
+    path = consent_email.journal_path()
+    journal.record_intent(path, key, "modern-token", generation=1, rail="wise",
+                          handler_name=world.handler.name,
+                          profile_entity_id="synthetic-profile")
+    journal.record_transfer_created(path, key, 3)
+    journal.record_wise_status(path, key, 3, "outgoing_payment_sent",
+                               "2026-11-11T21:00:00Z")
+    data = journal.load(path)
+    for field in (("last_status", "last_occurred_at") if missing_field == "both"
+                  else (missing_field,)):
+        data["obligations"][key].pop(field)
+    journal._write(path, data)
+    messages = []
+    monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", route)
+    monkeypatch.setattr(monedula, "_reconcile_wise_entries", lambda *a: True)
+    monkeypatch.setattr(monedula, "_notify", lambda message, **kw: messages.append(message))
+    monkeypatch.setattr(payment_approval, "collect", lambda *a, **kw:
+                        pytest.fail("stripped row offered for approval"))
+    monkeypatch.setattr(consent_email, "request_and_collect", lambda *a, **kw:
+                        pytest.fail("stripped row offered for email consent"))
+    monkeypatch.setattr(monedula, "telegram_send", lambda *a, **kw:
+                        pytest.fail("stripped row offered for Telegram consent"))
+    monkeypatch.setattr(wise, "_create_transfer", lambda *a, **kw:
+                        pytest.fail("stripped row created a transfer"))
+    monkeypatch.setattr(wise, "_fund_transfer", lambda *a, **kw:
+                        pytest.fail("stripped row funded a transfer"))
+    world.tick()
+    assert journal.session_state(journal.load(path), journal.session_key(
+        world.handler.name, event["id"])) != journal.SESSION_SETTLED
+    assert approvals.writes == 0 and world.sends == []
+    assert any(key in message for message in messages)
 
 
 @pytest.mark.parametrize("bad_id", [None, 42, ""])

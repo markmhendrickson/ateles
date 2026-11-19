@@ -288,6 +288,11 @@ def journal_state_for_item(journal: dict, item: PendingItem) -> str | None:
     entry = journal_entry_for_item(journal, item)
     if entry is None:
         return None
+    profile = getattr(item.handler, "profile", None)
+    if getattr(profile, "payment_type", None) == "wise" and entry.get("state") == payment_journal.STATE_DONE:
+        row = {key: value for key, value in entry.items() if key != "_journal_key"}
+        if not payment_journal._wise_paid(row, journal):
+            return payment_journal.STATE_INTENT
     if ("rail" not in entry and entry.get("state") == payment_journal.STATE_DONE
             and entry.get("outcome_status") != "sent"):
         return payment_journal.STATE_INTENT

@@ -130,20 +130,14 @@ def load(path: Path) -> dict[str, Any]:
                 "task_id", "approved_terms_hash", "payment_date", "match_id"
             )):
                 raise JournalError("payment journal Wise approval binding malformed")
-            legacy_wise = (
-                "customer_transaction_id" not in entry
-                and "attempt" not in entry
-                and "last_status" not in entry
-                and "last_occurred_at" not in entry
-            )
-            if not legacy_wise and (
+            if not is_legacy_settled_wise_row(entry) and (
                 not isinstance(entry.get("customer_transaction_id"), str)
                 or not isinstance(entry.get("attempt"), int)
                 or entry["attempt"] < 1
                 or not isinstance(entry.get("token"), str)
                 or data["consumed_tokens"].get(entry["token"]) != obligation
             ):
-                raise JournalError("payment journal Wise attempt malformed")
+                raise JournalError(f"payment journal Wise attempt {obligation} malformed")
             attempts = entry.get("attempts", [])
             if not isinstance(attempts, list) or any(
                 not isinstance(prior, dict)
@@ -155,7 +149,6 @@ def load(path: Path) -> dict[str, Any]:
                 for prior in attempts
             ):
                 raise JournalError("payment journal Wise attempt history malformed")
-            transfer_id = entry.get("transfer_id")
             if not _wise_row_consistent(entry):
                 log.warning("payment journal Wise attempt %s has contradictory outcome; held", obligation)
     try:
@@ -326,8 +319,38 @@ def obligation_state(data: dict[str, Any], obligation: str) -> str | None:
     return state
 
 
+_LEGACY_SETTLED_WISE_FIELDS = frozenset({
+    "state", "token", "generation", "intent_at", "outcome_status", "outcome_at",
+})
+_MODERN_SETTLED_WISE_FIELDS = frozenset({
+    "rail", "attempt", "customer_transaction_id", "handler_name", "session_key",
+    "profile_entity_id", "task_id", "approved_terms_hash", "payment_date", "match_id",
+    "transfer_id", "last_status", "last_occurred_at", "last_checked_at",
+    "outcome_at",
+})
+
+
+def is_legacy_settled_wise_row(entry: dict[str, Any]) -> bool:
+    """Recognize only the settled row emitted by the pre-funding-states writer."""
+    return (
+        isinstance(entry, dict)
+        and entry.keys() == _LEGACY_SETTLED_WISE_FIELDS
+        and entry.get("state") == STATE_DONE
+        and entry.get("outcome_status") == "sent"
+        and isinstance(entry.get("token"), str)
+        and bool(entry["token"])
+        and type(entry.get("generation")) is int
+        and type(entry.get("intent_at")) in (int, float)
+        and type(entry.get("outcome_at")) in (int, float)
+    )
+
+
 def _wise_row_consistent(entry: dict[str, Any]) -> bool:
     """Classify contradictory Wise outcomes as unresolved without hiding the row."""
+    if is_legacy_settled_wise_row(entry):
+        return True
+    if entry.get("rail") != "wise":
+        return False
     state = entry.get("state")
     outcome = entry.get("outcome_status")
     status = entry.get("last_status")
@@ -339,8 +362,6 @@ def _wise_row_consistent(entry: dict[str, Any]) -> bool:
     if effects is not None and not isinstance(effects, bool) or (effects is True and outcome != "sent"):
         return False
     if status is None and "last_occurred_at" not in entry:
-        if outcome == "sent" and state == STATE_DONE and failure is None and discrepancy is None:
-            return True  # historical row without status history
         if state == STATE_FAILED and failure == "not_submitted":
             return outcome == "failed" and not has_id and not entry.get("create_entered")
         return (state in (STATE_INTENT, STATE_FUNDING_PENDING)
@@ -351,6 +372,8 @@ def _wise_row_consistent(entry: dict[str, Any]) -> bool:
     if not has_id:
         return False
     if outcome == "sent":
+        if not _MODERN_SETTLED_WISE_FIELDS <= entry.keys():
+            return False
         return (state == STATE_DONE and failure is None and
                 (status == "outgoing_payment_sent" and discrepancy is None or
                  status != "outgoing_payment_sent" and discrepancy == status))
@@ -365,8 +388,8 @@ def _wise_paid(entry: dict[str, Any], data: dict[str, Any] | None = None) -> boo
     """Only a consistent, fully applied and session-settled attempt releases its profile."""
     if not _wise_row_consistent(entry):
         return False
-    if "last_status" not in entry and "last_occurred_at" not in entry:
-        return entry.get("state") == STATE_DONE and entry.get("outcome_status") == "sent"
+    if is_legacy_settled_wise_row(entry):
+        return True
     return (
         entry.get("state") == STATE_DONE
         and entry.get("outcome_status") == "sent"
