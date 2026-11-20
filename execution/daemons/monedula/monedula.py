@@ -1923,8 +1923,8 @@ def _reconcile_wise_entries(handlers: list) -> bool:
     clean = True
     for obligation, entry in wise_entries.items():
         kind, reason = payment_journal.classify_journal_row(entry, data)
-        if kind == "legacy_settled":
-            # Old paid rows have no transfer-status history or monitoring ID.
+        if kind in {"legacy_settled", "legacy_failed_terminal"}:
+            # Old terminal rows have no transfer-status history or monitoring ID.
             continue
         if kind not in {"wise_modern_resolved", "wise_modern_unresolved"}:
             _notify(

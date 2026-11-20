@@ -328,7 +328,8 @@ def obligation_state(data: dict[str, Any], obligation: str) -> str | None:
     if state not in (STATE_INTENT, STATE_FUNDING_PENDING, STATE_DONE, STATE_FAILED):
         raise JournalError("payment journal obligation state malformed")
     kind, _ = classify_journal_row(entry, data)
-    if kind == "invalid" or state == STATE_DONE and entry.get("rail") == "wise" and kind != "wise_modern_resolved":
+    if (kind in {"invalid", "legacy_failed_terminal"}
+            or state == STATE_DONE and entry.get("rail") == "wise" and kind != "wise_modern_resolved"):
         return STATE_FAILED  # malformed or incomplete settlement never clears a hold
     return state
 
@@ -418,6 +419,8 @@ def classify_journal_row(
             return "btc_valid_unresolved", "outcome unknown"
         if keys != allowed or row.get("state") not in (STATE_DONE, STATE_FAILED) or not _text(row.get("outcome_status")) or not _epoch(row.get("outcome_at")):
             return "invalid", "historical row shape or values malformed"
+        if row["state"] == STATE_DONE and row["outcome_status"] in {"failed", "manual_required"}:
+            return "legacy_failed_terminal", ""
         if (row["state"] == STATE_DONE and row["outcome_status"] != "sent"
                 or row["state"] == STATE_FAILED and row["outcome_status"] not in {"failed", "manual_required"}):
             return "invalid", "historical outcome malformed"
@@ -425,7 +428,7 @@ def classify_journal_row(
             return ("btc_valid_settled" if row["state"] == STATE_DONE and row["outcome_status"] == "sent" else "btc_valid_unresolved"), ""
         if row["state"] == STATE_DONE and row["outcome_status"] == "sent":
             return "legacy_settled", ""
-        # Untagged old BTC failures retain the historical all-profile hold.
+        # New failed-state rows remain unresolved for their own rail.
         return "btc_valid_unresolved", "untagged historical non-settlement"
     if row.get("rail") != "wise" or not _WISE_BASE_FIELDS <= keys or not keys <= _WISE_BASE_FIELDS | _WISE_OPTIONAL_FIELDS:
         return "invalid", "Wise field set or rail malformed"
@@ -536,7 +539,8 @@ def is_legacy_settled_wise_row(entry: dict[str, Any]) -> bool:
 def _wise_row_consistent(entry: dict[str, Any]) -> bool:
     """Classify contradictory Wise outcomes as unresolved without hiding the row."""
     return classify_journal_row(entry)[0] in {
-        "legacy_settled", "wise_modern_resolved", "wise_modern_unresolved"
+        "legacy_settled", "legacy_failed_terminal", "wise_modern_resolved",
+        "wise_modern_unresolved"
     }
 
 
@@ -558,6 +562,8 @@ def wise_replay_hold(
         if key == exclude_obligation:
             continue
         kind, _ = classify_journal_row(entry, data)
+        if kind == "legacy_failed_terminal":
+            continue
         if entry.get("rail") == "btc" and kind in {"btc_valid_settled", "btc_valid_unresolved"}:
             continue
         if _wise_paid(entry, data):

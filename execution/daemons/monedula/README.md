@@ -444,14 +444,17 @@ payee, amount, currency; for Wise also profile, task and reference). Wise order:
 the approval hash binds exact terms; every new Wise intent records the stable
 payment profile ID. While any attempt for that profile lacks a confirmed paid
 latest transfer status, every obligation of that profile is held across all
-term, date, event, prefix and handler edits. An unresolved old row with no
-profile ID holds all Wise profiles; the alert names its journal key and asks
-the operator to reconcile it in Wise Activity. The single row validator is
+term, date, event, prefix and handler edits. An old `intent` row with no
+outcome and no profile ID holds all Wise profiles; the alert names its journal
+key and asks the operator to check Wise Activity. An exact old `done/failed`
+or `done/manual_required` row with valid epoch times holds only its own
+obligation, whether untagged or tagged `rail: btc`. The single row validator is
 `payment_journal.classify_journal_row`, shared by consent, replay, session,
 effects, reconciliation and the read-only census. Only the exact historical
 six-field row (`state`, `token`, `generation`, `intent_at`, `outcome_status`,
 `outcome_at`) with `done/sent`, a nonempty token, a nonnegative integer
-generation and finite positive epoch times is legacy settled. Stripped,
+generation and finite positive epoch times is legacy settled. The same exact
+shape with `done/failed` or `done/manual_required` is terminally failed. Stripped,
 mixed, extended and value-invalid rows stay held, with the journal key in the
 alert. An invalid row holds its profile, or all Wise profiles if it has no
 usable profile ID. BTC rows are exempt only after their own historical writer
