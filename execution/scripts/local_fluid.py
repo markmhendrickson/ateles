@@ -41,11 +41,13 @@ DUAL_MONO_MIN_CORRELATION = 0.995
 DUAL_MONO_MAX_DIFFERENCE_RATIO = 0.10
 DUAL_MONO_MAX_MEASUREMENT_SECONDS = 300  # Avoid loading long calls into memory.
 # Whole-clip bounds can average away a short stretch of independent audio, so the aligned
-# channels are also compared window by window: any window where the channels clearly differ
-# keeps both channels. Quiet windows (below the absolute floor) cannot trigger it.
-DUAL_MONO_WINDOW_SAMPLES = 4000  # 0.25 s at 16 kHz.
+# channels are also compared window by window, every window including a short trailing one.
+# No window may differ by more than the clip may on average, unless the difference is below
+# the absolute floor (about -48 dBFS, where a difference is not speech). A real second voice
+# lasting about 50 ms or more at roughly a tenth of the shared level or more keeps both channels.
+DUAL_MONO_WINDOW_SAMPLES = 800  # 50 ms at 16 kHz.
 DUAL_MONO_WINDOW_MIN_DIFFERENCE_RMS = 128.0
-DUAL_MONO_WINDOW_MAX_DIFFERENCE_RATIO = 0.5
+DUAL_MONO_WINDOW_MAX_DIFFERENCE_RATIO = DUAL_MONO_MAX_DIFFERENCE_RATIO
 
 
 class LocalFluidUnavailable(RuntimeError):
@@ -412,15 +414,14 @@ def _dual_mono_similarity(left_path: Path, right_path: Path) -> tuple[float, flo
             right_window += b * b
         difference_energy += window_energy
         length = window_stop - window_start
-        if length >= DUAL_MONO_WINDOW_SAMPLES // 4:
-            difference_rms = math.sqrt(window_energy / length)
-            louder_window_rms = math.sqrt(max(left_window, right_window) / length)
-            if (
-                difference_rms >= DUAL_MONO_WINDOW_MIN_DIFFERENCE_RMS
-                and difference_rms > DUAL_MONO_WINDOW_MAX_DIFFERENCE_RATIO * louder_window_rms
-            ):
-                log.info("dual-mono collapse refused: independent audio in a short window")
-                return None
+        difference_rms = math.sqrt(window_energy / length)
+        louder_window_rms = math.sqrt(max(left_window, right_window) / length)
+        if (
+            difference_rms >= DUAL_MONO_WINDOW_MIN_DIFFERENCE_RMS
+            and difference_rms > DUAL_MONO_WINDOW_MAX_DIFFERENCE_RATIO * louder_window_rms
+        ):
+            log.info("dual-mono collapse refused: independent audio in a short window")
+            return None
     difference_ratio = math.sqrt(difference_energy / (stop - start)) / louder_rms
     return best_correlation, difference_ratio
 

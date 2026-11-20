@@ -405,14 +405,17 @@ def test_dual_mono_similarity_is_inconclusive_for_malformed_unequal_and_over_lim
     assert not lf._is_dual_mono(lf._dual_mono_similarity(good_a, broken))
 
 
-def _brief_independent_audio_pair(tmp_path, *, seconds=60, independent_seconds=0.25, independent_amplitude=3000):
+def _brief_independent_audio_pair(
+    tmp_path, *, seconds=60, independent_seconds=0.25, independent_amplitude=3000, additive=False
+):
     """Shared voice-like audio on both channels (right 5% louder) with a brief independent stretch on the left."""
     base = _voice_like(seconds * lf.DUAL_MONO_RATE)
     right = [int(value * 1.05) for value in base]
     left = base.copy()
     start = (seconds // 2) * lf.DUAL_MONO_RATE
     for n in range(start, start + int(independent_seconds * lf.DUAL_MONO_RATE)):
-        left[n] = int(independent_amplitude * math.sin(2 * math.pi * 330 * n / lf.DUAL_MONO_RATE))
+        burst = int(independent_amplitude * math.sin(2 * math.pi * 330 * n / lf.DUAL_MONO_RATE))
+        left[n] = max(-32768, min(32767, base[n] + burst)) if additive else burst
     audio = tmp_path / "synthetic-brief-independent.wav"
     _synthetic_stereo(audio, left, right)
     return audio
@@ -463,6 +466,65 @@ def test_brief_independent_audio_keeps_both_transcribed_channels(tmp_path, monke
     result = lf.transcribe_fluid(audio, channel_count=2)
     assert transcribed == ["channel-0.wav", "channel-1.wav"]
     assert "dual-mono" not in result["transcription_text"]
+
+
+def test_quiet_but_audible_brief_independent_audio_keeps_both_transcribed_channels(tmp_path, monkeypatch):
+    # a 700-amplitude 330 Hz burst added on the left for 0.25 s of a 60 s clip, the right channel 5% louder
+    audio = _brief_independent_audio_pair(tmp_path, independent_amplitude=700, additive=True)
+    left_path, right_path = _split_channels(audio, tmp_path)
+    with monkeypatch.context() as unguarded:  # the control: whole-clip bounds alone would have collapsed it
+        unguarded.setattr(lf, "DUAL_MONO_WINDOW_MIN_DIFFERENCE_RMS", 1e12)
+        assert lf._is_dual_mono(lf._dual_mono_similarity(left_path, right_path))
+    assert lf._dual_mono_similarity(left_path, right_path) is None
+    monkeypatch.setattr(lf, "resolve_fluid_cli", lambda: "synthetic-fluid")
+    transcribed = []
+
+    def model(cli, args, output):
+        if args[0] == "process":
+            return {"durationSeconds": 1, "segments": [
+                {"startTimeSeconds": 0, "endTimeSeconds": 1, "speakerId": "Speaker_1"}]}
+        transcribed.append(Path(args[1]).name)
+        return {"text": "Synthetic", "wordTimings": [{"word": "Synthetic", "startTime": 0.1, "endTime": 0.5}]}
+
+    monkeypatch.setattr(lf, "_run_json", model)
+    result = lf.transcribe_fluid(audio, channel_count=2)
+    assert transcribed == ["channel-0.wav", "channel-1.wav"]
+    assert "dual-mono" not in result["transcription_text"]
+
+
+def _quiet_and_trailing_pairs(tmp_path):
+    """Two 10-second pairs: quiet extra audio added on the quieter-side channel, and independent audio only in a
+    short trailing partial window (length is not a multiple of the window size)."""
+    window = lf.DUAL_MONO_WINDOW_SAMPLES
+    seconds_samples = 10 * lf.DUAL_MONO_RATE
+    base = _voice_like(seconds_samples)
+    quiet_right = [int(value * 1.05) for value in base]
+    quiet_left = base.copy()
+    for n in range(40000, 40000 + 4000):  # 0.25 s of extra audio, well below the shared level
+        quiet_left[n] = max(-32768, min(32767, base[n] + int(900 * math.sin(2 * math.pi * 330 * n / lf.DUAL_MONO_RATE))))
+    quiet = tmp_path / "synthetic-quiet-extra.wav"
+    _synthetic_stereo(quiet, quiet_left, quiet_right)
+
+    length = (seconds_samples // window) * window + 300  # a 300-sample trailing partial window
+    tail_base = _voice_like(length)
+    tail_right = [int(value * 1.05) for value in tail_base]
+    tail_left = tail_base.copy()
+    for n in range(length - 300, length):
+        tail_left[n] = int(6000 * math.sin(2 * math.pi * 330 * n / lf.DUAL_MONO_RATE))
+    trailing = tmp_path / "synthetic-trailing-independent.wav"
+    _synthetic_stereo(trailing, tail_left, tail_right)
+    return quiet, trailing
+
+
+@pytest.mark.parametrize("which", [0, 1], ids=["quiet_extra_audio", "trailing_partial_window"])
+def test_independent_audio_the_first_guard_missed_now_keeps_both_channels(tmp_path, monkeypatch, which):
+    audio = _quiet_and_trailing_pairs(tmp_path)[which]
+    left_path, right_path = _split_channels(audio, tmp_path)
+    # the control: the whole-clip bounds alone would have authorised the collapse (the defect)
+    with monkeypatch.context() as unguarded:
+        unguarded.setattr(lf, "DUAL_MONO_WINDOW_MIN_DIFFERENCE_RMS", 1e12)
+        assert lf._is_dual_mono(lf._dual_mono_similarity(left_path, right_path))
+    assert lf._dual_mono_similarity(left_path, right_path) is None
 
 
 def test_quiet_independent_noise_below_the_window_floor_does_not_block_a_collapse(tmp_path):
