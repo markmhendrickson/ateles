@@ -492,6 +492,25 @@ def test_quiet_but_audible_brief_independent_audio_keeps_both_transcribed_channe
     assert "dual-mono" not in result["transcription_text"]
 
 
+def test_collapsed_header_with_words_but_no_speaker_segments_uses_the_zero_speaker_wording(tmp_path, monkeypatch):
+    left = _voice_like()
+    audio = tmp_path / "synthetic-identical-no-segments.wav"
+    _synthetic_stereo(audio, left, left)
+    monkeypatch.setattr(lf, "resolve_fluid_cli", lambda: "synthetic-fluid")
+    monkeypatch.setattr(lf, "_run_json", lambda cli, args, output: (
+        {"durationSeconds": 1, "segments": []}
+        if args[0] == "process"
+        else {"text": "Synthetic", "wordTimings": [{"word": "Synthetic", "startTime": 0.1, "endTime": 0.5}]}))
+    result = lf.transcribe_fluid(audio, channel_count=2)
+    header = result["transcription_text"].splitlines()[0]
+    assert header.startswith("[Speakers: no separate speakers found, detected locally by "), header
+    assert "dual-mono, collapsed; correlation=" in header and "difference_rms_ratio=" in header
+    assert "[Speakers: 0," not in result["transcription_text"]
+    # the same wording the shared helper gives every other zero-speaker outcome
+    assert lf.diarization_header({"status": "ok", "speaker_count": 0}).startswith(
+        "[Speakers: no separate speakers found, detected locally by ")
+
+
 def _quiet_and_trailing_pairs(tmp_path):
     """Two 10-second pairs: quiet extra audio added on the quieter-side channel, and independent audio only in a
     short trailing partial window (length is not a multiple of the window size)."""

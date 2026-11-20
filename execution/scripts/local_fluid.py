@@ -508,11 +508,16 @@ def transcribe_fluid(
     if collapsed and all_events:
         # A silent result keeps the exact headerless silent text the result validator requires.
         speakers = {segment["speakerId"] for segment in raw[0]["diarization"]["segments"]}
-        transcript = (
-            f"[Speakers: {len(speakers)}, detected locally by {DIARIZATION_METHOD}; "
-            f"dual-mono, collapsed; correlation={similarity[0]:.6f}; "
-            f"difference_rms_ratio={similarity[1]:.6f}]\n\n{transcript}"
-        )
+        # Reuse the one header helper so the zero-speaker wording matches every other result.
+        header = diarization_header({
+            "status": "ok",
+            "speaker_count": len(speakers),
+            "note": (
+                f"dual-mono, collapsed; correlation={similarity[0]:.6f}; "
+                f"difference_rms_ratio={similarity[1]:.6f}"
+            ),
+        })
+        transcript = f"{header}\n\n{transcript}"
     return {
         "transcription_text": transcript,
         "language": language or "auto",
