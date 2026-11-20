@@ -8,12 +8,14 @@ Raw model outputs are returned for preservation alongside the readable text.
 from __future__ import annotations
 
 import hashlib
+from array import array
 import json
 import logging
 import math
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import wave
 from pathlib import Path
@@ -29,6 +31,23 @@ log = logging.getLogger("local_fluid")
 
 BACKEND_FLUID = "fluid"
 ENGINE_FLUID = "local_fluid_audio"
+
+DUAL_MONO_RATE = 16000
+DUAL_MONO_MAX_LAG_SAMPLES = 48  # 3 ms at 16 kHz.
+DUAL_MONO_MIN_RMS = 128.0  # Below about -48 dBFS, a match is unreliable.
+# Conservative bounds: clean synthetic copies with 1 ms skew and small noise pass;
+# distinct synthetic voices and added independent content fail either bound.
+DUAL_MONO_MIN_CORRELATION = 0.995
+DUAL_MONO_MAX_DIFFERENCE_RATIO = 0.10
+DUAL_MONO_MAX_MEASUREMENT_SECONDS = 300  # Avoid loading long calls into memory.
+# Whole-clip bounds can average away a short stretch of independent audio, so the aligned
+# channels are also compared window by window, every window including a short trailing one.
+# No window may differ by more than the clip may on average, unless the difference is below
+# the absolute floor (about -48 dBFS, where a difference is not speech). A real second voice
+# lasting about 50 ms or more at roughly a tenth of the shared level or more keeps both channels.
+DUAL_MONO_WINDOW_SAMPLES = 800  # 50 ms at 16 kHz.
+DUAL_MONO_WINDOW_MIN_DIFFERENCE_RMS = 128.0
+DUAL_MONO_WINDOW_MAX_DIFFERENCE_RATIO = DUAL_MONO_MAX_DIFFERENCE_RATIO
 
 
 class LocalFluidUnavailable(RuntimeError):
@@ -330,6 +349,99 @@ def format_turns(turns: list[dict]) -> str:
     )
 
 
+def _mono_samples(path: Path) -> array | None:
+    try:
+        with wave.open(str(path), "rb") as wav:
+            frames = wav.getnframes()
+            if (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) != (1, 2, DUAL_MONO_RATE):
+                return None
+            if frames > DUAL_MONO_RATE * DUAL_MONO_MAX_MEASUREMENT_SECONDS:
+                return None
+            samples = array("h")
+            samples.frombytes(wav.readframes(frames))
+    except (OSError, EOFError, wave.Error):
+        return None
+    if sys.byteorder != "little":
+        samples.byteswap()
+    return samples if len(samples) == frames else None
+
+
+def _dual_mono_similarity(left_path: Path, right_path: Path) -> tuple[float, float] | None:
+    """Return best lagged correlation and aligned difference RMS / louder RMS.
+
+    A missing, quiet, short or malformed measurement is inconclusive and cannot
+    authorize a collapse. So is a clip where any short window holds independent
+    audio on either channel: whole-clip bounds can average a brief independent
+    stretch away, so the aligned channels are also compared window by window.
+    """
+    left, right = _mono_samples(left_path), _mono_samples(right_path)
+    if left is None or right is None or len(left) != len(right):
+        return None
+    count = len(left)
+    if count <= 2 * DUAL_MONO_MAX_LAG_SAMPLES:
+        return None
+    left_energy = sum(value * value for value in left)
+    right_energy = sum(value * value for value in right)
+    quieter_rms = math.sqrt(min(left_energy, right_energy) / count)
+    if quieter_rms < DUAL_MONO_MIN_RMS:
+        return None
+    louder_rms = math.sqrt(max(left_energy, right_energy) / count)
+    best_correlation, best_lag = -1.0, 0
+    for lag in range(-DUAL_MONO_MAX_LAG_SAMPLES, DUAL_MONO_MAX_LAG_SAMPLES + 1):
+        start = max(0, -lag)
+        stop = min(count, count - lag)
+        # Sparse lag search spans the whole clip; final RMS checks every sample.
+        pairs = ((left[index], right[index + lag]) for index in range(start, stop, 8))
+        dot = energy_left = energy_right = 0
+        for a, b in pairs:
+            dot += a * b
+            energy_left += a * a
+            energy_right += b * b
+        denominator = math.sqrt(energy_left * energy_right)
+        correlation = dot / denominator if denominator else -1.0
+        if correlation > best_correlation:
+            best_correlation, best_lag = correlation, lag
+    start = max(0, -best_lag)
+    stop = min(count, count - best_lag)
+    difference_energy = 0
+    for window_start in range(start, stop, DUAL_MONO_WINDOW_SAMPLES):
+        window_stop = min(window_start + DUAL_MONO_WINDOW_SAMPLES, stop)
+        window_energy = left_window = right_window = 0
+        for index in range(window_start, window_stop):
+            a, b = left[index], right[index + best_lag]
+            window_energy += (a - b) ** 2
+            left_window += a * a
+            right_window += b * b
+        difference_energy += window_energy
+        length = window_stop - window_start
+        difference_rms = math.sqrt(window_energy / length)
+        louder_window_rms = math.sqrt(max(left_window, right_window) / length)
+        if (
+            difference_rms >= DUAL_MONO_WINDOW_MIN_DIFFERENCE_RMS
+            and difference_rms > DUAL_MONO_WINDOW_MAX_DIFFERENCE_RATIO * louder_window_rms
+        ):
+            log.info("dual-mono collapse refused: independent audio in a short window")
+            return None
+    difference_ratio = math.sqrt(difference_energy / (stop - start)) / louder_rms
+    return best_correlation, difference_ratio
+
+
+def _louder_channel(left_path: Path, right_path: Path) -> int:
+    """Index (0 or 1) of the channel with more energy; 0 when it cannot be told."""
+    left, right = _mono_samples(left_path), _mono_samples(right_path)
+    if left is None or right is None:
+        return 0
+    return 1 if sum(v * v for v in right) > sum(v * v for v in left) else 0
+
+
+def _is_dual_mono(similarity: tuple[float, float] | None) -> bool:
+    return bool(
+        similarity is not None
+        and similarity[0] >= DUAL_MONO_MIN_CORRELATION
+        and similarity[1] <= DUAL_MONO_MAX_DIFFERENCE_RATIO
+    )
+
+
 def transcribe_fluid(
     audio_path: Path,
     *,
@@ -344,15 +456,14 @@ def transcribe_fluid(
     all_events, raw = [], []
     with tempfile.TemporaryDirectory(prefix="local-fluid-") as temporary:
         root = Path(temporary)
-        for index in range(channel_count):
-            source = audio_path
-            channel = None
-            if channel_count > 1:
-                ffmpeg = shutil.which(os.environ.get("TRANSCRIBE_FFMPEG", "ffmpeg"))
-                if not ffmpeg:
-                    raise LocalFluidUnavailable(
-                        "ffmpeg required to preserve separate audio channels"
-                    )
+        sources = [(audio_path, None)]
+        similarity = None
+        if channel_count > 1:
+            ffmpeg = shutil.which(os.environ.get("TRANSCRIBE_FFMPEG", "ffmpeg"))
+            if not ffmpeg:
+                raise LocalFluidUnavailable("ffmpeg required to preserve separate audio channels")
+            sources = []
+            for index in range(channel_count):
                 source = root / f"channel-{index}.wav"
                 subprocess.run(
                     [
@@ -364,14 +475,22 @@ def transcribe_fluid(
                         "-af",
                         f"pan=mono|c0=c{index}",
                         "-ar",
-                        "16000",
+                        str(DUAL_MONO_RATE),
                         str(source),
                     ],
                     check=True,
                     capture_output=True,
                     timeout=300,
                 )
-                channel = f"Channel_{index}"
+                sources.append((source, f"Channel_{index}"))
+            if channel_count == 2:
+                similarity = _dual_mono_similarity(sources[0][0], sources[1][0])
+                if _is_dual_mono(similarity):
+                    # Keep ONE real channel (the louder one), never an average or mix: channels that
+                    # match only up to a small lag can cancel each other when summed.
+                    sources = [(sources[_louder_channel(sources[0][0], sources[1][0])][0], None)]
+        collapsed = channel_count == 2 and _is_dual_mono(similarity)
+        for index, (source, channel) in enumerate(sources):
             diar = _run_json(
                 cli,
                 ["process", str(source), "--mode", "offline",
@@ -385,8 +504,22 @@ def transcribe_fluid(
             events = align_words(asr, diar, channel=channel)
             all_events.extend(events)
             raw.append({"channel": channel, "diarization": diar, "asr": asr})
+    transcript = format_events(all_events)
+    if collapsed and all_events:
+        # A silent result keeps the exact headerless silent text the result validator requires.
+        speakers = {segment["speakerId"] for segment in raw[0]["diarization"]["segments"]}
+        # Reuse the one header helper so the zero-speaker wording matches every other result.
+        header = diarization_header({
+            "status": "ok",
+            "speaker_count": len(speakers),
+            "note": (
+                f"dual-mono, collapsed; correlation={similarity[0]:.6f}; "
+                f"difference_rms_ratio={similarity[1]:.6f}"
+            ),
+        })
+        transcript = f"{header}\n\n{transcript}"
     return {
-        "transcription_text": format_events(all_events),
+        "transcription_text": transcript,
         "language": language or "auto",
         "audio_duration_seconds": max(
             (x["diarization"].get("durationSeconds", 0) for x in raw), default=0

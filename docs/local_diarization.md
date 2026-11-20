@@ -126,9 +126,16 @@ The transcript assigns each timed word to all overlapping speaker segments.
 Words crossing a speaker boundary or simultaneous speakers retain an ambiguous
 label; words outside every speech segment remain `Unassigned`. The raw JSON
 preserves the ASR, diarization output and aligned words for review. Model speaker
-IDs are anonymous and do not establish a person's identity. Separate physical
-channels and paired files keep their channel labels, even when they contain
-similar voices. This does not infer a human name from a channel.
+IDs are anonymous and do not establish a person's identity. A two-channel file
+whose 16 kHz channel signals pass the conservative lagged-correlation and
+relative-difference checks, and show no short window of independent audio,
+is reduced to its louder original channel (never averaged or downmixed) before
+transcription. Its speaker header says `dual-mono, collapsed` and records both
+measurements. Distinct
+channels and paired files keep their channel labels. The thresholds and minimum
+signal level are named in `execution/scripts/local_fluid.py`; adjust them only
+with synthetic boundary cases and a check that independent voices still split.
+This does not infer a human name from a channel.
 
 Cloud backends remain available only by explicit backend selection. Their
 credentials never influence default routing. An explicit plain local backend or
