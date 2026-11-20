@@ -400,6 +400,14 @@ def _dual_mono_similarity(left_path: Path, right_path: Path) -> tuple[float, flo
     return best_correlation, difference_ratio
 
 
+def _louder_channel(left_path: Path, right_path: Path) -> int:
+    """Index (0 or 1) of the channel with more energy; 0 when it cannot be told."""
+    left, right = _mono_samples(left_path), _mono_samples(right_path)
+    if left is None or right is None:
+        return 0
+    return 1 if sum(v * v for v in right) > sum(v * v for v in left) else 0
+
+
 def _is_dual_mono(similarity: tuple[float, float] | None) -> bool:
     return bool(
         similarity is not None
@@ -452,13 +460,9 @@ def transcribe_fluid(
             if channel_count == 2:
                 similarity = _dual_mono_similarity(sources[0][0], sources[1][0])
                 if _is_dual_mono(similarity):
-                    mono = root / "dual-mono.wav"
-                    subprocess.run(
-                        [ffmpeg, "-v", "error", "-i", str(audio_path),
-                         "-af", "pan=mono|c0=0.5*c0+0.5*c1", "-ar", str(DUAL_MONO_RATE), str(mono)],
-                        check=True, capture_output=True, timeout=300,
-                    )
-                    sources = [(mono, None)]
+                    # Keep ONE real channel (the louder one), never an average: channels that match only up
+                    # to a small lag can cancel each other when summed.
+                    sources = [(sources[_louder_channel(sources[0][0], sources[1][0])][0], None)]
         collapsed = channel_count == 2 and _is_dual_mono(similarity)
         for index, (source, channel) in enumerate(sources):
             diar = _run_json(
@@ -475,7 +479,8 @@ def transcribe_fluid(
             all_events.extend(events)
             raw.append({"channel": channel, "diarization": diar, "asr": asr})
     transcript = format_events(all_events)
-    if collapsed:
+    if collapsed and all_events:
+        # A silent result keeps the exact headerless silent text the result validator requires.
         speakers = {segment["speakerId"] for segment in raw[0]["diarization"]["segments"]}
         transcript = (
             f"[Speakers: {len(speakers)}, detected locally by {DIARIZATION_METHOD}; "

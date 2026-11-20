@@ -301,9 +301,11 @@ def test_dual_mono_audio_decision_and_transcription_effect(tmp_path, monkeypatch
     assert len(paths) == (1 if collapsed else 2)
     assert len(result["raw_response"]["tracks"]) == len(paths)
     if collapsed:
-        assert paths[0].name == "dual-mono.wav"
+        # one REAL channel is kept (never an average): the louder one
+        assert paths[0].name in {"channel-0.wav", "channel-1.wav"}
         assert decoded[0][0:2] == (1, 16000)
-        assert abs(int.from_bytes(decoded[0][2], "little", signed=True) - (left[0] + right[0]) / 2) <= 1
+        first = int.from_bytes(decoded[0][2], "little", signed=True)
+        assert min(abs(first - left[0]), abs(first - right[0])) <= 1
         assert result["transcription_text"].count("Synthetic") == 1
         assert result["transcription_text"].splitlines()[0].startswith("[Speakers: 1,")
         assert "dual-mono, collapsed; correlation=" in result["transcription_text"]
@@ -314,6 +316,87 @@ def test_dual_mono_audio_decision_and_transcription_effect(tmp_path, monkeypatch
         assert "dual-mono, collapsed" not in result["transcription_text"]
         assert "[Channel_0/Speaker_1]" in result["transcription_text"]
         assert "[Channel_1/Speaker_1]" in result["transcription_text"]
+
+
+def _rms_of(path):
+    from array import array
+
+    with wave.open(str(path), "rb") as wav:
+        samples = array("h")
+        samples.frombytes(wav.readframes(wav.getnframes()))
+    return math.sqrt(sum(v * v for v in samples) / len(samples))
+
+
+def test_lagged_dual_mono_keeps_full_level_and_is_never_averaged(tmp_path, monkeypatch):
+    # A 500 Hz tone delayed by 1 ms is half a period out of phase: summing the channels would cancel it.
+    left = [int(6000 * math.sin(2 * math.pi * 500 * n / 16000)) for n in range(16000)]
+    right = [0] * 16 + left[:-16]
+    audio = tmp_path / "synthetic-lagged.wav"
+    _synthetic_stereo(audio, left, right)
+    monkeypatch.setattr(lf, "resolve_fluid_cli", lambda: "synthetic-fluid")
+    levels = []
+
+    def model(cli, args, output):
+        if args[0] == "process":
+            return {"durationSeconds": 1, "segments": [
+                {"startTimeSeconds": 0, "endTimeSeconds": 1, "speakerId": "Speaker_1"}]}
+        levels.append(_rms_of(Path(args[1])))
+        return {"text": "Synthetic", "wordTimings": [{"word": "Synthetic", "startTime": 0.1, "endTime": 0.5}]}
+
+    monkeypatch.setattr(lf, "_run_json", model)
+    result = lf.transcribe_fluid(audio, channel_count=2)
+    assert len(levels) == 1 and "dual-mono, collapsed" in result["transcription_text"]
+    assert levels[0] > 0.9 * math.sqrt(sum(v * v for v in left) / len(left))
+
+
+def test_silent_identical_channels_keep_the_exact_headerless_silent_result(tmp_path, monkeypatch):
+    # silent channels are inconclusive for the collapse; a collapsed clip with no words must stay headerless too
+    left = _voice_like()
+    audio = tmp_path / "synthetic-identical.wav"
+    _synthetic_stereo(audio, left, left)
+    monkeypatch.setattr(lf, "resolve_fluid_cli", lambda: "synthetic-fluid")
+    monkeypatch.setattr(lf, "_run_json", lambda cli, args, output: (
+        {"durationSeconds": 1, "segments": []}
+        if args[0] == "process" else {"wordTimings": []}))
+    result = lf.transcribe_fluid(audio, channel_count=2)
+    assert result["silence"] and result["transcription_text"] == lf.format_events([])
+    assert "dual-mono" not in result["transcription_text"]
+
+
+def test_dual_mono_similarity_is_inconclusive_for_malformed_unequal_and_over_limit(tmp_path, monkeypatch):
+    left = _voice_like()
+    good_a, good_b = tmp_path / "a.wav", tmp_path / "b.wav"
+    for path in (good_a, good_b):
+        with wave.open(str(path), "wb") as wav:
+            from array import array
+
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(lf.DUAL_MONO_RATE)
+            wav.writeframes(array("h", left).tobytes())
+    assert lf._dual_mono_similarity(good_a, good_b) is not None  # the control: measurable and identical
+    # malformed: not a WAV at all, and a WAV with the wrong format (stereo)
+    broken = tmp_path / "broken.wav"
+    broken.write_bytes(b"not a wav file")
+    assert lf._dual_mono_similarity(good_a, broken) is None
+    stereo = tmp_path / "stereo.wav"
+    _synthetic_stereo(stereo, left, left)
+    assert lf._dual_mono_similarity(good_a, stereo) is None
+    # unequal lengths
+    short = tmp_path / "short.wav"
+    with wave.open(str(short), "wb") as wav:
+        from array import array
+
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(lf.DUAL_MONO_RATE)
+        wav.writeframes(array("h", left[:-100]).tobytes())
+    assert lf._dual_mono_similarity(good_a, short) is None
+    # over the memory bound: shrink the bound below this clip's length
+    monkeypatch.setattr(lf, "DUAL_MONO_MAX_MEASUREMENT_SECONDS", 0.5)
+    assert lf._dual_mono_similarity(good_a, good_b) is None
+    # none of these can authorise a collapse
+    assert not lf._is_dual_mono(lf._dual_mono_similarity(good_a, broken))
 
 
 def test_dual_mono_threshold_boundaries():
