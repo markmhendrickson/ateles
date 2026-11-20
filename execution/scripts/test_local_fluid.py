@@ -233,6 +233,33 @@ def test_invalid_fluid_compute_units_fail_before_inference(tmp_path, monkeypatch
     run.assert_not_called()
 
 
+@pytest.fixture
+def synthetic_ffmpeg(monkeypatch):
+    """Hermetic stand-in for ffmpeg's per-channel extraction, so the tests do not need ffmpeg installed.
+
+    Emulates only `-i <wav> -af pan=mono|c0=cN -ar <rate> <out.wav>` for 16-bit PCM input already at 16 kHz.
+    """
+    from array import array
+
+    monkeypatch.setattr(lf.shutil, "which", lambda name: "/test/ffmpeg")
+
+    def extract(argv, **kwargs):
+        source = Path(argv[argv.index("-i") + 1])
+        channel = int(argv[argv.index("-af") + 1].rsplit("=c", 1)[1])
+        with wave.open(str(source), "rb") as wav:
+            assert (wav.getsampwidth(), wav.getframerate()) == (2, lf.DUAL_MONO_RATE)
+            channels = wav.getnchannels()
+            samples = array("h")
+            samples.frombytes(wav.readframes(wav.getnframes()))
+        with wave.open(str(argv[-1]), "wb") as out:
+            out.setnchannels(1)
+            out.setsampwidth(2)
+            out.setframerate(lf.DUAL_MONO_RATE)
+            out.writeframes(array("h", samples[channel::channels]).tobytes())
+
+    monkeypatch.setattr(lf.subprocess, "run", extract)
+
+
 def _synthetic_stereo(path, left, right):
     """Write tiny 16 kHz PCM input; no recorded audio is used by these tests."""
     from array import array
@@ -256,6 +283,7 @@ def _voice_like(length=16000):
 
 
 @pytest.mark.parametrize("variant", ["identical", "offset_noise", "different", "extra_voice", "silent", "one_silent", "short", "near_zero"])
+@pytest.mark.usefixtures("synthetic_ffmpeg")
 def test_dual_mono_audio_decision_and_transcription_effect(tmp_path, monkeypatch, variant):
     left = _voice_like(16000 if variant != "short" else 80)
     rng = random.Random(57)
@@ -333,6 +361,7 @@ def _rms_of(path):
     return math.sqrt(sum(v * v for v in samples) / len(samples))
 
 
+@pytest.mark.usefixtures("synthetic_ffmpeg")
 def test_lagged_dual_mono_keeps_full_level_and_is_never_averaged(tmp_path, monkeypatch):
     # A 500 Hz tone delayed by 1 ms is half a period out of phase: summing the channels would cancel it.
     left = [int(6000 * math.sin(2 * math.pi * 500 * n / 16000)) for n in range(16000)]
@@ -355,6 +384,7 @@ def test_lagged_dual_mono_keeps_full_level_and_is_never_averaged(tmp_path, monke
     assert levels[0] > 0.9 * math.sqrt(sum(v * v for v in left) / len(left))
 
 
+@pytest.mark.usefixtures("synthetic_ffmpeg")
 def test_silent_identical_channels_keep_the_exact_headerless_silent_result(tmp_path, monkeypatch):
     # silent channels are inconclusive for the collapse; a collapsed clip with no words must stay headerless too
     left = _voice_like()
@@ -450,6 +480,7 @@ def test_brief_independent_audio_on_one_channel_keeps_both_channels(tmp_path, mo
     assert not lf._is_dual_mono(lf._dual_mono_similarity(left_path, right_path))
 
 
+@pytest.mark.usefixtures("synthetic_ffmpeg")
 def test_brief_independent_audio_keeps_both_transcribed_channels(tmp_path, monkeypatch):
     audio = _brief_independent_audio_pair(tmp_path)
     monkeypatch.setattr(lf, "resolve_fluid_cli", lambda: "synthetic-fluid")
@@ -468,6 +499,7 @@ def test_brief_independent_audio_keeps_both_transcribed_channels(tmp_path, monke
     assert "dual-mono" not in result["transcription_text"]
 
 
+@pytest.mark.usefixtures("synthetic_ffmpeg")
 def test_quiet_but_audible_brief_independent_audio_keeps_both_transcribed_channels(tmp_path, monkeypatch):
     # a 700-amplitude 330 Hz burst added on the left for 0.25 s of a 60 s clip, the right channel 5% louder
     audio = _brief_independent_audio_pair(tmp_path, independent_amplitude=700, additive=True)
@@ -492,6 +524,7 @@ def test_quiet_but_audible_brief_independent_audio_keeps_both_transcribed_channe
     assert "dual-mono" not in result["transcription_text"]
 
 
+@pytest.mark.usefixtures("synthetic_ffmpeg")
 def test_collapsed_header_with_words_but_no_speaker_segments_uses_the_zero_speaker_wording(tmp_path, monkeypatch):
     left = _voice_like()
     audio = tmp_path / "synthetic-identical-no-segments.wav"
