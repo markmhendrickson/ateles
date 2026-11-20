@@ -1,6 +1,7 @@
 import json
 import math
 import random
+import re
 import wave
 from pathlib import Path
 from unittest.mock import patch
@@ -308,7 +309,12 @@ def test_dual_mono_audio_decision_and_transcription_effect(tmp_path, monkeypatch
         assert min(abs(first - left[0]), abs(first - right[0])) <= 1
         assert result["transcription_text"].count("Synthetic") == 1
         assert result["transcription_text"].splitlines()[0].startswith("[Speakers: 1,")
-        assert "dual-mono, collapsed; correlation=" in result["transcription_text"]
+        header = result["transcription_text"].splitlines()[0]
+        match = re.search(r"dual-mono, collapsed; correlation=(\d\.\d{6}); difference_rms_ratio=(\d\.\d{6})\]", header)
+        assert match, header
+        # both stored measurements are present and are the values that authorised the collapse
+        assert float(match.group(1)) >= lf.DUAL_MONO_MIN_CORRELATION
+        assert float(match.group(2)) <= lf.DUAL_MONO_MAX_DIFFERENCE_RATIO
         assert "[Speaker_1]" in result["transcription_text"]
         assert "Channel_" not in result["transcription_text"]
     else:
@@ -397,6 +403,78 @@ def test_dual_mono_similarity_is_inconclusive_for_malformed_unequal_and_over_lim
     assert lf._dual_mono_similarity(good_a, good_b) is None
     # none of these can authorise a collapse
     assert not lf._is_dual_mono(lf._dual_mono_similarity(good_a, broken))
+
+
+def _brief_independent_audio_pair(tmp_path, *, seconds=60, independent_seconds=0.25, independent_amplitude=3000):
+    """Shared voice-like audio on both channels (right 5% louder) with a brief independent stretch on the left."""
+    base = _voice_like(seconds * lf.DUAL_MONO_RATE)
+    right = [int(value * 1.05) for value in base]
+    left = base.copy()
+    start = (seconds // 2) * lf.DUAL_MONO_RATE
+    for n in range(start, start + int(independent_seconds * lf.DUAL_MONO_RATE)):
+        left[n] = int(independent_amplitude * math.sin(2 * math.pi * 330 * n / lf.DUAL_MONO_RATE))
+    audio = tmp_path / "synthetic-brief-independent.wav"
+    _synthetic_stereo(audio, left, right)
+    return audio
+
+
+def _split_channels(audio, tmp_path):
+    from array import array
+
+    with wave.open(str(audio), "rb") as wav:
+        samples = array("h")
+        samples.frombytes(wav.readframes(wav.getnframes()))
+    paths = []
+    for index in range(2):
+        path = tmp_path / f"split-{index}.wav"
+        with wave.open(str(path), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(lf.DUAL_MONO_RATE)
+            wav.writeframes(array("h", samples[index::2]).tobytes())
+        paths.append(path)
+    return paths
+
+
+def test_brief_independent_audio_on_one_channel_keeps_both_channels(tmp_path, monkeypatch):
+    left_path, right_path = _split_channels(_brief_independent_audio_pair(tmp_path), tmp_path)
+    # the control: the whole-clip bounds alone would have authorised the collapse (the defect)
+    with monkeypatch.context() as unguarded:
+        unguarded.setattr(lf, "DUAL_MONO_WINDOW_MAX_DIFFERENCE_RATIO", 1e9)
+        assert lf._is_dual_mono(lf._dual_mono_similarity(left_path, right_path))
+    # with the windowed guard the same pair is not a collapse candidate
+    assert lf._dual_mono_similarity(left_path, right_path) is None
+    assert not lf._is_dual_mono(lf._dual_mono_similarity(left_path, right_path))
+
+
+def test_brief_independent_audio_keeps_both_transcribed_channels(tmp_path, monkeypatch):
+    audio = _brief_independent_audio_pair(tmp_path)
+    monkeypatch.setattr(lf, "resolve_fluid_cli", lambda: "synthetic-fluid")
+    transcribed = []
+
+    def model(cli, args, output):
+        if args[0] == "process":
+            return {"durationSeconds": 1, "segments": [
+                {"startTimeSeconds": 0, "endTimeSeconds": 1, "speakerId": "Speaker_1"}]}
+        transcribed.append(Path(args[1]).name)
+        return {"text": "Synthetic", "wordTimings": [{"word": "Synthetic", "startTime": 0.1, "endTime": 0.5}]}
+
+    monkeypatch.setattr(lf, "_run_json", model)
+    result = lf.transcribe_fluid(audio, channel_count=2)
+    assert transcribed == ["channel-0.wav", "channel-1.wav"]
+    assert "dual-mono" not in result["transcription_text"]
+
+
+def test_quiet_independent_noise_below_the_window_floor_does_not_block_a_collapse(tmp_path):
+    base = _voice_like(20 * lf.DUAL_MONO_RATE)
+    rng = random.Random(7)
+    right = base.copy()
+    for n in range(8 * lf.DUAL_MONO_RATE, 8 * lf.DUAL_MONO_RATE + 4000):
+        right[n] = max(-32768, min(32767, base[n] + rng.randrange(-60, 61)))  # rms about 35, below the floor
+    audio = tmp_path / "synthetic-quiet-noise.wav"
+    _synthetic_stereo(audio, base, right)
+    left_path, right_path = _split_channels(audio, tmp_path)
+    assert lf._is_dual_mono(lf._dual_mono_similarity(left_path, right_path))
 
 
 def test_dual_mono_threshold_boundaries():

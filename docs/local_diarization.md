@@ -128,8 +128,10 @@ label; words outside every speech segment remain `Unassigned`. The raw JSON
 preserves the ASR, diarization output and aligned words for review. Model speaker
 IDs are anonymous and do not establish a person's identity. A two-channel file
 whose 16 kHz channel signals pass the conservative lagged-correlation and
-relative-difference checks is downmixed before transcription. Its speaker
-header says `dual-mono, collapsed` and records both measurements. Distinct
+relative-difference checks, and show no short window of independent audio,
+is reduced to its louder original channel (never averaged or downmixed) before
+transcription. Its speaker header says `dual-mono, collapsed` and records both
+measurements. Distinct
 channels and paired files keep their channel labels. The thresholds and minimum
 signal level are named in `execution/scripts/local_fluid.py`; adjust them only
 with synthetic boundary cases and a check that independent voices still split.

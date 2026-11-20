@@ -9,8 +9,9 @@ proposed issues) is handled by the /analyze-meeting skill, auto-invoked by
 /import-audio on each transcript.
 
 The local FluidAudio route compares two extracted 16 kHz channels before
-transcription. A confident dual-mono match is mixed to one stream and marked
-in the speaker header; distinct channels retain separate labels. Adjust the
+transcription. A confident dual-mono match is reduced to the louder mono channel
+(never a mix) and marked in the speaker header; distinct channels, including a
+clip with independent audio in any short window, retain separate labels. Adjust the
 conservative similarity bounds in local_fluid.py only with synthetic boundary
 cases and a check that independent voices still split.
 

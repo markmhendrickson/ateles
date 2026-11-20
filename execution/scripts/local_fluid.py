@@ -40,6 +40,12 @@ DUAL_MONO_MIN_RMS = 128.0  # Below about -48 dBFS, a match is unreliable.
 DUAL_MONO_MIN_CORRELATION = 0.995
 DUAL_MONO_MAX_DIFFERENCE_RATIO = 0.10
 DUAL_MONO_MAX_MEASUREMENT_SECONDS = 300  # Avoid loading long calls into memory.
+# Whole-clip bounds can average away a short stretch of independent audio, so the aligned
+# channels are also compared window by window: any window where the channels clearly differ
+# keeps both channels. Quiet windows (below the absolute floor) cannot trigger it.
+DUAL_MONO_WINDOW_SAMPLES = 4000  # 0.25 s at 16 kHz.
+DUAL_MONO_WINDOW_MIN_DIFFERENCE_RMS = 128.0
+DUAL_MONO_WINDOW_MAX_DIFFERENCE_RATIO = 0.5
 
 
 class LocalFluidUnavailable(RuntimeError):
@@ -362,7 +368,9 @@ def _dual_mono_similarity(left_path: Path, right_path: Path) -> tuple[float, flo
     """Return best lagged correlation and aligned difference RMS / louder RMS.
 
     A missing, quiet, short or malformed measurement is inconclusive and cannot
-    authorize a collapse. The full difference scan catches brief independent speech.
+    authorize a collapse. So is a clip where any short window holds independent
+    audio on either channel: whole-clip bounds can average a brief independent
+    stretch away, so the aligned channels are also compared window by window.
     """
     left, right = _mono_samples(left_path), _mono_samples(right_path)
     if left is None or right is None or len(left) != len(right):
@@ -393,9 +401,26 @@ def _dual_mono_similarity(left_path: Path, right_path: Path) -> tuple[float, flo
             best_correlation, best_lag = correlation, lag
     start = max(0, -best_lag)
     stop = min(count, count - best_lag)
-    difference_energy = sum(
-        (left[index] - right[index + best_lag]) ** 2 for index in range(start, stop)
-    )
+    difference_energy = 0
+    for window_start in range(start, stop, DUAL_MONO_WINDOW_SAMPLES):
+        window_stop = min(window_start + DUAL_MONO_WINDOW_SAMPLES, stop)
+        window_energy = left_window = right_window = 0
+        for index in range(window_start, window_stop):
+            a, b = left[index], right[index + best_lag]
+            window_energy += (a - b) ** 2
+            left_window += a * a
+            right_window += b * b
+        difference_energy += window_energy
+        length = window_stop - window_start
+        if length >= DUAL_MONO_WINDOW_SAMPLES // 4:
+            difference_rms = math.sqrt(window_energy / length)
+            louder_window_rms = math.sqrt(max(left_window, right_window) / length)
+            if (
+                difference_rms >= DUAL_MONO_WINDOW_MIN_DIFFERENCE_RMS
+                and difference_rms > DUAL_MONO_WINDOW_MAX_DIFFERENCE_RATIO * louder_window_rms
+            ):
+                log.info("dual-mono collapse refused: independent audio in a short window")
+                return None
     difference_ratio = math.sqrt(difference_energy / (stop - start)) / louder_rms
     return best_correlation, difference_ratio
 
@@ -460,8 +485,8 @@ def transcribe_fluid(
             if channel_count == 2:
                 similarity = _dual_mono_similarity(sources[0][0], sources[1][0])
                 if _is_dual_mono(similarity):
-                    # Keep ONE real channel (the louder one), never an average: channels that match only up
-                    # to a small lag can cancel each other when summed.
+                    # Keep ONE real channel (the louder one), never an average or mix: channels that
+                    # match only up to a small lag can cancel each other when summed.
                     sources = [(sources[_louder_channel(sources[0][0], sources[1][0])][0], None)]
         collapsed = channel_count == 2 and _is_dual_mono(similarity)
         for index, (source, channel) in enumerate(sources):
