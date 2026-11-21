@@ -3096,6 +3096,62 @@ def test_required_ci_state_missing_or_partial_evidence_holds(monkeypatch, payloa
                                   "conclusion": "success"}], **payloads) != "green"
 
 
+_GREEN_RUN = [{"name": "pytest", "status": "completed", "conclusion": "success"}]
+
+
+@pytest.mark.parametrize("status_payload", [
+    # A reported "success" never stands over an entry that is not success.
+    {"state": "success", "total_count": 1, "statuses": [{}]},
+    {"state": "success", "total_count": 1, "statuses": [{"state": "failure"}]},
+    {"state": "success", "total_count": 1, "statuses": [{"state": "error"}]},
+    {"state": "success", "total_count": 1, "statuses": [{"state": "pending"}]},
+    {"state": "success", "total_count": 1, "statuses": [{"state": "SUCCESS"}]},
+    {"state": "success", "total_count": 1, "statuses": [{"state": None}]},
+    {"state": "success", "total_count": 2,
+     "statuses": [{"state": "success"}, {"state": "neutral"}]},
+    {"state": "failure", "total_count": 0, "statuses": []},
+    {"state": "success", "total_count": 0, "statuses": []},
+])
+def test_required_ci_state_inconsistent_legacy_statuses_hold(monkeypatch, status_payload):
+    assert _ci_state(monkeypatch, check_runs=_GREEN_RUN,
+                     status_payload=status_payload) != "green"
+
+
+def test_required_ci_state_consistent_legacy_success_is_green(monkeypatch):
+    assert _ci_state(monkeypatch, check_runs=_GREEN_RUN, status_payload={
+        "state": "success", "total_count": 2,
+        "statuses": [{"state": "success"}, {"state": "success"}],
+    }) == "green"
+
+
+def test_required_ci_state_consistent_legacy_error_is_failing(monkeypatch):
+    assert _ci_state(monkeypatch, check_runs=_GREEN_RUN, status_payload={
+        "state": "error", "total_count": 1, "statuses": [{"state": "error"}],
+    }) == "failing"
+
+
+@pytest.mark.parametrize("payload,expected", [
+    ({"state": "pending", "total_count": 0, "statuses": []}, "absent"),
+    ({"state": "success", "total_count": 1, "statuses": [{"state": "success"}]}, "success"),
+    ({"state": "pending", "total_count": 2,
+      "statuses": [{"state": "success"}, {"state": "pending"}]}, "pending"),
+    ({"state": "failure", "total_count": 2,
+      "statuses": [{"state": "pending"}, {"state": "error"}]}, "failing"),
+    ({"state": "error", "total_count": 1, "statuses": [{"state": "failure"}]}, "failing"),
+    ({"state": "success", "total_count": 1, "statuses": [{"state": "failure"}]}, "unknown"),
+    ({"state": "pending", "total_count": 1, "statuses": [{"state": "success"}]}, "unknown"),
+    ({}, "unknown"),
+    ([], "unknown"),
+    (None, "unknown"),
+    ({"state": "success", "total_count": True, "statuses": [{"state": "success"}]}, "unknown"),
+    ({"state": "success", "total_count": "1", "statuses": [{"state": "success"}]}, "unknown"),
+    ({"state": "success", "total_count": 1, "statuses": ["success"]}, "unknown"),
+])
+def test_legacy_status_state_validator(payload, expected):
+    from swarm_dispatch import _legacy_status_state
+    assert _legacy_status_state(payload) == expected
+
+
 def test_review_clear_checks_only_head_reaches_one_atomic_merge(monkeypatch):
     head = "b" * 40
     client = _FakeCIHttpxClient(

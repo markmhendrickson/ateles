@@ -3155,6 +3155,59 @@ _SUPERSEDING_CONCLUSIONS = frozenset(
 )
 
 
+_LEGACY_STATUS_STATES = ("success", "pending", "failure", "error")
+
+
+def _legacy_status_state(payload: object) -> str:
+    """Validate a ``commits/{sha}/status`` response; return its legacy state.
+
+    Returns "absent" | "success" | "pending" | "failing" | "unknown". Only
+    "success" and "absent" may ever contribute to green; both CI readers (the
+    dispatcher's ``_fetch_head_ci_snapshot`` and the approval tool's
+    ``evaluate_checks``) use this one validator so they cannot drift apart.
+
+    GitHub answers combined ``pending`` with ``total_count == 0`` when a head
+    has no legacy statuses at all; that is "absent", not a live pending
+    status. Every other response must be complete and self-consistent: the
+    count a non-bool int >= 0 matching the ``statuses`` list, every entry a
+    dict whose ``state`` is one GitHub defines, and the reported overall
+    state equal to the one derived from the entries (failure if any entry is
+    failure or error, else pending if any is pending, else success; a
+    reported "error" reads as a derived failure). Anything else is "unknown",
+    so a reported "success" never stands over an entry that is not success.
+    """
+    if not isinstance(payload, dict):
+        return "unknown"
+    reported = payload.get("state")
+    count = payload.get("total_count")
+    statuses = payload.get("statuses")
+    if (
+        not isinstance(count, int) or isinstance(count, bool) or count < 0
+        or not isinstance(statuses, list) or len(statuses) != count
+        or reported not in _LEGACY_STATUS_STATES
+    ):
+        return "unknown"
+    if count == 0:
+        return "absent" if reported == "pending" else "unknown"
+    entry_states = []
+    for entry in statuses:
+        if not isinstance(entry, dict):
+            return "unknown"
+        entry_state = entry.get("state")
+        if entry_state not in _LEGACY_STATUS_STATES:
+            return "unknown"
+        entry_states.append(entry_state)
+    if any(e in ("failure", "error") for e in entry_states):
+        derived = "failure"
+    elif "pending" in entry_states:
+        derived = "pending"
+    else:
+        derived = "success"
+    if ("failure" if reported == "error" else reported) != derived:
+        return "unknown"
+    return "failing" if derived == "failure" else derived
+
+
 def _latest_check_runs(runs: list[dict]) -> list[dict]:
     """Drop superseded re-runs of the PR-body checks only; keep every other run.
 
@@ -11685,20 +11738,7 @@ class SwarmDispatcher:
                 headers=headers,
             )
             status.raise_for_status()
-            status_data = status.json()
-            state = status_data.get("state")
-            count = status_data.get("total_count")
-            statuses = status_data.get("statuses")
-            if (
-                not isinstance(count, int) or isinstance(count, bool) or count < 0
-                or not isinstance(statuses, list) or len(statuses) != count
-                or any(not isinstance(s, dict) for s in statuses)
-                or state not in ("pending", "success", "failure", "error")
-                or (count == 0 and state != "pending")
-            ):
-                state = "unknown"
-            elif count == 0:
-                state = "absent"
+            state = _legacy_status_state(status.json())
 
             checks = await client.get(
                 f"https://api.github.com/repos/{trigger.repository}/commits/"
@@ -11790,14 +11830,14 @@ class SwarmDispatcher:
             }
 
             if (
-                state != "failure"
+                state != "failing"
                 and failing_names
                 and failing_names <= PR_BODY_ONLY_CHECKS
             ):
                 # Only PR-body checks fail: no code push fixes this, so it is
                 # not "failing" (which routes a CI-fix round).
                 return CI_STATE_PR_BODY_ONLY
-            if state in ("failure", "error") or failing_run:
+            if state == "failing" or failing_run:
                 return "failing"
             if unknown_run:
                 return "unknown"

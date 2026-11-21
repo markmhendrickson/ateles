@@ -151,6 +151,7 @@ class _FakeClient:
         check_runs_after_first_pr_get: list[dict] | None = None,
         combined_state: str = "success",
         legacy_status_total_count: int = 1,
+        status_payload: object = None,
         changed_files: list[str] | None = None,
         parent_issue_comments: list[dict] | None = None,
         parent_issue_comments_after_first_get: list[dict] | None = None,
@@ -216,6 +217,7 @@ class _FakeClient:
         self.check_runs = check_runs
         self.combined_state = combined_state
         self.legacy_status_total_count = legacy_status_total_count
+        self.status_payload = status_payload
         self.changed_files = changed_files if changed_files is not None else NEUTRAL_FILES
         self.parent_issue_comments = parent_issue_comments or []
         self.parent_issue_comments_after_first_get = parent_issue_comments_after_first_get
@@ -374,8 +376,17 @@ class _FakeClient:
                 rows = self.parent_issue_comments_after_first_get
             return _FakeResponse(rows if page == 1 else [])
         if url.endswith("/status"):
+            if self.status_payload is not None:
+                return _FakeResponse(self.status_payload)
+            # One entry per legacy status, each consistent with the combined
+            # state, as GitHub returns it.
+            entry_state = "failure" if self.combined_state == "error" else self.combined_state
             return _FakeResponse(
-                {"state": self.combined_state, "total_count": self.legacy_status_total_count}
+                {
+                    "state": self.combined_state,
+                    "total_count": self.legacy_status_total_count,
+                    "statuses": [{"state": entry_state}] * self.legacy_status_total_count,
+                }
             )
         if url.endswith("/check-runs"):
             self.check_pages.append(page)
@@ -626,6 +637,62 @@ class TestChecksApiOnlyRepoDoesNotFalseFail:
 
         assert code == 1
         assert client.posted == []
+
+
+_GREEN_RUN = [{"name": "ateles-tests", "status": "completed", "conclusion": "success"}]
+
+
+@pytest.mark.asyncio
+class TestLegacyStatusResponseIsValidated:
+    """Falco, PR #1840: the commit-status response goes through the shared
+    `swarm_dispatch._legacy_status_state` validator inside `evaluate_checks`.
+    Every case has completed, successful check-runs, so only the legacy status
+    reading can hold the head."""
+
+    @pytest.mark.parametrize("payload", [
+        {"state": "success", "total_count": 1, "statuses": [{}]},
+        {"state": "success", "total_count": 1, "statuses": [{"state": "failure"}]},
+        {"state": "success", "total_count": 1, "statuses": [{"state": "pending"}]},
+        {"state": "success", "total_count": 1, "statuses": [{"state": "bogus"}]},
+        {},
+        {"state": "success", "statuses": []},
+        {"state": "failure", "total_count": "2",
+         "statuses": [{"state": "failure"}, {"state": "failure"}]},
+        {"state": "failure", "total_count": 0, "statuses": []},
+        {"total_count": 0, "statuses": []},
+        {"state": "pending", "total_count": 0},
+    ])
+    async def test_malformed_or_inconsistent_status_is_not_green(self, payload):
+        client = _FakeClient(comments=[], check_runs=_GREEN_RUN, status_payload=payload)
+        outcomes, green = await target.evaluate_checks(client, repo=REPO, head_sha=HEAD)
+        assert green is False
+        legacy = [o for o in outcomes if o.name == "legacy-statuses"]
+        assert legacy and legacy[0].state.startswith("unreadable")
+        assert legacy[0].passed is False
+
+    @pytest.mark.parametrize("state", ["pending", "failure"])
+    async def test_consistent_non_success_status_is_not_green_and_named(self, state):
+        client = _FakeClient(comments=[], check_runs=_GREEN_RUN, status_payload={
+            "state": state, "total_count": 1, "statuses": [{"state": state}],
+        })
+        outcomes, green = await target.evaluate_checks(client, repo=REPO, head_sha=HEAD)
+        assert green is False
+        assert [o.passed for o in outcomes if o.name == "legacy-statuses"] == [False]
+
+    async def test_consistent_success_is_green(self):
+        client = _FakeClient(comments=[], check_runs=_GREEN_RUN, status_payload={
+            "state": "success", "total_count": 1, "statuses": [{"state": "success"}],
+        })
+        outcomes, green = await target.evaluate_checks(client, repo=REPO, head_sha=HEAD)
+        assert green is True
+        assert not [o for o in outcomes if o.name == "legacy-statuses"]
+
+    async def test_absent_statuses_with_green_runs_is_green(self):
+        client = _FakeClient(comments=[], check_runs=_GREEN_RUN, status_payload={
+            "state": "pending", "total_count": 0, "statuses": [],
+        })
+        _, green = await target.evaluate_checks(client, repo=REPO, head_sha=HEAD)
+        assert green is True
 
 
 @pytest.mark.asyncio

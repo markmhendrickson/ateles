@@ -177,7 +177,7 @@ def test_mixed_body_and_code_failure_still_routes_a_fix_round(monkeypatch):
 def test_combined_status_failure_with_body_check_still_routes(monkeypatch):
     # A failing commit status is a code-side signal the body check cannot explain.
     runs = [_run(BODY_CHECK, "failure", 11)]
-    d, rec = _dispatcher(monkeypatch, runs, status_state="failure")
+    d, rec = _dispatcher(monkeypatch, runs, status_state="failing")
 
     _ci_completed(d)
 
