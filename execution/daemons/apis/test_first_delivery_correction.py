@@ -378,3 +378,60 @@ def test_first_delivery_through_run_fly_delivery_settles_and_reads_back():
     held = _ledger().delivery_receipts()[PR]
     assert held["status"] == "no_changes" and held["associated_keys"] == [SOURCE]
     assert held["task_id"] == "corr"
+
+
+# ── Nothing reached Fly: the superseded receipt goes back ──────────────────
+
+def _not_launched(launched):
+    async def launch():
+        launched.append(True)
+        return SkillResult("cicada", False, None, "", "", error="inert prelaunch refusal")
+    return launch
+
+
+def test_prelaunch_outcome_restores_the_first_delivery_and_a_retry_still_works():
+    held = _seed()
+    launched, refused = [], []
+    got = asyncio.run(delivery.run_fly_delivery(_plan(), _not_launched(launched), refused.append))
+    assert launched == [True] and refused == []
+    assert got.fly_delivery_not_launched and got.fly_delivery_cleanup == "released"
+    # The source issue is still refused by its own original receipt, unchanged.
+    assert _ledger().delivery_receipts() == {SOURCE: held}
+    assert "already recorded" in delivery.fly_delivery_blocker(SOURCE)
+    assert [x["stage"] for x in _audit()] == ["superseding", "restored"]
+    assert delivery.fly_delivered_pr(REPO, 12, BRANCH).source_task == "source-task"
+    # A same-task re-entry (a fresh dispatch of the same correction) qualifies again.
+    assert _test_launch_once() == [True]
+    assert list(_ledger().delivery_receipts()) == [PR]
+
+
+def _test_launch_once():
+    launched = []
+
+    async def launch():
+        launched.append(True)
+        return SkillResult("cicada", True, 0, "", "", fly_delivery_status="no_changes",
+                           remote_run_id="correction-run")
+    asyncio.run(delivery.run_fly_delivery(_plan(), launch, lambda r: pytest.fail(r)))
+    return launched
+
+
+def test_prelaunch_outcome_restores_a_superseded_correction():
+    entry = {"status": "updated", "token": "earlier", "branch": BRANCH, "run_id": "earlier-run",
+             "recorded_at": 1.0, "commit": OPENED, "associated_keys": [SOURCE],
+             "existing_pr": {"branch": BRANCH, "base_branch": "main", "pr_number": "12", "head_sha": STALE}}
+    assert _ledger().reserve_delivery(PR, entry)
+    launched = []
+    got = asyncio.run(delivery.run_fly_delivery(_plan(), _not_launched(launched), pytest.fail))
+    assert launched == [True] and got.fly_delivery_cleanup == "released"
+    assert _ledger().delivery_receipts() == {PR: entry}
+    assert "already recorded" in delivery.fly_delivery_blocker(SOURCE)
+
+
+def test_restore_refuses_a_reservation_this_dispatch_does_not_own():
+    held = _seed()
+    plan, taken = _plan(), []
+    assert delivery._supersede_settled_first_delivery(plan, taken)
+    assert not delivery._restore_superseded(plan, "other-token", *taken[0])
+    assert list(_ledger().delivery_receipts()) == [PR]
+    assert held == taken[0][1]
