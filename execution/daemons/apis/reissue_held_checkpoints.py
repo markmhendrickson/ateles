@@ -30,6 +30,15 @@ succeed), is ``unknown`` (whether its hold was retired could not be told) or is
 ``incomplete`` (a stale brief could not be retired), so an
 operator can re-run (the operation is idempotent) until it is zero.
 
+``--prelaunch-correction`` (requires ``--task``) instead re-holds each named
+existing-PR correction that Fly refused before launch, on its original task,
+by one version-conditional ``blocked`` -> ``awaiting_approval`` write, then
+files its fresh signed checkpoint through the same reissue path.  Only a task
+whose blocked hold, receipt ledger and consumed-approval history prove a
+prelaunch refusal is admitted; everything else is ``refused`` with nothing
+written.  It never approves, releases or dispatches.  Exit status is non-zero
+for ``refused``, ``failed`` and ``incomplete``.
+
 ``--gate-hold-only`` instead inspects one bounded page of recent gate holds.
 It leaves the broader explicit reissue behavior untouched. In this mode,
 ``--apply`` writes eligible missing checkpoints and the default dry run writes
@@ -44,7 +53,12 @@ import collections
 import itertools
 import json
 
-from apis import iter_held_task_ids, reissue_held_task_checkpoint, sweep_missing_gate_checkpoints
+from apis import (
+    iter_held_task_ids,
+    reissue_held_task_checkpoint,
+    reopen_prelaunch_refused_correction,
+    sweep_missing_gate_checkpoints,
+)
 
 
 def _positive_int(value: str) -> int:
@@ -87,7 +101,26 @@ def main() -> int:
               "default is a dry run that writes nothing; "
               "exit 1 if any hold is unreconstructable, including in dry run"),
     )
+    parser.add_argument(
+        "--prelaunch-correction", action="store_true",
+        help=("re-hold named existing-PR corrections Fly refused before launch and "
+              "file their fresh checkpoint; requires --task; dry run unless --apply"),
+    )
     args = parser.parse_args()
+
+    if args.prelaunch_correction:
+        if not args.task or args.gate_hold_only or args.limit is not None:
+            parser.error("--prelaunch-correction requires --task and takes no --limit "
+                         "or --gate-hold-only")
+        outcomes: collections.Counter[str] = collections.Counter()
+        for task_id in args.task:
+            result = reopen_prelaunch_refused_correction(task_id, apply=args.apply)
+            outcomes[result.outcome] += 1
+            print(json.dumps({"task_id": result.task_id, "outcome": result.outcome,
+                              "detail": result.detail, "checkpoint_id": result.checkpoint_id},
+                             sort_keys=True))
+        print(json.dumps({"summary": dict(outcomes), "applied": args.apply}, sort_keys=True))
+        return 1 if (outcomes["refused"] or outcomes["failed"] or outcomes["incomplete"]) else 0
 
     if args.gate_hold_only:
         if args.task or args.limit is not None:
