@@ -14,7 +14,6 @@ import asyncio
 import copy
 import json
 
-import httpx
 import pytest
 
 import apis
