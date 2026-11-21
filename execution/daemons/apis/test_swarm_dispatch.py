@@ -2991,7 +2991,7 @@ class _FakeCIHttpxClient:
 
     def __init__(self, *, head_sha="abc123", status_state="success",
                  status_count=1, statuses=None, check_runs=None, raise_on=None,
-                 status_payload=None, checks_payload=None):
+                 status_payload=None, checks_payload=None, checks_pages=None):
         self.head_sha = head_sha
         self.status_state = status_state
         self.status_count = status_count
@@ -3000,6 +3000,9 @@ class _FakeCIHttpxClient:
         self.raise_on = raise_on or set()
         self.status_payload = status_payload
         self.checks_payload = checks_payload
+        # page -> raw check-runs body, for paging tests.
+        self.checks_pages = checks_pages
+        self.check_pages_read = []
 
     async def __aenter__(self):
         return self
@@ -3026,6 +3029,13 @@ class _FakeCIHttpxClient:
             if url.endswith("/check-runs"):
                 if "checks" in parent.raise_on:
                     raise httpx.HTTPError("boom")
+                page = (kwargs.get("params") or {}).get("page", 1)
+                parent.check_pages_read.append(page)
+                if parent.checks_pages is not None:
+                    return parent.checks_pages.get(page, {"total_count": 0, "check_runs": []})
+                if page > 1 and isinstance(parent.checks_payload, dict):
+                    # Past the last page GitHub repeats the count, no rows.
+                    return {**parent.checks_payload, "check_runs": []}
                 return parent.checks_payload if parent.checks_payload is not None else {
                     "total_count": len(parent.check_runs),
                     "check_runs": parent.check_runs,
@@ -3097,6 +3107,67 @@ def test_required_ci_state_missing_or_partial_evidence_holds(monkeypatch, payloa
 
 
 _GREEN_RUN = [{"name": "pytest", "status": "completed", "conclusion": "success"}]
+
+
+def _paged_runs(n):
+    return [{"name": f"job-{i}", "status": "completed", "conclusion": "success"}
+            for i in range(1, n + 1)]
+
+
+_OK = {"status": "completed", "conclusion": "success"}
+
+
+@pytest.mark.parametrize("page1", [
+    # Falco, PR #1840 round 2: the dispatcher reads check-runs through the same
+    # shared `read_check_run_pages` as the approval tool.
+    {"total_count": "1", "check_runs": [_OK]},
+    {"total_count": None, "check_runs": [_OK]},
+    {"total_count": True, "check_runs": [_OK]},
+    {"total_count": -1, "check_runs": [_OK]},
+    {"total_count": 1.0, "check_runs": [_OK]},
+    {"total_count": 1, "check_runs": "x"},
+    {"total_count": 1, "check_runs": ["x"]},
+    {"total_count": 1, "check_runs": [_OK, _OK]},
+    ["not", "a", "dict"],
+])
+def test_required_ci_state_malformed_check_runs_page_holds(monkeypatch, page1):
+    assert _ci_state(monkeypatch, status_state="success",
+                     checks_pages={1: page1}) == "unknown"
+
+
+def test_required_ci_state_reads_every_page_of_a_long_list(monkeypatch):
+    runs = _paged_runs(150)
+    client = _FakeCIHttpxClient(status_state="success", checks_pages={
+        1: {"total_count": 150, "check_runs": runs[:100]},
+        2: {"total_count": 150, "check_runs": runs[100:]},
+    })
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    assert asyncio.run(d._required_ci_state(_trigger())) == "green"
+    assert client.check_pages_read == [1, 2]
+
+
+def test_required_ci_state_sees_a_failure_on_a_later_page(monkeypatch):
+    runs = _paged_runs(150)
+    runs[120] = {"name": "job-121", "status": "completed", "conclusion": "failure"}
+    assert _ci_state(monkeypatch, status_state="success", checks_pages={
+        1: {"total_count": 150, "check_runs": runs[:100]},
+        2: {"total_count": 150, "check_runs": runs[100:]},
+    }) == "failing"
+
+
+@pytest.mark.parametrize("page2", [
+    {"check_runs": _paged_runs(150)[100:]},                       # count omitted
+    {"total_count": 151, "check_runs": _paged_runs(150)[100:]},   # count changed
+    {"total_count": 150, "check_runs": []},                       # short read
+])
+def test_required_ci_state_partial_or_changing_pages_hold(monkeypatch, page2):
+    runs = _paged_runs(150)
+    assert _ci_state(monkeypatch, status_state="success", checks_pages={
+        1: {"total_count": 150, "check_runs": runs[:100]},
+        2: page2,
+    }) == "unknown"
 
 
 @pytest.mark.parametrize("status_payload", [

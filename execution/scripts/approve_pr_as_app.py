@@ -271,7 +271,10 @@ from swarm_dispatch import (  # noqa: E402
     SwarmDispatcher,
     _mint_reviewer_app_installation_token,
     _normalise_full_sha,
+    _CHECK_RUNS_PAGE_CAP,
+    CHECK_RUNS_PER_PAGE,
     _legacy_status_state,
+    read_check_run_pages,
     _normalise_github_review_id,
     _reviewer_app_private_key_pem,
     body_has_blocking_findings,
@@ -1605,7 +1608,6 @@ async def _unscheduled_non_required_reason(
 # A re-run's start time may not be later than "now" by more than this: a clock
 # error or a forged timestamp must not let a run outrank real ones.
 CHECK_RUN_FUTURE_SKEW = timedelta(minutes=5)
-_CHECK_RUNS_PAGE_CAP = 50
 _ACTIONS_RUNS_PAGE_CAP = 20
 
 
@@ -1648,32 +1650,27 @@ async def _read_check_runs(
 ) -> tuple[list[dict], str]:
     """(every check-run on the head, "") or (what was read, why it is incomplete).
 
-    Paginated at 100 per page. A page that cannot be read, a list shorter than
-    the API's own `total_count`, or a list too long to read is incomplete, and an
-    incomplete list is never green.
+    Paged and validated by the shared `swarm_dispatch.read_check_run_pages`,
+    the same reader the dispatcher's merge gate uses: a page that cannot be
+    read, a malformed page, a count that is missing, changes or disagrees with
+    the rows, or a list too long to read is incomplete, and an incomplete list
+    is never green.
     """
-    runs: list[dict] = []
-    total: object = None
-    for page in range(1, _CHECK_RUNS_PAGE_CAP + 1):
+
+    async def fetch_page(page: int) -> tuple[object, str]:
         resp = await client.get(
             f"{GITHUB_API}/repos/{repo}/commits/{head_sha}/check-runs",
             headers={**_github_headers(repo), "Accept": "application/vnd.github+json"},
-            params={"per_page": 100, "page": page},
+            params={"per_page": CHECK_RUNS_PER_PAGE, "page": page},
         )
         if resp.status_code >= 400:
-            return runs, f"check-runs page {page} could not be read (HTTP {resp.status_code})"
-        payload = resp.json() or {}
-        rows = payload.get("check_runs", []) or []
-        runs.extend(rows)
-        total = payload.get("total_count", total)
-        if isinstance(total, int) and not isinstance(total, bool):
-            if len(runs) >= total:
-                return runs, ""
-            if not rows:
-                return runs, f"read {len(runs)} of {total} check-runs"
-        elif len(rows) < 100:
-            return runs, ""
-    return runs, f"more than {_CHECK_RUNS_PAGE_CAP * 100} check-runs; the list cannot be fully read"
+            return None, f"check-runs page {page} could not be read (HTTP {resp.status_code})"
+        try:
+            return resp.json(), ""
+        except ValueError:
+            return None, f"check-runs page {page}: response is not JSON"
+
+    return await read_check_run_pages(fetch_page, _CHECK_RUNS_PAGE_CAP)
 
 
 async def _workflow_runs_by_suite(

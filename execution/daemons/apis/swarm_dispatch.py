@@ -3208,6 +3208,66 @@ def _legacy_status_state(payload: object) -> str:
     return "failing" if derived == "failure" else derived
 
 
+CHECK_RUNS_PER_PAGE = 100
+# Pages a CI gate reads before calling the list unreadable (5,000 runs).
+_CHECK_RUNS_PAGE_CAP = 50
+
+
+async def read_check_run_pages(
+    fetch_page, page_cap: int
+) -> tuple[list[dict], str]:
+    """Read every check-run on a head: (runs, "") or (what was read, why not).
+
+    ``fetch_page(page)`` returns ``(payload, problem)`` for one
+    ``commits/{sha}/check-runs`` page of ``CHECK_RUNS_PER_PAGE`` rows; a
+    non-empty ``problem`` (an HTTP error, a body that is not JSON) ends the
+    read. Both CI gates (the dispatcher's ``_fetch_head_ci_snapshot`` and the
+    approval tool's ``evaluate_checks``) read through this one function so
+    they cannot drift apart, as ``_legacy_status_state`` does for statuses.
+
+    Every page must be a dict whose ``total_count`` is a non-bool int >= 0,
+    the same on every page, whose ``check_runs`` is a list of dicts. The only
+    complete result is exactly ``total_count`` runs; a malformed page, a
+    count that changes mid-read, an empty page before the count is reached,
+    more runs than the count, or more pages than ``page_cap`` is incomplete,
+    and an incomplete list is never green.
+    """
+    runs: list[dict] = []
+    total: int | None = None
+    for page in range(1, page_cap + 1):
+        payload, problem = await fetch_page(page)
+        if problem:
+            return runs, problem
+        if not isinstance(payload, dict):
+            return runs, f"check-runs page {page}: malformed response"
+        count = payload.get("total_count")
+        rows = payload.get("check_runs")
+        if (
+            not isinstance(count, int) or isinstance(count, bool) or count < 0
+            or not isinstance(rows, list)
+            or any(not isinstance(row, dict) for row in rows)
+        ):
+            return runs, f"check-runs page {page}: malformed response"
+        if total is None:
+            total = count
+        elif count != total:
+            return runs, (
+                f"check-runs page {page}: count changed from {total} to "
+                f"{count} during the read"
+            )
+        runs.extend(rows)
+        if len(runs) > total:
+            return runs, f"read {len(runs)} check-runs, more than the reported {total}"
+        if len(runs) == total:
+            return runs, ""
+        if not rows:
+            return runs, f"read {len(runs)} of {total} check-runs"
+    return runs, (
+        f"more than {page_cap * CHECK_RUNS_PER_PAGE} check-runs; "
+        "the list cannot be fully read"
+    )
+
+
 def _latest_check_runs(runs: list[dict]) -> list[dict]:
     """Drop superseded re-runs of the PR-body checks only; keep every other run.
 
@@ -11740,21 +11800,20 @@ class SwarmDispatcher:
             status.raise_for_status()
             state = _legacy_status_state(status.json())
 
-            checks = await client.get(
-                f"https://api.github.com/repos/{trigger.repository}/commits/"
-                f"{head_sha}/check-runs",
-                headers={**headers, "Accept": "application/vnd.github+json"},
+            async def _page(page: int) -> tuple[object, str]:
+                checks = await client.get(
+                    f"https://api.github.com/repos/{trigger.repository}/commits/"
+                    f"{head_sha}/check-runs",
+                    headers={**headers, "Accept": "application/vnd.github+json"},
+                    params={"per_page": CHECK_RUNS_PER_PAGE, "page": page},
+                )
+                checks.raise_for_status()
+                return checks.json(), ""
+
+            runs, problem = await read_check_run_pages(
+                _page, _CHECK_RUNS_PAGE_CAP
             )
-            checks.raise_for_status()
-            checks_data = checks.json()
-            runs = checks_data.get("check_runs")
-            run_count = checks_data.get("total_count")
-            if (
-                not isinstance(run_count, int) or isinstance(run_count, bool)
-                or run_count < 0 or not isinstance(runs, list)
-                or len(runs) != run_count
-                or any(not isinstance(run, dict) for run in runs)
-            ):
+            if problem:
                 return head_sha, "unknown", []
             # Judge the head on the newest run of each check only: a failed run
             # superseded by a passing re-run of the same check is not a failure.
