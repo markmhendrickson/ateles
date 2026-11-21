@@ -151,6 +151,7 @@ class _FakeClient:
         check_runs_after_first_pr_get: list[dict] | None = None,
         combined_state: str = "success",
         legacy_status_total_count: int = 1,
+        status_payload: object = None,
         changed_files: list[str] | None = None,
         parent_issue_comments: list[dict] | None = None,
         parent_issue_comments_after_first_get: list[dict] | None = None,
@@ -176,6 +177,7 @@ class _FakeClient:
         repo_owner: "dict | list | None" = None,
         checks_total: "int | None" = None,
         checks_page_status: "dict[int, int] | None" = None,
+        checks_page_payload: "dict[int, object] | None" = None,
         pr_mergeable: "bool | None" = True,
         pr_mergeable_state: "str | None" = "clean",
         mergeability_after_first_get: "tuple[bool | None, str | None] | None" = None,
@@ -196,6 +198,8 @@ class _FakeClient:
         self.profile_response = profile_response
         self.checks_total = checks_total
         self.checks_page_status = checks_page_status or {}
+        # Raw check-runs page bodies to serve instead of the derived ones.
+        self.checks_page_payload = checks_page_payload or {}
         self.check_pages: list[int] = []
         # What the PR itself says about how many files it changes ("auto" = the
         # real count; None = the field is absent), and a base branch that moves
@@ -216,6 +220,7 @@ class _FakeClient:
         self.check_runs = check_runs
         self.combined_state = combined_state
         self.legacy_status_total_count = legacy_status_total_count
+        self.status_payload = status_payload
         self.changed_files = changed_files if changed_files is not None else NEUTRAL_FILES
         self.parent_issue_comments = parent_issue_comments or []
         self.parent_issue_comments_after_first_get = parent_issue_comments_after_first_get
@@ -374,13 +379,33 @@ class _FakeClient:
                 rows = self.parent_issue_comments_after_first_get
             return _FakeResponse(rows if page == 1 else [])
         if url.endswith("/status"):
+            if self.status_payload is not None:
+                return _FakeResponse(self.status_payload)
+            # One entry per legacy status, each consistent with the combined
+            # state, as GitHub returns it.
+            entry_state = "failure" if self.combined_state == "error" else self.combined_state
             return _FakeResponse(
-                {"state": self.combined_state, "total_count": self.legacy_status_total_count}
+                {
+                    "state": self.combined_state,
+                    "total_count": self.legacy_status_total_count,
+                    "statuses": [{"state": entry_state}] * self.legacy_status_total_count,
+                }
             )
         if url.endswith("/check-runs"):
             self.check_pages.append(page)
             if self.checks_page_status.get(page, 200) >= 400:
                 return _FakeResponse({"message": "error"}, status_code=self.checks_page_status[page])
+            if page in self.checks_page_payload:
+                served = self.checks_page_payload[page]
+                if isinstance(served, ValueError):
+                    response = _FakeResponse({})
+
+                    def _not_json():
+                        raise served
+
+                    response.json = _not_json  # type: ignore[method-assign]
+                    return response
+                return _FakeResponse(served)
             total = self.checks_total if self.checks_total is not None else len(self.check_runs)
             return _FakeResponse(
                 {"total_count": total, "check_runs": self.check_runs[(page - 1) * 100 : page * 100]}
@@ -626,6 +651,62 @@ class TestChecksApiOnlyRepoDoesNotFalseFail:
 
         assert code == 1
         assert client.posted == []
+
+
+_GREEN_RUN = [{"name": "ateles-tests", "status": "completed", "conclusion": "success"}]
+
+
+@pytest.mark.asyncio
+class TestLegacyStatusResponseIsValidated:
+    """Falco, PR #1840: the commit-status response goes through the shared
+    `swarm_dispatch._legacy_status_state` validator inside `evaluate_checks`.
+    Every case has completed, successful check-runs, so only the legacy status
+    reading can hold the head."""
+
+    @pytest.mark.parametrize("payload", [
+        {"state": "success", "total_count": 1, "statuses": [{}]},
+        {"state": "success", "total_count": 1, "statuses": [{"state": "failure"}]},
+        {"state": "success", "total_count": 1, "statuses": [{"state": "pending"}]},
+        {"state": "success", "total_count": 1, "statuses": [{"state": "bogus"}]},
+        {},
+        {"state": "success", "statuses": []},
+        {"state": "failure", "total_count": "2",
+         "statuses": [{"state": "failure"}, {"state": "failure"}]},
+        {"state": "failure", "total_count": 0, "statuses": []},
+        {"total_count": 0, "statuses": []},
+        {"state": "pending", "total_count": 0},
+    ])
+    async def test_malformed_or_inconsistent_status_is_not_green(self, payload):
+        client = _FakeClient(comments=[], check_runs=_GREEN_RUN, status_payload=payload)
+        outcomes, green = await target.evaluate_checks(client, repo=REPO, head_sha=HEAD)
+        assert green is False
+        legacy = [o for o in outcomes if o.name == "legacy-statuses"]
+        assert legacy and legacy[0].state.startswith("unreadable")
+        assert legacy[0].passed is False
+
+    @pytest.mark.parametrize("state", ["pending", "failure"])
+    async def test_consistent_non_success_status_is_not_green_and_named(self, state):
+        client = _FakeClient(comments=[], check_runs=_GREEN_RUN, status_payload={
+            "state": state, "total_count": 1, "statuses": [{"state": state}],
+        })
+        outcomes, green = await target.evaluate_checks(client, repo=REPO, head_sha=HEAD)
+        assert green is False
+        assert [o.passed for o in outcomes if o.name == "legacy-statuses"] == [False]
+
+    async def test_consistent_success_is_green(self):
+        client = _FakeClient(comments=[], check_runs=_GREEN_RUN, status_payload={
+            "state": "success", "total_count": 1, "statuses": [{"state": "success"}],
+        })
+        outcomes, green = await target.evaluate_checks(client, repo=REPO, head_sha=HEAD)
+        assert green is True
+        assert not [o for o in outcomes if o.name == "legacy-statuses"]
+
+    async def test_absent_statuses_with_green_runs_is_green(self):
+        client = _FakeClient(comments=[], check_runs=_GREEN_RUN, status_payload={
+            "state": "pending", "total_count": 0, "statuses": [],
+        })
+        _, green = await target.evaluate_checks(client, repo=REPO, head_sha=HEAD)
+        assert green is True
 
 
 @pytest.mark.asyncio
@@ -4924,6 +5005,86 @@ class TestCheckRunListIsReadInFull:
     async def test_an_unreadable_first_page_is_not_green(self):
         outcomes, green = await _evaluate(self._many(5), checks_page_status={1: 500})
         assert green is False
+
+
+_ONE_GREEN = {"name": "ateles-tests", "status": "completed", "conclusion": "success"}
+
+
+def _unreadable_check_runs(outcomes) -> list:
+    return [o for o in outcomes if o.name == "check-runs" and o.state.startswith("unreadable")]
+
+
+@pytest.mark.asyncio
+class TestCheckRunPagesAreValidated:
+    """Falco, PR #1840 round 2: every check-runs page goes through the shared
+    `swarm_dispatch.read_check_run_pages`, which the dispatcher's merge gate
+    also uses. A missing or malformed count, a malformed list or row, a count
+    that changes between pages, or more rows than the count is unreadable,
+    never green. Each case carries otherwise green evidence, so only the
+    check-runs reading can hold the head."""
+
+    @pytest.mark.parametrize("page1", [
+        {"check_runs": [_ONE_GREEN]},                         # count missing
+        {"total_count": "1", "check_runs": [_ONE_GREEN]},
+        {"total_count": None, "check_runs": [_ONE_GREEN]},
+        {"total_count": True, "check_runs": [_ONE_GREEN]},
+        {"total_count": -1, "check_runs": [_ONE_GREEN]},
+        {"total_count": 1.0, "check_runs": [_ONE_GREEN]},
+        {"total_count": 1, "check_runs": {"0": _ONE_GREEN}},  # list not a list
+        {"total_count": 0},                                   # list missing
+        {"total_count": 2, "check_runs": [_ONE_GREEN, "x"]},  # non-dict row
+        {"total_count": 1, "check_runs": [_ONE_GREEN, dict(_ONE_GREEN, name="b")]},
+        [_ONE_GREEN],                                         # body not a dict
+        None,
+        ValueError("not json"),
+    ])
+    async def test_a_malformed_page_is_unreadable_not_green(self, page1):
+        client = _FakeClient(comments=[], check_runs=[_ONE_GREEN], checks_page_payload={1: page1})
+        outcomes, green = await target.evaluate_checks(client, repo=REPO, head_sha=HEAD)
+        assert green is False
+        assert _unreadable_check_runs(outcomes)
+
+    @pytest.mark.parametrize("page2_count", ["omitted", 151, 149, "150"])
+    async def test_a_later_page_must_repeat_the_same_count(self, page2_count):
+        runs = [_cr(i, "success", name=f"job-{i}") for i in range(1, 151)]
+        page2 = {"check_runs": runs[100:]}
+        if page2_count != "omitted":
+            page2["total_count"] = page2_count
+        outcomes, green = await _evaluate(runs, checks_page_payload={2: page2})
+        assert green is False
+        assert _unreadable_check_runs(outcomes)
+
+    async def test_a_short_page_before_the_count_is_unreadable(self):
+        runs = [_cr(i, "success", name=f"job-{i}") for i in range(1, 151)]
+        outcomes, green = await _evaluate(
+            runs, checks_page_payload={1: {"total_count": 150, "check_runs": runs[:40]},
+                                       2: {"total_count": 150, "check_runs": []}}
+        )
+        assert green is False
+        assert any("read 40 of 150" in o.state for o in outcomes)
+
+    async def test_a_valid_multi_page_list_stays_green(self):
+        runs = [_cr(i, "success", name=f"job-{i}") for i in range(1, 151)]
+        outcomes, green = await _evaluate(runs)
+        assert green is True and not _unreadable_check_runs(outcomes)
+        assert _evaluate.client.check_pages == [1, 2]
+
+    async def test_an_empty_list_with_a_zero_count_is_complete(self):
+        client = _FakeClient(comments=[], check_runs=[],
+                             checks_page_payload={1: {"total_count": 0, "check_runs": []}})
+        outcomes, green = await target.evaluate_checks(client, repo=REPO, head_sha=HEAD)
+        assert green is True and not _unreadable_check_runs(outcomes)
+
+    async def test_the_approval_run_refuses_a_page_with_no_count(self, monkeypatch):
+        client = _FakeClient(
+            comments=_all_clear_comments(ALL_FOUR),
+            check_runs=_green_checks(),
+            checks_page_payload={1: {"check_runs": _green_checks()}},
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        assert await target.run(REPO, PR, ALL_FOUR, apply=True) == 1
+        assert client.posted == []
 
 
 @pytest.mark.asyncio

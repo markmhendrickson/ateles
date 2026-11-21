@@ -3155,6 +3155,119 @@ _SUPERSEDING_CONCLUSIONS = frozenset(
 )
 
 
+_LEGACY_STATUS_STATES = ("success", "pending", "failure", "error")
+
+
+def _legacy_status_state(payload: object) -> str:
+    """Validate a ``commits/{sha}/status`` response; return its legacy state.
+
+    Returns "absent" | "success" | "pending" | "failing" | "unknown". Only
+    "success" and "absent" may ever contribute to green; both CI readers (the
+    dispatcher's ``_fetch_head_ci_snapshot`` and the approval tool's
+    ``evaluate_checks``) use this one validator so they cannot drift apart.
+
+    GitHub answers combined ``pending`` with ``total_count == 0`` when a head
+    has no legacy statuses at all; that is "absent", not a live pending
+    status. Every other response must be complete and self-consistent: the
+    count a non-bool int >= 0 matching the ``statuses`` list, every entry a
+    dict whose ``state`` is one GitHub defines, and the reported overall
+    state equal to the one derived from the entries (failure if any entry is
+    failure or error, else pending if any is pending, else success; a
+    reported "error" reads as a derived failure). Anything else is "unknown",
+    so a reported "success" never stands over an entry that is not success.
+    """
+    if not isinstance(payload, dict):
+        return "unknown"
+    reported = payload.get("state")
+    count = payload.get("total_count")
+    statuses = payload.get("statuses")
+    if (
+        not isinstance(count, int) or isinstance(count, bool) or count < 0
+        or not isinstance(statuses, list) or len(statuses) != count
+        or reported not in _LEGACY_STATUS_STATES
+    ):
+        return "unknown"
+    if count == 0:
+        return "absent" if reported == "pending" else "unknown"
+    entry_states = []
+    for entry in statuses:
+        if not isinstance(entry, dict):
+            return "unknown"
+        entry_state = entry.get("state")
+        if entry_state not in _LEGACY_STATUS_STATES:
+            return "unknown"
+        entry_states.append(entry_state)
+    if any(e in ("failure", "error") for e in entry_states):
+        derived = "failure"
+    elif "pending" in entry_states:
+        derived = "pending"
+    else:
+        derived = "success"
+    if ("failure" if reported == "error" else reported) != derived:
+        return "unknown"
+    return "failing" if derived == "failure" else derived
+
+
+CHECK_RUNS_PER_PAGE = 100
+# Pages a CI gate reads before calling the list unreadable (5,000 runs).
+_CHECK_RUNS_PAGE_CAP = 50
+
+
+async def read_check_run_pages(
+    fetch_page, page_cap: int
+) -> tuple[list[dict], str]:
+    """Read every check-run on a head: (runs, "") or (what was read, why not).
+
+    ``fetch_page(page)`` returns ``(payload, problem)`` for one
+    ``commits/{sha}/check-runs`` page of ``CHECK_RUNS_PER_PAGE`` rows; a
+    non-empty ``problem`` (an HTTP error, a body that is not JSON) ends the
+    read. Both CI gates (the dispatcher's ``_fetch_head_ci_snapshot`` and the
+    approval tool's ``evaluate_checks``) read through this one function so
+    they cannot drift apart, as ``_legacy_status_state`` does for statuses.
+
+    Every page must be a dict whose ``total_count`` is a non-bool int >= 0,
+    the same on every page, whose ``check_runs`` is a list of dicts. The only
+    complete result is exactly ``total_count`` runs; a malformed page, a
+    count that changes mid-read, an empty page before the count is reached,
+    more runs than the count, or more pages than ``page_cap`` is incomplete,
+    and an incomplete list is never green.
+    """
+    runs: list[dict] = []
+    total: int | None = None
+    for page in range(1, page_cap + 1):
+        payload, problem = await fetch_page(page)
+        if problem:
+            return runs, problem
+        if not isinstance(payload, dict):
+            return runs, f"check-runs page {page}: malformed response"
+        count = payload.get("total_count")
+        rows = payload.get("check_runs")
+        if (
+            not isinstance(count, int) or isinstance(count, bool) or count < 0
+            or not isinstance(rows, list)
+            or any(not isinstance(row, dict) for row in rows)
+        ):
+            return runs, f"check-runs page {page}: malformed response"
+        if total is None:
+            total = count
+        elif count != total:
+            return runs, (
+                f"check-runs page {page}: count changed from {total} to "
+                f"{count} during the read"
+            )
+        runs.extend(rows)
+        if len(runs) > total:
+            return runs, f"read {len(runs)} check-runs, more than the reported {total}"
+        if len(runs) == total:
+            return runs, ""
+        if not rows:
+            return runs, f"read {len(runs)} of {total} check-runs"
+    return runs, (
+        f"more than {page_cap * CHECK_RUNS_PER_PAGE} check-runs; "
+        "the list cannot be fully read"
+    )
+
+
 def _latest_check_runs(runs: list[dict]) -> list[dict]:
     """Drop superseded re-runs of the PR-body checks only; keep every other run.
 
@@ -11661,7 +11774,12 @@ class SwarmDispatcher:
     async def _fetch_head_ci_snapshot(
         self, trigger: SwarmTrigger
     ) -> tuple[str, str, list[dict]]:
-        """Return PR head SHA, combined commit status state, and raw check-runs."""
+        """Return head SHA, validated legacy status state, and latest check-runs.
+
+        GitHub reports combined ``pending`` when there are zero legacy
+        statuses. Preserve that absence separately from a genuinely pending
+        status; incomplete responses cannot establish either condition.
+        """
         async with httpx.AsyncClient(timeout=30) as client:
             headers = self._github_headers(trigger.repository)
             pr = await client.get(
@@ -11680,15 +11798,23 @@ class SwarmDispatcher:
                 headers=headers,
             )
             status.raise_for_status()
-            state = status.json().get("state", "")
+            state = _legacy_status_state(status.json())
 
-            checks = await client.get(
-                f"https://api.github.com/repos/{trigger.repository}/commits/"
-                f"{head_sha}/check-runs",
-                headers={**headers, "Accept": "application/vnd.github+json"},
+            async def _page(page: int) -> tuple[object, str]:
+                checks = await client.get(
+                    f"https://api.github.com/repos/{trigger.repository}/commits/"
+                    f"{head_sha}/check-runs",
+                    headers={**headers, "Accept": "application/vnd.github+json"},
+                    params={"per_page": CHECK_RUNS_PER_PAGE, "page": page},
+                )
+                checks.raise_for_status()
+                return checks.json(), ""
+
+            runs, problem = await read_check_run_pages(
+                _page, _CHECK_RUNS_PAGE_CAP
             )
-            checks.raise_for_status()
-            runs = checks.json().get("check_runs", [])
+            if problem:
+                return head_sha, "unknown", []
             # Judge the head on the newest run of each check only: a failed run
             # superseded by a passing re-run of the same check is not a failure.
             return head_sha, state, _latest_check_runs(runs)
@@ -11742,6 +11868,8 @@ class SwarmDispatcher:
             head_sha, state, runs = await self._fetch_head_ci_snapshot(trigger)
             if not head_sha:
                 return "unknown"
+            if state == "unknown":
+                return "unknown"
             run_conclusions = [r.get("conclusion") for r in runs]
             run_statuses = [r.get("status") for r in runs]
 
@@ -11749,6 +11877,11 @@ class SwarmDispatcher:
                 c in _FAILING_CHECK_CONCLUSIONS for c in run_conclusions
             )
             pending_run = any(s != "completed" for s in run_statuses)
+            unknown_run = any(
+                s not in ("queued", "in_progress", "completed")
+                or (s == "completed" and c not in _SUPERSEDING_CONCLUSIONS)
+                for s, c in zip(run_statuses, run_conclusions)
+            )
             failing_names = {
                 (r.get("name") or "").strip()
                 for r in runs
@@ -11756,20 +11889,22 @@ class SwarmDispatcher:
             }
 
             if (
-                state != "failure"
+                state != "failing"
                 and failing_names
                 and failing_names <= PR_BODY_ONLY_CHECKS
             ):
                 # Only PR-body checks fail: no code push fixes this, so it is
                 # not "failing" (which routes a CI-fix round).
                 return CI_STATE_PR_BODY_ONLY
-            if state == "failure" or failing_run:
+            if state == "failing" or failing_run:
                 return "failing"
+            if unknown_run:
+                return "unknown"
             if state == "pending" or pending_run:
                 return "pending"
-            if state in ("success", "") and not runs and not failing_run:
-                return "green"
-            return "green"
+            if state == "absent" and not runs:
+                return "unknown"
+            return "green" if state in ("success", "absent") else "unknown"
 
         ref = f"{trigger.repository}#{trigger.number}"
         # load_policy() does a blocking httpx.get(); run it off the event loop
