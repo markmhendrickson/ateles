@@ -2990,11 +2990,16 @@ class _FakeCIHttpxClient:
     Any endpoint may be set to raise to exercise the fail-open path."""
 
     def __init__(self, *, head_sha="abc123", status_state="success",
-                 check_runs=None, raise_on=None):
+                 status_count=1, statuses=None, check_runs=None, raise_on=None,
+                 status_payload=None, checks_payload=None):
         self.head_sha = head_sha
         self.status_state = status_state
+        self.status_count = status_count
+        self.statuses = statuses if statuses is not None else ([{"state": status_state}] if status_count else [])
         self.check_runs = check_runs if check_runs is not None else []
         self.raise_on = raise_on or set()
+        self.status_payload = status_payload
+        self.checks_payload = checks_payload
 
     async def __aenter__(self):
         return self
@@ -3013,11 +3018,18 @@ class _FakeCIHttpxClient:
             if url.endswith("/status"):
                 if "status" in parent.raise_on:
                     raise httpx.HTTPError("boom")
-                return {"state": parent.status_state}
+                return parent.status_payload if parent.status_payload is not None else {
+                    "state": parent.status_state,
+                    "total_count": parent.status_count,
+                    "statuses": parent.statuses,
+                }
             if url.endswith("/check-runs"):
                 if "checks" in parent.raise_on:
                     raise httpx.HTTPError("boom")
-                return {"check_runs": parent.check_runs}
+                return parent.checks_payload if parent.checks_payload is not None else {
+                    "total_count": len(parent.check_runs),
+                    "check_runs": parent.check_runs,
+                }
             return {}
 
         payload = _payload()
@@ -3049,7 +3061,104 @@ def test_required_ci_state_green_when_all_checks_success(monkeypatch):
         {"status": "completed", "conclusion": "success"},
         {"status": "completed", "conclusion": "success"},
     ]
-    assert _ci_state(monkeypatch, status_state="", check_runs=runs) == "green"
+    assert _ci_state(monkeypatch, status_state="success", check_runs=runs) == "green"
+
+
+def test_required_ci_state_green_with_no_legacy_statuses_and_passing_checks(monkeypatch):
+    runs = [{"name": "pytest", "status": "completed", "conclusion": "success"}]
+    assert _ci_state(monkeypatch, status_state="pending", status_count=0,
+                     check_runs=runs) == "green"
+
+
+def test_required_ci_state_empty_legacy_statuses_need_check_evidence(monkeypatch):
+    assert _ci_state(monkeypatch, status_state="pending", status_count=0,
+                     check_runs=[]) != "green"
+
+
+def test_required_ci_state_real_pending_legacy_status_holds(monkeypatch):
+    runs = [{"name": "pytest", "status": "completed", "conclusion": "success"}]
+    assert _ci_state(monkeypatch, status_state="pending", status_count=1,
+                     check_runs=runs) == "pending"
+
+
+@pytest.mark.parametrize("payloads", [
+    {"status_payload": {"state": "pending", "statuses": []}},
+    {"status_payload": {"state": "pending", "total_count": 0}},
+    {"status_payload": {"state": "pending", "total_count": 0, "statuses": [{}]}},
+    {"status_payload": {"state": "pending", "total_count": 2, "statuses": [{"state": "pending"}]}},
+    {"checks_payload": {"check_runs": [{"status": "completed", "conclusion": "success"}]}},
+    {"checks_payload": {"total_count": 2, "check_runs": [{"status": "completed", "conclusion": "success"}]}},
+    {"checks_payload": {"total_count": 1, "check_runs": [{"status": "completed"}]}},
+])
+def test_required_ci_state_missing_or_partial_evidence_holds(monkeypatch, payloads):
+    assert _ci_state(monkeypatch, status_state="pending", status_count=0,
+                     check_runs=[{"name": "pytest", "status": "completed",
+                                  "conclusion": "success"}], **payloads) != "green"
+
+
+def test_review_clear_checks_only_head_reaches_one_atomic_merge(monkeypatch):
+    head = "b" * 40
+    client = _FakeCIHttpxClient(
+        head_sha=head, status_state="pending", status_count=0,
+        check_runs=[{"name": "pytest", "status": "completed",
+                     "conclusion": "success"}],
+    )
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    merged = []
+
+    async def live_head(self, trigger):
+        return head
+
+    async def no_outside_block(self, trigger, *, reviewed_head, panel_lenses):
+        return None
+
+    async def merge(self, repository, number, method, *, expected_head="",
+                    require_default_base=False):
+        merged.append((repository, number, method, expected_head, require_default_base))
+        return True, "d" * 40
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", live_head)
+    monkeypatch.setattr(SwarmDispatcher, "_live_blocking_verdict_outside_panel",
+                        no_outside_block)
+    monkeypatch.setattr(SwarmDispatcher, "_merge_pr", merge)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_merge=True))
+    receipt = ReviewBindingReceipt(
+        review_id="103", reviewer_login=agent_github_login("vanellus"),
+        commit_id=head, state="APPROVED",
+    )
+
+    asyncio.run(dispatcher._gate_merge_readiness(
+        _trigger(head_sha=head), parent=80, panel=[], reviewed_head=head,
+        binding_receipt=receipt,
+    ))
+
+    assert merged == [("owner/repo", 87, "squash", head, True)]
+
+
+def test_review_clear_checks_only_stale_head_refuses_merge(monkeypatch):
+    head = "b" * 40
+    merged = []
+
+    async def live_head(self, trigger):
+        return "c" * 40
+
+    async def merge(self, *args, **kwargs):
+        merged.append((args, kwargs))
+        return True, "d" * 40
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", live_head)
+    monkeypatch.setattr(SwarmDispatcher, "_merge_pr", merge)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_merge=True))
+    receipt = ReviewBindingReceipt(
+        review_id="103", reviewer_login=agent_github_login("vanellus"),
+        commit_id=head, state="APPROVED",
+    )
+    asyncio.run(dispatcher._gate_merge_readiness(
+        _trigger(head_sha=head), parent=80, panel=[], reviewed_head=head,
+        binding_receipt=receipt,
+    ))
+    assert merged == []
 
 
 def test_required_ci_state_failing_when_status_failure(monkeypatch):
@@ -3084,7 +3193,7 @@ def test_required_ci_state_pending_when_a_check_incomplete(monkeypatch):
 def test_required_ci_state_failing_on_actionable_conclusions(monkeypatch):
     for concl in ("timed_out", "cancelled", "action_required"):
         runs = [{"status": "completed", "conclusion": concl}]
-        assert _ci_state(monkeypatch, status_state="", check_runs=runs) == "failing"
+        assert _ci_state(monkeypatch, status_state="success", check_runs=runs) == "failing"
 
 
 def test_required_ci_state_unknown_on_missing_head_sha(monkeypatch):

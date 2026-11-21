@@ -11661,7 +11661,12 @@ class SwarmDispatcher:
     async def _fetch_head_ci_snapshot(
         self, trigger: SwarmTrigger
     ) -> tuple[str, str, list[dict]]:
-        """Return PR head SHA, combined commit status state, and raw check-runs."""
+        """Return head SHA, validated legacy status state, and latest check-runs.
+
+        GitHub reports combined ``pending`` when there are zero legacy
+        statuses. Preserve that absence separately from a genuinely pending
+        status; incomplete responses cannot establish either condition.
+        """
         async with httpx.AsyncClient(timeout=30) as client:
             headers = self._github_headers(trigger.repository)
             pr = await client.get(
@@ -11680,7 +11685,20 @@ class SwarmDispatcher:
                 headers=headers,
             )
             status.raise_for_status()
-            state = status.json().get("state", "")
+            status_data = status.json()
+            state = status_data.get("state")
+            count = status_data.get("total_count")
+            statuses = status_data.get("statuses")
+            if (
+                not isinstance(count, int) or isinstance(count, bool) or count < 0
+                or not isinstance(statuses, list) or len(statuses) != count
+                or any(not isinstance(s, dict) for s in statuses)
+                or state not in ("pending", "success", "failure", "error")
+                or (count == 0 and state != "pending")
+            ):
+                state = "unknown"
+            elif count == 0:
+                state = "absent"
 
             checks = await client.get(
                 f"https://api.github.com/repos/{trigger.repository}/commits/"
@@ -11688,7 +11706,16 @@ class SwarmDispatcher:
                 headers={**headers, "Accept": "application/vnd.github+json"},
             )
             checks.raise_for_status()
-            runs = checks.json().get("check_runs", [])
+            checks_data = checks.json()
+            runs = checks_data.get("check_runs")
+            run_count = checks_data.get("total_count")
+            if (
+                not isinstance(run_count, int) or isinstance(run_count, bool)
+                or run_count < 0 or not isinstance(runs, list)
+                or len(runs) != run_count
+                or any(not isinstance(run, dict) for run in runs)
+            ):
+                return head_sha, "unknown", []
             # Judge the head on the newest run of each check only: a failed run
             # superseded by a passing re-run of the same check is not a failure.
             return head_sha, state, _latest_check_runs(runs)
@@ -11742,6 +11769,8 @@ class SwarmDispatcher:
             head_sha, state, runs = await self._fetch_head_ci_snapshot(trigger)
             if not head_sha:
                 return "unknown"
+            if state == "unknown":
+                return "unknown"
             run_conclusions = [r.get("conclusion") for r in runs]
             run_statuses = [r.get("status") for r in runs]
 
@@ -11749,6 +11778,11 @@ class SwarmDispatcher:
                 c in _FAILING_CHECK_CONCLUSIONS for c in run_conclusions
             )
             pending_run = any(s != "completed" for s in run_statuses)
+            unknown_run = any(
+                s not in ("queued", "in_progress", "completed")
+                or (s == "completed" and c not in _SUPERSEDING_CONCLUSIONS)
+                for s, c in zip(run_statuses, run_conclusions)
+            )
             failing_names = {
                 (r.get("name") or "").strip()
                 for r in runs
@@ -11763,13 +11797,15 @@ class SwarmDispatcher:
                 # Only PR-body checks fail: no code push fixes this, so it is
                 # not "failing" (which routes a CI-fix round).
                 return CI_STATE_PR_BODY_ONLY
-            if state == "failure" or failing_run:
+            if state in ("failure", "error") or failing_run:
                 return "failing"
+            if unknown_run:
+                return "unknown"
             if state == "pending" or pending_run:
                 return "pending"
-            if state in ("success", "") and not runs and not failing_run:
-                return "green"
-            return "green"
+            if state == "absent" and not runs:
+                return "unknown"
+            return "green" if state in ("success", "absent") else "unknown"
 
         ref = f"{trigger.repository}#{trigger.number}"
         # load_policy() does a blocking httpx.get(); run it off the event loop
