@@ -958,6 +958,14 @@ def test_voice_memo_uses_channel_appropriate_local_backend(
     monkeypatch.setenv("TRANSCRIBE_BACKEND", "elevenlabs")
     monkeypatch.setenv("RECORD_MEETING_DIARIZE", "0")
     monkeypatch.setenv("TRANSCRIBE_DISABLE_NEOTOMA_VOCAB", "1")
+    # Hermetic prompt resolution: no ambient override, and the product_profile
+    # lookup is a stub reporting no names, so the run resolves "no prompt"
+    # without ever reaching a live Neotoma CLI or store.
+    monkeypatch.delenv("TRANSCRIBE_WHISPER_PROMPT", raising=False)
+    product_names = MagicMock(return_value=[])
+    monkeypatch.setattr(cli, "_product_names_from_neotoma", product_names)
+    monkeypatch.setattr(cli, "_neotoma_cli_json", MagicMock(
+        side_effect=AssertionError("prompt lookup must not reach the Neotoma CLI")))
     whisper = MagicMock(return_value={"transcription_text": "Synthetic memo.", "language": "en"})
     from test_transcription_results import complete_result
     fluid = MagicMock(return_value=complete_result(memo, backend='fluid',
@@ -1002,8 +1010,14 @@ def test_voice_memo_uses_channel_appropriate_local_backend(
         fluid.assert_called_once_with(memo, language=None, verbose=True, channel_count=2)
         whisper.assert_not_called()
     else:
-        whisper.assert_called_once_with(memo, language=None, verbose=True, diarize=True)
+        # Resolved-no-prompt contract: the run resolved the prompt once and,
+        # with no product names, passes "" so local_whisper does not re-read
+        # the environment.
+        whisper.assert_called_once_with(
+            memo, language=None, verbose=True, diarize=True, initial_prompt=""
+        )
         fluid.assert_not_called()
+    product_names.assert_called_once_with()
     cloud.assert_not_called()
     assert memo.read_bytes() == original
 
