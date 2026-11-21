@@ -1091,8 +1091,6 @@ def _undelivered_correction_settled(target: "ExistingPRTarget", entry: dict, adm
     head, so an equal admitted head proves nothing landed from that run: the
     new correction starts from the same state the earlier one did. Any ledger
     read failure, or a run that cannot be named, refuses."""
-    import fly_runner
-
     if "commit" not in entry or entry["commit"] not in (None, ""):
         return False  # a missing field is unknown evidence, not a recorded "no commit"
     if not (isinstance(target.head_sha, str) and _FULL_SHA_RE.fullmatch(target.head_sha)
@@ -1101,6 +1099,14 @@ def _undelivered_correction_settled(target: "ExistingPRTarget", entry: dict, adm
             and admitted.get("branch") == target.branch
             and admitted.get("base_branch") == target.base_branch):
         return False
+    return _run_settled(entry)
+
+
+def _run_settled(entry: dict) -> bool:
+    """True only when *entry* names its run and the ledger holds no
+    reservation for that run any more. Any ledger read failure refuses."""
+    import fly_runner
+
     run_id = entry.get("run_id")
     if not isinstance(run_id, str) or not run_id:
         return False  # the run cannot be shown to have settled
@@ -1108,6 +1114,47 @@ def _undelivered_correction_settled(target: "ExistingPRTarget", entry: dict, adm
         return _delivery_ledger().entry(run_id) is None
     except (OSError, fly_runner.FlyLedgerError, AttributeError, TypeError, ValueError):
         return False
+
+
+def supersedable_first_delivery(plan: "FlyDeliveryPlan", stored: str, entry: dict) -> bool:
+    """True only when *entry* is the settled first delivery that opened the
+    exact pull request *plan* corrects, at the exact head *plan* declares.
+
+    A first delivery keyed by an issue (``OWNER/REPO#34``) that opened PR #12
+    leaves its receipt under the issue key. The first correction of that PR
+    reserves ``OWNER/REPO#12`` with the issue key as an association, which
+    collides with that receipt; without this, the settled delivery would make
+    its own PR's correction impossible until an operator cleared it.
+
+    Every condition must hold: *plan* is an existing-PR correction that
+    carries its source issue key, distinct from its own PR key; *stored* is
+    that source key (an issue key, never a task key); the receipt is a first
+    delivery (no ``existing_pr``, no associations, not a lens) that settled
+    ``opened`` with a passed read-back; it names this PR number and head
+    branch; the correction's base is the base a first delivery opens against;
+    its recorded commit is a full SHA equal to the correction's admitted head
+    (which admission has already read as the PR's live head); and its run
+    holds no reservation still in flight."""
+    target = plan.target
+    if target is None or not plan.source_key:
+        return False
+    source = canonical_key(plan.source_key)
+    if (canonical_key(stored) != source or source == canonical_key(plan.key)
+            or _TASK_KEY_MARK in source or not isinstance(entry, dict)):
+        return False
+    if entry.get("kind") == "lens" or "existing_pr" in entry or "associated_keys" in entry:
+        return False
+    if entry.get("status") != "opened" or entry.get("readback") != "passed":
+        return False
+    commit = entry.get("commit")
+    if not isinstance(commit, str) or not _FULL_SHA_RE.fullmatch(commit):
+        return False
+    if not (_as_issue_number(entry.get("pr_number")) == target.number
+            and entry.get("branch") == target.branch
+            and target.base_branch == FLY_DELIVERY_BASE_BRANCH
+            and commit == target.head_sha):
+        return False
+    return _run_settled(entry)
 
 
 # Receipt outcomes that name a pull request the runner opened or updated and
@@ -1552,10 +1599,12 @@ def fly_delivery_blocker(key: str) -> str:
 
 
 def fly_delivery_entrance_blocker(key: str, *, receipt_key: str = "", target=None) -> str:
-    """``fly_delivery_blocker`` for a dispatch entrance, with the one exception
+    """``fly_delivery_blocker`` for a dispatch entrance, with the exceptions
     ``run_fly_delivery`` admits: a further correction of an existing PR whose
-    settled receipt passes ``supersedable_correction`` proceeds (an empty
-    string), so the same eligibility decides at the entrance and at launch.
+    settled receipt passes ``supersedable_correction``, or a first correction
+    whose source's settled first delivery passes ``supersedable_first_delivery``,
+    proceeds (an empty string), so the same eligibility decides at the entrance
+    and at launch.
 
     *key* is the entrance's receipt key, *receipt_key* the correction's own
     (``OWNER/REPO#PR``). Every receipt naming either key, by its stored key or
@@ -1579,8 +1628,9 @@ def fly_delivery_entrance_blocker(key: str, *, receipt_key: str = "", target=Non
     except (OSError, fly_runner.FlyLedgerError, AttributeError, TypeError):
         return reason
     probe = FlyDeliveryPlan(repository="", branch=target.branch, base_branch=target.base_branch,
-                            key=receipt_key, issue_number=None, target=target)
-    if len(matches) == 1 and supersedable_correction(probe, *matches[0]):
+                            key=receipt_key, issue_number=None, target=target, source_key=key)
+    if len(matches) == 1 and (supersedable_correction(probe, *matches[0])
+                              or supersedable_first_delivery(probe, *matches[0])):
         return ""
     return reason
 
@@ -1616,7 +1666,7 @@ def _reservation_entry(plan: FlyDeliveryPlan, token: str) -> dict:
                 **({"associated_keys": [canonical_key(plan.source_key)]} if plan.source_key else {})} if plan.target else {})}
 
 
-def _supersede_settled_correction(plan: FlyDeliveryPlan) -> str | None:
+def _supersede_settled_correction(plan: FlyDeliveryPlan, taken: list | None = None) -> str | None:
     """Replace a settled existing-PR correction receipt with this dispatch's
     reservation when ``supersedable_correction`` holds, and return the new
     token. None: the receipt does not qualify (the caller refuses as before).
@@ -1628,41 +1678,110 @@ def _supersede_settled_correction(plan: FlyDeliveryPlan) -> str | None:
     written, the old receipt's identity is appended to the same audit file the
     operator's ``fly_delivery_receipt.py clear`` writes; if that fails, nothing
     is replaced."""
+    if plan.target is None:
+        return None
+    return _supersede(plan, canonical_key(plan.key), supersedable_correction, taken)
+
+
+def _supersede_settled_first_delivery(plan: FlyDeliveryPlan, taken: list | None = None) -> str | None:
+    """Take over the settled first-delivery receipt held under this
+    correction's source key when ``supersedable_first_delivery`` holds, with
+    the same return values and the same audited compare-and-swap as
+    ``_supersede_settled_correction``.
+
+    The new reservation is keyed by the PR and keeps the source key as its
+    association, so the source issue stays refused for any new first delivery;
+    the removed receipt's full identity (its source task, run, branch, commit
+    and PR) is on the audit line, which ``fly_delivered_pr`` reads for the
+    PR's parent. Done at most once per first delivery: afterwards the source
+    key is only an association, and further corrections supersede the PR's
+    own receipt."""
+    if plan.target is None or not plan.source_key:
+        return None
+    return _supersede(plan, canonical_key(plan.source_key), supersedable_first_delivery, taken)
+
+
+def _supersede(plan: FlyDeliveryPlan, lookup: str, qualifies, taken: list | None = None) -> str | None:
+    """The shared audited compare-and-swap. On success, *taken* (when given)
+    receives the replaced ``(stored key, receipt)`` so a dispatch that then
+    launches nothing can put it back (``_restore_superseded``)."""
     import fly_delivery_receipt
     import fly_runner
 
-    if plan.target is None:
-        return None
     key = canonical_key(plan.key)
     ledger = _delivery_ledger()
     try:
-        found = _stored_receipt(key, ledger.delivery_receipts())
+        found = _stored_receipt(lookup, ledger.delivery_receipts())
     except fly_runner.FlyLedgerError as exc:
         raise ValueError(str(exc)) from None
-    if found is None or not supersedable_correction(plan, *found):
+    if found is None or not qualifies(plan, *found):
         return None
     stored, expected = found
     token = _new_token()
     entry = _reservation_entry(plan, token)
+    correction = isinstance(expected.get("existing_pr"), dict)
 
     def audit() -> None:
         fly_delivery_receipt._append_audit(ledger, {
             "by": "apis", "action": "supersede_delivery_receipt", "stage": "superseding",
             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "key": stored, "source_task": receipt_source_task(stored, expected),
+            "key": stored,
+            # A first delivery delivered for a task records the task id; that
+            # task is the PR's parent once its receipt is gone.
+            "source_task": receipt_source_task(stored, expected) or (
+                "" if correction else str(expected.get("task_id") or "").strip()),
             "status": expected.get("status"), "run_id": expected.get("run_id"),
             "branch": expected.get("branch"), "commit": expected.get("commit"),
             "recorded_at": expected.get("recorded_at"), "existing_pr": expected.get("existing_pr"),
             # The removed receipt was a correction: its key names the correction
             # task, never the parent, so readers skip this line's source_task.
-            **({"correction": True} if isinstance(expected.get("existing_pr"), dict) else {}),
+            **({"correction": True} if correction else {
+                "first_delivery": {k: expected.get(k) for k in
+                                   ("pr_number", "pr_url", "readback", "task_id")}}),
             "superseded_by": {"key": key, "head_sha": plan.target.head_sha}})
 
     try:
         won = ledger.supersede_delivery(stored, expected, key, entry, before=audit)
     except fly_runner.FlyLedgerError as exc:
         raise ValueError(str(exc)) from None
+    if won and taken is not None:
+        taken.append((stored, expected))
     return token if won else ""
+
+
+def _restore_superseded(plan: FlyDeliveryPlan, token: str, stored: str, expected: dict) -> bool:
+    """Put back the receipt this dispatch superseded, in place of its own
+    still-``launching`` reservation, after a proven pre-launch outcome.
+
+    Deleting the reservation (``_release_delivery``) would also delete the
+    only record still refusing the source issue: the receipt it replaced
+    exists only on the audit line. The swap is a compare on the reservation
+    in full, under the ledger lock, audited first. False: the receipt is not
+    this dispatch's (or no longer ``launching``), so nothing changed. Any
+    exception means the ledger state is uncertain, as for a release."""
+    import fly_delivery_receipt
+    import fly_runner
+
+    key = canonical_key(plan.key)
+    ledger = _delivery_ledger()
+    current = ledger.delivery_receipts().get(key)
+    if not isinstance(current, dict) or current.get("token") != token or current.get("status") != "launching":
+        return False
+
+    def audit() -> None:
+        # Parsed as a removal of this dispatch's own reservation; marked a
+        # correction so it never supplies a PR's parent task.
+        fly_delivery_receipt._append_audit(ledger, {
+            "by": "apis", "action": "supersede_delivery_receipt", "stage": "restored",
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "key": key, "source_task": "", "status": "launching", "run_id": "",
+            "branch": current.get("branch"), "existing_pr": current.get("existing_pr"),
+            "correction": True, "restored": {"key": stored, "run_id": expected.get("run_id")}})
+
+    try:
+        return ledger.supersede_delivery(key, current, stored, expected, before=audit)
+    except fly_runner.FlyLedgerError as exc:
+        raise ValueError(str(exc)) from None
 
 
 def _settle_delivery(plan: FlyDeliveryPlan, token: str, entry: dict) -> bool:
@@ -1704,11 +1823,14 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
     One recorded receipt does not refuse: a settled correction of the same
     existing PR whose pushed commit is exactly this correction's admitted head
     (``supersedable_correction``) is replaced by this dispatch's reservation,
-    with the old receipt's identity audited first."""
+    with the old receipt's identity audited first. So is the settled first
+    delivery that opened the PR a first correction targets, at that
+    correction's admitted head (``supersedable_first_delivery``)."""
+    taken: list = []
     reason = fly_delivery_blocker(plan.key)
     if reason:
         try:
-            token = _supersede_settled_correction(plan)
+            token = _supersede_settled_correction(plan, taken)
         except (OSError, ValueError):
             return blocked("the settled correction receipt could not be replaced with certainty; "
                            "not launching. " + reason)
@@ -1725,7 +1847,18 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
         except (OSError, ValueError):
             return blocked("the Fly delivery record could not be written; not launching")
         if not token:
-            return blocked("another dispatcher already reserved this Fly delivery; not launching")
+            # The first correction of a PR collides with the settled first
+            # delivery that opened it (held under the source issue key); that
+            # one receipt may be taken over, audited, exactly as above.
+            try:
+                token = _supersede_settled_first_delivery(plan, taken)
+            except (OSError, ValueError):
+                return blocked("the settled first delivery receipt could not be taken over "
+                               "with certainty; not launching")
+            if not token:
+                return blocked("another dispatcher already reserved this Fly delivery; not launching")
+            log.info("[apis] took over the settled first delivery receipt for %s; it opened "
+                     "this PR at this correction's admitted head", plan.source_key)
     try:
         result = await launch()
     except BaseException:
@@ -1744,7 +1877,9 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
         # raised left the ledger in an unknown state (the removal may have
         # happened, and another dispatch may already hold the key): fail closed.
         try:
-            owned = _release_delivery(plan, token)
+            # A superseded receipt goes back; nothing launched under its successor.
+            owned = (_restore_superseded(plan, token, *taken[0]) if taken
+                     else _release_delivery(plan, token))
         except Exception as exc:  # noqa: BLE001 - any failure is an uncertain state
             kind = type(exc).__name__
             log.warning("[apis] the delivery receipt for %s could not be confirmed after a "
