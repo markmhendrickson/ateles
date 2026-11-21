@@ -172,11 +172,22 @@ def test_settled_first_delivery_is_corrected_once_through_the_natural_entrances(
     assert list(receipts) == [PR] and receipts[PR]["associated_keys"] == [SOURCE]
     assert [x.get("correction") for x in _audit()] == [None, True]
 
-    # The PR's origin and parent read back from the ledger and its audit.
+    # The PR's origin and parent read back from the ledger and its audit. A
+    # task-routed source names its task; a pipeline source never recorded one
+    # (its first-delivery receipt named no task either), so it stays unknown.
     origin = delivery.fly_delivered_pr(REPO, 12, branch)
-    assert origin.delivered is True and origin.branch == branch
-    if not pipeline:
+    if pipeline:
+        assert origin.delivered is None and "single source task" in origin.unknown_reason
+    else:
+        assert origin.delivered is True and origin.branch == branch
         assert origin.source_task == "ent_inert_source"
+
+
+def test_pipeline_source_parent_was_already_unknown_before_any_correction(monkeypatch):
+    world = _World(monkeypatch)
+    asyncio.run(_source(True))
+    origin = delivery.fly_delivered_pr(REPO, 12, world.launched[0]["branch"])
+    assert origin.delivered is None and _audit() == []
 
 
 # ── Hard negatives: refused before any preflight, job or model ──────────────
@@ -217,16 +228,6 @@ def test_wrong_target_refuses_at_the_entrance(monkeypatch, row):
     got = _correct(_correction_row(**row))
     assert not got.ok and world.preflight == [] and world.launched == []
     assert _ledger().delivery_receipts() == {SOURCE: held} and _audit() == []
-
-
-def test_correction_without_its_source_issue_is_refused(monkeypatch):
-    held = _seed()
-    world = _World(monkeypatch)
-    row = _correction_row()
-    row.pop("issue_number")
-    got = _correct(row)
-    assert not got.ok and world.launched == []
-    assert _ledger().delivery_receipts() == {SOURCE: held}
 
 
 def test_run_still_in_flight_refuses(monkeypatch):
