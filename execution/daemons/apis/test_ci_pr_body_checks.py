@@ -259,9 +259,10 @@ def test_snapshot_fetch_applies_the_latest_run_filter(monkeypatch):
             if "/pulls/" in url:
                 payload = {"head": {"sha": HEAD}}
             elif url.endswith("/status"):
-                payload = {"state": "success"}
+                payload = {"state": "success", "total_count": 1,
+                           "statuses": [{"state": "success"}]}
             else:
-                payload = {"check_runs": runs}
+                payload = {"total_count": len(runs), "check_runs": runs}
 
             class _Resp:
                 def raise_for_status(self_inner):
