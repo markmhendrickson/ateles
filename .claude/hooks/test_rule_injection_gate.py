@@ -1029,3 +1029,120 @@ class TestMalformedInputFailsOpen:
         )
         assert result.returncode == 0
         assert result.stdout.strip() == ""
+
+
+# ------------------------------------------------- planning-record warnings
+#
+# Advisory only: every case also asserts the hook still allows.
+
+_TOOL = "mcp__751abb6c-0000-0000-0000-000000000000__"
+
+
+def _warn_run(tool: str, tool_input: dict):
+    r = _run({"tool_name": _TOOL + tool, "tool_input": tool_input})
+    assert r.returncode == 0
+    if not r.stdout.strip():
+        return None
+    out = json.loads(r.stdout)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "allow"
+    return out["additionalContext"]
+
+
+class TestPlanningRecordWarnings:
+    def test_oversized_plan_next_steps_correct_warns(self):
+        ctx = _warn_run("correct", {
+            "entity_id": "ent_x", "entity_type": "plan",
+            "field": "next_steps", "value": "x" * 2001,
+        })
+        assert ctx and "next_steps is 2001 characters" in ctx
+        assert "size only" in ctx  # says the previous value is unavailable
+
+    def test_oversized_plan_next_steps_store_warns(self):
+        ctx = _warn_run("store", {"entities": [
+            {"entity_type": "plan", "next_steps": "y" * 5000}]})
+        assert ctx and "next_steps" in ctx
+
+    def test_small_next_steps_is_quiet(self):
+        assert _warn_run("correct", {
+            "entity_id": "ent_x", "entity_type": "plan",
+            "field": "next_steps", "value": "1. do the thing"}) is None
+
+    def test_next_steps_on_other_entity_type_is_quiet(self):
+        assert _warn_run("correct", {
+            "entity_id": "ent_x", "entity_type": "note",
+            "field": "next_steps", "value": "x" * 5000}) is None
+
+    def test_done_task_without_artifact_warns(self):
+        ctx = _warn_run("correct", {
+            "entity_id": "ent_t", "entity_type": "task",
+            "field": "status", "value": "done"})
+        assert ctx and "no artifact reference" in ctx
+
+    def test_done_task_store_without_artifact_warns(self):
+        ctx = _warn_run("store", {"entities": [
+            {"entity_type": "task", "entity_id": "ent_t", "status": "completed",
+             "notes": "finished it"}]})
+        assert ctx and "no artifact reference" in ctx
+
+    @pytest.mark.parametrize("notes", [
+        "merged in PR #1234",
+        "see https://github.com/o/r/pull/9",
+        "commit 3f9a1c7e2b",
+        "edited execution/mcp/ateles/server.py",
+        "stored ent_0123456789abcdef01234567",
+    ])
+    def test_done_task_with_artifact_is_quiet(self, notes):
+        assert _warn_run("store", {"entities": [
+            {"entity_type": "task", "entity_id": "ent_t", "status": "done",
+             "notes": notes}]}) is None
+
+    def test_in_progress_task_update_is_quiet(self):
+        assert _warn_run("store", {"entities": [
+            {"entity_type": "task", "entity_id": "ent_t",
+             "status": "in_progress"}]}) is None
+
+    def test_new_task_without_part_of_warns(self):
+        ctx = _warn_run("store", {"entities": [
+            {"entity_type": "task", "title": "t", "status": "pending"}]})
+        assert ctx and "no PART_OF" in ctx
+
+    def test_new_task_with_part_of_is_quiet(self):
+        assert _warn_run("store", {
+            "entities": [{"entity_type": "task", "title": "t",
+                          "status": "pending"}],
+            "relationships": [{"relationship_type": "PART_OF",
+                               "source_index": 0,
+                               "target_entity_id": "ent_plan"}]}) is None
+
+    def test_warning_never_blocks_and_fails_open_on_bad_input(self):
+        assert _warn_run("store", {"entities": "not-a-list"}) is None
+        assert _warn_run("correct", {"field": 5, "value": None}) is None
+
+    def test_warnings_combine_with_rule_injection_category(self):
+        ctx = _warn_run("store", {"entities": [
+            {"entity_type": "agent_grant"},
+            {"entity_type": "task", "title": "t"}]})
+        assert ctx and "agent_grant write" in ctx and "no PART_OF" in ctx
+
+
+class TestWiringMatchesConnectorToolNames:
+    """The Neotoma tool is named after its connector (`mcp__<id>__store`), not
+    only `mcp__mcpsrv_neotoma__store`; the wirings must match both."""
+
+    def _matchers(self):
+        import re
+        claude = json.loads((REPO_ROOT / ".claude/settings.json").read_text())
+        codex = json.loads((REPO_ROOT / ".codex/hooks.json").read_text())
+        out = []
+        for cfg in (claude, codex):
+            for entry in cfg["hooks"]["PreToolUse"]:
+                if any("rule_injection_gate.py" in h["command"] for h in entry["hooks"]):
+                    out.append(re.compile(entry["matcher"]))
+        return out
+
+    @pytest.mark.parametrize("name", [
+        "mcp__mcpsrv_neotoma__store", "mcp__751abb6c-449b-4851-9f0e-2c90a18da349__correct"])
+    def test_matches(self, name):
+        ms = self._matchers()
+        assert len(ms) == 2
+        assert all(m.search(name) for m in ms)

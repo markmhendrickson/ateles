@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 import math
 
 
@@ -188,3 +189,62 @@ def session_state_counts(rows: list[dict], row_indexes: list[int]) -> dict[str, 
         states.setdefault(key, set()).add(row["priority"])
     counts = Counter(next(iter(values)) if len(values) == 1 else "recorded" for values in states.values())
     return {"tasks": len(states), **dict(counts)}
+
+
+# Read-only planning-record hygiene section (operator decision d4, plan
+# ent_b7a4ebbe5086bc1670ec4665: warnings and a visible list, never blocking).
+# It is derived from the rows this read already built; it creates no store.
+NEXT_STEPS_CAP_CHARS = 2000
+STALE_IN_PROGRESS_DAYS = 7
+_IN_PROGRESS = {"in_progress"}
+
+
+def _parse_when(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def planning_record_findings(rows: list[dict], *, now: datetime) -> dict:
+    """List planning records in shapes known to rot: an oversized `next_steps`
+    on a plan, an `in_progress` task untouched for 7+ days, and an
+    `in_progress` task with no owner. Read-only and bounded to this read's rows.
+
+    The data path does not say which session wrote an oversized field, so
+    plans and tasks are listed, not sessions. Plans reached only through a
+    task's PART_OF ascent are not read here, so they are not checked.
+    """
+    oversized, stale, ownerless = [], [], []
+    for row in rows:
+        entity_id = row.get("entity_id")
+        item = {"entity_id": entity_id, "title": row.get("work")}
+        chars = row.get("next_steps_chars")
+        if row.get("kind") == "plan" and isinstance(chars, int) and chars > NEXT_STEPS_CAP_CHARS:
+            oversized.append({**item, "chars": chars})
+        status = row.get("recorded_status")
+        if row.get("kind") != "task" or not isinstance(status, str) or status.strip().lower() not in _IN_PROGRESS:
+            continue
+        touched = _parse_when(row.get("record_last_observation_at"))
+        if touched is not None and now - touched >= timedelta(days=STALE_IN_PROGRESS_DAYS):
+            stale.append({**item, "days_idle": (now - touched).days})
+        if not any(
+            isinstance(row.get(key), str) and row[key].strip().lower() not in {"", "unknown", "unassigned"}
+            for key in ("assigned_principal", "record_owner", "recorded_executor", "declared_step_owner")
+        ):
+            ownerless.append(item)
+    return {
+        "scope": "Only records on this board; a read-only list, not a store or a gate",
+        "next_steps_cap_chars": NEXT_STEPS_CAP_CHARS,
+        "stale_after_days": STALE_IN_PROGRESS_DAYS,
+        "oversized_next_steps": oversized,
+        "stale_in_progress": stale,
+        "ownerless_in_progress": ownerless,
+        "limits": [
+            "The writing session is not recorded cheaply, so plans and tasks are listed, not sessions",
+            "Plans reached only through a task's PART_OF ascent are not read here",
+        ],
+    }

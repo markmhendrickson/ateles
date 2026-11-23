@@ -235,3 +235,62 @@ def test_registry_through_actual_mcp_handler_and_bundled_view(tmp_path):
         here = Path(__file__).parent
         view = subprocess.run([node, str(here / "test_workboard_bridge.cjs"), str(here / "workboard.html"), str(fixture), "planning"], capture_output=True, text=True, timeout=15)
         assert view.returncode == 0, view.stdout + view.stderr
+
+
+# ---- planning-record findings (read-only list) ----
+
+from datetime import datetime, timezone
+from workboard_planning import planning_record_findings
+
+NOW = datetime(2026, 11, 23, tzinfo=timezone.utc)
+
+
+def _row(**kw):
+    base = {"kind": "task", "entity_id": "ent_t", "work": "W", "recorded_status": "in_progress",
+            "record_last_observation_at": "2026-11-22T00:00:00Z", "assigned_principal": "cicada"}
+    base.update(kw)
+    return base
+
+
+def test_oversized_plan_next_steps_is_listed():
+    out = planning_record_findings(
+        [{"kind": "plan", "entity_id": "ent_p", "work": "P", "next_steps_chars": 810_000}], now=NOW)
+    assert out["oversized_next_steps"] == [{"entity_id": "ent_p", "title": "P", "chars": 810_000}]
+    assert planning_record_findings(
+        [{"kind": "plan", "entity_id": "ent_p", "work": "P", "next_steps_chars": 500}], now=NOW
+    )["oversized_next_steps"] == []
+
+
+def test_stale_in_progress_task_is_listed_only_after_seven_days():
+    old = planning_record_findings([_row(record_last_observation_at="2026-11-10T00:00:00Z")], now=NOW)
+    assert old["stale_in_progress"][0]["days_idle"] == 13
+    assert planning_record_findings([_row()], now=NOW)["stale_in_progress"] == []
+    assert planning_record_findings(
+        [_row(recorded_status="done", record_last_observation_at="2026-01-01T00:00:00Z")], now=NOW
+    )["stale_in_progress"] == []
+
+
+def test_ownerless_in_progress_task_is_listed_and_unknown_is_not_an_owner():
+    out = planning_record_findings([_row(assigned_principal="unknown", record_owner="unknown")], now=NOW)
+    assert [i["entity_id"] for i in out["ownerless_in_progress"]] == ["ent_t"]
+    assert planning_record_findings([_row()], now=NOW)["ownerless_in_progress"] == []
+    assert planning_record_findings(
+        [_row(assigned_principal="unknown", recorded_executor="codex")], now=NOW
+    )["ownerless_in_progress"] == []
+
+
+def test_unparseable_timestamp_is_not_reported_stale_and_limits_are_stated():
+    out = planning_record_findings([_row(record_last_observation_at="garbage")], now=NOW)
+    assert out["stale_in_progress"] == [] and out["limits"]
+
+
+def test_workboard_read_carries_findings_and_renders_a_warning_section():
+    digest = {"entity_type": "session_digest", "entity_id": "ent_digest",
+              "snapshot": {"session_key": "synthetic:f", "tasks_claimed": []}}
+    plan = {"entity_type": "plan", "snapshot": {"title": "Big", "next_steps": "x" * 3000}}
+    with patch.object(srv, "_find_session_digest", return_value=digest), \
+         patch.object(srv, "_get", return_value=plan), \
+         patch.object(srv, "_planning_registry", return_value=({}, True, [])):
+        result = srv._get_session_workboard("synthetic:f", "ent_display")
+    assert result["planning_record_findings"]["oversized_next_steps"][0]["chars"] == 3000
+    assert "Planning-record warnings" in result["table"] and "3000 characters" in result["table"]

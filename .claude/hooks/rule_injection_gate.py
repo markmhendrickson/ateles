@@ -65,12 +65,26 @@ does not attempt to detect whether the probe actually happens — that is a
 downstream audit's job (the eval harness's `check_grant_admission`), not a
 gate that fires before the write itself even lands.
 
+PLANNING-RECORD WARNINGS (a second, rule-free job; never blocks). The same
+hook also WARNS, through the same `additionalContext` channel, when a Neotoma
+`store`/`correct` call writes a planning record in a shape that has been
+observed to corrupt it: a plan `next_steps` value over
+`NEXT_STEPS_MAX_CHARS` (one plan's grew to ~810 KB across 948 writes, 826 of
+which kept the previous text); a `task` marked done with no artifact
+reference (PR, commit, URL, file path, entity id) in the same write; and a
+`task` stored with no `PART_OF` relationship. The hook payload carries only
+the NEW value, never the previous one, so "the new value contains the old as
+a prefix/suffix" cannot be judged here: the size check is the whole of the
+`next_steps` test and the warning says so. Warnings are advisory by design
+(operator decision d4 on plan ent_b7a4ebbe5086bc1670ec4665): permission is
+always `allow`. Design basis: docs/foundation/planning_model.md.
+
 FAIL-OPEN, STDLIB-ONLY, NEVER LOGS A RULE BODY TO STDERR (only entity ids and
 counts — same posture as session_rule_index.py; some `agent_policy` rows
 carry operator payment details, CLAUDE.md).
 
 Wire under PreToolUse with matcher
-"Edit|Write|NotebookEdit|mcp__mcpsrv_neotoma__correct|mcp__mcpsrv_neotoma__store|Bash"
+"Edit|Write|NotebookEdit|Bash|mcp__.*__(correct|store)"
 under Claude Code (no separate MultiEdit tool name in this Claude Code
 version — every other hook in this directory matches the same four-tool
 set), and additionally "apply_patch" under Codex
@@ -486,6 +500,123 @@ _GRANT_PROBE_REMINDER = (
 )
 
 
+# --------------------------------------------------------------------------
+# Planning-record warnings (advisory, never blocking).
+# --------------------------------------------------------------------------
+NEXT_STEPS_MAX_CHARS = 2000
+_DONE_STATUSES = {"done", "completed", "complete"}
+_ARTIFACT_REF_RE = re.compile(
+    r"https?://"
+    r"|\bPR\s*#?\d+|(?<![\w&])#\d+"
+    r"|\bent_[0-9a-f]{12,}"
+    r"|\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b"
+    r"|[\w.~-]+(?:/[\w.~-]+)+\.\w{1,6}\b"
+    r"|\b[\w-]+\.(?:py|md|ts|tsx|js|json|ya?ml|sh|html)\b",
+    re.IGNORECASE,
+)
+
+
+def _written_entities(tool_name: str, tool_input: dict) -> list[tuple[dict, bool]]:
+    """(entity-fields dict, is_store_create_candidate) for each entity a
+    Neotoma `store`/`correct` call writes. A `correct` is one field of an
+    existing entity, synthesized as a one-field dict; a `store` entity with
+    its own `entity_id` is an update of an existing record."""
+    out: list[tuple[dict, bool]] = []
+    if tool_name.endswith("__correct"):
+        field = tool_input.get("field")
+        if isinstance(field, str) and field:
+            out.append(
+                (
+                    {
+                        "entity_type": tool_input.get("entity_type"),
+                        field: tool_input.get("value"),
+                    },
+                    False,
+                )
+            )
+    elif tool_name.endswith("__store"):
+        entities = tool_input.get("entities")
+        if isinstance(entities, list):
+            for e in entities:
+                if isinstance(e, dict):
+                    out.append((e, not e.get("entity_id")))
+    return out
+
+
+def _has_artifact_ref(entity: dict) -> bool:
+    for key, value in entity.items():
+        if key in ("status", "entity_type"):
+            continue
+        if isinstance(value, str) and _ARTIFACT_REF_RE.search(value):
+            return True
+        if isinstance(value, (dict, list)) and _ARTIFACT_REF_RE.search(
+            json.dumps(value)
+        ):
+            return True
+    return False
+
+
+def _store_has_part_of(tool_input: dict) -> bool:
+    rels = tool_input.get("relationships")
+    if not isinstance(rels, list):
+        return False
+    return any(
+        isinstance(r, dict)
+        and "part_of" in str(r.get("relationship_type", "")).lower()
+        for r in rels
+    )
+
+
+def planning_record_warnings(tool_name: str, tool_input: dict) -> list[str]:
+    """Advisory warnings for one Neotoma store/correct call. Pure."""
+    warnings: list[str] = []
+    for entity, is_create in _written_entities(tool_name, tool_input):
+        etype = entity.get("entity_type")
+        if etype == "plan" and isinstance(entity.get("next_steps"), str):
+            n = len(entity["next_steps"])
+            if n > NEXT_STEPS_MAX_CHARS:
+                warnings.append(
+                    f"plan next_steps is {n} characters (cap about "
+                    f"{NEXT_STEPS_MAX_CHARS}). It is a current-state summary: "
+                    "REWRITE it from scratch, do not append to or merge it "
+                    "with the old text, and record progress on the task "
+                    "(status plus a dated one-line note). The previous value "
+                    "is not in the hook payload, so this checks size only, "
+                    "not whether the old text is kept as a prefix or suffix."
+                )
+        if etype == "task":
+            status = entity.get("status")
+            if (
+                isinstance(status, str)
+                and status.strip().lower() in _DONE_STATUSES
+                and not _has_artifact_ref(entity)
+            ):
+                warnings.append(
+                    "task marked done with no artifact reference in this "
+                    "write. Add the PR, commit, URL, file path, or entity id "
+                    "that proves it (a dated note naming it), and verify it "
+                    "resolves first."
+                )
+            if (
+                is_create
+                and tool_name.endswith("__store")
+                and not _store_has_part_of(tool_input)
+            ):
+                warnings.append(
+                    "task stored with no PART_OF relationship in this write. "
+                    "A task has one line upward: link it PART_OF its plan or "
+                    "parent task in the same store (or immediately after)."
+                )
+    return warnings
+
+
+def _render_warnings(warnings: list[str]) -> str:
+    return (
+        "Planning-record warning (advisory, not blocking; "
+        "docs/foundation/planning_model.md):\n- " + "\n- ".join(warnings)
+    )
+
+
 def _render_context(
     category_to_rows: dict[str, dict[str, object]],
 ) -> tuple[str, list[str]]:
@@ -517,27 +648,38 @@ def main() -> int:
         return 0
 
     categories = matched_categories(tool_name, tool_input)
-    if not categories:
+    warnings = planning_record_warnings(tool_name, tool_input)
+    if not categories and not warnings:
         return 0
 
-    wanted_ids: set[str] = set()
-    for c in categories:
-        wanted_ids.update(_CATEGORY_RULE_IDS.get(c, ()))
+    context = ""
+    injected_ids: list[str] = []
+    if categories:
+        wanted_ids: set[str] = set()
+        for c in categories:
+            wanted_ids.update(_CATEGORY_RULE_IDS.get(c, ()))
 
-    rows = _fetch_rows_by_id(wanted_ids)
-    category_to_rows = {
-        c: {eid: rows[eid] for eid in _CATEGORY_RULE_IDS.get(c, ()) if eid in rows}
-        for c in categories
-    }
-    # Even with no row fetched (Neotoma unreachable), a grant write still gets
-    # the probe reminder — that instruction does not depend on Neotoma.
-    if not any(category_to_rows.values()) and "grant_write" not in categories:
+        rows = _fetch_rows_by_id(wanted_ids)
+        category_to_rows = {
+            c: {eid: rows[eid] for eid in _CATEGORY_RULE_IDS.get(c, ()) if eid in rows}
+            for c in categories
+        }
+        # Even with no row fetched (Neotoma unreachable), a grant write still
+        # gets the probe reminder — that instruction does not depend on
+        # Neotoma.
+        if any(category_to_rows.values()) or "grant_write" in categories:
+            context, injected_ids = _render_context(category_to_rows)
+
+    if warnings:
+        warning_text = _render_warnings(warnings)
+        context = f"{context}\n\n{warning_text}" if context else warning_text
+    if not context:
         return 0
 
-    context, injected_ids = _render_context(category_to_rows)
     _log(
-        f"tool={tool_name} categories={','.join(categories)} "
-        f"injected={','.join(injected_ids) or '(none — fail-open)'}"
+        f"tool={tool_name} categories={','.join(categories) or '(none)'} "
+        f"injected={','.join(injected_ids) or '(none)'} "
+        f"planning_warnings={len(warnings)}"
     )
     print(
         json.dumps(
