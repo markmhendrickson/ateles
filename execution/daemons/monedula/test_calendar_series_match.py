@@ -508,3 +508,32 @@ def test_explicit_empty_collection_still_allows_the_env_fallback(key, monkeypatc
     assert [p.prefix for p in load_profiles_with_neotoma_fallback([])] == ["TEST"]
     _serve(monkeypatch, [])
     assert [p.prefix for p in load_profiles_with_neotoma_fallback([])] == ["TEST"]
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("status", ["paused", "archived", "retired", "", None])
+@pytest.mark.parametrize("pass_strandings", [True, False])
+def test_populated_collection_with_no_active_profile_holds_the_env_fallback(
+    rail, status, pass_strandings, monkeypatch
+):
+    """A non-empty Neotoma collection whose profiles are all inactive or of an unrecognised status
+    must not activate an env-var profile (no series binding, and it would resurrect a pause)."""
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch, rail)
+    _serve(monkeypatch, {"entities": [_profile(
+        payment_type=rail, status=status, calendar_recurring_event_id=SERIES,
+    )]})
+    stranded = [] if pass_strandings else None
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+
+
+def test_active_profile_alongside_inactive_ones_is_returned(monkeypatch):
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    _serve(monkeypatch, {"entities": [
+        _profile(status="paused"),
+        _profile(payment_type="btc", btc_address="synthetic-address"),
+    ]})
+    assert len(load_profiles_with_neotoma_fallback([])) == 1

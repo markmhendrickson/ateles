@@ -137,6 +137,7 @@ def parse_wise_recipient_id(raw: Any) -> int | None:
 
 def load_profiles_from_neotoma(
     strandings: list | None = None,
+    observed: dict | None = None,
 ) -> list[PaymentProfile]:
     """
     Load PaymentProfiles from Neotoma payment_profile entities (Phase 5+).
@@ -321,6 +322,10 @@ def load_profiles_from_neotoma(
         )
         return []
 
+    if observed is not None:
+        # How many profile entities the read returned, usable or not: the env-var fallback
+        # may follow only an explicitly EMPTY collection, never a populated one.
+        observed["entities"] = len(items)
     profiles: list[PaymentProfile] = []
     for item in items:
         snap: dict = item.get("snapshot") or {}
@@ -508,8 +513,9 @@ def load_profiles_with_neotoma_fallback(
     # whether a profile was held for an invalid calendar series id, whatever the
     # caller passed.
     collected: list = []
+    observed: dict = {}
     try:
-        profiles = load_profiles_from_neotoma(collected)
+        profiles = load_profiles_from_neotoma(collected, observed)
     except RuntimeError as exc:
         # Neotoma is unconfigured, not unreachable. That is loud in the log but
         # recoverable here, because env-var profiles are a real second source —
@@ -532,6 +538,17 @@ def load_profiles_with_neotoma_fallback(
         log.error(
             "Neotoma payment profile source yielded no usable profile "
             f"({len(collected)} stranding(s)); not falling back to env-var profiles"
+        )
+        return []
+
+    if observed.get("entities", 0) > 0:
+        # The configured Neotoma source returned profile entities but none is active (all
+        # paused, archived or of an unrecognised status). An env-var profile has no series
+        # binding and would resurrect a paused payment: hold. The fallback follows only an
+        # explicitly empty collection.
+        log.warning(
+            f"Neotoma returned {observed['entities']} payment profile(s), none active; "
+            "not falling back to env-var profiles"
         )
         return []
 
