@@ -54,7 +54,7 @@
         ]
       },
       {
-        "matcher": "^(Bash|apply_patch|mcp__mcpsrv_neotoma__correct|mcp__mcpsrv_neotoma__store)$",
+        "matcher": "^(Bash|apply_patch|mcp__.*__(correct|store))$",
         "hooks": [
           {
             "type": "command",

@@ -23,7 +23,7 @@ Each session maintains the Neotoma `plan` entity that matches **its own workstre
 - **When a todo item is completed** — correct its `status` to `"done"` in `todos`, with relevant entity IDs, file paths, or PR numbers in a `notes` field.
 - **Never mark a task or todo `done` while citing a commit, branch, file, or PR that does not resolve.** Verify the artifact exists first (git `cat-file`/`ls-remote`, GitHub). Unverifiable completion claims are the second failure mode that corrupted this plan in June 2026.
 - **When a decision is settled** — add or correct one entry in the `decisions` map. One sentence, snake_case key.
-- **When blockers change** (something unblocked, something newly blocked) — correct `next_steps` to reflect the current state.
+- **When blockers change** (something unblocked, something newly blocked) — REWRITE `next_steps` as a current-state summary of about 2,000 characters or less: never append to it and never merge it with the old text (the re-read-and-merge rule above is for `decisions` and `todos` only). Progress goes on the task: status plus a dated one-line note.
 - **When a new actionable task is identified** — create a `task` entity and link it `PART_OF` the bound plan. Use the `update-tasks` skill for field values and priority mapping.
 - **When a daemon, entity, or file is renamed** — correct any stale references in `body`, `decisions`, and `todos` in the same turn the rename happens.
 

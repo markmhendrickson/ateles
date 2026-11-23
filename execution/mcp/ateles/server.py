@@ -92,6 +92,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from execution.mcp.ateles.workboard_planning import (  # noqa: E402
     planning_declaration,
+    planning_record_findings,
     session_planning_tree,
 )
 
@@ -1293,6 +1294,13 @@ def _claim_row(claim: Any, planning_cache: dict | None = None) -> dict | None:
         "declared_step_owner": _text(snapshot.get("step_owner")) or "unknown",
         "record_owner": _text(snapshot.get("owner")) or "unknown",
         "recorded_executor": _text(snapshot.get("executor")) or "unknown",
+        "recorded_status": live_status,
+        "record_last_observation_at": live_record.get("last_observation_at")
+        if isinstance(live_record, dict)
+        else None,
+        "next_steps_chars": len(snapshot["next_steps"])
+        if record_kind == "plan" and isinstance(snapshot.get("next_steps"), str)
+        else None,
         "recorded_session_next_action": _text(claim.get("next_action")),
         "next_action": _next_action(snapshot, claim, bucket, live_record is not None),
         "evidence": evidence,
@@ -1472,6 +1480,9 @@ def _get_session_workboard(
             "record_owner": _text(plan.get("owner")) or "unknown",
             "next_action": _text(plan.get("next_steps"))
             or "Read the current plan next steps",
+            "next_steps_chars": len(plan["next_steps"])
+            if isinstance(plan.get("next_steps"), str)
+            else None,
             "evidence": [display_plan_id],
             "state_source": "recorded_plan",
             "entity_id": display_plan_id,
@@ -1527,6 +1538,9 @@ def _get_session_workboard(
         "rows": rows,
         "planning": session_planning_tree(
             rows, declarations, complete=registry_complete, gaps=registry_gaps
+        ),
+        "planning_record_findings": planning_record_findings(
+            rows, now=datetime.now(timezone.utc)
         ),
         "table": _format_workboard(rows),
         "observed_at": datetime.now(timezone.utc).isoformat(),
@@ -1612,6 +1626,31 @@ def _format_workboard_result(result: dict) -> str:
                     + json.dumps(node["counts"], sort_keys=True)
                     + "; these counts do not establish whole-plan completion."
                 )
+    findings = result.get("planning_record_findings")
+    if isinstance(findings, dict):
+        lines = []
+        for item in findings.get("oversized_next_steps", []):
+            lines.append(
+                f"- plan {item['entity_id']} ({item['title']}): next_steps is "
+                f"{item['chars']} characters (cap about {findings['next_steps_cap_chars']}); "
+                "rewrite it as a current-state summary"
+            )
+        for item in findings.get("stale_in_progress", []):
+            lines.append(
+                f"- task {item['entity_id']} ({item['title']}): in_progress, "
+                f"untouched for {item['days_idle']} days"
+            )
+        for item in findings.get("ownerless_in_progress", []):
+            lines.append(
+                f"- task {item['entity_id']} ({item['title']}): in_progress with no owner"
+            )
+        if lines:
+            sections.append(
+                "Planning-record warnings (read-only, advisory):\n"
+                + "\n".join(lines)
+                + "\n"
+                + "\n".join("Not covered: " + str(x) for x in findings.get("limits", []))
+            )
     if "history" in result:
         sections.append(
             "Requested cumulative session history (not current status):\n"

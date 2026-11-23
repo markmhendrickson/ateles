@@ -48,7 +48,9 @@ Key decisions to always capture if settled:
 
 ### Step 4: Correct next_steps
 
-Replace with the current phase's specific blockers and the immediate next action. Be concrete — name files, entity IDs, PR numbers, or account names involved. Format as a short numbered list.
+`next_steps` is a current-state summary: the current phase's specific blockers and the immediate next action. **REWRITE it from scratch each time** — never append to it and never merge it with the old text; the re-read-and-merge rule in Step 3 applies to `decisions` and `todos` only, not to this free-text field. Cap it at about 2,000 characters. Be concrete — name files, entity IDs, PR numbers, or account names involved. Format as a short numbered list.
+
+Progress does not belong here. Record it on the task: update the task's `status` and add a dated one-line note (what changed, with the PR, commit, or entity ID). A plan whose `next_steps` keeps growing is a sign that progress is being logged on the plan instead of on tasks.
 
 ### Step 5: Fix body if stale
 
