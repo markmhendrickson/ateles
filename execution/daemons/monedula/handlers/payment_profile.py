@@ -517,11 +517,21 @@ def load_profiles_with_neotoma_fallback(
     try:
         profiles = load_profiles_from_neotoma(collected, observed)
     except RuntimeError as exc:
-        # Neotoma is unconfigured, not unreachable. That is loud in the log but
-        # recoverable here, because env-var profiles are a real second source —
-        # so fall through rather than taking the whole run down.
         log.error(f"Neotoma payment profiles unavailable: {exc}")
         profiles = []
+        if os.environ.get("NEOTOMA_BASE_URL", "").strip():
+            # The source IS configured, so this is a read failure, not "no Neotoma here":
+            # hold (an env-var profile carries no series binding) and let the caller
+            # escalate it, whatever the exception text says.
+            from strandings import REASON_FETCH_FAILED, Stranding
+
+            collected.append(Stranding(
+                entity_id="", label="(all profiles)", reason=REASON_FETCH_FAILED,
+                detail="The configured Neotoma source failed during the payment profile "
+                       "read; no profiles were loaded this run, so none can be proposed.",
+            ))
+        # With no Neotoma base URL configured (an env-only install) env-var profiles are the
+        # only source, so the run falls through to them rather than being taken down.
     if strandings is not None:
         strandings.extend(collected)
     if profiles:

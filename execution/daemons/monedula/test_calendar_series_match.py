@@ -537,3 +537,38 @@ def test_active_profile_alongside_inactive_ones_is_returned(monkeypatch):
         _profile(payment_type="btc", btc_address="synthetic-address"),
     ]})
     assert len(load_profiles_with_neotoma_fallback([])) == 1
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("pass_strandings", [True, False])
+def test_runtime_error_from_a_configured_neotoma_source_holds_the_env_fallback(
+    rail, pass_strandings, monkeypatch
+):
+    """Any RuntimeError while the Neotoma base URL IS configured is a failed read (hold and
+    escalate), never 'unconfigured'; only an absent base URL falls back to env profiles."""
+    from strandings import REASON_FETCH_FAILED
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch, rail)
+
+    def _raise(req, timeout=None):
+        raise RuntimeError("synthetic read failure")
+
+    monkeypatch.setattr("urllib.request.urlopen", _raise)
+    stranded = [] if pass_strandings else None
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+    if pass_strandings:
+        assert [s.reason for s in stranded] == [REASON_FETCH_FAILED]
+
+
+def test_profile_with_the_status_field_absent_loads_as_active(monkeypatch):
+    """Legacy default, deliberate and now pinned: an entity with NO status field is active."""
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    entity = _profile(payment_type="btc", btc_address="synthetic-address")
+    entity["snapshot"].pop("status", None)
+    _serve(monkeypatch, {"entities": [entity]})
+    profiles = load_profiles_with_neotoma_fallback([])
+    assert len(profiles) == 1 and profiles[0].label == "Test profile"
