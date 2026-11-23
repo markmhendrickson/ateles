@@ -7,6 +7,7 @@
  *
  *   #/                       THE CURRENT SESSION — the app root (see below)
  *   #/console                the Console overview: mission, strategies, areas
+ *   #/planning               the planning tree (S5): mission > ... > task, per-project summary
  *   #/tasks                  the task view
  *   #/agents                 the agent directory
  *   #/agents/ent_<hex>       one agent's definition
@@ -58,6 +59,7 @@ import { useEffect, useState } from "react";
 export type Section =
   | "home"
   | "console"
+  | "planning"
   | "tasks"
   | "agents"
   | "sessions"
@@ -77,6 +79,7 @@ export type Section =
 export const NAV_SECTIONS = [
   "home",
   "console",
+  "planning",
   "tasks",
   "agents",
   "sessions",
@@ -131,6 +134,11 @@ export function parseHash(hash: string): Route {
     // A flat page for now: the overview is the whole content of slice 1. Area,
     // workflow and role pages get sub-routes in later slices.
     return { ...EMPTY, section: "console" };
+  }
+
+  if (path[0] === "planning") {
+    // Flat, like the console: the tree is the whole content.
+    return { ...EMPTY, section: "planning" };
   }
 
   if (path[0] === "agents") {
@@ -192,6 +200,9 @@ export function toHash(route: Route): string {
   }
   if (route.section === "console") {
     return "#/console";
+  }
+  if (route.section === "planning") {
+    return "#/planning";
   }
   if (route.section === "agents") {
     return route.agentId ? `#/agents/${route.agentId}` : "#/agents";

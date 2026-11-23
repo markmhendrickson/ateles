@@ -75,7 +75,7 @@ def classify_gaps(gaps: list[str], ascent: list[dict]) -> tuple[str, str | None]
     """
     if not gaps and ascent:
         return "planned", None
-    reason = "; ".join(gaps) if gaps else "No planning parent is recorded"
+    reason = "; ".join(gaps) if gaps else "The ascent was empty without a stated reason"
     if any(g.startswith(NO_PARENT_PREFIX) for g in gaps) and not ascent:
         return "unplanned", reason
     if any(MULTI_PARENT_MARK in g for g in gaps):
