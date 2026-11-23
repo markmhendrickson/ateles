@@ -598,6 +598,7 @@ def collect(
             result.blocked.add(key)
             result.reason_code = "payment_approval_unavailable"
             continue
+        item.approval_id = str(entity.get("entity_id") or "")
         verdict = judge(item, entity, parse_reply)
         if verdict.state == "approved":
             result.states[key] = "approved"

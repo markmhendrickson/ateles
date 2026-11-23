@@ -2,9 +2,10 @@
 """Apply the versioned ``payment_event`` Neotoma schema (declared identity).
 
 The definition lives in ``execution/schemas/payment_event.json``. Its identity
-is ``approval_id + payment_date``, falling back to ``primary_session_key +
-payment_date``, with ``canonical_name_strict`` so a write that matches neither
-rule is refused instead of falling back to a guessed name (the guess landed on
+includes ``obligation_key`` with ``approval_id`` or ``primary_session_key``
+and ``payment_date`` whenever the obligation is known. Legacy stores without
+it retain the old identity rules. ``canonical_name_strict`` means a write
+that matches neither rule is refused instead of falling back to a guessed name (the guess landed on
 ``btc_address`` and merged two payments to one address into one entity).
 
 DRY RUN BY DEFAULT: reads the live schema and prints a field-level diff (field

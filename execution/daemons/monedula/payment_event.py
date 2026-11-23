@@ -1,8 +1,10 @@
 """The one store path for ``payment_event`` records written on Monedula's behalf.
 
 ``payment_event`` identity is declared in ``execution/schemas/payment_event.json``:
-``approval_id + payment_date``, falling back to ``primary_session_key +
-payment_date``. Without it Neotoma guessed a canonical name from
+``approval_id + obligation_key + payment_date``, falling back to
+``primary_session_key + obligation_key + payment_date`` when the obligation
+is known. Legacy callers without an obligation keep the prior rules.
+Without it Neotoma guessed a canonical name from
 ``btc_address``, so two payments to one address resolved to one entity and the
 second overwrote the first.
 
@@ -39,12 +41,14 @@ def store_body(
     payment_date: str,
     approval_id: str | None = None,
     session_keys: list[str] | None = None,
+    obligation_key: str | None = None,
 ) -> dict[str, Any]:
     """The ``POST /store`` body for one payment_event."""
     if not payment_date:
         raise PaymentEventError("payment_event needs payment_date")
     keys = [str(k).strip() for k in (session_keys or []) if str(k).strip()]
     approval = (approval_id or "").strip()
+    obligation = (obligation_key or "").strip()
     if not approval and not keys:
         raise PaymentEventError(
             "payment_event needs approval_id or at least one session key; "
@@ -60,14 +64,29 @@ def store_body(
     if keys:
         entity["session_keys"] = keys
         entity["primary_session_key"] = keys[0]
+    if obligation:
+        entity["obligation_key"] = obligation
     identity = approval or keys[0]
+    suffix = f"-{obligation}" if obligation else ""
     return {
         "entities": [entity],
         "strict": True,
-        "idempotency_key": f"monedula-payment-event-{identity}-{payment_date}",
+        "idempotency_key": f"monedula-payment-event-{identity}-{payment_date}{suffix}",
     }
 
 
 def store(fields: dict[str, Any], **identity: Any) -> Any:
-    """Store one payment_event. Raises on a missing identity or a failed request."""
-    return payment_approval._request("POST", "/store", store_body(fields, **identity))
+    """Store one payment_event and verify its identity and outcome by reading it."""
+    body = store_body(fields, **identity)
+    response = payment_approval._request("POST", "/store", body)
+    ids = response.get("entity_ids") if isinstance(response, dict) else None
+    if not isinstance(ids, list) or len(ids) != 1 or not isinstance(ids[0], str) or not ids[0]:
+        raise PaymentEventError("payment_event store returned no entity id")
+    read = payment_approval._request("GET", f"/entities/{ids[0]}")
+    snap = payment_approval._snapshot(read) if isinstance(read, dict) else {}
+    written = body["entities"][0]
+    identity_field = "approval_id" if written.get("approval_id") else "primary_session_key"
+    for field in (identity_field, "obligation_key", "payment_date", "status"):
+        if snap.get(field) != written.get(field):
+            raise PaymentEventError(f"payment_event read-back mismatched {field}")
+    return response

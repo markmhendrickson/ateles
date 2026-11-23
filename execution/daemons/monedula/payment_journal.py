@@ -279,8 +279,23 @@ def record_intent(path: Path, obligation: str, token: str, *, generation: int) -
         raise JournalError("payment intent did not persist")
 
 
-def record_outcome(path: Path, obligation: str, status: str) -> None:
-    """Record the transfer's outcome after it returns, and read it back."""
+def record_outcome(
+    path: Path, obligation: str, status: str, *, event_queued: bool | None = None,
+    event_entry: dict[str, Any] | None = None,
+) -> None:
+    """Record the transfer's outcome after it returns, and read it back.
+
+    ``event_queued`` says whether this route records a payment_event for the
+    outcome: True when its entry is queued, False when queueing failed (then
+    ``event_entry`` is kept with the outcome so recording can be retried), and
+    None for a route that writes no payment_event (the Telegram consent route
+    today), whose outcome carries no ``payment_event_state`` and so never holds
+    payments for a record that route was never going to write.
+    """
+    if event_queued is not None and not isinstance(event_queued, bool):
+        raise JournalError("event_queued must be True, False or None")
+    if event_queued is False and not isinstance(event_entry, dict):
+        raise JournalError("unrecorded payment_event requires its entry")
     data = load(path)
     entry = data["obligations"].get(obligation)
     if not isinstance(entry, dict):
@@ -288,9 +303,51 @@ def record_outcome(path: Path, obligation: str, status: str) -> None:
     entry["state"] = STATE_DONE
     entry["outcome_status"] = str(status)[:64]
     entry["outcome_at"] = time.time()
+    if event_queued is not None:
+        entry["payment_event_state"] = "queued" if event_queued else "unrecorded"
+    if event_queued is False:
+        entry["payment_event_entry"] = event_entry
     _write(path, data)
-    if obligation_state(load(path), obligation) != STATE_DONE:
+    back = load(path)
+    if (
+        obligation_state(back, obligation) != STATE_DONE
+        or back["obligations"][obligation].get("payment_event_state")
+        != entry.get("payment_event_state")
+        or (
+            event_queued is False
+            and back["obligations"][obligation].get("payment_event_entry") != event_entry
+        )
+    ):
         raise JournalError("payment outcome did not persist")
+
+
+def mark_payment_event_queued(path: Path, obligation: str) -> None:
+    """Mark a retained event queued only after its pending entry was read back."""
+    data = load(path)
+    entry = data["obligations"].get(obligation)
+    if (
+        not isinstance(entry, dict)
+        or entry.get("state") != STATE_DONE
+        or entry.get("payment_event_state") != "unrecorded"
+        or not isinstance(entry.get("payment_event_entry"), dict)
+    ):
+        raise JournalError("payment_event has no recoverable journaled outcome")
+    entry["payment_event_state"] = "queued"
+    _write(path, data)
+    if load(path)["obligations"][obligation].get("payment_event_state") != "queued":
+        raise JournalError("payment_event queued state did not persist")
+
+
+def mark_payment_event_stored(path: Path, obligation: str) -> None:
+    """Mark a journaled outcome stored only after the entity was read back."""
+    data = load(path)
+    entry = data["obligations"].get(obligation)
+    if not isinstance(entry, dict) or entry.get("state") != STATE_DONE:
+        raise JournalError("payment_event has no journaled outcome")
+    entry["payment_event_state"] = "stored"
+    _write(path, data)
+    if load(path)["obligations"][obligation].get("payment_event_state") != "stored":
+        raise JournalError("payment_event stored state did not persist")
 
 
 # ---------------------------------------------------------------------------
