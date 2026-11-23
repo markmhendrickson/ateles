@@ -83,7 +83,7 @@ Definitions used by the rows:
 
 - **Open task:** a task of the lead's workstream whose `status` (trimmed, lowercased) is not terminal. Terminal values: `done`, `completed`, `complete`, `cancelled`, `canceled`, `closed`, `dropped`, `declined`, `superseded`. `status` is a free string in the task schema, so an unknown spelling counts as open. **Active:** `in_progress` or `executing`.
 - **Ascent:** the `PART_OF` relationships from a task, followed upward. A task-to-task chain counts as one ascent and is never flattened.
-- **No owner:** every one of `assigned_to`, `executor` and `owner` is empty, or its trimmed, lowercased value is a sentinel (`unassigned`, `none`, `nobody`, `tbd`, `n/a`, `-`; the set in `lib/daemon_runtime/task_ownership.py` governs if it differs).
+- **No owner:** every one of `assigned_to`, `executor` and `owner` is empty after reduction. Reduce a value by trimming and lowercasing it, stripping a trailing `@ateles-swarm` or `@ateles` suffix (repeatedly), then treating a sentinel (`unassigned`, `none`, `nobody`, `tbd`, `n/a`, `-`) as empty, so `unassigned@ateles-swarm` is no owner. This is `canonical_assignee` in `lib/daemon_runtime/task_ownership.py`, which governs if it differs.
 - **Dated note:** the task's `notes` field contains a line starting `YYYY-MM-DD migrate-harness:` with the close-out date (ISO 8601).
 
 | Check | Pass condition |
@@ -92,7 +92,7 @@ Definitions used by the rows:
 | Owner on active work | No active task has "no owner" (definition above). |
 | Cap on `next_steps` | Every plan the lead maintains has a `next_steps` string shorter than 2,000 characters. |
 | Status verified | Every open task has a dated note from this close-out. A stale or unverifiable task passes with its note and its triage-desk listing (step 1.2); it must not have been closed without an artifact. |
-| Old side recorded | Goal and watcher status, ids and timestamps are recorded (step 1.5), and the pause is read back as done, or listed for the operator. |
+| Old side recorded | Goal and watcher status, ids and timestamps are recorded (step 1.5), and the pause is read back as done, or listed for the operator. A pause only listed for the operator passes this check but does not permit retirement; section 4 requires a confirmed pause. |
 | No effect in flight | No send, payment, deploy or merge started by the old session is unresolved. |
 
 The operator-facing report keeps this to one plain line per lead (section 6). The per-check counts, `<check>: <n checked>, <n failed>` with offenders named, live on the stored record. A zero-offender line is valid only when the failed count is zero. Prove the instrument on a case you know should fail (for example, count a task you know has no parent) before trusting an all-zero result.
@@ -107,7 +107,7 @@ The operator-facing report keeps this to one plain line per lead (section 6). Th
 
 ## 4. Retire the old copy
 
-Only after **all** hold: the new session has confirmed it received the brief and derived the state, the section 2 check passed, and the old side's goal and watchers are **confirmed paused by read-back**. A pause that is only listed for the operator does not qualify: the old session is not retired until the operator has run it and you have read it back, or the old side is resumed (step 4).
+Only after **all** hold: the new session has confirmed it received the brief and derived the state, the section 2 check passed, and the old side's goal and watchers are **confirmed paused by read-back**. A pause that is only listed for the operator does not qualify: the old session is not retired until the operator has run it and you have read it back, or the old side is resumed (step 4.4).
 
 1. Archive or stop the old session using `coordinate-sessions` step 6: archive through the harness's own mechanism, then read the harness's own record back. Expected values: Claude Code, the session record reads archived; Codex, the thread row's archived flag is set and the app's own sidebar no longer lists it; Cursor, `composerHeaders.isArchived` reads 1. A session the harness refuses to archive stays held, with the error.
 2. Leave a note on the lead's owner task: the old session was retired, the date, where the new one lives, and how to resume the old one.

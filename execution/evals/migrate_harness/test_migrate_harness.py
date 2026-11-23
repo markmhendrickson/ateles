@@ -11,7 +11,7 @@ import re
 
 
 from migrate_harness_sandbox import MigrateHarnessSandbox as Sandbox
-from lib.daemon_runtime.task_ownership import SENTINEL_ASSIGNEES
+from lib.daemon_runtime.task_ownership import SENTINEL_ASSIGNEES, canonical_assignee
 
 TERMINAL = {'done', 'completed', 'complete', 'cancelled', 'canceled', 'closed', 'dropped',
             'declined', 'superseded'}
@@ -25,12 +25,22 @@ def is_open(task):
     return task['status'].strip().lower() not in TERMINAL
 
 
+AAUTH_SUFFIXES = ('@ateles-swarm', '@ateles')
+
+
+def reduce_owner(value):
+    """Trim, lowercase, strip AAuth suffixes to a fixed point, then test for a sentinel."""
+    v = (value or '').strip().lower()
+    while True:
+        suffix = next((x for x in AAUTH_SUFFIXES if v.endswith(x)), None)
+        if not suffix:
+            break
+        v = v[:-len(suffix)].strip()
+    return '' if v in SKILL_SENTINELS else v
+
+
 def has_owner(task):
-    for field in ('assigned_to', 'executor', 'owner'):
-        v = (task.get(field) or '').strip().lower()
-        if v and v not in SKILL_SENTINELS:
-            return True
-    return False
+    return any(reduce_owner(task.get(f)) for f in ('assigned_to', 'executor', 'owner'))
 
 
 def ascent(s, task_id, seen=()):
@@ -148,7 +158,8 @@ def test_task_to_task_chain_counts_as_one_ascent_and_is_not_flattened():
 
 def test_active_task_with_no_owner_fails_and_so_does_the_unassigned_sentinel():
     s = Sandbox()
-    assert failures(section2(s, 'lead-bad'))['owner'] == ['t-no-owner', 't-sentinel-owner']
+    assert failures(section2(s, 'lead-bad'))['owner'] == [
+        't-no-owner', 't-sentinel-owner', 't-suffix-sentinel']
 
 
 def test_owner_may_come_from_any_of_the_three_fields_and_sentinel_in_one_is_ignored():
@@ -159,6 +170,16 @@ def test_owner_may_come_from_any_of_the_three_fields_and_sentinel_in_one_is_igno
 
 def test_skill_sentinel_set_equals_the_repo_sentinel_set():
     assert SKILL_SENTINELS == set(SENTINEL_ASSIGNEES)
+
+
+def test_owner_reduction_agrees_with_the_repo_helper_including_aauth_suffixes():
+    s = Sandbox()
+    values = ['', ' Unassigned ', 'unassigned@ateles-swarm', 'Unassigned@ateles', 'n/a@ateles-swarm',
+              'agent-c@ateles', 'agent-b', '-', 'tbd']
+    for v in values:
+        assert bool(reduce_owner(v)) == (canonical_assignee(v) is not None), v
+    assert has_owner(s.tasks['t-suffix-real-owner']) is True
+    assert has_owner(s.tasks['t-suffix-sentinel']) is False
 
 
 def test_next_steps_at_the_cap_fails_and_just_under_passes():
@@ -319,3 +340,24 @@ def test_naive_pause_without_resume_leaves_no_working_lead():
     close_out_old_side(s, 'old-bad')
     assert retire(s, 'lead-bad') is False
     assert s.call('read_old_side', session='old-bad')['goal']['status'] == 'paused'  # nobody drives it
+
+
+def test_unconfirmed_new_side_blocks_retirement_even_when_everything_else_passes():
+    s = Sandbox()
+    # Section 2 passes and the old side is paused (read back), so only the new side's
+    # confirmation separates this lead from a retirable one.
+    assert failures(section2(s, 'lead-unconfirmed')) == {}
+    assert s.call('read_old_side', session='old-unconfirmed')['goal']['status'] == 'paused'
+    assert s.call('new_side_confirmation', session='old-unconfirmed')['confirmed'] is False
+    assert may_retire(s, 'lead-unconfirmed') is False
+    assert retire(s, 'lead-unconfirmed') is False
+    assert not effects(s, 'archive_session')
+
+
+def test_unconfirmed_pause_alone_blocks_retirement_when_new_side_confirmed():
+    s = Sandbox()
+    # lead-clean: new side confirmed, every ascent/owner/cap/note row passes, pause not yet done.
+    assert s.call('new_side_confirmation', session='old-clean')['confirmed'] is True
+    assert set(failures(section2(s, 'lead-clean'))) == {'old_side'}
+    assert retire(s, 'lead-clean') is False
+    assert not effects(s, 'archive_session')
