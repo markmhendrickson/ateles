@@ -52,6 +52,16 @@ describe("PlanningView ready", () => {
     expect(html).toContain("Working now: run1");
     expect(html).toContain("Recorded state: pending");
   });
+  it("draws a parent task as a container with counts, not as an empty leaf", () => {
+    const tree: PlanningTree = {
+      ...TREE,
+      roots: ["ent_pt"],
+      nodes: [node("ent_pt", "task", null, ["ent_c"]), node("ent_c", "task", "ent_pt", [], { status: "open", bucket: "recorded", working: null })],
+    };
+    const out = render({ state: "ready", fetchedAt: "t", tree });
+    expect(out.split('data-testid="tree-task"').length - 1).toBe(1);
+    expect(out).toContain('data-testid="node-counts"');
+  });
   it("states the window, unknown levels and partial operator coverage", () => {
     expect(html).toContain("60 of 8,393 open tasks");
     expect(html).toContain("Planning levels are unknown");

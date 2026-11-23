@@ -124,7 +124,9 @@ export function ProjectTable({ projects, onOpen }: { projects: ProjectSummary[];
 
 function TreeRow({ row, onOpen }: { row: FlatRow; onOpen: Open }) {
   const { node, depth } = row;
-  const isTask = node.entity_type === "task";
+  // A task can also sit ABOVE other tasks (a parent task). Only a task the read
+  // walked itself carries a bucket; a parent task is drawn as a container.
+  const isTask = node.entity_type === "task" && node.bucket !== undefined;
   const level = levelText(node);
   return (
     <li
