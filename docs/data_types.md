@@ -211,3 +211,9 @@ Periodic self-evaluation by a strategic agent against its `agent_strategy`. Fiel
 **Schema ID**: `8f10fe72-2924-422c-b2ee-d537d9952576` · **v1.0**
 
 Recurring payment configuration used by Monedula. Contains IBANs and transfer amounts — never commit this schema's entity data to plaintext files.
+Optional `calendar_recurring_event_id` narrows calendar matching to that exact
+series (`recurringEventId` on an occurrence, or `id` on its parent) while still
+requiring a title keyword. Without it, any configured keyword matches as before.
+For a series-bound profile, two calendars showing the same session produce one
+approval; different sessions produce separate approvals. A rejected payment key
+remains rejected on later ticks.

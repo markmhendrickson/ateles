@@ -28,9 +28,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from ..handler_base import PaymentHandler
+    from ..handler_base import PaymentHandler, event_matches_profile, matching_events
 except ImportError:
-    from handler_base import PaymentHandler  # type: ignore[no-redef]
+    from handler_base import PaymentHandler, event_matches_profile, matching_events  # type: ignore[no-redef]
 from . import task_writes
 from .payment_profile import PaymentProfile
 
@@ -136,12 +136,10 @@ class WiseTransferHandler(PaymentHandler):
             return _due_date_matches(self.profile, self.name)
 
         matched = []
-        for event in events:
+        for event in matching_events(self.profile, events):
             summary = event.get("summary", "") or ""
-            low = summary.lower()
-            if any(kw in low for kw in self.profile.calendar_keywords):
-                log.info(f"[{self.name}] Matched event: {summary!r}")
-                matched.append({"event": event, "summary": summary})
+            log.info(f"[{self.name}] Matched event: {summary!r}")
+            matched.append({"event": event, "summary": summary})
         return matched
 
     def preview(self, match: dict) -> str:
@@ -958,8 +956,7 @@ def _find_next_event_due_date(profile: PaymentProfile) -> str | None:
                 continue
             data = json.loads(result.stdout)
             for item in data.get("items") or []:
-                summary_low = (item.get("summary") or "").lower()
-                if any(kw in summary_low for kw in profile.calendar_keywords):
+                if event_matches_profile(profile, item):
                     start = item.get("start", {})
                     event_date_str = start.get("date") or start.get("dateTime", "")[:10]
                     if event_date_str:

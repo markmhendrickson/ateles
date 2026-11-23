@@ -7,6 +7,7 @@ No business-specific values are hardcoded here.
 Each profile is identified by a PREFIX (e.g. "THERAPY", "YOGA") and reads:
   <PREFIX>_LABEL          Human-readable label for Telegram messages
   <PREFIX>_CALENDAR_KEYWORDS  Comma-separated keywords to match against calendar event titles
+  <PREFIX>_CALENDAR_RECURRING_EVENT_ID  Optional exact calendar series id
   <PREFIX>_PAYMENT_TYPE   "wise" | "btc"
   <PREFIX>_CONTACT_ID     (wise only) Neotoma contact_id prefix for IBAN lookup
   <PREFIX>_CONTACT_CATEGORY  (wise only) Fallback category for contact lookup
@@ -65,6 +66,7 @@ class PaymentProfile:
     calendar_keywords: list[str]  # event title match keywords
     payment_type: Literal["wise", "btc"]
     amount_eur: int
+    calendar_recurring_event_id: str = ""  # optional exact calendar series id
 
     # Wise-specific
     contact_id: str = ""  # Neotoma contact_id prefix for IBAN lookup
@@ -163,6 +165,7 @@ def load_profiles_from_neotoma(
         REASON_BAD_LEGAL_TYPE,
         REASON_BAD_PAYMENT_TYPE,
         REASON_BAD_RECIPIENT_ID,
+        REASON_BAD_CALENDAR_SERIES_ID,
         NEOTOMA_TIMEOUT_SEC,
         REASON_FETCH_FAILED,
         REASON_FETCH_REJECTED,
@@ -322,6 +325,14 @@ def load_profiles_from_neotoma(
             except (ValueError, TypeError):
                 keywords_raw = [k.strip() for k in keywords_raw.split(",") if k.strip()]
         calendar_keywords = [str(k).strip().lower() for k in keywords_raw if k]
+        recurring_id = snap.get("calendar_recurring_event_id")
+        if recurring_id is not None and not isinstance(recurring_id, str):
+            log.warning("payment_profile has malformed calendar series id — skipped")
+            _strand(
+                item.get("entity_id"), label, REASON_BAD_CALENDAR_SERIES_ID,
+                "Calendar series id must be a string; this profile was held.",
+            )
+            continue
 
         due_date = str(snap.get("due_date") or "").strip()
         one_off = bool(snap.get("one_off")) or (not calendar_keywords and bool(due_date))
@@ -431,6 +442,7 @@ def load_profiles_from_neotoma(
                 prefix=prefix,
                 label=label,
                 calendar_keywords=calendar_keywords,
+                calendar_recurring_event_id=(recurring_id or "").strip(),
                 payment_type=payment_type,
                 amount_eur=amount_eur,
                 contact_id=snap.get("contact_id", ""),
@@ -577,6 +589,7 @@ def _load_profile(
         prefix=prefix,
         label=label,
         calendar_keywords=calendar_keywords,
+        calendar_recurring_event_id=env("CALENDAR_RECURRING_EVENT_ID"),
         payment_type=payment_type,
         amount_eur=amount_eur,
         # wise

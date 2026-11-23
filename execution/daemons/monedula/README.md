@@ -117,6 +117,13 @@ ruling 2026-11-12). The default and only automatic channel is `payment_approval`
 - **Calendars:** every calendar the account can read is scanned, including shared
   calendars others can write to. Events on them can raise approval requests;
   nothing is paid without the operator's per-payment answer.
+- **Series matching:** a profile with `calendar_recurring_event_id` matches only
+  occurrences whose `recurringEventId` equals that value, or the series parent
+  whose own `id` equals it, and whose title contains a configured keyword. A
+  profile without the field keeps keyword-only matching. For a series-bound
+  profile, copies of one session on two calendars (same start time and
+  normalized title) raise one approval; separate sessions raise separate
+  approvals. A rejected payment key stays rejected on later ticks.
 - **Cutover:** a session already paid under the pre-window obligation key is
   recognised by that legacy key and marked settled, never raised again.
 
