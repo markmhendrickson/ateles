@@ -1043,9 +1043,7 @@ def _warn_run(tool: str, tool_input: dict):
     assert r.returncode == 0
     if not r.stdout.strip():
         return None
-    out = json.loads(r.stdout)["hookSpecificOutput"]
-    assert out["permissionDecision"] == "allow"
-    return out["additionalContext"]
+    return json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
 
 
 class TestPlanningRecordWarnings:
@@ -1055,7 +1053,7 @@ class TestPlanningRecordWarnings:
             "field": "next_steps", "value": "x" * 2001,
         })
         assert ctx and "next_steps is 2001 characters" in ctx
-        assert "size only" in ctx  # says the previous value is unavailable
+        assert "size only" not in ctx
 
     def test_oversized_plan_next_steps_store_warns(self):
         ctx = _warn_run("store", {"entities": [
@@ -1076,7 +1074,7 @@ class TestPlanningRecordWarnings:
         ctx = _warn_run("correct", {
             "entity_id": "ent_t", "entity_type": "task",
             "field": "status", "value": "done"})
-        assert ctx and "no artifact reference" in ctx
+        assert ctx and "artifact reference" in ctx
 
     def test_done_task_store_without_artifact_warns(self):
         ctx = _warn_run("store", {"entities": [
@@ -1146,3 +1144,59 @@ class TestWiringMatchesConnectorToolNames:
         ms = self._matchers()
         assert len(ms) == 2
         assert all(m.search(name) for m in ms)
+
+
+def _raw(tool, tool_input):
+    r = _run({"tool_name": _TOOL + tool, "tool_input": tool_input})
+    assert r.returncode == 0
+    return json.loads(r.stdout)["hookSpecificOutput"] if r.stdout.strip() else None
+
+
+class TestPermissionAndBounds:
+    def test_planning_warning_only_carries_no_permission_decision(self):
+        out = _raw("store", {"entities": [{"entity_type": "task", "title": "t"}]})
+        assert out and "additionalContext" in out
+        assert "permissionDecision" not in out
+
+    def test_rule_category_path_still_allows(self):
+        out = _raw("store", {"entities": [{"entity_type": "agent_grant"}]})
+        assert out["permissionDecision"] == "allow"
+
+    def test_rule_category_plus_warning_still_allows(self):
+        out = _raw("store", {"entities": [{"entity_type": "agent_grant"},
+                                          {"entity_type": "task", "title": "t"}]})
+        assert out["permissionDecision"] == "allow"
+        assert "no PART_OF" in out["additionalContext"]
+
+    @pytest.mark.parametrize("notes", [
+        "finished it, see later", "done", "12345", "a" * 200_000,
+        "x/y " * 50_000, "deadbeef" * 25_000, ("ab " * 70_000),
+    ], ids=["prose", "word", "digits", "a200k", "slashes", "hexrun", "words"])
+    def test_large_non_reference_notes_return_quickly(self, notes):
+        import time
+        t0 = time.time()
+        ctx = _warn_run("store", {"entities": [
+            {"entity_type": "task", "entity_id": "ent_t", "status": "done",
+             "notes": notes}]})
+        assert time.time() - t0 < 5
+        assert ctx and "no artifact reference" in ctx
+
+    def test_reference_beyond_scan_bound_is_not_found(self):
+        ctx = _warn_run("store", {"entities": [
+            {"entity_type": "task", "entity_id": "ent_t", "status": "done",
+             "notes": "z" * 5000 + " PR #12"}]})
+        assert ctx and "no artifact reference" in ctx
+
+    @pytest.mark.parametrize("notes", ["see later", "v1.2", "a/b", "ent_abc", "abcdefg", "1234567", "#"])
+    def test_near_misses_are_not_references(self, notes):
+        assert gate._has_artifact_ref({"status": "done", "notes": notes}) is False
+
+    def test_status_field_is_never_scanned(self):
+        # a status value that would itself look like a reference must not count
+        assert gate._has_artifact_ref({"status": "ent_0123456789abcdef0123"}) is False
+        assert gate._has_artifact_ref({"status": "done", "notes": "ent_0123456789abcdef0123"}) is True
+
+    def test_lone_correct_status_done_warning_is_actionable(self):
+        ctx = _warn_run("correct", {"entity_id": "ent_t", "entity_type": "task",
+                                    "field": "status", "value": "done"})
+        assert "task's notes" in ctx and "in this write" not in ctx

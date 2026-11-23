@@ -294,3 +294,25 @@ def test_workboard_read_carries_findings_and_renders_a_warning_section():
         result = srv._get_session_workboard("synthetic:f", "ent_display")
     assert result["planning_record_findings"]["oversized_next_steps"][0]["chars"] == 3000
     assert "Planning-record warnings" in result["table"] and "3000 characters" in result["table"]
+
+
+def test_claim_row_carries_fields_that_feed_the_findings_for_a_real_task():
+    from unittest.mock import patch as _p
+    task_rec = {"entity_id": "ent_task1", "entity_type": "task",
+                "last_observation_at": "2026-11-01T00:00:00Z",
+                "snapshot": {"status": "in_progress"}}
+    plan_rec = {"entity_id": "ent_plan1", "entity_type": "plan",
+                "snapshot": {"title": "P", "next_steps": "n" * 2500}}
+    reads = {"/entities/ent_task1": task_rec, "/entities/ent_plan1": plan_rec}
+    with _p.object(srv, "_get", side_effect=reads.get), \
+         _p.object(srv, "_planning_ascent", return_value=([], [])):
+        task_row = srv._claim_row({"claim": "t", "task_entity_id": "ent_task1"}, {})
+        plan_row = srv._claim_row({"claim": "p", "evidence_pointers": ["ent_plan1"]}, {})
+    assert task_row["recorded_status"] == "in_progress"
+    assert task_row["record_last_observation_at"] == "2026-11-01T00:00:00Z"
+    assert plan_row["next_steps_chars"] == 2500
+    out = planning_record_findings([task_row, plan_row], now=NOW)
+    assert out["stale_in_progress"][0]["entity_id"] == "ent_task1"
+    assert out["ownerless_in_progress"][0]["entity_id"] == "ent_task1"
+    assert out["oversized_next_steps"][0]["chars"] == 2500
+    assert out["stale_in_progress"][0]["title"]  # falls back to something, never None

@@ -1632,7 +1632,8 @@ def _format_workboard_result(result: dict) -> str:
         for item in findings.get("oversized_next_steps", []):
             lines.append(
                 f"- plan {item['entity_id']} ({item['title']}): next_steps is "
-                f"{item['chars']} characters (cap about {findings['next_steps_cap_chars']})"
+                f"{item['chars']} characters (cap about {findings['next_steps_cap_chars']}); "
+                "rewrite it as a current-state summary"
             )
         for item in findings.get("stale_in_progress", []):
             lines.append(
@@ -1648,7 +1649,7 @@ def _format_workboard_result(result: dict) -> str:
                 "Planning-record warnings (read-only, advisory):\n"
                 + "\n".join(lines)
                 + "\n"
-                + "; ".join(findings.get("limits", []))
+                + "\n".join("Not covered: " + str(x) for x in findings.get("limits", []))
             )
     if "history" in result:
         sections.append(

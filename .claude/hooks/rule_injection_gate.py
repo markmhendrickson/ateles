@@ -75,7 +75,7 @@ reference (PR, commit, URL, file path, entity id) in the same write; and a
 `task` stored with no `PART_OF` relationship. The hook payload carries only
 the NEW value, never the previous one, so "the new value contains the old as
 a prefix/suffix" cannot be judged here: the size check is the whole of the
-`next_steps` test and the warning says so. Warnings are advisory by design
+`next_steps` test (the warning text omits this detail by design). Warnings are advisory by design
 (operator decision d4 on plan ent_b7a4ebbe5086bc1670ec4665): permission is
 always `allow`. Design basis: docs/foundation/planning_model.md.
 
@@ -505,15 +505,49 @@ _GRANT_PROBE_REMINDER = (
 # --------------------------------------------------------------------------
 NEXT_STEPS_MAX_CHARS = 2000
 _DONE_STATUSES = {"done", "completed", "complete"}
-_ARTIFACT_REF_RE = re.compile(
-    r"https?://"
-    r"|\bPR\s*#?\d+|(?<![\w&])#\d+"
-    r"|\bent_[0-9a-f]{12,}"
-    r"|\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b"
-    r"|[\w.~-]+(?:/[\w.~-]+)+\.\w{1,6}\b"
-    r"|\b[\w-]+\.(?:py|md|ts|tsx|js|json|ya?ml|sh|html)\b",
-    re.IGNORECASE,
+# The artifact-reference scan is token based and bounded so that no input can
+# make it superlinear: a 200 KB notes value must not stall a PreToolUse hook
+# (security review of PR #1846 timed an earlier whole-string regex at 34 s).
+_SCAN_CHARS_PER_FIELD = 4096
+_SCAN_CHARS_PER_CALL = 16384
+_MAX_TOKEN_CHARS = 256
+_TOKEN_SPLIT_RE = re.compile(r"[\s,;()\[\]]+")
+_ISSUE_REF_RE = re.compile(r"(?:PR)?#\d+", re.IGNORECASE)
+_PATH_TOKEN_RE = re.compile(r"[\w.~-]*(?:/[\w.~-]+)+\.\w{1,6}")
+_FILE_TOKEN_RE = re.compile(
+    r"[\w-]+\.(?:py|md|ts|tsx|js|json|ya?ml|sh|html)", re.IGNORECASE
 )
+_ENT_REF_RE = re.compile(r"ent_[0-9a-f]{12,}")
+_SHA_RE = re.compile(r"[0-9a-f]{7,40}")
+
+
+def _token_is_artifact_ref(token: str, previous: str) -> bool:
+    token = token.strip(".'\"`")
+    if not token or len(token) > _MAX_TOKEN_CHARS:
+        return False
+    low = token.lower()
+    if low.startswith(("http://", "https://")) and len(token) > 8:
+        return True
+    if _ISSUE_REF_RE.fullmatch(token):
+        return True
+    if previous.lower() == "pr" and re.fullmatch(r"#?\d+", token):
+        return True
+    if _ENT_REF_RE.search(low):
+        return True
+    if _SHA_RE.fullmatch(low) and any(c.isdigit() for c in low) and any(
+        c.isalpha() for c in low
+    ):
+        return True
+    return bool(_PATH_TOKEN_RE.fullmatch(token) or _FILE_TOKEN_RE.fullmatch(token))
+
+
+def _text_has_artifact_ref(text: str) -> bool:
+    previous = ""
+    for token in _TOKEN_SPLIT_RE.split(text):
+        if token and _token_is_artifact_ref(token, previous):
+            return True
+        previous = token
+    return False
 
 
 def _written_entities(tool_name: str, tool_input: dict) -> list[tuple[dict, bool]]:
@@ -544,14 +578,23 @@ def _written_entities(tool_name: str, tool_input: dict) -> list[tuple[dict, bool
 
 
 def _has_artifact_ref(entity: dict) -> bool:
+    """True iff some non-status field names a PR, commit, URL, path or entity
+    id. Scans at most `_SCAN_CHARS_PER_FIELD` per field and
+    `_SCAN_CHARS_PER_CALL` per call."""
+    budget = _SCAN_CHARS_PER_CALL
     for key, value in entity.items():
-        if key in ("status", "entity_type"):
+        if key in ("status", "entity_type") or budget <= 0:
             continue
-        if isinstance(value, str) and _ARTIFACT_REF_RE.search(value):
-            return True
-        if isinstance(value, (dict, list)) and _ARTIFACT_REF_RE.search(
-            json.dumps(value)
-        ):
+        if isinstance(value, (dict, list)):
+            try:
+                value = json.dumps(value)[:_SCAN_CHARS_PER_FIELD]
+            except (TypeError, ValueError):
+                continue
+        if not isinstance(value, str):
+            continue
+        chunk = value[: min(_SCAN_CHARS_PER_FIELD, budget)]
+        budget -= len(chunk)
+        if _text_has_artifact_ref(chunk):
             return True
     return False
 
@@ -580,9 +623,7 @@ def planning_record_warnings(tool_name: str, tool_input: dict) -> list[str]:
                     f"{NEXT_STEPS_MAX_CHARS}). It is a current-state summary: "
                     "REWRITE it from scratch, do not append to or merge it "
                     "with the old text, and record progress on the task "
-                    "(status plus a dated one-line note). The previous value "
-                    "is not in the hook payload, so this checks size only, "
-                    "not whether the old text is kept as a prefix or suffix."
+                    "(status plus a dated one-line note)."
                 )
         if etype == "task":
             status = entity.get("status")
@@ -591,12 +632,19 @@ def planning_record_warnings(tool_name: str, tool_input: dict) -> list[str]:
                 and status.strip().lower() in _DONE_STATUSES
                 and not _has_artifact_ref(entity)
             ):
-                warnings.append(
-                    "task marked done with no artifact reference in this "
-                    "write. Add the PR, commit, URL, file path, or entity id "
-                    "that proves it (a dated note naming it), and verify it "
-                    "resolves first."
-                )
+                if tool_name.endswith("__correct"):
+                    warnings.append(
+                        "task marked done: add the artifact reference (PR, "
+                        "commit, URL, file path, or entity id) to the task's "
+                        "notes, and verify it resolves."
+                    )
+                else:
+                    warnings.append(
+                        "task marked done with no artifact reference in this "
+                        "write. Add the PR, commit, URL, file path, or entity "
+                        "id that proves it (a dated note naming it), and "
+                        "verify it resolves first."
+                    )
             if (
                 is_create
                 and tool_name.endswith("__store")
@@ -605,7 +653,8 @@ def planning_record_warnings(tool_name: str, tool_input: dict) -> list[str]:
                 warnings.append(
                     "task stored with no PART_OF relationship in this write. "
                     "A task has one line upward: link it PART_OF its plan or "
-                    "parent task in the same store (or immediately after)."
+                    "parent task in the same store. If you link it in the next "
+                    "call, ignore this."
                 )
     return warnings
 
@@ -681,17 +730,12 @@ def main() -> int:
         f"injected={','.join(injected_ids) or '(none)'} "
         f"planning_warnings={len(warnings)}"
     )
-    print(
-        json.dumps(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                    "additionalContext": context,
-                }
-            }
-        )
-    )
+    output: dict = {"hookEventName": "PreToolUse", "additionalContext": context}
+    if categories:
+        # Pre-existing behaviour, unchanged. Planning warnings alone must not
+        # pre-approve a tool call, so they carry no permissionDecision.
+        output["permissionDecision"] = "allow"
+    print(json.dumps({"hookSpecificOutput": output}))
     return 0
 
 
@@ -699,5 +743,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as exc:  # noqa: BLE001 — fail open, never block a tool call
-        _log(f"error (ignored): {exc}")
+        _log(f"error (ignored): {type(exc).__name__}")
         sys.exit(0)

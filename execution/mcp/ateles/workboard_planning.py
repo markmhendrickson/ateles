@@ -221,7 +221,7 @@ def planning_record_findings(rows: list[dict], *, now: datetime) -> dict:
     oversized, stale, ownerless = [], [], []
     for row in rows:
         entity_id = row.get("entity_id")
-        item = {"entity_id": entity_id, "title": row.get("work")}
+        item = {"entity_id": entity_id, "title": row.get("work") or entity_id or "untitled record"}
         chars = row.get("next_steps_chars")
         if row.get("kind") == "plan" and isinstance(chars, int) and chars > NEXT_STEPS_CAP_CHARS:
             oversized.append({**item, "chars": chars})
@@ -244,7 +244,7 @@ def planning_record_findings(rows: list[dict], *, now: datetime) -> dict:
         "stale_in_progress": stale,
         "ownerless_in_progress": ownerless,
         "limits": [
-            "The writing session is not recorded cheaply, so plans and tasks are listed, not sessions",
-            "Plans reached only through a task's PART_OF ascent are not read here",
+            "which session wrote a field (plans and tasks are listed, not sessions)",
+            "plans reached only through a task's PART_OF ascent",
         ],
     }
