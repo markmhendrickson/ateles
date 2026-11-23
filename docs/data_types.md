@@ -212,8 +212,14 @@ Periodic self-evaluation by a strategic agent against its `agent_strategy`. Fiel
 
 Recurring payment configuration used by Monedula. Contains IBANs and transfer amounts — never commit this schema's entity data to plaintext files.
 Optional `calendar_recurring_event_id` narrows calendar matching to that exact
-series (`recurringEventId` on an occurrence, or `id` on its parent) while still
-requiring a title keyword. Without it, any configured keyword matches as before.
-For a series-bound profile, two calendars showing the same session produce one
-approval; different sessions produce separate approvals. A rejected payment key
-remains rejected on later ticks.
+series (`recurringEventId` on an occurrence, or `id` on a parent with no
+`recurringEventId`) while still requiring a title keyword. The configured id
+must be a string of at most 1024 characters after trimming, without control
+characters; invalid values strand the profile. Without it, any configured
+keyword matches as before. For a series-bound profile, calendar copies of the
+same series and start instant share one payment identity across reads; different
+sessions produce separate approvals. Prior event-ID keys from visible copies
+remain read-only cutover checks. A rejected or paid session stays suppressed.
+Keyword-matching events outside the configured series raise no approval;
+Monedula sends one operator-visible WARN notice per profile and calendar date
+with the count and date. If one should be paid, check the profile's series id.

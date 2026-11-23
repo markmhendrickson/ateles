@@ -510,6 +510,7 @@ def collect(
         ConsentEmailResult,
         build_pending_items,
         journal_path,
+        legacy_series_obligation_keys,
         match_key,
     )
 
@@ -558,15 +559,26 @@ def collect(
         try:
             entity = find_entity(str(item.obligation))
             if entity is None:
-                raise_request(item)
-                raised_now = True
-                log.info(
-                    f"payment_approval_raised handler={item.handler_name} "
-                    f"session={item.match_id or item.payment_date}"
-                )
-                entity = find_entity(str(item.obligation))
-                if entity is None:
-                    raise ApprovalError("payment_approval did not read back after write")
+                legacy_records = [
+                    found for old_key in sorted(legacy_series_obligation_keys(
+                        item.handler, item.match, item.payment_date
+                    ))
+                    if (found := find_entity(old_key)) is not None
+                ]
+                if len(legacy_records) > 1:
+                    raise ApprovalError("multiple prior approvals for one calendar session")
+                if legacy_records:
+                    entity = legacy_records[0]
+                else:
+                    raise_request(item)
+                    raised_now = True
+                    log.info(
+                        f"payment_approval_raised handler={item.handler_name} "
+                        f"session={item.match_id or item.payment_date}"
+                    )
+                    entity = find_entity(str(item.obligation))
+                    if entity is None:
+                        raise ApprovalError("payment_approval did not read back after write")
             if raised_now:
                 say(
                     item,

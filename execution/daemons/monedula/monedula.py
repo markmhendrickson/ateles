@@ -306,6 +306,38 @@ def _clear_notify_dedupe(dedupe_key: str) -> None:
         pass
 
 
+def _notify_series_mismatches(handler: Any, events: list[dict], fallback_date: str) -> None:
+    """Report keyword hits outside a configured series once per profile/day."""
+    from consent_email import event_session_date
+    from handler_base import event_matches_profile, title_matches_profile
+
+    profile = getattr(handler, "profile", None)
+    series_id = getattr(profile, "calendar_recurring_event_id", "")
+    if not series_id:
+        return
+    counts: dict[str, int] = {}
+    for event in events:
+        if title_matches_profile(profile, event) and not event_matches_profile(profile, event):
+            event_date = (
+                event_session_date({"event": event})
+                or event_session_date({"event": {"start": event.get("end")}})
+                or fallback_date
+            )
+            counts[event_date] = counts.get(event_date, 0) + 1
+    profile_key = hashlib.sha256(
+        f"{handler.name}|{series_id}".encode()
+    ).hexdigest()[:16]
+    for event_date, count in counts.items():
+        _notify(
+            f"monedula: no payment approval was raised for {count} event(s) "
+            f"on {event_date} whose title matches {profile.label} but are not in "
+            "its configured calendar series; if one should be paid, check "
+            "the profile's series id.",
+            priority="warn",
+            dedupe_key=f"monedula:series_mismatch:{profile_key}:{event_date}",
+        )
+
+
 # Stable dedupe key for the consent-channel-timeout alert (ateles#1127). Must
 # NOT vary per tick — no timestamp, no streak count, no pending-handler list —
 # or it defeats the dedupe the same way a changing message would. Scoped to
@@ -1605,6 +1637,7 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
         event_session_date,
         journal_path,
         legacy_obligation_keys,
+        legacy_series_obligation_keys,
         obligation_key,
     )
 
@@ -1636,10 +1669,28 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                 state = payment_journal.session_state(data, key)
                 if state in payment_journal.SESSION_TERMINAL:
                     continue
+                legacy_ids = (match or {}).get("legacy_event_ids", [])
+                legacy_keys = {
+                    payment_journal.session_key(handler.name, old_id)
+                    for old_id in legacy_ids
+                }
+                legacy_states = {
+                    old_key: payment_journal.session_state(data, old_key)
+                    for old_key in legacy_keys
+                }
+                if any(s in payment_journal.SESSION_TERMINAL for s in legacy_states.values()):
+                    continue
+                seen_keys.update(
+                    old_key for old_key, old_state in legacy_states.items()
+                    if old_state == payment_journal.SESSION_PENDING
+                )
                 if state is None and any(
                     payment_journal.obligation_state(data, legacy) is not None
-                    for legacy in legacy_obligation_keys(
-                        handler, match, matches, _yesterday().isoformat()
+                    for legacy in (
+                        legacy_obligation_keys(handler, match, matches, _yesterday().isoformat())
+                        | legacy_series_obligation_keys(
+                            handler, match, event_session_date(match) or _yesterday().isoformat()
+                        )
                     )
                 ):
                     # Cutover guard: paid (or intent recorded) under the key the
@@ -1825,6 +1876,7 @@ def main() -> bool:
     # Find triggered handlers from calendar
     triggered: list[tuple] = []  # [(handler, [match, ...]), ...]
     for handler in all_handlers:
+        _notify_series_mismatches(handler, events, yesterday_str)
         matches = handler.matches(events)
         if matches:
             triggered.append((handler, matches))
@@ -1938,7 +1990,6 @@ def main() -> bool:
             clear_consent_state,
             journal_path,
             match_key,
-            obligation_key,
             request_and_collect,
         )
 

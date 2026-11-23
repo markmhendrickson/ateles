@@ -46,7 +46,7 @@ from lib.approval.email_channel import (
 from lib.approval.tokens import subject_marker, token_for
 
 import payment_journal
-from handler_base import event_matches_profile, matching_events
+from handler_base import event_matches_profile, matching_events, series_match_id, legacy_event_ids
 
 log = logging.getLogger(__name__)
 
@@ -269,11 +269,27 @@ def _profile_fields(handler: Any) -> tuple[str, int, bool]:
 
 
 def event_id_of(match: Any) -> str:
-    """The calendar event id of a match, or ``""`` when it has none."""
+    """The stable session id for series matches, otherwise the event id."""
+    if isinstance(match, dict) and isinstance(match.get("match_id"), str):
+        return match["match_id"]
+    return raw_event_id_of(match)
+
+
+def raw_event_id_of(match: Any) -> str:
+    """The calendar's own id, used only for read-only cutover checks."""
     event = (match or {}).get("event") if isinstance(match, dict) else None
     if isinstance(event, dict):
         return str(event.get("id") or "")
     return ""
+
+
+def legacy_series_obligation_keys(handler: Any, match: Any, payment_date: str) -> set[str]:
+    """Keys a prior version could have written for visible calendar copies."""
+    profile = getattr(handler, "profile", None)
+    if not getattr(profile, "calendar_recurring_event_id", ""):
+        return set()
+    ids = (match or {}).get("legacy_event_ids", []) if isinstance(match, dict) else []
+    return {obligation_key(handler, payment_date, eid) for eid in ids}
 
 
 def event_session_date(match: Any) -> str:
@@ -321,7 +337,7 @@ def legacy_obligation_keys(
     ids: set[str] = {""}
     if len(matches) > 1:
         top = match if isinstance(match, dict) else {}
-        for candidate in (top.get("event_id"), top.get("id"), event_id_of(match)):
+        for candidate in (top.get("event_id"), top.get("id"), raw_event_id_of(match)):
             if candidate:
                 ids.add(str(candidate))
         # The old code fell back to the match's own position in the list.
@@ -343,12 +359,18 @@ def build_pending_items(
         profile = getattr(handler, "profile", None)
         if getattr(profile, "calendar_recurring_event_id", ""):
             events = [m.get("event") for m in match_list if isinstance(m, dict)]
-            selected = {id(e) for e in matching_events(profile, [e for e in events if isinstance(e, dict)])}
+            events = [e for e in events if isinstance(e, dict)]
+            selected = {id(e) for e in matching_events(profile, events)}
             match_list = [
                 m for m in match_list
                 if isinstance(m, dict) and id(m.get("event")) in selected
                 and event_matches_profile(profile, m["event"])
             ]
+            for match in match_list:
+                match["match_id"] = series_match_id(profile, match["event"])
+                match["legacy_event_ids"] = sorted(set(
+                    match.get("legacy_event_ids", [])
+                ) | set(legacy_event_ids(profile, events, match["event"])))
         multi = len(match_list) > 1
         for idx, match in enumerate(match_list):
             # A real calendar event id always identifies the session, so the

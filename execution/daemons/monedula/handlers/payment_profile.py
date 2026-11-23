@@ -49,6 +49,11 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+try:
+    from ..handler_base import valid_configured_series_id
+except ImportError:
+    from handler_base import valid_configured_series_id
+
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
 # User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
 NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
@@ -326,11 +331,11 @@ def load_profiles_from_neotoma(
                 keywords_raw = [k.strip() for k in keywords_raw.split(",") if k.strip()]
         calendar_keywords = [str(k).strip().lower() for k in keywords_raw if k]
         recurring_id = snap.get("calendar_recurring_event_id")
-        if recurring_id is not None and not isinstance(recurring_id, str):
+        if recurring_id is not None and not valid_configured_series_id(recurring_id):
             log.warning("payment_profile has malformed calendar series id — skipped")
             _strand(
                 item.get("entity_id"), label, REASON_BAD_CALENDAR_SERIES_ID,
-                "Calendar series id must be a string; this profile was held.",
+                "Calendar series id is invalid; this profile was held. Check its type, length and control characters.",
             )
             continue
 
@@ -542,6 +547,18 @@ def _load_profile(
         log.warning(f"[{prefix}] {prefix}_CALENDAR_KEYWORDS not set — profile skipped")
         return None
 
+    recurring_id = os.environ.get(f"{prefix}_CALENDAR_RECURRING_EVENT_ID", "")
+    if not valid_configured_series_id(recurring_id):
+        log.warning(f"[{prefix}] Invalid calendar series id — profile skipped")
+        if strandings is not None:
+            from strandings import REASON_BAD_CALENDAR_SERIES_ID, Stranding
+
+            strandings.append(Stranding(
+                entity_id="", label=label, reason=REASON_BAD_CALENDAR_SERIES_ID,
+                detail="Calendar series id is invalid; this profile was held. Check its type, length and control characters.",
+            ))
+        return None
+
     payment_type_raw = env("PAYMENT_TYPE", "wise").lower()
     if payment_type_raw not in ("wise", "btc"):
         log.warning(
@@ -589,7 +606,7 @@ def _load_profile(
         prefix=prefix,
         label=label,
         calendar_keywords=calendar_keywords,
-        calendar_recurring_event_id=env("CALENDAR_RECURRING_EVENT_ID"),
+        calendar_recurring_event_id=recurring_id.strip(),
         payment_type=payment_type,
         amount_eur=amount_eur,
         # wise

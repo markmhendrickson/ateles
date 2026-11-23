@@ -19,65 +19,121 @@ The result dict returned by execute() must include at least:
 from __future__ import annotations
 
 import abc
+import hashlib
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any
 
 
+MAX_CALENDAR_ID_LENGTH = 1024
+
+
+def valid_calendar_id(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and len(value.strip()) <= MAX_CALENDAR_ID_LENGTH
+        and not any(unicodedata.category(char) == "Cc" for char in value)
+    )
+
+
+def valid_configured_series_id(value: Any) -> bool:
+    return isinstance(value, str) and (
+        valid_calendar_id(value)
+        or (not value.strip() and not any(unicodedata.category(char) == "Cc" for char in value))
+    )
+
+
+def session_start_key(event: dict) -> str:
+    """Canonical start, with distinct namespaces for dates and instants."""
+    if not isinstance(event, dict):
+        return ""
+    start = event.get("start")
+    if not isinstance(start, dict):
+        return ""
+    raw = start.get("dateTime")
+    if isinstance(raw, str):
+        try:
+            instant = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if instant.tzinfo is not None:
+                return "instant:" + instant.astimezone(timezone.utc).isoformat()
+        except ValueError:
+            pass
+        return ""
+    raw = start.get("date")
+    if isinstance(raw, str):
+        try:
+            return "date:" + datetime.strptime(raw, "%Y-%m-%d").date().isoformat()
+        except ValueError:
+            pass
+    return ""
+
+
+def series_match_id(profile: Any, event: dict) -> str:
+    series_id = getattr(profile, "calendar_recurring_event_id", "")
+    start = session_start_key(event)
+    if not valid_calendar_id(series_id) or not start:
+        return ""
+    digest = hashlib.sha256(f"{series_id.strip()}|{start}".encode()).hexdigest()[:32]
+    return f"series-{digest}"
+
+
 def event_matches_profile(profile: Any, event: dict) -> bool:
     """Match an event's title and, when configured, its exact series identity."""
-    summary = event.get("summary") or ""
-    if not isinstance(summary, str) or not any(
-        keyword in summary.lower() for keyword in profile.calendar_keywords
-    ):
+    if not title_matches_profile(profile, event):
         return False
     series_id = getattr(profile, "calendar_recurring_event_id", "")
-    if not isinstance(series_id, str):
+    if not valid_configured_series_id(series_id):
+        return False
+    if not series_id.strip():
+        return True
+    if not valid_calendar_id(series_id):
         return False
     series_id = series_id.strip()
-    if not series_id:
-        return True
     event_id = event.get("id")
-    if not isinstance(event_id, str) or not event_id.strip():
+    if not valid_calendar_id(event_id) or not session_start_key(event):
         return False
-    return any(
-        isinstance(value, str) and bool(value.strip()) and value == series_id
-        for value in (event.get("recurringEventId"), event.get("id"))
+    recurring = event.get("recurringEventId")
+    if recurring is not None:
+        return valid_calendar_id(recurring) and recurring.strip() == series_id
+    return event_id.strip() == series_id
+
+
+def title_matches_profile(profile: Any, event: dict) -> bool:
+    """Keyword check shared by matching and mismatch notice counting."""
+    if not isinstance(event, dict):
+        return False
+    summary = event.get("summary") or ""
+    return isinstance(summary, str) and any(
+        keyword in summary.lower() for keyword in profile.calendar_keywords
     )
 
 
 def matching_events(profile: Any, events: list[dict]) -> list[dict]:
     """Return matching events, collapsing a series session copied to calendars.
 
-    The smallest event id wins regardless of calendar enumeration order. A
-    lone event keeps its existing id and therefore its existing payment key.
+    The display copy may vary; the payment identity never does.
     """
     matched = [event for event in events if event_matches_profile(profile, event)]
-    if not str(getattr(profile, "calendar_recurring_event_id", "") or "").strip():
+    if not getattr(profile, "calendar_recurring_event_id", ""):
         return matched
-    sessions: dict[tuple[str, str], dict] = {}
-    without_start: list[dict] = []
+    sessions: dict[str, dict] = {}
     for event in matched:
-        start = event.get("start") or {}
-        if not isinstance(start, dict):
-            without_start.append(event)
-            continue
-        instant = start.get("dateTime") or start.get("date") or ""
-        if not isinstance(instant, str) or not instant.strip():
-            without_start.append(event)
-            continue
-        if "T" in instant:
-            try:
-                instant = datetime.fromisoformat(instant.replace("Z", "+00:00"))
-                if instant.tzinfo is not None:
-                    instant = instant.astimezone(timezone.utc).isoformat()
-            except ValueError:
-                pass
-        title = " ".join(event["summary"].split()).casefold()
-        key = (instant, title)
+        key = series_match_id(profile, event)
         current = sessions.get(key)
         if current is None or str(event.get("id") or "") < str(current.get("id") or ""):
             sessions[key] = event
-    return list(sessions.values()) + without_start
+    return list(sessions.values())
+
+
+def legacy_event_ids(profile: Any, events: list[dict], selected: dict) -> list[str]:
+    """Event IDs previously used for this session among visible copies."""
+    identity = series_match_id(profile, selected)
+    return sorted({
+        event["id"] for event in events
+        if event_matches_profile(profile, event)
+        and series_match_id(profile, event) == identity
+    })
 
 
 class PaymentHandler(abc.ABC):

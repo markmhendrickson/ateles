@@ -119,11 +119,20 @@ ruling 2026-11-12). The default and only automatic channel is `payment_approval`
   nothing is paid without the operator's per-payment answer.
 - **Series matching:** a profile with `calendar_recurring_event_id` matches only
   occurrences whose `recurringEventId` equals that value, or the series parent
-  whose own `id` equals it, and whose title contains a configured keyword. A
-  profile without the field keeps keyword-only matching. For a series-bound
-  profile, copies of one session on two calendars (same start time and
-  normalized title) raise one approval; separate sessions raise separate
-  approvals. A rejected payment key stays rejected on later ticks.
+  whose own `id` equals it and has no `recurringEventId`, and whose title
+  contains a configured keyword. Invalid configured identifiers strand the
+  profile. A profile without the field keeps keyword-only matching. For a
+  series-bound profile, copies of one session on two calendars share one
+  payment identity based on the series and start time, even as copies appear
+  or disappear. Prior event-ID journal and approval keys from visible copies
+  remain read-only cutover checks. Separate sessions raise separate approvals;
+  a rejected or paid session stays suppressed on later ticks.
+- **Series mismatch notice:** if a series-bound profile sees a keyword-matching
+  event outside its configured series, Monedula sends one WARN notice per
+  profile and calendar date through the existing notifier. The notice gives
+  the count and date without event titles or identifiers. No payment approval
+  is raised for those events. If one should be paid, check the profile's
+  configured series id before the next tick.
 - **Cutover:** a session already paid under the pre-window obligation key is
   recognised by that legacy key and marked settled, never raised again.
 
