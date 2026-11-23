@@ -105,6 +105,17 @@ Vite on port 5273 with HMR, no sign-in, reading Neotoma through the same
 `/api/*` routes the deployed server exposes. This is still the loop for
 iterating on the app.
 
+### The planning tree (`#/planning`)
+
+Screen S5 of `docs/product/console.md`. `GET /api/planning-tree` starts a
+background build that runs `execution/mcp/ateles/planning_tree.py`, which
+CALLS the session workboard's ascent (`server._planning_ascent`), its
+lease-plus-activity "working now" rule and its bucketing; the dashboard does
+not re-implement them. The build reads a bounded window of recently touched
+tasks one read at a time and takes tens of seconds to a few minutes; the page
+polls and says so. It needs Python and the repo checkout, so the deployed
+image answers `unavailable` rather than an empty tree.
+
 ### The deployed instance
 
 The dashboard also runs on Fly, so its links resolve for the operator on any

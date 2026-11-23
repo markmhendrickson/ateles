@@ -43,6 +43,7 @@ import { cn } from "@/lib/utils";
 import { ArrowLeft } from "lucide-react";
 import { AtelesLogo } from "./Brand";
 import { GlobalSearch } from "./GlobalSearch";
+import { Planning } from "./Planning";
 
 const REFRESH_MS = 10_000;
 
@@ -57,6 +58,7 @@ const REFRESH_MS = 10_000;
 const BACK_LABELS: Record<NavSection, string> = {
   home: "Now",
   console: "Console",
+  planning: "Planning",
   tasks: "Tasks",
   agents: "Agents",
   sessions: "Sessions",
@@ -69,6 +71,7 @@ const BACK_LABELS: Record<NavSection, string> = {
 const NAV_LABELS: { value: NavSection; label: string }[] = [
   { value: "home", label: "Now" },
   { value: "console", label: "Console" },
+  { value: "planning", label: "Planning" },
   { value: "tasks", label: "Tasks" },
   { value: "agents", label: "Agents" },
   { value: "sessions", label: "Sessions" },
@@ -364,6 +367,8 @@ export function App() {
               />
             ) : route.section === "console" ? (
               <Console onOpenEntity={sheet.open} />
+            ) : route.section === "planning" ? (
+              <Planning onOpenEntity={sheet.open} />
             ) : route.section === "workflows" ? (
               <Workflows />
             ) : route.section === "lifecycle" ? (
