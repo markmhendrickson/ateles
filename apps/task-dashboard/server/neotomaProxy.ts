@@ -38,6 +38,8 @@
  *                             missions, strategies, retired, allstrategies,
  *                             projects); cached
  *                             briefly and read two at a time — see consoleSpine.ts
+ *   GET  /api/planning-tree   the S5 planning tree over a bounded task window,
+ *                             built in the background — see planningTree.ts
  *   GET  /api/scan-freshness  how far the committed static code scan has fallen
  *                             behind the repo's HEAD — the one thing about that
  *                             scan that changes, and the only one worth showing
@@ -59,6 +61,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { SPINE_READ_TIMEOUT_MS, createSpine, isSpineSection } from "./consoleSpine";
+import { createPlanningTree, runPython } from "./planningTree";
 import { dirname, join } from "node:path";
 /**
  * ONE definition of the filtered-total ceiling, shared with the client that
@@ -1777,6 +1780,9 @@ const consoleSpine = createSpine({
   query: (body) => neotomaPost("/entities/query", body, SPINE_READ_TIMEOUT_MS),
 });
 
+/** The planning tree (S5): one background build at a time, shared by every viewer. */
+const planningTree = createPlanningTree({ run: runPython });
+
 /**
  * Register every `/api/*` route on `server`.
  *
@@ -2149,6 +2155,18 @@ export function registerApiRoutes(server: MiddlewareHost) {
         const result = await consoleSpine(section);
         if (!result.ok) res.statusCode = 502;
         res.end(JSON.stringify(result));
+      });
+
+      /**
+       * GET /api/planning-tree — the S5 planning tree, built in the background
+       * by execution/mcp/ateles/planning_tree.py (which calls the workboard's
+       * ascent). Answers at once with `{state: building|ready|error|unavailable}`;
+       * the client polls. READ-ONLY.
+       */
+      server.use("/api/planning-tree", (_req, res) => {
+        res.setHeader("Content-Type", "application/json");
+        res.setHeader("Cache-Control", "no-store");
+        res.end(JSON.stringify(planningTree()));
       });
 
       server.use("/api/agents", async (req, res) => {
