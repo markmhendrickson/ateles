@@ -1,0 +1,57 @@
+{
+  "today": "2026-11-23",
+  "projects": {
+    "proj-customer": {"customer_org_expected": true, "refers_to": ["org-customer"]},
+    "proj-unlinked": {"customer_org_expected": true, "refers_to": []},
+    "proj-internal": {"customer_org_expected": false, "refers_to": []}
+  },
+  "plans": {
+    "plan-clean": {"part_of": ["proj-customer"], "next_steps": "1. Deploy is live. 2. Next: confirm the review. 3. Waiting on the operator: one decision."},
+    "plan-other": {"part_of": ["proj-internal"], "next_steps": "1. Idle."},
+    "plan-orphan-project": {"part_of": ["proj-unlinked"], "next_steps": "1. Idle."}
+  },
+  "tasks": {
+    "t-live": {"status": "in_progress", "assigned_to": "agent-a", "executor": "", "owner": "", "part_of": ["plan-clean"],
+               "notes": "2026-11-23 migrate-harness: live, next action is the review, executor agent-a."},
+    "t-chain-child": {"status": "pending", "assigned_to": "", "executor": "", "owner": "", "part_of": ["t-live"],
+                      "notes": "2026-11-23 migrate-harness: waits on t-live."},
+    "t-stale": {"status": "pending", "assigned_to": "", "executor": "", "owner": "", "part_of": ["plan-clean"],
+                "notes": "2026-11-23 migrate-harness: checked the PR and mailbox, cannot tell whether still wanted; listed for the task-triage desk."},
+    "t-done-with-artifact": {"status": "pending", "assigned_to": "", "executor": "", "owner": "", "part_of": ["plan-clean"],
+                             "notes": "2026-11-23 migrate-harness: merged, evidence in the PR.", "artifact": "pr-merged"},
+    "t-terminal": {"status": "Done ", "assigned_to": "", "executor": "", "owner": "", "part_of": [], "notes": ""},
+    "t-zero": {"status": "pending", "assigned_to": "", "executor": "", "owner": "", "part_of": [],
+               "notes": "2026-11-23 migrate-harness: no parent."},
+    "t-two": {"status": "pending", "assigned_to": "", "executor": "", "owner": "", "part_of": ["plan-clean", "plan-other"],
+              "notes": "2026-11-23 migrate-harness: two parents."},
+    "t-cycle-a": {"status": "pending", "assigned_to": "", "executor": "", "owner": "", "part_of": ["t-cycle-b"],
+                  "notes": "2026-11-23 migrate-harness: cycle."},
+    "t-cycle-b": {"status": "pending", "assigned_to": "", "executor": "", "owner": "", "part_of": ["t-cycle-a"],
+                  "notes": "2026-11-23 migrate-harness: cycle."},
+    "t-no-owner": {"status": "in_progress", "assigned_to": "", "executor": "", "owner": "", "part_of": ["plan-clean"],
+                   "notes": "2026-11-23 migrate-harness: active, no owner."},
+    "t-sentinel-owner": {"status": "executing", "assigned_to": " Unassigned ", "executor": "", "owner": "", "part_of": ["plan-clean"],
+                         "notes": "2026-11-23 migrate-harness: active, sentinel owner."},
+    "t-owner-by-executor": {"status": "in_progress", "assigned_to": "unassigned", "executor": "agent-b", "owner": "", "part_of": ["plan-clean"],
+                            "notes": "2026-11-23 migrate-harness: owner via executor field."},
+    "t-no-note": {"status": "pending", "assigned_to": "", "executor": "", "owner": "", "part_of": ["plan-clean"], "notes": "old note without the dated line"},
+    "t-wrong-date-format": {"status": "pending", "assigned_to": "", "executor": "", "owner": "", "part_of": ["plan-clean"],
+                            "notes": "23 Nov migrate-harness: wrong date format."},
+    "t-unlinked-project": {"status": "pending", "assigned_to": "", "executor": "", "owner": "", "part_of": ["plan-orphan-project"],
+                           "notes": "2026-11-23 migrate-harness: project lacks its customer link."},
+    "t-other-plan": {"status": "pending", "assigned_to": "", "executor": "", "owner": "", "part_of": ["plan-other"],
+                     "notes": "2026-11-23 migrate-harness: internal project, no customer."}
+  },
+  "leads": {
+    "lead-clean": {"tasks": ["t-live", "t-chain-child", "t-stale", "t-terminal", "t-other-plan"],
+                   "plans": ["plan-clean"], "session": "old-clean"},
+    "lead-bad": {"tasks": ["t-zero", "t-two", "t-no-owner", "t-sentinel-owner"], "plans": ["plan-clean"], "session": "old-bad"}
+  },
+  "old_side": {
+    "old-clean": {"goal": {"id": "goal-1", "status": "active"},
+                  "watchers": [{"id": "watch-1", "status": "active", "updated_at": "2026-11-22T10:00:00Z"}],
+                  "archived": false},
+    "old-bad": {"goal": {"id": "goal-2", "status": "active"}, "watchers": [], "archived": false}
+  },
+  "new_side": {"old-clean": {"confirmed": true}, "old-bad": {"confirmed": false}}
+}
