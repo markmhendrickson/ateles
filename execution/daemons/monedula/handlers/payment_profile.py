@@ -331,7 +331,7 @@ def load_profiles_from_neotoma(
                 keywords_raw = [k.strip() for k in keywords_raw.split(",") if k.strip()]
         calendar_keywords = [str(k).strip().lower() for k in keywords_raw if k]
         recurring_id = snap.get("calendar_recurring_event_id")
-        if recurring_id is not None and not valid_configured_series_id(recurring_id):
+        if not valid_configured_series_id(recurring_id):
             log.warning("payment_profile has malformed calendar series id — skipped")
             _strand(
                 item.get("entity_id"), label, REASON_BAD_CALENDAR_SERIES_ID,
@@ -447,7 +447,7 @@ def load_profiles_from_neotoma(
                 prefix=prefix,
                 label=label,
                 calendar_keywords=calendar_keywords,
-                calendar_recurring_event_id=(recurring_id or "").strip(),
+                calendar_recurring_event_id=recurring_id or "",
                 payment_type=payment_type,
                 amount_eur=amount_eur,
                 contact_id=snap.get("contact_id", ""),
@@ -606,7 +606,7 @@ def _load_profile(
         prefix=prefix,
         label=label,
         calendar_keywords=calendar_keywords,
-        calendar_recurring_event_id=recurring_id.strip(),
+        calendar_recurring_event_id=recurring_id,
         payment_type=payment_type,
         amount_eur=amount_eur,
         # wise

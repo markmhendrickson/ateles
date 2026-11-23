@@ -1637,7 +1637,6 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
         event_session_date,
         journal_path,
         legacy_obligation_keys,
-        legacy_series_obligation_keys,
         obligation_key,
     )
 
@@ -1669,28 +1668,10 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                 state = payment_journal.session_state(data, key)
                 if state in payment_journal.SESSION_TERMINAL:
                     continue
-                legacy_ids = (match or {}).get("legacy_event_ids", [])
-                legacy_keys = {
-                    payment_journal.session_key(handler.name, old_id)
-                    for old_id in legacy_ids
-                }
-                legacy_states = {
-                    old_key: payment_journal.session_state(data, old_key)
-                    for old_key in legacy_keys
-                }
-                if any(s in payment_journal.SESSION_TERMINAL for s in legacy_states.values()):
-                    continue
-                seen_keys.update(
-                    old_key for old_key, old_state in legacy_states.items()
-                    if old_state == payment_journal.SESSION_PENDING
-                )
                 if state is None and any(
                     payment_journal.obligation_state(data, legacy) is not None
-                    for legacy in (
-                        legacy_obligation_keys(handler, match, matches, _yesterday().isoformat())
-                        | legacy_series_obligation_keys(
-                            handler, match, event_session_date(match) or _yesterday().isoformat()
-                        )
+                    for legacy in legacy_obligation_keys(
+                        handler, match, matches, _yesterday().isoformat()
                     )
                 ):
                     # Cutover guard: paid (or intent recorded) under the key the
@@ -1990,6 +1971,7 @@ def main() -> bool:
             clear_consent_state,
             journal_path,
             match_key,
+            obligation_key,
             request_and_collect,
         )
 

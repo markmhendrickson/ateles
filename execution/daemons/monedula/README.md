@@ -120,13 +120,16 @@ ruling 2026-11-12). The default and only automatic channel is `payment_approval`
 - **Series matching:** a profile with `calendar_recurring_event_id` matches only
   occurrences whose `recurringEventId` equals that value, or the series parent
   whose own `id` equals it and has no `recurringEventId`, and whose title
-  contains a configured keyword. Invalid configured identifiers strand the
-  profile. A profile without the field keeps keyword-only matching. For a
-  series-bound profile, copies of one session on two calendars share one
-  payment identity based on the series and start time, even as copies appear
-  or disappear. Prior event-ID journal and approval keys from visible copies
-  remain read-only cutover checks. Separate sessions raise separate approvals;
-  a rejected or paid session stays suppressed on later ticks.
+  contains a configured keyword. Configured and event ids must be exact
+  nonempty strings of at most 1024 raw characters, without control characters
+  or surrounding whitespace. `null` and `""` mean unset; other invalid
+  configured values strand the profile with `invalid_calendar_series_id`.
+  Comparison is exact, without case folding or Unicode normalization. A
+  profile without the field keeps keyword-only matching. Payment and session
+  keys remain event-id based; a rejected key stays rejected on later ticks.
+  A series session shown on two calendars raises one approval per copy, as
+  before this change. Deduplicating copies needs a separate design for moved
+  occurrences, unconfirmed transfers, and approvals recorded under old keys.
 - **Series mismatch notice:** if a series-bound profile sees a keyword-matching
   event outside its configured series, Monedula sends one WARN notice per
   profile and calendar date through the existing notifier. The notice gives

@@ -28,9 +28,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from ..handler_base import PaymentHandler, event_matches_profile, matching_events, series_match_id, legacy_event_ids
+    from ..handler_base import PaymentHandler, event_matches_profile, matching_events
 except ImportError:
-    from handler_base import PaymentHandler, event_matches_profile, matching_events, series_match_id, legacy_event_ids  # type: ignore[no-redef]
+    from handler_base import PaymentHandler, event_matches_profile, matching_events  # type: ignore[no-redef]
 from . import task_writes
 from .payment_profile import PaymentProfile
 
@@ -139,11 +139,7 @@ class WiseTransferHandler(PaymentHandler):
         for event in matching_events(self.profile, events):
             summary = event.get("summary", "") or ""
             log.info(f"[{self.name}] Matched event: {summary!r}")
-            match = {"event": event, "summary": summary}
-            if self.profile.calendar_recurring_event_id:
-                match["match_id"] = series_match_id(self.profile, event)
-                match["legacy_event_ids"] = legacy_event_ids(self.profile, events, event)
-            matched.append(match)
+            matched.append({"event": event, "summary": summary})
         return matched
 
     def preview(self, match: dict) -> str:
