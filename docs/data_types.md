@@ -220,7 +220,8 @@ unset; any other invalid configured value strands the profile with
 `invalid_calendar_series_id`, and a stranded profile is held (the env-var
 fallback does not replace it; nor does it when the Neotoma source fails, is
 rejected or strands every active profile: the fallback applies only after a
-successful empty read or in an env-only install). A present but null, blank or invalid
+successful empty read, meaning an explicit empty collection, or in an env-only
+install; a response with no valid collection is a rejected read). A present but null, blank or invalid
 `recurringEventId` never matches, even when `id` equals the series id. Event
 ids obey the same bounds and compare by
 exact string equality. Without a configured id, keyword-only matching remains.

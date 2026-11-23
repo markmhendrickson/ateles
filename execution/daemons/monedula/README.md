@@ -129,6 +129,8 @@ ruling 2026-11-12). The default and only automatic channel is `payment_approval`
   strands every active profile: env-var profiles carry no series binding, so
   they are used only after a successful empty read or when no Neotoma base URL
   is configured (an env-only install).
+  A successful response without an explicit, valid profile collection (an error
+  object, an unexpected shape) counts as a rejected read, never as an empty one.
   A `recurringEventId` that is present on an event but null, blank or invalid
   never matches, even when the event's own `id` equals the series id.
   Comparison is exact, without case folding or Unicode normalization. A

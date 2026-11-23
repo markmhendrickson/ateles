@@ -471,3 +471,37 @@ def test_env_fallback_remains_for_env_only_install(monkeypatch):
     _env_profile(monkeypatch)
     profiles = load_profiles_with_neotoma_fallback([])
     assert [p.prefix for p in profiles] == ["TEST"]
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("body", [
+    {"error": "synthetic"}, {}, {"entities": None}, {"entities": "none"},
+    {"entities": [17]}, "unexpected", 17, None,
+])
+@pytest.mark.parametrize("pass_strandings", [True, False])
+def test_successful_response_without_a_valid_profile_collection_is_a_rejected_read(
+    rail, body, pass_strandings, monkeypatch
+):
+    """A 2xx body that lacks an explicit, valid profile collection must not read as 'no profiles
+    configured' (which enables the env-var fallback); it holds, on both rails' configurations."""
+    from strandings import REASON_FETCH_REJECTED
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch, rail)
+    _serve(monkeypatch, body)
+    stranded = [] if pass_strandings else None
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+    if pass_strandings:
+        assert [s.reason for s in stranded] == [REASON_FETCH_REJECTED]
+
+
+@pytest.mark.parametrize("key", ["entities", "items", "results"])
+def test_explicit_empty_collection_still_allows_the_env_fallback(key, monkeypatch):
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    _serve(monkeypatch, {key: []})
+    assert [p.prefix for p in load_profiles_with_neotoma_fallback([])] == ["TEST"]
+    _serve(monkeypatch, [])
+    assert [p.prefix for p in load_profiles_with_neotoma_fallback([])] == ["TEST"]

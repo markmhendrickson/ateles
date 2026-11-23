@@ -296,11 +296,28 @@ def load_profiles_from_neotoma(
         )
         return []
 
-    items: list[dict] = []
+    # A successful response must carry an explicit profile collection (possibly empty). A body
+    # without one (an error object, an unexpected shape) is a rejected read, never "no profiles
+    # configured": treating it as empty would enable the env-var fallback, which has no series
+    # binding.
+    items: list[dict] | None = None
     if isinstance(data, list):
         items = data
     elif isinstance(data, dict):
-        items = data.get("entities") or data.get("items") or data.get("results") or []
+        for key in ("entities", "items", "results"):
+            if isinstance(data.get(key), list):
+                items = data[key]
+                break
+    if items is None or not all(isinstance(entry, dict) for entry in items):
+        log.error("Neotoma payment_profile fetch returned no valid profile collection")
+        _strand(
+            "",
+            "(all profiles)",
+            REASON_FETCH_REJECTED,
+            "Neotoma answered the payment profile fetch without a valid profile "
+            "collection. Check the Neotoma host and any proxy in front of it.",
+        )
+        return []
 
     profiles: list[PaymentProfile] = []
     for item in items:
