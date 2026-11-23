@@ -389,3 +389,85 @@ def test_env_fallback_still_used_when_neotoma_has_no_profiles(monkeypatch):
     monkeypatch.setenv("TEST_BTC_ADDRESS", "synthetic-address")
     profiles = load_profiles_with_neotoma_fallback([])
     assert [p.prefix for p in profiles] == ["TEST"]
+
+
+@pytest.mark.parametrize("handler_type,rail", RAILS)
+@pytest.mark.parametrize("event,expected_writes", [
+    (_session("other-instance", recurring="other-series"), 0),
+    (_session("no-recurrence"), 0),
+    (_session("instance"), 1),
+])
+def test_wrong_series_keyword_event_raises_no_approval_end_to_end(
+    env, monkeypatch, handler_type, rail, event, expected_writes
+):
+    """The reported defect through the real tick on BOTH rails: a keyword-matching event outside
+    the configured series writes no payment_approval; the real series instance writes one."""
+    if event["id"] == "no-recurrence":
+        event.pop("recurringEventId", None)
+    world, neo = env
+    world.handler = handler_type(_payment_profile(rail))
+    world.calendars = {"primary": [event]}
+    monkeypatch.setattr(monedula, "_notify", lambda message, **kwargs: None)
+    world.tick()
+    assert neo.writes == expected_writes
+
+
+def _env_profile(monkeypatch, rail="btc"):
+    monkeypatch.setenv("MONEDULA_PROFILES", "TEST")
+    monkeypatch.setenv("TEST_LABEL", "Example class")
+    monkeypatch.setenv("TEST_CALENDAR_KEYWORDS", "movement")
+    monkeypatch.setenv("TEST_PAYMENT_TYPE", rail)
+    monkeypatch.setenv("TEST_AMOUNT_EUR", "10")
+    monkeypatch.setenv("TEST_BTC_ADDRESS", "synthetic-address")
+
+
+def _fail_fetch(monkeypatch, error):
+    def _raise(req, timeout=None):
+        raise error
+    monkeypatch.setattr("urllib.request.urlopen", _raise)
+
+
+@pytest.mark.parametrize("failure", [
+    "unreachable", "server_error", "rejected", "bad_amount", "invalid_series",
+])
+@pytest.mark.parametrize("pass_strandings", [True, False])
+def test_configured_neotoma_source_that_yields_no_profile_holds_the_env_fallback(
+    failure, pass_strandings, monkeypatch
+):
+    """A configured Neotoma source that fails, is rejected, or strands every active profile must
+    not be replaced by an env-var profile (it has no series binding: title-only matching)."""
+    import io
+    import urllib.error
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    if failure == "unreachable":
+        _fail_fetch(monkeypatch, urllib.error.URLError("synthetic outage"))
+    elif failure == "server_error":
+        _fail_fetch(monkeypatch, urllib.error.HTTPError(
+            "https://example.invalid", 503, "Unavailable", {}, io.BytesIO(b"")))
+    elif failure == "rejected":
+        _fail_fetch(monkeypatch, urllib.error.HTTPError(
+            "https://example.invalid", 403, "Forbidden", {}, io.BytesIO(b"")))
+    elif failure == "bad_amount":
+        _serve(monkeypatch, {"entities": [_profile(
+            payment_type="btc", amount_eur="not-a-number",
+            calendar_recurring_event_id=SERIES,
+        )]})
+    else:
+        _serve(monkeypatch, {"entities": [_profile(
+            payment_type="btc", calendar_recurring_event_id="x" * 1025,
+        )]})
+    stranded = [] if pass_strandings else None
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+    if pass_strandings:
+        assert stranded, "the stranding must still be escalated by the caller"
+
+
+def test_env_fallback_remains_for_env_only_install(monkeypatch):
+    """Control: with no Neotoma base URL (an env-only install) the env profile loads as before."""
+    monkeypatch.delenv("NEOTOMA_BASE_URL", raising=False)
+    _env_profile(monkeypatch)
+    profiles = load_profiles_with_neotoma_fallback([])
+    assert [p.prefix for p in profiles] == ["TEST"]

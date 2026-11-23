@@ -485,8 +485,6 @@ def load_profiles_with_neotoma_fallback(
 
     ``strandings`` is forwarded to the Neotoma loader; see its docstring.
     """
-    from strandings import REASON_BAD_CALENDAR_SERIES_ID
-
     # Collect this load's strandings locally as well, so the fallback below can see
     # whether a profile was held for an invalid calendar series id, whatever the
     # caller passed.
@@ -504,14 +502,17 @@ def load_profiles_with_neotoma_fallback(
     if profiles:
         return profiles
 
-    if any(getattr(s, "reason", "") == REASON_BAD_CALENDAR_SERIES_ID for s in collected):
-        # A profile that configures a calendar series was held because its series id is
-        # invalid. An env-var profile has no series id, so falling back would resume
-        # title-only matching for the same payment: hold it instead (the stranding is
-        # escalated by the caller).
+    if collected:
+        # The configured Neotoma source answered or failed, but yielded no usable profile:
+        # a fetch failure or rejection, or every active profile stranded (an invalid
+        # calendar series id among them). An env-var profile has no series binding, so
+        # falling back would resume title-only matching for a payment whose configured
+        # profile requires a series: hold instead (the strandings are escalated by the
+        # caller). The env fallback remains for a successful empty read and for an
+        # env-only install (no Neotoma base URL configured).
         log.error(
-            "Neotoma payment profile held for an invalid calendar series id; "
-            "not falling back to env-var profiles"
+            "Neotoma payment profile source yielded no usable profile "
+            f"({len(collected)} stranding(s)); not falling back to env-var profiles"
         )
         return []
 
