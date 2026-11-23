@@ -52,8 +52,11 @@ def event_matches_profile(profile: Any, event: dict) -> bool:
     event_id = event.get("id")
     if not valid_calendar_id(event_id):
         return False
-    recurring = event.get("recurringEventId")
-    if recurring is not None:
+    # Presence, not value: a present recurringEventId (even null or blank) is recurrence
+    # metadata and must be a valid id equal to the series id; only a missing field means
+    # the event could be the series parent itself.
+    if "recurringEventId" in event:
+        recurring = event["recurringEventId"]
         return valid_calendar_id(recurring) and recurring == series_id
     return event_id == series_id
 

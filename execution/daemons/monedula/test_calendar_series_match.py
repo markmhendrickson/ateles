@@ -21,6 +21,7 @@ from handler_base import event_matches_profile, valid_calendar_id  # noqa: E402
 from handlers import btc_transfer, wise_transfer  # noqa: E402
 from handlers.btc_transfer import BtcTransferHandler  # noqa: E402
 from handlers.payment_profile import (  # noqa: E402
+    load_profiles_with_neotoma_fallback,
     PaymentProfile,
     _load_profile,
     load_profiles_from_neotoma,
@@ -329,3 +330,62 @@ def test_no_mismatch_notice_without_wrong_series_keyword_hit(env, monkeypatch, e
     world.tick()
     assert not [message for message in notices if "configured calendar series" in message]
     assert neo.writes == expected_writes
+
+
+@pytest.mark.parametrize("handler_type,rail", RAILS)
+@pytest.mark.parametrize("value", [None, "", "   ", 17, False])
+def test_present_empty_or_null_recurrence_is_not_a_series_parent(handler_type, rail, value):
+    """A recurringEventId that is present but null or blank is recurrence metadata, never the
+    'no metadata' parent case, even when the event's own id equals the series id."""
+    profile = _payment_profile(rail)
+    event = _session(SERIES, recurring=None)
+    event["recurringEventId"] = value
+    assert not event_matches_profile(profile, event)
+    assert handler_type(profile).matches([event]) == []
+    handler = handler_type(profile)
+    items = consent_email.build_pending_items(
+        [(handler, [{"event": event, "summary": event["summary"]}])], "2026-11-11"
+    )
+    assert items == []
+    # control: the same event with the field genuinely absent is the series parent
+    parent = _session(SERIES, recurring=None)
+    assert "recurringEventId" not in parent
+    assert len(handler.matches([parent])) == 1
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("pass_strandings", [True, False])
+def test_invalid_series_profile_is_held_not_replaced_by_env_profile(
+    rail, pass_strandings, monkeypatch
+):
+    """When the Neotoma profile is stranded for an invalid series id, the env-var profile
+    (which has no series id) must not take its place and resume title-only matching."""
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _serve(monkeypatch, {"entities": [_profile(
+        payment_type=rail, calendar_recurring_event_id="x" * 1025,
+    )]})
+    monkeypatch.setenv("MONEDULA_PROFILES", "TEST")
+    monkeypatch.setenv("TEST_LABEL", "Example class")
+    monkeypatch.setenv("TEST_CALENDAR_KEYWORDS", "movement")
+    monkeypatch.setenv("TEST_PAYMENT_TYPE", rail)
+    monkeypatch.setenv("TEST_AMOUNT_EUR", "10")
+    stranded = [] if pass_strandings else None
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+    if pass_strandings:
+        assert [s.reason for s in stranded] == [REASON_BAD_CALENDAR_SERIES_ID]
+
+
+def test_env_fallback_still_used_when_neotoma_has_no_profiles(monkeypatch):
+    """Control: the env-var fallback is unchanged when nothing was stranded for a series id."""
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _serve(monkeypatch, {"entities": []})
+    monkeypatch.setenv("MONEDULA_PROFILES", "TEST")
+    monkeypatch.setenv("TEST_LABEL", "Example class")
+    monkeypatch.setenv("TEST_CALENDAR_KEYWORDS", "movement")
+    monkeypatch.setenv("TEST_PAYMENT_TYPE", "btc")
+    monkeypatch.setenv("TEST_AMOUNT_EUR", "10")
+    monkeypatch.setenv("TEST_BTC_ADDRESS", "synthetic-address")
+    profiles = load_profiles_with_neotoma_fallback([])
+    assert [p.prefix for p in profiles] == ["TEST"]

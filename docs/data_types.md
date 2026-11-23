@@ -217,7 +217,10 @@ series (`recurringEventId` on an occurrence, or `id` on a parent with no
 nonempty string of at most 1024 characters measured before any transformation,
 with no control characters or surrounding whitespace. `null` and `""` mean
 unset; any other invalid configured value strands the profile with
-`invalid_calendar_series_id`. Event ids obey the same bounds and compare by
+`invalid_calendar_series_id`, and a stranded profile is held (the env-var
+fallback does not replace it). A present but null, blank or invalid
+`recurringEventId` never matches, even when `id` equals the series id. Event
+ids obey the same bounds and compare by
 exact string equality. Without a configured id, keyword-only matching remains.
 Payment and session keys remain event-id based. A series session shown on two
 calendars raises one approval per copy, as before this change; deduplicating

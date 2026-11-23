@@ -123,7 +123,10 @@ ruling 2026-11-12). The default and only automatic channel is `payment_approval`
   contains a configured keyword. Configured and event ids must be exact
   nonempty strings of at most 1024 raw characters, without control characters
   or surrounding whitespace. `null` and `""` mean unset; other invalid
-  configured values strand the profile with `invalid_calendar_series_id`.
+  configured values strand the profile with `invalid_calendar_series_id`,
+  and a stranded profile is held: the env-var fallback is not used in its place.
+  A `recurringEventId` that is present on an event but null, blank or invalid
+  never matches, even when the event's own `id` equals the series id.
   Comparison is exact, without case folding or Unicode normalization. A
   profile without the field keeps keyword-only matching. Payment and session
   keys remain event-id based; a rejected key stays rejected on later ticks.
