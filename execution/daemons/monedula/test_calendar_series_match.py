@@ -477,6 +477,9 @@ def test_env_fallback_remains_for_env_only_install(monkeypatch):
 @pytest.mark.parametrize("body", [
     {"error": "synthetic"}, {}, {"entities": None}, {"entities": "none"},
     {"entities": [17]}, "unexpected", 17, None,
+    {"entities": "bad", "items": []}, {"entities": None, "results": []},
+    {"entities": [], "items": []}, {"items": [], "results": []},
+    {"entities": [{"entity_id": "a", "snapshot": {}}], "items": []},
 ])
 @pytest.mark.parametrize("pass_strandings", [True, False])
 def test_successful_response_without_a_valid_profile_collection_is_a_rejected_read(

@@ -304,10 +304,12 @@ def load_profiles_from_neotoma(
     if isinstance(data, list):
         items = data
     elif isinstance(data, dict):
-        for key in ("entities", "items", "results"):
-            if isinstance(data.get(key), list):
-                items = data[key]
-                break
+        # Exactly ONE recognised collection key may be present, and it must be a list: a
+        # malformed value under one key, or two recognised keys that could disagree, is a
+        # rejected read, never a pick of whichever key happens to look valid.
+        present = [key for key in ("entities", "items", "results") if key in data]
+        if len(present) == 1 and isinstance(data[present[0]], list):
+            items = data[present[0]]
     if items is None or not all(isinstance(entry, dict) for entry in items):
         log.error("Neotoma payment_profile fetch returned no valid profile collection")
         _strand(
