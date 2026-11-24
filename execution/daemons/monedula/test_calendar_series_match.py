@@ -270,7 +270,19 @@ def test_series_and_unset_profiles_keep_origin_main_event_keys(env, handler_type
         handler.name, "2026-11-11", "event-a",
         consent_email.payee_identity(handler), "10", "EUR",
     ])
-    assert item.obligation == hashlib.sha256(basis.encode()).hexdigest()[:32]
+    expected = hashlib.sha256(basis.encode()).hexdigest()[:32]
+    if rail == "wise":
+        # origin/main binds a Wise approval to its profile, task and transfer terms (the Wise key)
+        profile = handler.profile
+        wise_basis = "|".join((
+            expected,
+            str(profile.entity_id or ""),
+            str(profile.neotoma_task_id or ""),
+            str(profile.wise_reference or ""),
+            "",
+        ))
+        expected = hashlib.sha256(wise_basis.encode()).hexdigest()[:32]
+    assert item.obligation == expected
     assert payment_journal.session_key(handler.name, item.match_id) == "test:event-a"
 
 

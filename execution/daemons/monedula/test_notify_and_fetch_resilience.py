@@ -638,6 +638,10 @@ def test_failed_alert_log_never_contains_the_message_text(monkeypatch, caplog):
 
 
 def _entry(monkeypatch, *, clean, undeliverable):
+    import consent_email
+    import payment_journal
+
+    payment_journal.init_journal(consent_email.journal_path())
     order: list = []
     monkeypatch.setattr(monedula, "main", lambda: clean)
 
