@@ -155,7 +155,7 @@ def load_profiles_from_neotoma(
     (ateles#553). The caller escalates whatever lands in this list.
 
     Passing ``None`` keeps the historical warn-and-continue behaviour, which
-    is what the env-var fallback path and older callers expect.
+    older callers expect.
 
     Required env vars:
       NEOTOMA_BEARER_TOKEN   Neotoma API auth token
@@ -174,6 +174,7 @@ def load_profiles_from_neotoma(
         NEOTOMA_TIMEOUT_SEC,
         REASON_FETCH_FAILED,
         REASON_FETCH_REJECTED,
+        REASON_MALFORMED_PROFILE,
         REASON_MISSING_LABEL,
         REASON_UNREACHABLE,
         Stranding,
@@ -312,8 +313,7 @@ def load_profiles_from_neotoma(
     if (
         items is None
         or not all(isinstance(entry, dict) for entry in items)
-        # a truthy non-object snapshot is a malformed record: reject the whole read, never let
-        # it raise mid-parse or be skipped into the env fallback
+        # a truthy non-object snapshot is a malformed record: reject the whole read
         or not all(isinstance(entry.get("snapshot") or {}, dict) for entry in items)
     ):
         log.error("Neotoma payment_profile fetch returned no valid profile collection")
@@ -326,11 +326,27 @@ def load_profiles_from_neotoma(
         )
         return []
 
+    if not items:
+        # An empty collection from a configured source cannot be told from a failed read (a 2xx
+        # body can dress either one in any metadata), so it is reported as a rejected read: the
+        # caller then neither claims the day nor clears pending consent.
+        log.warning("Neotoma returned an empty payment profile collection")
+        _strand(
+            "",
+            "(all profiles)",
+            REASON_FETCH_REJECTED,
+            "Neotoma returned no payment profile. An empty answer cannot be told from a "
+            "failed one, so no profiles were loaded this run. Check the Neotoma host and "
+            "that the payment profiles exist.",
+        )
+        return []
+
     profiles: list[PaymentProfile] = []
-    for item in items:
+
+    def _parse_item(item: dict) -> None:
         snap: dict = item.get("snapshot") or {}
         if snap.get("status", "active") not in ("active",):
-            continue  # skip paused/archived
+            return  # skip paused/archived
 
         label = snap.get("label", "")
         prefix = snap.get("prefix", label.upper().replace(" ", "_"))
@@ -345,7 +361,7 @@ def load_profiles_from_neotoma(
                 "Active payment_profile has no label, so it cannot be identified "
                 "to the operator or matched to a handler.",
             )
-            continue
+            return
 
         keywords_raw: list | str = snap.get("calendar_keywords", [])
         if isinstance(keywords_raw, str):
@@ -361,7 +377,7 @@ def load_profiles_from_neotoma(
                 item.get("entity_id"), label, REASON_BAD_CALENDAR_SERIES_ID,
                 "Calendar series id is invalid; this profile was held. Check its type, length and control characters.",
             )
-            continue
+            return
 
         due_date = str(snap.get("due_date") or "").strip()
         one_off = bool(snap.get("one_off")) or (not calendar_keywords and bool(due_date))
@@ -382,7 +398,7 @@ def load_profiles_from_neotoma(
                 "attendance-gated trigger) nor due_date (the one-off trigger), so "
                 "matches() can never fire for it. Set one of the two.",
             )
-            continue
+            return
 
         payment_type_raw = str(snap.get("payment_type", "wise")).lower()
         if payment_type_raw not in ("wise", "btc"):
@@ -396,7 +412,7 @@ def load_profiles_from_neotoma(
                 f"payment_type={payment_type_raw!r} is not a rail Monedula can "
                 f"execute (expected 'wise' or 'btc').",
             )
-            continue
+            return
         payment_type: Literal["wise", "btc"] = payment_type_raw  # type: ignore[assignment]
 
         amount_raw = snap.get("amount_eur", 0)
@@ -413,7 +429,7 @@ def load_profiles_from_neotoma(
                 "amount_eur is not a whole number of euros, so no transfer can "
                 "be constructed from this profile.",
             )
-            continue
+            return
 
         if amount_eur <= 0:
             log.warning(
@@ -426,7 +442,7 @@ def load_profiles_from_neotoma(
                 "amount_eur must be positive; the profile is active but "
                 "describes no payable amount.",
             )
-            continue
+            return
 
         task_kw_raw: list | str = snap.get("task_keywords", [])
         if isinstance(task_kw_raw, str):
@@ -452,7 +468,7 @@ def load_profiles_from_neotoma(
                 f"wise_legal_type={legal_type_raw!r} is not accepted by Wise "
                 f"(expected one of {sorted(_WISE_LEGAL_TYPES)}).",
             )
-            continue
+            return
 
         try:
             recipient_id = parse_wise_recipient_id(snap.get("wise_recipient_id"))
@@ -464,7 +480,7 @@ def load_profiles_from_neotoma(
                 REASON_BAD_RECIPIENT_ID,
                 f"{exc}. Payments for this profile are held until it is fixed.",
             )
-            continue
+            return
 
         profiles.append(
             PaymentProfile(
@@ -490,6 +506,24 @@ def load_profiles_from_neotoma(
                 task_keywords=task_keywords,
             )
         )
+
+    for item in items:
+        try:
+            _parse_item(item)
+        except (TypeError, ValueError, AttributeError, KeyError) as exc:
+            # A malformed field must hold that one profile and be reported, never raise out of the
+            # whole read.
+            log.error(
+                f"payment_profile {item.get('entity_id')} could not be read "
+                f"({type(exc).__name__}) — skipped"
+            )
+            _strand(
+                item.get("entity_id"),
+                f"(unreadable {item.get('entity_id')})",
+                REASON_MALFORMED_PROFILE,
+                "An active payment_profile has a malformed field and could not be read; it is "
+                "held until it is fixed.",
+            )
 
     log.info(
         f"Loaded {len(profiles)} payment profile(s) from Neotoma: "

@@ -610,3 +610,70 @@ def test_env_profile_loads_only_without_a_configured_neotoma_source(rail, monkey
     monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
     _serve(monkeypatch, {"entities": []})
     assert load_profiles_with_neotoma_fallback([]) == []
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("body", [
+    {"entities": []}, {"items": []}, {"results": []}, [],
+    {"entities": [], "error": "synthetic"}, {"entities": [], "errors": ["synthetic"]},
+    {"entities": [], "success": False}, {"entities": [], "ok": 0},
+    {"entities": [], "status": "fail"}, {"entities": [], "status": 503},
+    {"entities": [], "total": 1}, {"entities": [], "next_cursor": "synthetic-cursor"},
+    {"entities": [], "unrecognised_flag": "anything"},
+])
+def test_empty_read_from_a_configured_source_is_reported_and_marks_the_load_degraded(
+    rail, body, monkeypatch
+):
+    """An empty collection cannot be told from a failed read, so a configured source that returns
+    one is reported (a rejected-fetch stranding): the tick is then degraded and neither claims the
+    day nor clears pending consent."""
+    from strandings import REASON_FETCH_REJECTED
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch, rail)
+    _serve(monkeypatch, body)
+    stranded = []
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+    assert [s.reason for s in stranded] == [REASON_FETCH_REJECTED]
+    assert monedula._profile_load_degraded([], stranded) is True
+
+
+@pytest.mark.parametrize("field,value", [
+    ("calendar_keywords", None), ("calendar_keywords", 7), ("calendar_keywords", True),
+    ("task_keywords", 7), ("task_keywords", True), ("amount_eur", [10]),
+])
+def test_malformed_profile_field_holds_that_profile_only_and_is_reported(field, value, monkeypatch):
+    """A malformed field raises nowhere: that one profile is held with its own stranding, a healthy
+    sibling still loads, and no process-settings profile is used."""
+    from strandings import REASON_FETCH_FAILED, REASON_FETCH_REJECTED, REASON_MALFORMED_PROFILE
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    bad = _profile(payment_type="btc", btc_address="synthetic-address")
+    bad["snapshot"][field] = value
+    bad["snapshot"]["label"] = "Bad profile"
+    good = _profile(payment_type="btc", btc_address="synthetic-address")
+    good["snapshot"]["label"] = "Good profile"
+    _serve(monkeypatch, {"entities": [bad, good]})
+    stranded = []
+    profiles = load_profiles_with_neotoma_fallback(stranded)
+    assert [p.label for p in profiles] == ["Good profile"]
+    assert len(stranded) == 1 and stranded[0].reason in (
+        REASON_MALFORMED_PROFILE, "invalid_amount")
+    assert stranded[0].reason not in (REASON_FETCH_FAILED, REASON_FETCH_REJECTED)
+    assert monedula._profile_load_degraded(profiles, stranded) is False
+
+
+def test_only_malformed_profile_is_reported_and_degrades_the_load(monkeypatch):
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    bad = _profile(payment_type="btc", btc_address="synthetic-address")
+    bad["snapshot"]["calendar_keywords"] = None
+    _serve(monkeypatch, {"entities": [bad]})
+    stranded = []
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+    assert len(stranded) == 1
+    assert monedula._profile_load_degraded([], stranded) is True

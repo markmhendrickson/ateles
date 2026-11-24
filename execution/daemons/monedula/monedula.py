@@ -1762,8 +1762,9 @@ def main() -> bool:
     yesterday = _yesterday()
     yesterday_str = yesterday.isoformat()
 
-    # Load handlers from env-var-defined payment profiles.
-    # Set MONEDULA_PROFILES=THERAPY,YOGA (and corresponding profile env vars).
+    # Load handlers from the payment profile source: Neotoma payment_profile entities when a
+    # Neotoma base URL is configured, otherwise the process-settings profiles
+    # (MONEDULA_PROFILES=THERAPY,YOGA and their per-profile settings).
     from handlers import load_handlers
 
     # Collect every ACTIVE profile the loader could not act on. Each of these
