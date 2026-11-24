@@ -572,3 +572,66 @@ def test_profile_with_the_status_field_absent_loads_as_active(monkeypatch):
     _serve(monkeypatch, {"entities": [entity]})
     profiles = load_profiles_with_neotoma_fallback([])
     assert len(profiles) == 1 and profiles[0].label == "Test profile"
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("body", [
+    {"entities": [], "error": "synthetic"},
+    {"entities": [], "errors": ["synthetic"]},
+    {"entities": [], "error_message": "synthetic"},
+    {"entities": [], "detail": "synthetic"},
+    {"entities": [], "success": False},
+    {"entities": [], "ok": False},
+    {"entities": [], "status": "error"},
+    {"entities": [], "status": 503},
+    {"items": [], "exception": "synthetic"},
+    {"results": [], "failure": True},
+])
+@pytest.mark.parametrize("pass_strandings", [True, False])
+def test_contradictory_response_that_reports_a_failure_is_a_rejected_read(
+    rail, body, pass_strandings, monkeypatch
+):
+    """A 2xx body that carries an empty collection AND reports a failure must not read as an
+    explicitly empty collection (it would enable the unbound env-var fallback)."""
+    from strandings import REASON_FETCH_REJECTED
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch, rail)
+    _serve(monkeypatch, body)
+    stranded = [] if pass_strandings else None
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+    if pass_strandings:
+        assert [s.reason for s in stranded] == [REASON_FETCH_REJECTED]
+
+
+@pytest.mark.parametrize("body", [
+    {"entities": [], "total": 0, "excluded_merged": 0, "search_mode": "keyword",
+     "read_contract": {"mode": "synthetic"}, "applied_search_strategies": []},
+    {"entities": [], "error": None, "errors": [], "status": "ok", "success": True},
+    {"entities": [], "status": 200},
+])
+def test_real_empty_collection_with_benign_metadata_still_allows_the_env_fallback(body, monkeypatch):
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    _serve(monkeypatch, body)
+    assert [p.prefix for p in load_profiles_with_neotoma_fallback([])] == ["TEST"]
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("snapshot", ["not-an-object", ["list"], 7, True])
+@pytest.mark.parametrize("pass_strandings", [True, False])
+def test_non_object_snapshot_in_a_collection_is_a_rejected_read(
+    rail, snapshot, pass_strandings, monkeypatch
+):
+    from strandings import REASON_FETCH_REJECTED
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch, rail)
+    _serve(monkeypatch, {"entities": [{"entity_id": "ent_synthetic", "snapshot": snapshot}]})
+    stranded = [] if pass_strandings else None
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+    if pass_strandings:
+        assert [s.reason for s in stranded] == [REASON_FETCH_REJECTED]

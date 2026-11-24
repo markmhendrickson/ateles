@@ -135,6 +135,27 @@ def parse_wise_recipient_id(raw: Any) -> int | None:
     return raw
 
 
+def _reports_failure(data: dict) -> bool:
+    """True when a response body reports a failure alongside (or instead of) its collection.
+
+    A 2xx body that carries an error-named key with a real value, a failed ``success`` or ``ok``
+    flag, or a failure ``status`` is contradictory: treat it as a rejected read, never as an
+    explicitly empty collection (which would enable the env-var fallback).
+    """
+    for key, value in data.items():
+        name = str(key).lower()
+        if ("error" in name or name in {"detail", "exception", "fault", "failure"}) and value not in (None, "", [], {}, False, 0):
+            return True
+        if name in {"success", "ok"} and value is False:
+            return True
+        if name in {"status", "state", "result"}:
+            if isinstance(value, str) and value.strip().lower() in {"error", "failed", "failure", "fail", "unavailable"}:
+                return True
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 400:
+                return True
+    return False
+
+
 def load_profiles_from_neotoma(
     strandings: list | None = None,
     observed: dict | None = None,
@@ -304,6 +325,8 @@ def load_profiles_from_neotoma(
     items: list[dict] | None = None
     if isinstance(data, list):
         items = data
+    elif isinstance(data, dict) and _reports_failure(data):
+        items = None  # a 2xx body that also reports an error is a failed read, whatever it lists
     elif isinstance(data, dict):
         # Exactly ONE recognised collection key may be present, and it must be a list: a
         # malformed value under one key, or two recognised keys that could disagree, is a
@@ -311,7 +334,13 @@ def load_profiles_from_neotoma(
         present = [key for key in ("entities", "items", "results") if key in data]
         if len(present) == 1 and isinstance(data[present[0]], list):
             items = data[present[0]]
-    if items is None or not all(isinstance(entry, dict) for entry in items):
+    if (
+        items is None
+        or not all(isinstance(entry, dict) for entry in items)
+        # a truthy non-object snapshot is a malformed record: reject the whole read, never let
+        # it raise mid-parse or be skipped into the env fallback
+        or not all(isinstance(entry.get("snapshot") or {}, dict) for entry in items)
+    ):
         log.error("Neotoma payment_profile fetch returned no valid profile collection")
         _strand(
             "",
