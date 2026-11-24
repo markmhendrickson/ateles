@@ -350,6 +350,8 @@ def load_profiles_from_neotoma(
 
         label = snap.get("label", "")
         prefix = snap.get("prefix", label.upper().replace(" ", "_"))
+        if (label and not isinstance(label, str)) or not isinstance(prefix, str):
+            raise TypeError("label and prefix must be text")
         if not label:
             log.warning(
                 f"payment_profile entity {item.get('entity_id')} missing label — skipped"
@@ -482,7 +484,7 @@ def load_profiles_from_neotoma(
             )
             return
 
-        profiles.append(
+        profile = (
             PaymentProfile(
                 prefix=prefix,
                 label=label,
@@ -506,6 +508,10 @@ def load_profiles_from_neotoma(
                 task_keywords=task_keywords,
             )
         )
+        # derived properties must work before the profile is accepted, so a malformed field can
+        # never escape later (for example the profile's name)
+        profile.name
+        profiles.append(profile)
 
     for item in items:
         try:

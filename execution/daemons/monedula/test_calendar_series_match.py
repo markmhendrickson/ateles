@@ -642,6 +642,7 @@ def test_empty_read_from_a_configured_source_is_reported_and_marks_the_load_degr
 @pytest.mark.parametrize("field,value", [
     ("calendar_keywords", None), ("calendar_keywords", 7), ("calendar_keywords", True),
     ("task_keywords", 7), ("task_keywords", True), ("amount_eur", [10]),
+    ("prefix", 7), ("prefix", ["x"]), ("prefix", True), ("label", 7), ("label", ["x"]),
 ])
 def test_malformed_profile_field_holds_that_profile_only_and_is_reported(field, value, monkeypatch):
     """A malformed field raises nowhere: that one profile is held with its own stranding, a healthy
@@ -652,8 +653,8 @@ def test_malformed_profile_field_holds_that_profile_only_and_is_reported(field, 
     monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
     _env_profile(monkeypatch)
     bad = _profile(payment_type="btc", btc_address="synthetic-address")
-    bad["snapshot"][field] = value
     bad["snapshot"]["label"] = "Bad profile"
+    bad["snapshot"][field] = value
     good = _profile(payment_type="btc", btc_address="synthetic-address")
     good["snapshot"]["label"] = "Good profile"
     _serve(monkeypatch, {"entities": [bad, good]})
