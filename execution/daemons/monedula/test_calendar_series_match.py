@@ -643,6 +643,10 @@ def test_empty_read_from_a_configured_source_is_reported_and_marks_the_load_degr
     ("calendar_keywords", None), ("calendar_keywords", 7), ("calendar_keywords", True),
     ("task_keywords", 7), ("task_keywords", True), ("amount_eur", [10]),
     ("prefix", 7), ("prefix", ["x"]), ("prefix", True), ("label", 7), ("label", ["x"]),
+    ("calendar_keywords", {"movement": "x"}), ("calendar_keywords", '{"movement": 1}'),
+    ("calendar_keywords", '"movement"'), ("calendar_keywords", [{"a": 1}]),
+    ("task_keywords", {"movement": "x"}), ("task_keywords", '{"movement": 1}'),
+    ("task_keywords", [["nested"]]),
 ])
 def test_malformed_profile_field_holds_that_profile_only_and_is_reported(field, value, monkeypatch):
     """A malformed field raises nowhere: that one profile is held with its own stranding, a healthy
@@ -678,3 +682,40 @@ def test_only_malformed_profile_is_reported_and_degrades_the_load(monkeypatch):
     assert load_profiles_with_neotoma_fallback(stranded) == []
     assert len(stranded) == 1
     assert monedula._profile_load_degraded([], stranded) is True
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("field", ["calendar_keywords", "task_keywords"])
+@pytest.mark.parametrize("value", [
+    {"movement": "unexpected"}, '{"movement": 1}', '"movement"', [{"a": 1}], 7, True,
+])
+def test_mapped_or_scalar_keywords_strand_the_profile_and_build_no_handler(
+    rail, field, value, monkeypatch
+):
+    """The effect on both rails: a keyword field that is a mapping, a JSON object or scalar, a list
+    of non-text, a number or a boolean holds the profile (malformed-profile stranding) and builds no
+    handler, so nothing can reach payment approval."""
+    from handlers import load_handlers
+    from strandings import REASON_MALFORMED_PROFILE
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch, rail)
+    entity = _profile(payment_type=rail, btc_address="synthetic-address",
+                      calendar_recurring_event_id=SERIES)
+    entity["snapshot"]["calendar_keywords"] = ["movement"]
+    entity["snapshot"][field] = value
+    _serve(monkeypatch, {"entities": [entity]})
+    stranded = []
+    assert load_handlers(stranded) == []
+    assert [s.reason for s in stranded] == [REASON_MALFORMED_PROFILE]
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (["Movement", " yoga "], ["movement", "yoga"]), ("movement, Yoga", ["movement", "yoga"]),
+    ('["Movement", "yoga"]', ["movement", "yoga"]), ("", []), ([], []), (["", "x"], ["x"]),
+])
+def test_valid_keyword_collections_still_parse(raw, expected):
+    from handlers.payment_profile import _keyword_list
+
+    assert _keyword_list(raw) == expected

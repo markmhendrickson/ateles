@@ -44,6 +44,7 @@ operator's private .env, never in this public file):
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -133,6 +134,26 @@ def parse_wise_recipient_id(raw: Any) -> int | None:
     if not isinstance(raw, int) or raw <= 0:
         raise ValueError("wise_recipient_id must be a positive integer")
     return raw
+
+
+def _keyword_list(raw: Any) -> list[str]:
+    """Parse a stored keyword collection: a list of text, a JSON list, or a comma-separated string.
+
+    Anything else (a mapping, a number, a boolean, a null, a JSON object or scalar, a list that
+    holds non-text) is malformed and raises TypeError, so the caller holds that one profile with
+    a malformed-profile stranding instead of coercing the value (iterating a mapping would
+    silently load its keys as keywords).
+    """
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            raw = [k.strip() for k in raw.split(",") if k.strip()]
+    if not isinstance(raw, (list, tuple)):
+        raise TypeError("keywords must be a list of text")
+    if not all(isinstance(k, str) for k in raw if k):
+        raise TypeError("keywords must be text")
+    return [k.strip().lower() for k in raw if k and k.strip()]
 
 
 def load_profiles_from_neotoma(
@@ -365,13 +386,7 @@ def load_profiles_from_neotoma(
             )
             return
 
-        keywords_raw: list | str = snap.get("calendar_keywords", [])
-        if isinstance(keywords_raw, str):
-            try:
-                keywords_raw = json.loads(keywords_raw)
-            except (ValueError, TypeError):
-                keywords_raw = [k.strip() for k in keywords_raw.split(",") if k.strip()]
-        calendar_keywords = [str(k).strip().lower() for k in keywords_raw if k]
+        calendar_keywords = _keyword_list(snap.get("calendar_keywords", []))
         recurring_id = snap.get("calendar_recurring_event_id")
         if not valid_configured_series_id(recurring_id):
             log.warning("payment_profile has malformed calendar series id — skipped")
@@ -446,15 +461,7 @@ def load_profiles_from_neotoma(
             )
             return
 
-        task_kw_raw: list | str = snap.get("task_keywords", [])
-        if isinstance(task_kw_raw, str):
-            try:
-                task_kw_raw = json.loads(task_kw_raw)
-            except (ValueError, TypeError):
-                task_kw_raw = [k.strip() for k in task_kw_raw.split(",") if k.strip()]
-        task_keywords = [
-            str(k).strip().lower() for k in task_kw_raw if k
-        ] or calendar_keywords
+        task_keywords = _keyword_list(snap.get("task_keywords", [])) or calendar_keywords
 
         legal_type_raw = str(snap.get("wise_legal_type") or "PRIVATE").strip().upper()
         if legal_type_raw not in _WISE_LEGAL_TYPES:
