@@ -421,7 +421,9 @@ def load_profiles_from_neotoma(
     def _parse_item(item: dict) -> None:
         snap: dict = item.get("snapshot") or {}
         status = snap.get("status", "active")
-        if status is not None and not isinstance(status, str):
+        if not isinstance(status, str):
+            # an ABSENT status means active (the legacy default); an explicit null or any other
+            # non-text value is malformed and reported, never silently skipped
             raise TypeError("status must be text")
         if status not in ("active",):
             return  # skip paused/archived

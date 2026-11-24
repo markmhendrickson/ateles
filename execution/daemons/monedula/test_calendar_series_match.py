@@ -645,7 +645,7 @@ def test_empty_read_from_a_configured_source_is_reported_and_marks_the_load_degr
     ("amount_eur", 1e309), ("amount_eur", float("nan")), ("wise_recipient_id", 1e309),
     ("wise_recipient_id", float("nan")), ("wise_recipient_id", [1]),
     ("one_off", "yes"), ("one_off", "0"), ("one_off", 1), ("one_off", ["x"]), ("one_off", {"a": 1}),
-    ("status", 7), ("status", ["active"]), ("status", {"a": 1}), ("status", True),
+    ("status", 7), ("status", ["active"]), ("status", {"a": 1}), ("status", True), ("status", None),
     ("due_date", 7), ("due_date", {"a": 1}), ("due_date", ["2026-11-24"]),
     ("payment_type", 7), ("payment_type", None), ("payment_type", ["wise"]),
     ("wise_legal_type", 7), ("wise_legal_type", ["PRIVATE"]), ("wise_legal_type", {"a": 1}),
@@ -957,3 +957,21 @@ def test_empty_non_text_values_are_not_treated_as_missing(field, value, monkeypa
         assert [p.one_off for p in profiles] == [False] and stranded == []
     else:
         assert profiles == [] and len(stranded) == 1
+
+
+def test_absent_status_means_active_but_explicit_null_is_reported(monkeypatch):
+    from strandings import REASON_MALFORMED_PROFILE
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    absent = _profile(payment_type="btc", btc_address="synthetic-address")
+    absent["snapshot"].pop("status", None)
+    absent["snapshot"]["label"] = "Absent status"
+    null = _profile(payment_type="btc", btc_address="synthetic-address")
+    null["snapshot"]["status"] = None
+    null["snapshot"]["label"] = "Null status"
+    _serve(monkeypatch, {"entities": [absent, null]})
+    stranded = []
+    assert [p.label for p in load_profiles_with_neotoma_fallback(stranded)] == ["Absent status"]
+    assert [s.reason for s in stranded] == [REASON_MALFORMED_PROFILE]
