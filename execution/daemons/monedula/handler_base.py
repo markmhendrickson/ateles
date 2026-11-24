@@ -10,7 +10,7 @@ triggered by calendar events.  Subclasses implement three methods:
 
 The result dict returned by execute() must include at least:
   {
-    "status":   "sent" | "failed" | "manual_required",
+    "status":   "sent" | "funding_pending" | "submission_unknown" | "failed" | "manual_required",
     "handler":  <handler name>,
     ...handler-specific fields...
   }
@@ -20,6 +20,9 @@ from __future__ import annotations
 
 import abc
 from typing import Any
+
+STATUS_FUNDING_PENDING = "funding_pending"
+STATUS_SUBMISSION_UNKNOWN = "submission_unknown"
 
 
 class PaymentHandler(abc.ABC):
@@ -55,7 +58,7 @@ class PaymentHandler(abc.ABC):
 
         Must return a dict with at least:
           {
-            "status":  "sent" | "failed" | "manual_required",
+            "status":  "sent" | "funding_pending" | "submission_unknown" | "failed" | "manual_required",
             "handler": self.name,
           }
         Additional fields are handler-specific (e.g. txid, transfer_id, iban).

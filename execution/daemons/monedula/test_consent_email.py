@@ -227,6 +227,47 @@ def test_pending_set_sends_exactly_one_send_request(monkeypatch, tmp_path):
     assert result.states[tok] == "awaiting_approval"
 
 
+@pytest.mark.parametrize("status", ["not_submitted", "funds_refunded", "cancelled"])
+def test_email_request_holds_terminal_attempt_without_offering_reapproval(
+    monkeypatch, tmp_path, status
+):
+    held = _Handler("old_invoice", label="Old invoice", amount=25, calendar=False)
+    open_item = _Handler("new_invoice", label="New invoice", amount=30, calendar=False)
+    held.profile.entity_id = "old-profile"
+    held.profile.neotoma_task_id = "old-task"
+    open_item.profile.entity_id = "new-profile"
+    open_item.profile.neotoma_task_id = "new-task"
+    state_path = tmp_path / "request.json"
+    jpath = consent_email.journal_path(state_path)
+    item = consent_email.build_pending_items([(held, [{}])], "2026-09-22")[0]
+    payment_journal.record_intent(
+        jpath, item.obligation, item.token, generation=1,
+        rail="wise", handler_name=held.name,
+        profile_entity_id=held.profile.entity_id,
+        task_id=held.profile.neotoma_task_id,
+    approved_terms_hash="synthetic-hash", payment_date="2026-01-01", match_id="2026-01-01")
+    if status == "not_submitted":
+        payment_journal.record_wise_not_submitted(jpath, item.obligation)
+    else:
+        payment_journal.record_transfer_created(jpath, item.obligation, 3)
+        payment_journal.record_wise_status(
+            jpath, item.obligation, 3, status, "2026-09-22T12:00:00Z"
+        )
+    sent = []
+    monkeypatch.setattr(consent_email, "send_request", lambda subject, body: sent.append(body) or True)
+    monkeypatch.setattr(consent_email, "read_replies_with_status",
+                        lambda *a, **k: ReadRepliesOutcome(kind="ok", texts=[]))
+    result = consent_email.request_and_collect(
+        [(held, [{}]), (open_item, [{}])], "2026-09-22", state_path=state_path
+    )
+    assert item.token not in result.approved
+    assert len(sent) == 1
+    assert "original attempt remains held" in sent[0].lower()
+    assert "replacement route is not available yet" in sent[0].lower()
+    assert "approval alone will not advance" in sent[0].lower()
+    assert "do not pay again" in sent[0].lower()
+
+
 def test_fingerprint_persisted_only_after_send_true(monkeypatch, tmp_path):
     h = _Handler("therapy", label="Studio Example", amount=60)
     state = tmp_path / "m.json"
@@ -2589,7 +2630,7 @@ def test_tokenless_payment_reply_holds_entire_request(
             mids = (["m1"] if "subject:" not in query and items[0].token in query else
                     ["m1", "m2"] if "subject:" in query else [])
             return {"complete": True, "messages": [{
-                "id": mid, "subject": f"RE: [Ateles] Monedula consent 2026-09-22"
+                "id": mid, "subject": "RE: [Ateles] Monedula consent 2026-09-22"
                                       + (f" {subject_marker(items[0].token)}" if mid == "m1" else ""),
                 "from": "op@example.com"} for mid in mids]}
         if "+read" in args:
