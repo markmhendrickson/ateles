@@ -523,7 +523,7 @@ def load_profiles_from_neotoma(
     for item in items:
         try:
             _parse_item(item)
-        except (TypeError, ValueError, AttributeError, KeyError) as exc:
+        except Exception as exc:  # noqa: BLE001 - one malformed entry must never abort the read
             # A malformed field must hold that one profile and be reported, never raise out of the
             # whole read.
             log.error(

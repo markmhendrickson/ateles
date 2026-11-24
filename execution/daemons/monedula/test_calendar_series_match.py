@@ -642,6 +642,8 @@ def test_empty_read_from_a_configured_source_is_reported_and_marks_the_load_degr
 @pytest.mark.parametrize("field,value", [
     ("calendar_keywords", None), ("calendar_keywords", 7), ("calendar_keywords", True),
     ("task_keywords", 7), ("task_keywords", True), ("amount_eur", [10]),
+    ("amount_eur", 1e309), ("amount_eur", float("nan")), ("wise_recipient_id", 1e309),
+    ("wise_recipient_id", float("nan")), ("wise_recipient_id", [1]),
     ("prefix", 7), ("prefix", ["x"]), ("prefix", True), ("label", 7), ("label", ["x"]),
     ("calendar_keywords", {"movement": "x"}), ("calendar_keywords", '{"movement": 1}'),
     ("calendar_keywords", '"movement"'), ("calendar_keywords", [{"a": 1}]),
@@ -666,7 +668,7 @@ def test_malformed_profile_field_holds_that_profile_only_and_is_reported(field, 
     profiles = load_profiles_with_neotoma_fallback(stranded)
     assert [p.label for p in profiles] == ["Good profile"]
     assert len(stranded) == 1 and stranded[0].reason in (
-        REASON_MALFORMED_PROFILE, "invalid_amount")
+        REASON_MALFORMED_PROFILE, "invalid_amount", "invalid_wise_recipient_id")
     assert stranded[0].reason not in (REASON_FETCH_FAILED, REASON_FETCH_REJECTED)
     assert monedula._profile_load_degraded(profiles, stranded) is False
 
