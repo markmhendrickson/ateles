@@ -635,3 +635,67 @@ def test_non_object_snapshot_in_a_collection_is_a_rejected_read(
     assert load_profiles_with_neotoma_fallback(stranded) == []
     if pass_strandings:
         assert [s.reason for s in stranded] == [REASON_FETCH_REJECTED]
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("body", [
+    {"entities": [], "total": 1, "limit": 50, "offset": 0},
+    {"entities": [], "total": 3},
+    {"entities": [], "total": -1},
+    {"entities": [], "total": "0"},
+    {"entities": [], "total": True},
+    {"entities": [], "next_cursor": "synthetic-cursor"},
+    {"entities": [], "next_offset": 50},
+    {"entities": [], "has_more": True},
+    {"entities": [], "truncated": True},
+    {"entities": [], "read_contract": {"coverage": {"page_exhausted": False}}},
+    {"entities": [], "read_contract": {"coverage": {"scope_exhausted": False}}},
+    {"entities": [], "read_contract": {"coverage": {"continuation": {"next_cursor": "synthetic"}}}},
+    {"items": [], "total": 2},
+    {"results": [], "next_cursor": "synthetic-cursor"},
+])
+@pytest.mark.parametrize("pass_strandings", [True, False])
+def test_empty_page_contradicted_by_its_own_count_or_pagination_is_a_rejected_read(
+    rail, body, pass_strandings, monkeypatch
+):
+    """An empty first page whose own total or pagination says more exist cannot establish that no
+    profile exists: reject it (no env fallback), on both rails."""
+    from strandings import REASON_FETCH_REJECTED
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch, rail)
+    _serve(monkeypatch, body)
+    stranded = [] if pass_strandings else None
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+    if pass_strandings:
+        assert [s.reason for s in stranded] == [REASON_FETCH_REJECTED]
+
+
+@pytest.mark.parametrize("body", [
+    {"entities": [], "total": 0, "limit": 50, "offset": 0, "next_cursor": None, "has_more": False},
+    {"entities": [], "total": 0, "read_contract": {"coverage": {
+        "page_exhausted": True, "scope_exhausted": None, "state": "unknown",
+        "continuation": {"kind": "unsupported", "next_cursor": None, "next_offset": None}}}},
+    {"items": []},
+    [],
+])
+def test_confirmed_empty_read_with_agreeing_signals_still_allows_the_env_fallback(body, monkeypatch):
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    _serve(monkeypatch, body)
+    assert [p.prefix for p in load_profiles_with_neotoma_fallback([])] == ["TEST"]
+
+
+def test_populated_page_with_a_total_above_what_it_lists_is_a_rejected_read(monkeypatch):
+    from strandings import REASON_FETCH_REJECTED
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    entity = _profile(payment_type="btc", btc_address="synthetic-address")
+    _serve(monkeypatch, {"entities": [entity], "total": 2})
+    stranded = []
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+    assert [s.reason for s in stranded] == [REASON_FETCH_REJECTED]

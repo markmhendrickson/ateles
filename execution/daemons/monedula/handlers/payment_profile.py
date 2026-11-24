@@ -156,6 +156,44 @@ def _reports_failure(data: dict) -> bool:
     return False
 
 
+def _reports_incomplete(data: dict, count: int) -> bool:
+    """True when the response's own count or pagination signals contradict the list it carries.
+
+    A page that is not the whole answer cannot establish that no profile exists: an empty page
+    with ``total`` above zero, or one that still names a next cursor or offset, says more
+    profiles exist than were returned. Treated as a rejected read, never as an empty one (which
+    would enable the unbound env-var fallback). Unknown or absent signals do not count.
+    """
+    total = data.get("total")
+    if total is not None:
+        if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+            return True
+        if total != count:
+            return True
+    for key in ("next_cursor", "next_offset", "cursor", "continuation", "next"):
+        if data.get(key) not in (None, "", False, [], {}):
+            return True
+    for key in ("has_more", "truncated", "partial", "incomplete"):
+        if data.get(key) in (True, "true", "True", 1):
+            return True
+    sources = [data]
+    contract = data.get("read_contract")
+    if isinstance(contract, dict):
+        coverage = contract.get("coverage")
+        if isinstance(coverage, dict):
+            sources.append(coverage)
+            continuation = coverage.get("continuation")
+            if isinstance(continuation, dict):
+                for key in ("next_cursor", "next_offset"):
+                    if continuation.get(key) not in (None, "", False):
+                        return True
+    for src in sources:
+        for key in ("page_exhausted", "scope_exhausted"):
+            if src.get(key) is False:
+                return True
+    return False
+
+
 def load_profiles_from_neotoma(
     strandings: list | None = None,
     observed: dict | None = None,
@@ -340,6 +378,8 @@ def load_profiles_from_neotoma(
         # a truthy non-object snapshot is a malformed record: reject the whole read, never let
         # it raise mid-parse or be skipped into the env fallback
         or not all(isinstance(entry.get("snapshot") or {}, dict) for entry in items)
+        # the response's own count or pagination signals must agree with what it lists
+        or (isinstance(data, dict) and _reports_incomplete(data, len(items)))
     ):
         log.error("Neotoma payment_profile fetch returned no valid profile collection")
         _strand(
