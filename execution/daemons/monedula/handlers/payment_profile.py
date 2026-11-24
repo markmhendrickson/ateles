@@ -135,68 +135,8 @@ def parse_wise_recipient_id(raw: Any) -> int | None:
     return raw
 
 
-def _reports_failure(data: dict) -> bool:
-    """True when a response body reports a failure alongside (or instead of) its collection.
-
-    A 2xx body that carries an error-named key with a real value, a failed ``success`` or ``ok``
-    flag, or a failure ``status`` is contradictory: treat it as a rejected read, never as an
-    explicitly empty collection (which would enable the env-var fallback).
-    """
-    for key, value in data.items():
-        name = str(key).lower()
-        if ("error" in name or name in {"detail", "exception", "fault", "failure"}) and value not in (None, "", [], {}, False, 0):
-            return True
-        if name in {"success", "ok"} and value is False:
-            return True
-        if name in {"status", "state", "result"}:
-            if isinstance(value, str) and value.strip().lower() in {"error", "failed", "failure", "fail", "unavailable"}:
-                return True
-            if isinstance(value, int) and not isinstance(value, bool) and value >= 400:
-                return True
-    return False
-
-
-def _reports_incomplete(data: dict, count: int) -> bool:
-    """True when the response's own count or pagination signals contradict the list it carries.
-
-    A page that is not the whole answer cannot establish that no profile exists: an empty page
-    with ``total`` above zero, or one that still names a next cursor or offset, says more
-    profiles exist than were returned. Treated as a rejected read, never as an empty one (which
-    would enable the unbound env-var fallback). Unknown or absent signals do not count.
-    """
-    total = data.get("total")
-    if total is not None:
-        if isinstance(total, bool) or not isinstance(total, int) or total < 0:
-            return True
-        if total != count:
-            return True
-    for key in ("next_cursor", "next_offset", "cursor", "continuation", "next"):
-        if data.get(key) not in (None, "", False, [], {}):
-            return True
-    for key in ("has_more", "truncated", "partial", "incomplete"):
-        if data.get(key) in (True, "true", "True", 1):
-            return True
-    sources = [data]
-    contract = data.get("read_contract")
-    if isinstance(contract, dict):
-        coverage = contract.get("coverage")
-        if isinstance(coverage, dict):
-            sources.append(coverage)
-            continuation = coverage.get("continuation")
-            if isinstance(continuation, dict):
-                for key in ("next_cursor", "next_offset"):
-                    if continuation.get(key) not in (None, "", False):
-                        return True
-    for src in sources:
-        for key in ("page_exhausted", "scope_exhausted"):
-            if src.get(key) is False:
-                return True
-    return False
-
-
 def load_profiles_from_neotoma(
     strandings: list | None = None,
-    observed: dict | None = None,
 ) -> list[PaymentProfile]:
     """
     Load PaymentProfiles from Neotoma payment_profile entities (Phase 5+).
@@ -204,8 +144,8 @@ def load_profiles_from_neotoma(
     Queries Neotoma for active payment_profile entities belonging to this
     operator, constructs PaymentProfile objects from snapshot fields.
 
-    Falls back to empty list on any error — caller should then call
-    load_profiles() to use env-var fallback.
+    Returns an empty list on any error. ``load_profiles_with_neotoma_fallback`` decides
+    whether env-var profiles may be used: only when no Neotoma base URL is configured.
 
     ``strandings``, when supplied, is appended to with one ``Stranding`` per
     ACTIVE profile that was rejected, and one for a failed fetch. Every
@@ -357,14 +297,11 @@ def load_profiles_from_neotoma(
         return []
 
     # A successful response must carry an explicit profile collection (possibly empty). A body
-    # without one (an error object, an unexpected shape) is a rejected read, never "no profiles
-    # configured": treating it as empty would enable the env-var fallback, which has no series
-    # binding.
+    # without one (an error object, an unexpected shape) is reported as a rejected read so the
+    # caller escalates it; it is never read as "no profiles configured".
     items: list[dict] | None = None
     if isinstance(data, list):
         items = data
-    elif isinstance(data, dict) and _reports_failure(data):
-        items = None  # a 2xx body that also reports an error is a failed read, whatever it lists
     elif isinstance(data, dict):
         # Exactly ONE recognised collection key may be present, and it must be a list: a
         # malformed value under one key, or two recognised keys that could disagree, is a
@@ -378,8 +315,6 @@ def load_profiles_from_neotoma(
         # a truthy non-object snapshot is a malformed record: reject the whole read, never let
         # it raise mid-parse or be skipped into the env fallback
         or not all(isinstance(entry.get("snapshot") or {}, dict) for entry in items)
-        # the response's own count or pagination signals must agree with what it lists
-        or (isinstance(data, dict) and _reports_incomplete(data, len(items)))
     ):
         log.error("Neotoma payment_profile fetch returned no valid profile collection")
         _strand(
@@ -391,10 +326,6 @@ def load_profiles_from_neotoma(
         )
         return []
 
-    if observed is not None:
-        # How many profile entities the read returned, usable or not: the env-var fallback
-        # may follow only an explicitly EMPTY collection, never a populated one.
-        observed["entities"] = len(items)
     profiles: list[PaymentProfile] = []
     for item in items:
         snap: dict = item.get("snapshot") or {}
@@ -571,68 +502,46 @@ def load_profiles_with_neotoma_fallback(
     strandings: list | None = None,
 ) -> list[PaymentProfile]:
     """
-    Load PaymentProfiles: try Neotoma first, fall back to env vars.
+    Load PaymentProfiles from the configured source: Neotoma, or env vars only when no Neotoma
+    base URL is configured.
 
     Phase 5 entrypoint. Monedula callers should use this instead of
     load_profiles() to transparently prefer Neotoma-sourced profiles.
 
+    When a Neotoma base URL IS configured, env-var profiles are NEVER used, whatever the read
+    returned (a failure, a rejected or malformed response, no profile, or only paused ones).
+    An env-var profile carries no calendar series binding, so it would resume title-only
+    matching for a payment whose configured profile requires a series, or resurrect a paused
+    payment. A failed read is reported as a stranding for the caller to escalate.
+
     ``strandings`` is forwarded to the Neotoma loader; see its docstring.
     """
-    # Collect this load's strandings locally as well, so the fallback below can see
-    # whether a profile was held for an invalid calendar series id, whatever the
-    # caller passed.
+    if not os.environ.get("NEOTOMA_BASE_URL", "").strip():
+        # An env-only install: env-var profiles are the only source.
+        log.info("No Neotoma source configured — using env-var payment profiles")
+        return load_profiles(strandings)
+
     collected: list = []
-    observed: dict = {}
     try:
-        profiles = load_profiles_from_neotoma(collected, observed)
+        profiles = load_profiles_from_neotoma(collected)
     except RuntimeError as exc:
         log.error(f"Neotoma payment profiles unavailable: {exc}")
         profiles = []
-        if os.environ.get("NEOTOMA_BASE_URL", "").strip():
-            # The source IS configured, so this is a read failure, not "no Neotoma here":
-            # hold (an env-var profile carries no series binding) and let the caller
-            # escalate it, whatever the exception text says.
-            from strandings import REASON_FETCH_FAILED, Stranding
+        from strandings import REASON_FETCH_FAILED, Stranding
 
-            collected.append(Stranding(
-                entity_id="", label="(all profiles)", reason=REASON_FETCH_FAILED,
-                detail="The configured Neotoma source failed during the payment profile "
-                       "read; no profiles were loaded this run, so none can be proposed.",
-            ))
-        # With no Neotoma base URL configured (an env-only install) env-var profiles are the
-        # only source, so the run falls through to them rather than being taken down.
+        collected.append(Stranding(
+            entity_id="", label="(all profiles)", reason=REASON_FETCH_FAILED,
+            detail="The configured Neotoma source failed during the payment profile "
+                   "read; no profiles were loaded this run, so none can be proposed.",
+        ))
     if strandings is not None:
         strandings.extend(collected)
-    if profiles:
-        return profiles
-
-    if collected:
-        # The configured Neotoma source answered or failed, but yielded no usable profile:
-        # a fetch failure or rejection, or every active profile stranded (an invalid
-        # calendar series id among them). An env-var profile has no series binding, so
-        # falling back would resume title-only matching for a payment whose configured
-        # profile requires a series: hold instead (the strandings are escalated by the
-        # caller). The env fallback remains for a successful empty read and for an
-        # env-only install (no Neotoma base URL configured).
-        log.error(
-            "Neotoma payment profile source yielded no usable profile "
-            f"({len(collected)} stranding(s)); not falling back to env-var profiles"
-        )
-        return []
-
-    if observed.get("entities", 0) > 0:
-        # The configured Neotoma source returned profile entities but none is active (all
-        # paused, archived or of an unrecognised status). An env-var profile has no series
-        # binding and would resurrect a paused payment: hold. The fallback follows only an
-        # explicitly empty collection.
+    if not profiles:
         log.warning(
-            f"Neotoma returned {observed['entities']} payment profile(s), none active; "
-            "not falling back to env-var profiles"
+            "Neotoma is configured but yielded no usable payment profile; "
+            "env-var profiles are not used when a Neotoma source is configured"
         )
-        return []
-
-    log.info("No Neotoma payment profiles found — falling back to env vars")
-    return load_profiles(strandings)
+    return profiles
 
 
 def load_profiles(strandings: list | None = None) -> list[PaymentProfile]:

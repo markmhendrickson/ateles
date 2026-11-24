@@ -217,11 +217,10 @@ series (`recurringEventId` on an occurrence, or `id` on a parent with no
 nonempty string of at most 1024 characters measured before any transformation,
 with no control characters or surrounding whitespace. `null` and `""` mean
 unset; any other invalid configured value strands the profile with
-`invalid_calendar_series_id`, and a stranded profile is held (the env-var
-fallback does not replace it; nor does it when the Neotoma source fails, is
-rejected or strands every active profile: the fallback applies only after a
-successful empty read, meaning an explicit empty collection, or in an env-only
-install; a response with no valid collection is a rejected read). A present but null, blank or invalid
+`invalid_calendar_series_id`, and a stranded profile is held. Env-var profiles
+are used only when no Neotoma base URL is configured (an env-only install); with
+a Neotoma source configured they are never used, whatever the read returns, and
+a failed or rejected read is reported as a stranding. A present but null, blank or invalid
 `recurringEventId` never matches, even when `id` equals the series id. Event
 ids obey the same bounds and compare by
 exact string equality. Without a configured id, keyword-only matching remains.

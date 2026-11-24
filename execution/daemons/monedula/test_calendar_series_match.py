@@ -376,21 +376,6 @@ def test_invalid_series_profile_is_held_not_replaced_by_env_profile(
         assert [s.reason for s in stranded] == [REASON_BAD_CALENDAR_SERIES_ID]
 
 
-def test_env_fallback_still_used_when_neotoma_has_no_profiles(monkeypatch):
-    """Control: the env-var fallback is unchanged when nothing was stranded for a series id."""
-    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
-    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
-    _serve(monkeypatch, {"entities": []})
-    monkeypatch.setenv("MONEDULA_PROFILES", "TEST")
-    monkeypatch.setenv("TEST_LABEL", "Example class")
-    monkeypatch.setenv("TEST_CALENDAR_KEYWORDS", "movement")
-    monkeypatch.setenv("TEST_PAYMENT_TYPE", "btc")
-    monkeypatch.setenv("TEST_AMOUNT_EUR", "10")
-    monkeypatch.setenv("TEST_BTC_ADDRESS", "synthetic-address")
-    profiles = load_profiles_with_neotoma_fallback([])
-    assert [p.prefix for p in profiles] == ["TEST"]
-
-
 @pytest.mark.parametrize("handler_type,rail", RAILS)
 @pytest.mark.parametrize("event,expected_writes", [
     (_session("other-instance", recurring="other-series"), 0),
@@ -431,7 +416,7 @@ def _fail_fetch(monkeypatch, error):
     "unreachable", "server_error", "rejected", "bad_amount", "invalid_series",
 ])
 @pytest.mark.parametrize("pass_strandings", [True, False])
-def test_configured_neotoma_source_that_yields_no_profile_holds_the_env_fallback(
+def test_configured_neotoma_source_that_yields_no_profile_never_loads_env_profiles(
     failure, pass_strandings, monkeypatch
 ):
     """A configured Neotoma source that fails, is rejected, or strands every active profile must
@@ -499,21 +484,10 @@ def test_successful_response_without_a_valid_profile_collection_is_a_rejected_re
         assert [s.reason for s in stranded] == [REASON_FETCH_REJECTED]
 
 
-@pytest.mark.parametrize("key", ["entities", "items", "results"])
-def test_explicit_empty_collection_still_allows_the_env_fallback(key, monkeypatch):
-    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
-    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
-    _env_profile(monkeypatch)
-    _serve(monkeypatch, {key: []})
-    assert [p.prefix for p in load_profiles_with_neotoma_fallback([])] == ["TEST"]
-    _serve(monkeypatch, [])
-    assert [p.prefix for p in load_profiles_with_neotoma_fallback([])] == ["TEST"]
-
-
 @pytest.mark.parametrize("rail", ["btc", "wise"])
 @pytest.mark.parametrize("status", ["paused", "archived", "retired", "", None])
 @pytest.mark.parametrize("pass_strandings", [True, False])
-def test_populated_collection_with_no_active_profile_holds_the_env_fallback(
+def test_populated_collection_with_no_active_profile_never_loads_env_profiles(
     rail, status, pass_strandings, monkeypatch
 ):
     """A non-empty Neotoma collection whose profiles are all inactive or of an unrecognised status
@@ -541,7 +515,7 @@ def test_active_profile_alongside_inactive_ones_is_returned(monkeypatch):
 
 @pytest.mark.parametrize("rail", ["btc", "wise"])
 @pytest.mark.parametrize("pass_strandings", [True, False])
-def test_runtime_error_from_a_configured_neotoma_source_holds_the_env_fallback(
+def test_runtime_error_from_a_configured_neotoma_source_never_loads_env_profiles(
     rail, pass_strandings, monkeypatch
 ):
     """Any RuntimeError while the Neotoma base URL IS configured is a failed read (hold and
@@ -575,51 +549,6 @@ def test_profile_with_the_status_field_absent_loads_as_active(monkeypatch):
 
 
 @pytest.mark.parametrize("rail", ["btc", "wise"])
-@pytest.mark.parametrize("body", [
-    {"entities": [], "error": "synthetic"},
-    {"entities": [], "errors": ["synthetic"]},
-    {"entities": [], "error_message": "synthetic"},
-    {"entities": [], "detail": "synthetic"},
-    {"entities": [], "success": False},
-    {"entities": [], "ok": False},
-    {"entities": [], "status": "error"},
-    {"entities": [], "status": 503},
-    {"items": [], "exception": "synthetic"},
-    {"results": [], "failure": True},
-])
-@pytest.mark.parametrize("pass_strandings", [True, False])
-def test_contradictory_response_that_reports_a_failure_is_a_rejected_read(
-    rail, body, pass_strandings, monkeypatch
-):
-    """A 2xx body that carries an empty collection AND reports a failure must not read as an
-    explicitly empty collection (it would enable the unbound env-var fallback)."""
-    from strandings import REASON_FETCH_REJECTED
-
-    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
-    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
-    _env_profile(monkeypatch, rail)
-    _serve(monkeypatch, body)
-    stranded = [] if pass_strandings else None
-    assert load_profiles_with_neotoma_fallback(stranded) == []
-    if pass_strandings:
-        assert [s.reason for s in stranded] == [REASON_FETCH_REJECTED]
-
-
-@pytest.mark.parametrize("body", [
-    {"entities": [], "total": 0, "excluded_merged": 0, "search_mode": "keyword",
-     "read_contract": {"mode": "synthetic"}, "applied_search_strategies": []},
-    {"entities": [], "error": None, "errors": [], "status": "ok", "success": True},
-    {"entities": [], "status": 200},
-])
-def test_real_empty_collection_with_benign_metadata_still_allows_the_env_fallback(body, monkeypatch):
-    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
-    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
-    _env_profile(monkeypatch)
-    _serve(monkeypatch, body)
-    assert [p.prefix for p in load_profiles_with_neotoma_fallback([])] == ["TEST"]
-
-
-@pytest.mark.parametrize("rail", ["btc", "wise"])
 @pytest.mark.parametrize("snapshot", ["not-an-object", ["list"], 7, True])
 @pytest.mark.parametrize("pass_strandings", [True, False])
 def test_non_object_snapshot_in_a_collection_is_a_rejected_read(
@@ -638,64 +567,46 @@ def test_non_object_snapshot_in_a_collection_is_a_rejected_read(
 
 
 @pytest.mark.parametrize("rail", ["btc", "wise"])
-@pytest.mark.parametrize("body", [
-    {"entities": [], "total": 1, "limit": 50, "offset": 0},
-    {"entities": [], "total": 3},
-    {"entities": [], "total": -1},
-    {"entities": [], "total": "0"},
-    {"entities": [], "total": True},
-    {"entities": [], "next_cursor": "synthetic-cursor"},
-    {"entities": [], "next_offset": 50},
-    {"entities": [], "has_more": True},
-    {"entities": [], "truncated": True},
-    {"entities": [], "read_contract": {"coverage": {"page_exhausted": False}}},
-    {"entities": [], "read_contract": {"coverage": {"scope_exhausted": False}}},
-    {"entities": [], "read_contract": {"coverage": {"continuation": {"next_cursor": "synthetic"}}}},
-    {"items": [], "total": 2},
-    {"results": [], "next_cursor": "synthetic-cursor"},
-])
 @pytest.mark.parametrize("pass_strandings", [True, False])
-def test_empty_page_contradicted_by_its_own_count_or_pagination_is_a_rejected_read(
-    rail, body, pass_strandings, monkeypatch
+@pytest.mark.parametrize("body", [
+    # an empty collection, however the response dresses it: none of these may reach the env profile
+    {"entities": []}, {"items": []}, {"results": []}, [],
+    {"entities": [], "total": 0}, {"entities": [], "total": 1}, {"entities": [], "total": "0"},
+    {"entities": [], "next_cursor": "synthetic-cursor"}, {"entities": [], "has_more": True},
+    {"entities": [], "error": "synthetic"}, {"entities": [], "errors": ["synthetic"]},
+    {"entities": [], "success": False}, {"entities": [], "success": "false"},
+    {"entities": [], "ok": 0}, {"entities": [], "ok": "no"},
+    {"entities": [], "status": "error"}, {"entities": [], "status": "fail"},
+    {"entities": [], "status": 503}, {"entities": [], "result": "failed"},
+    {"entities": [], "read_contract": {"coverage": {"page_exhausted": False}}},
+    {"entities": [], "unrecognised_flag": "anything"},
+])
+def test_no_response_from_a_configured_neotoma_source_can_reach_the_env_profile(
+    rail, pass_strandings, body, monkeypatch
 ):
-    """An empty first page whose own total or pagination says more exist cannot establish that no
-    profile exists: reject it (no env fallback), on both rails."""
-    from strandings import REASON_FETCH_REJECTED
-
+    """The whole class by construction: with a Neotoma base URL configured, whatever a successful
+    read returns (an empty collection however it is dressed, a failure report, a contradicted page)
+    loads no env-var profile, on both rails, with and without a strandings list."""
     monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
     monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
     _env_profile(monkeypatch, rail)
     _serve(monkeypatch, body)
     stranded = [] if pass_strandings else None
     assert load_profiles_with_neotoma_fallback(stranded) == []
-    if pass_strandings:
-        assert [s.reason for s in stranded] == [REASON_FETCH_REJECTED]
 
 
-@pytest.mark.parametrize("body", [
-    {"entities": [], "total": 0, "limit": 50, "offset": 0, "next_cursor": None, "has_more": False},
-    {"entities": [], "total": 0, "read_contract": {"coverage": {
-        "page_exhausted": True, "scope_exhausted": None, "state": "unknown",
-        "continuation": {"kind": "unsupported", "next_cursor": None, "next_offset": None}}}},
-    {"items": []},
-    [],
-])
-def test_confirmed_empty_read_with_agreeing_signals_still_allows_the_env_fallback(body, monkeypatch):
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+def test_env_profile_loads_only_without_a_configured_neotoma_source(rail, monkeypatch):
+    """The one rule: env-var profiles are the source only when no Neotoma base URL is configured
+    (blank counts as unconfigured)."""
+    _env_profile(monkeypatch, rail)
+    for value in (None, "", "   "):
+        if value is None:
+            monkeypatch.delenv("NEOTOMA_BASE_URL", raising=False)
+        else:
+            monkeypatch.setenv("NEOTOMA_BASE_URL", value)
+        assert [p.prefix for p in load_profiles_with_neotoma_fallback([])] == ["TEST"]
     monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
     monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
-    _env_profile(monkeypatch)
-    _serve(monkeypatch, body)
-    assert [p.prefix for p in load_profiles_with_neotoma_fallback([])] == ["TEST"]
-
-
-def test_populated_page_with_a_total_above_what_it_lists_is_a_rejected_read(monkeypatch):
-    from strandings import REASON_FETCH_REJECTED
-
-    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
-    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
-    _env_profile(monkeypatch)
-    entity = _profile(payment_type="btc", btc_address="synthetic-address")
-    _serve(monkeypatch, {"entities": [entity], "total": 2})
-    stranded = []
-    assert load_profiles_with_neotoma_fallback(stranded) == []
-    assert [s.reason for s in stranded] == [REASON_FETCH_REJECTED]
+    _serve(monkeypatch, {"entities": []})
+    assert load_profiles_with_neotoma_fallback([]) == []
