@@ -895,3 +895,65 @@ def test_falsy_non_text_keyword_entries_are_rejected_not_dropped(raw):
 
     with pytest.raises(TypeError):
         _keyword_list(raw)
+
+
+@pytest.mark.parametrize("entity_id", [{"a": 1}, ["x"], 7, True])
+def test_non_text_entity_id_holds_that_profile_only(entity_id, monkeypatch):
+    from strandings import REASON_MALFORMED_PROFILE
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    bad = _profile(payment_type="btc", btc_address="synthetic-address")
+    bad["snapshot"]["label"] = "Bad profile"
+    bad["entity_id"] = entity_id
+    good = _profile(payment_type="btc", btc_address="synthetic-address")
+    good["snapshot"]["label"] = "Good profile"
+    _serve(monkeypatch, {"entities": [bad, good]})
+    stranded = []
+    assert [p.label for p in load_profiles_with_neotoma_fallback(stranded)] == ["Good profile"]
+    assert [s.reason for s in stranded] == [REASON_MALFORMED_PROFILE]
+    assert all(isinstance(s.entity_id, str) for s in stranded)
+
+
+@pytest.mark.parametrize("keywords", [[False], [0], [None], [0.0]])
+@pytest.mark.parametrize("due_date", [20261124, "2026-11-24"])
+def test_wise_one_off_cannot_be_triggered_by_falsy_keywords_or_a_numeric_due_date(
+    keywords, due_date, monkeypatch
+):
+    """The effect on the Wise route: a malformed keyword list or a numeric due date builds no
+    handler, produces no due-date match and records the malformed-profile stranding. (The valid
+    text date with a falsy keyword entry is held for the keyword entry; the numeric date alone is
+    held for the date.)"""
+    from handlers import load_handlers
+    from strandings import REASON_MALFORMED_PROFILE
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    entity = _profile(payment_type="wise")
+    entity["snapshot"]["calendar_keywords"] = keywords
+    entity["snapshot"]["due_date"] = due_date
+    _serve(monkeypatch, {"entities": [entity]})
+    stranded = []
+    assert load_handlers(stranded) == []
+    assert [s.reason for s in stranded] == [REASON_MALFORMED_PROFILE]
+
+
+@pytest.mark.parametrize("field,value", [("wise_iban", {}), ("wise_recipient_name", []), ("one_off", "false"),
+                                          ("one_off", "yes")])
+def test_empty_non_text_values_are_not_treated_as_missing(field, value, monkeypatch):
+    """A falsy non-text value ({} or []) must not read as 'not set': text fields reject it, and the
+    one-off flag reads only real booleans and the exact text true or false."""
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    entity = _profile(payment_type="wise", calendar_recurring_event_id=SERIES)
+    entity["snapshot"][field] = value
+    _serve(monkeypatch, {"entities": [entity]})
+    stranded = []
+    profiles = load_profiles_with_neotoma_fallback(stranded)
+    if field == "one_off" and value == "false":
+        assert [p.one_off for p in profiles] == [False] and stranded == []
+    else:
+        assert profiles == [] and len(stranded) == 1

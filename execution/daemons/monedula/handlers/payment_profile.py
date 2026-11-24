@@ -570,7 +570,7 @@ def load_profiles_from_neotoma(
                 btc_address=_text_field(snap, "btc_address"),
                 due_date=due_date,
                 one_off=one_off,
-                entity_id=str(item.get("entity_id") or "").strip(),
+                entity_id=_text_field(item, "entity_id").strip(),
                 neotoma_task_id=_text_field(snap, "neotoma_task_id"),
                 task_keywords=task_keywords,
             )
@@ -587,12 +587,13 @@ def load_profiles_from_neotoma(
             # A malformed field must hold that one profile and be reported, never raise out of the
             # whole read.
             log.error(
-                f"payment_profile {item.get('entity_id')} could not be read "
+                f"payment_profile {str(item.get('entity_id'))[:60]} could not be read "
                 f"({type(exc).__name__}) — skipped"
             )
+            safe_id = item.get("entity_id") if isinstance(item.get("entity_id"), str) else ""
             _strand(
-                item.get("entity_id"),
-                f"(unreadable {item.get('entity_id')})",
+                safe_id,
+                f"(unreadable {safe_id})",
                 REASON_MALFORMED_PROFILE,
                 "An active payment_profile has a malformed field and could not be read; it is "
                 "held until it is fixed.",
