@@ -203,9 +203,11 @@ def _keyword_list(raw: Any) -> list[str]:
             raw = [k.strip() for k in raw.split(",") if k.strip()]
     if not isinstance(raw, (list, tuple)):
         raise TypeError("keywords must be a list of text")
-    if not all(isinstance(k, str) for k in raw if k):
+    if not all(isinstance(k, str) for k in raw):
+        # every entry must be text, including falsy ones (None, 0, False) that a truthiness
+        # filter would drop silently; only empty text entries are ignored
         raise TypeError("keywords must be text")
-    return [k.strip().lower() for k in raw if k and k.strip()]
+    return [k.strip().lower() for k in raw if k.strip()]
 
 
 def load_profiles_from_neotoma(

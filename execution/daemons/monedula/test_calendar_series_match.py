@@ -658,6 +658,9 @@ def test_empty_read_from_a_configured_source_is_reported_and_marks_the_load_degr
     ("contact_id", ["x"]), ("contact_category", 7), ("contact_platform", {"a": 1}),
     ("wise_reference", 7), ("neotoma_task_id", {"a": 1}),
     ("prefix", 7), ("prefix", ["x"]), ("prefix", True), ("label", 7), ("label", ["x"]),
+    ("calendar_keywords", [None, "movement"]), ("calendar_keywords", [0]),
+    ("calendar_keywords", [False, "movement"]), ("calendar_keywords", [{}]),
+    ("task_keywords", [None]), ("task_keywords", [0, "movement"]),
     ("calendar_keywords", {"movement": "x"}), ("calendar_keywords", '{"movement": 1}'),
     ("calendar_keywords", '"movement"'), ("calendar_keywords", [{"a": 1}]),
     ("task_keywords", {"movement": "x"}), ("task_keywords", '{"movement": 1}'),
@@ -729,6 +732,7 @@ def test_mapped_or_scalar_keywords_strand_the_profile_and_build_no_handler(
 
 @pytest.mark.parametrize("raw,expected", [
     (["Movement", " yoga "], ["movement", "yoga"]), ("movement, Yoga", ["movement", "yoga"]),
+    (["  ", "x"], ["x"]),
     ('["Movement", "yoga"]', ["movement", "yoga"]), ("", []), ([], []), (["", "x"], ["x"]),
 ])
 def test_valid_keyword_collections_still_parse(raw, expected):
@@ -883,3 +887,11 @@ def test_unreadable_one_off_holds_the_profile_so_nothing_can_archive_it(stored, 
     stranded = []
     assert load_handlers(stranded) == []
     assert [s.reason for s in stranded] == [REASON_MALFORMED_PROFILE]
+
+
+@pytest.mark.parametrize("raw", [[None], [0], [False], [{}], [[]], ["x", None], '[null, "x"]', "[0]"])
+def test_falsy_non_text_keyword_entries_are_rejected_not_dropped(raw):
+    from handlers.payment_profile import _keyword_list
+
+    with pytest.raises(TypeError):
+        _keyword_list(raw)
