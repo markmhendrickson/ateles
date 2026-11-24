@@ -136,6 +136,18 @@ def parse_wise_recipient_id(raw: Any) -> int | None:
     return raw
 
 
+def _text_field(snap: dict, name: str) -> str:
+    """A stored text field: missing or null reads as empty text; anything that is not text (a
+    mapping, a list, a number, a boolean) is malformed and raises TypeError so the caller holds
+    that one profile instead of passing the value through."""
+    value = snap.get(name, "")
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be text")
+    return value
+
+
 def _keyword_list(raw: Any) -> list[str]:
     """Parse a stored keyword collection: a list of text, a JSON list, or a comma-separated string.
 
@@ -499,19 +511,19 @@ def load_profiles_from_neotoma(
                 calendar_recurring_event_id=recurring_id or "",
                 payment_type=payment_type,
                 amount_eur=amount_eur,
-                contact_id=snap.get("contact_id", ""),
-                contact_category=snap.get("contact_category", ""),
-                contact_platform=snap.get("contact_platform", ""),
-                wise_reference=snap.get("wise_reference", ""),
+                contact_id=_text_field(snap, "contact_id"),
+                contact_category=_text_field(snap, "contact_category"),
+                contact_platform=_text_field(snap, "contact_platform"),
+                wise_reference=_text_field(snap, "wise_reference"),
                 wise_legal_type=legal_type_raw,
                 wise_iban=str(snap.get("wise_iban") or "").strip(),
                 wise_recipient_name=str(snap.get("wise_recipient_name") or "").strip(),
                 wise_recipient_id=recipient_id,
-                btc_address=snap.get("btc_address", ""),
+                btc_address=_text_field(snap, "btc_address"),
                 due_date=due_date,
                 one_off=one_off,
                 entity_id=str(item.get("entity_id") or "").strip(),
-                neotoma_task_id=snap.get("neotoma_task_id", ""),
+                neotoma_task_id=_text_field(snap, "neotoma_task_id"),
                 task_keywords=task_keywords,
             )
         )

@@ -644,6 +644,9 @@ def test_empty_read_from_a_configured_source_is_reported_and_marks_the_load_degr
     ("task_keywords", 7), ("task_keywords", True), ("amount_eur", [10]),
     ("amount_eur", 1e309), ("amount_eur", float("nan")), ("wise_recipient_id", 1e309),
     ("wise_recipient_id", float("nan")), ("wise_recipient_id", [1]),
+    ("btc_address", {"a": 1}), ("btc_address", 7), ("btc_address", ["x"]),
+    ("contact_id", ["x"]), ("contact_category", 7), ("contact_platform", {"a": 1}),
+    ("wise_reference", 7), ("neotoma_task_id", {"a": 1}),
     ("prefix", 7), ("prefix", ["x"]), ("prefix", True), ("label", 7), ("label", ["x"]),
     ("calendar_keywords", {"movement": "x"}), ("calendar_keywords", '{"movement": 1}'),
     ("calendar_keywords", '"movement"'), ("calendar_keywords", [{"a": 1}]),
@@ -721,3 +724,16 @@ def test_valid_keyword_collections_still_parse(raw, expected):
     from handlers.payment_profile import _keyword_list
 
     assert _keyword_list(raw) == expected
+
+
+@pytest.mark.parametrize("name", [
+    "contact_id", "contact_category", "contact_platform", "wise_reference", "btc_address",
+    "neotoma_task_id",
+])
+def test_text_fields_read_missing_null_and_text_values_as_text(name):
+    from handlers.payment_profile import _text_field
+
+    assert _text_field({}, name) == ""
+    assert _text_field({name: None}, name) == ""
+    assert _text_field({name: ""}, name) == ""
+    assert _text_field({name: "synthetic"}, name) == "synthetic"
