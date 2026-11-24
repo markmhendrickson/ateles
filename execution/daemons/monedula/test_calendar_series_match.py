@@ -644,6 +644,13 @@ def test_empty_read_from_a_configured_source_is_reported_and_marks_the_load_degr
     ("task_keywords", 7), ("task_keywords", True), ("amount_eur", [10]),
     ("amount_eur", 1e309), ("amount_eur", float("nan")), ("wise_recipient_id", 1e309),
     ("wise_recipient_id", float("nan")), ("wise_recipient_id", [1]),
+    ("one_off", "yes"), ("one_off", "0"), ("one_off", 1), ("one_off", ["x"]), ("one_off", {"a": 1}),
+    ("status", 7), ("status", ["active"]), ("status", {"a": 1}), ("status", True),
+    ("due_date", 7), ("due_date", {"a": 1}), ("due_date", ["2026-11-24"]),
+    ("payment_type", 7), ("payment_type", None), ("payment_type", ["wise"]),
+    ("wise_legal_type", 7), ("wise_legal_type", ["PRIVATE"]), ("wise_legal_type", {"a": 1}),
+    ("wise_iban", 7), ("wise_iban", {"a": 1}), ("wise_recipient_name", 7),
+    ("wise_recipient_name", ["x"]),
     ("amount_eur", True), ("amount_eur", False), ("amount_eur", 10.5), ("amount_eur", "10.5"),
     ("amount_eur", "1_0"), ("amount_eur", "ten"), ("amount_eur", {"a": 1}), ("amount_eur", None),
     ("amount_eur", "1e3"), ("amount_eur", "--5"), ("amount_eur", "\u0661\u0660"),
@@ -674,7 +681,8 @@ def test_malformed_profile_field_holds_that_profile_only_and_is_reported(field, 
     profiles = load_profiles_with_neotoma_fallback(stranded)
     assert [p.label for p in profiles] == ["Good profile"]
     assert len(stranded) == 1 and stranded[0].reason in (
-        REASON_MALFORMED_PROFILE, "invalid_amount", "invalid_wise_recipient_id")
+        REASON_MALFORMED_PROFILE, "invalid_amount", "invalid_wise_recipient_id",
+        "unknown_payment_type", "invalid_wise_legal_type")
     assert stranded[0].reason not in (REASON_FETCH_FAILED, REASON_FETCH_REJECTED)
     assert monedula._profile_load_degraded(profiles, stranded) is False
 
@@ -767,3 +775,111 @@ def test_coerced_amount_builds_no_handler_that_can_match_a_series_event(rail, am
     stranded = []
     assert load_handlers(stranded) == []
     assert [s.reason for s in stranded] == ["invalid_amount"]
+
+
+@pytest.mark.parametrize("stored,expected", [
+    (None, False), (False, False), (True, True), ("false", False), ("FALSE", False),
+    (" true ", True), ("True", True),
+])
+def test_one_off_reads_booleans_by_meaning_not_by_truthiness(stored, expected):
+    from handlers.payment_profile import _bool_field
+
+    assert _bool_field({"one_off": stored}, "one_off") is expected
+    assert _bool_field({}, "one_off") is False
+
+
+@pytest.mark.parametrize("stored", ["yes", "0", "1", "", 1, 0, ["x"], {"a": 1}])
+def test_one_off_rejects_everything_that_is_not_a_boolean(stored):
+    from handlers.payment_profile import _bool_field
+
+    with pytest.raises(TypeError):
+        _bool_field({"one_off": stored}, "one_off")
+
+
+@pytest.mark.parametrize("stored,one_off", [("false", False), (False, False), ("true", True), (True, True)])
+def test_recurring_wise_profile_with_text_boolean_keeps_its_real_meaning(stored, one_off, monkeypatch):
+    """The effect: a recurring Wise profile stored with the text "false" stays recurring (it is not
+    treated as one-off, which would archive it after an approved payment); only an unreadable value
+    holds the profile."""
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    entity = _profile(payment_type="wise", calendar_recurring_event_id=SERIES, one_off=stored)
+    _serve(monkeypatch, {"entities": [entity]})
+    profiles = load_profiles_with_neotoma_fallback([])
+    assert [p.one_off for p in profiles] == [one_off]
+
+
+def test_every_stored_field_is_read_through_a_typed_accessor():
+    """Source guard: a raw read of a stored field in the Neotoma loader must be one of the few
+    that are validated on the next lines; every other field must go through a typed accessor, so a
+    new field cannot be added as an unchecked coercion."""
+    import inspect
+    import re
+
+    import handlers.payment_profile as module
+
+    source = inspect.getsource(module.load_profiles_from_neotoma)
+    raw_allowed = {
+        "status", "label", "prefix", "calendar_recurring_event_id", "payment_type", "amount_eur",
+    }
+    wrappers = ("_keyword_list(", "parse_wise_recipient_id(")
+    offenders = []
+    for line in source.splitlines():
+        for name in re.findall(r'snap\.get\("([a-z_]+)"', line):
+            if name not in raw_allowed and not any(w in line for w in wrappers):
+                offenders.append((name, line.strip()))
+    assert offenders == [], offenders
+    typed = set(re.findall(r'_(?:text|bool)_field\(snap, "([a-z_]+)"', source))
+    assert {"due_date", "one_off", "wise_legal_type", "wise_iban", "wise_recipient_name",
+            "contact_id", "contact_category", "contact_platform", "wise_reference",
+            "btc_address", "neotoma_task_id"} <= typed
+
+
+class _InertClient:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+@pytest.mark.parametrize("stored,archived", [("false", False), (False, False), (None, False),
+                                              ("true", True), (True, True)])
+def test_post_payment_archives_only_a_genuinely_one_off_profile(stored, archived, monkeypatch):
+    """The Wise post-payment effect: a recurring profile stored with the text "false" is NOT closed
+    and archived after an approved payment; only a genuinely one-off profile is. A profile stored
+    with an unreadable value never reaches this path (it is held at load)."""
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    entity = _profile(payment_type="wise", calendar_recurring_event_id=SERIES)
+    if stored is not None:
+        entity["snapshot"]["one_off"] = stored
+    _serve(monkeypatch, {"entities": [entity]})
+    profile = load_profiles_with_neotoma_fallback([])[0]
+
+    closed = []
+    monkeypatch.setattr(wise_transfer, "_find_task_id", lambda profile: "ent_synthetic_task")
+    monkeypatch.setattr(wise_transfer.task_writes, "make_client", lambda: (_InertClient(), "base"))
+    monkeypatch.setattr(wise_transfer.task_writes, "append_note", lambda *a, **k: True)
+    monkeypatch.setattr(wise_transfer, "_close_one_off", lambda *a, **k: closed.append(a))
+    monkeypatch.setattr(wise_transfer, "_find_next_event_due_date", lambda profile: None)
+    wise_transfer._update_task_impl(profile, {"status": "sent", "transfer_id": "synthetic"})
+    assert bool(closed) is archived
+
+
+@pytest.mark.parametrize("stored", ["yes", "0", 1, ["x"]])
+def test_unreadable_one_off_holds_the_profile_so_nothing_can_archive_it(stored, monkeypatch):
+    from handlers import load_handlers
+    from strandings import REASON_MALFORMED_PROFILE
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    entity = _profile(payment_type="wise", calendar_recurring_event_id=SERIES)
+    entity["snapshot"]["one_off"] = stored
+    _serve(monkeypatch, {"entities": [entity]})
+    stranded = []
+    assert load_handlers(stranded) == []
+    assert [s.reason for s in stranded] == [REASON_MALFORMED_PROFILE]

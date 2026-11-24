@@ -161,6 +161,21 @@ def parse_amount_eur(raw: Any) -> int:
     raise TypeError("amount_eur must be a number")
 
 
+def _bool_field(snap: dict, name: str) -> bool:
+    """A stored boolean: missing or null reads as False, a real boolean is kept, and the exact
+    text "true" or "false" (any case) maps to its meaning. Anything else (any other text such as
+    "yes" or "0", a number, a list, a mapping) is malformed and raises TypeError: a truthiness
+    coercion would read the text "false" as True."""
+    value = snap.get(name)
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+        return value.strip().lower() == "true"
+    raise TypeError(f"{name} must be a boolean")
+
+
 def _text_field(snap: dict, name: str) -> str:
     """A stored text field: missing or null reads as empty text; anything that is not text (a
     mapping, a list, a number, a boolean) is malformed and raises TypeError so the caller holds
@@ -403,7 +418,10 @@ def load_profiles_from_neotoma(
 
     def _parse_item(item: dict) -> None:
         snap: dict = item.get("snapshot") or {}
-        if snap.get("status", "active") not in ("active",):
+        status = snap.get("status", "active")
+        if status is not None and not isinstance(status, str):
+            raise TypeError("status must be text")
+        if status not in ("active",):
             return  # skip paused/archived
 
         label = snap.get("label", "")
@@ -433,8 +451,8 @@ def load_profiles_from_neotoma(
             )
             return
 
-        due_date = str(snap.get("due_date") or "").strip()
-        one_off = bool(snap.get("one_off")) or (not calendar_keywords and bool(due_date))
+        due_date = _text_field(snap, "due_date").strip()
+        one_off = _bool_field(snap, "one_off") or (not calendar_keywords and bool(due_date))
 
         # A profile needs at least one trigger: calendar keywords (recurring,
         # attendance-gated) or a due date (one-off invoice). With neither it is
@@ -454,7 +472,10 @@ def load_profiles_from_neotoma(
             )
             return
 
-        payment_type_raw = str(snap.get("payment_type", "wise")).lower()
+        payment_type_stored = snap.get("payment_type", "wise")
+        if not isinstance(payment_type_stored, str):
+            raise TypeError("payment_type must be text")
+        payment_type_raw = payment_type_stored.lower()
         if payment_type_raw not in ("wise", "btc"):
             log.warning(
                 f"payment_profile {label!r} unknown payment_type={payment_type_raw!r} — skipped"
@@ -500,7 +521,7 @@ def load_profiles_from_neotoma(
 
         task_keywords = _keyword_list(snap.get("task_keywords", [])) or calendar_keywords
 
-        legal_type_raw = str(snap.get("wise_legal_type") or "PRIVATE").strip().upper()
+        legal_type_raw = _text_field(snap, "wise_legal_type").strip().upper() or "PRIVATE"
         if legal_type_raw not in _WISE_LEGAL_TYPES:
             log.warning(
                 f"payment_profile {label!r} invalid wise_legal_type="
@@ -541,8 +562,8 @@ def load_profiles_from_neotoma(
                 contact_platform=_text_field(snap, "contact_platform"),
                 wise_reference=_text_field(snap, "wise_reference"),
                 wise_legal_type=legal_type_raw,
-                wise_iban=str(snap.get("wise_iban") or "").strip(),
-                wise_recipient_name=str(snap.get("wise_recipient_name") or "").strip(),
+                wise_iban=_text_field(snap, "wise_iban").strip(),
+                wise_recipient_name=_text_field(snap, "wise_recipient_name").strip(),
                 wise_recipient_id=recipient_id,
                 btc_address=_text_field(snap, "btc_address"),
                 due_date=due_date,
