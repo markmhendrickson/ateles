@@ -47,6 +47,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -134,6 +135,30 @@ def parse_wise_recipient_id(raw: Any) -> int | None:
     if not isinstance(raw, int) or raw <= 0:
         raise ValueError("wise_recipient_id must be a positive integer")
     return raw
+
+
+def parse_amount_eur(raw: Any) -> int:
+    """Normalise a stored ``amount_eur`` to a whole number of euros.
+
+    Accepts an int, an integral float, or a string of plain digits. A boolean, a fractional or
+    non-finite number, a string that is not plain digits, and anything else raises ``ValueError``
+    or ``TypeError``: an amount must never be coerced (a boolean would read as 1 and a fraction
+    would be truncated).
+    """
+    if isinstance(raw, bool):
+        raise TypeError("amount_eur must be a number, not a boolean")
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        if raw != raw or raw in (float("inf"), float("-inf")) or not raw.is_integer():
+            raise ValueError("amount_eur must be a whole number")
+        return int(raw)
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not re.fullmatch(r"[+-]?[0-9]+", text):
+            raise ValueError("amount_eur must be plain digits")
+        return int(text)
+    raise TypeError("amount_eur must be a number")
 
 
 def _text_field(snap: dict, name: str) -> str:
@@ -446,8 +471,8 @@ def load_profiles_from_neotoma(
 
         amount_raw = snap.get("amount_eur", 0)
         try:
-            amount_eur = int(amount_raw)
-        except (ValueError, TypeError):
+            amount_eur = parse_amount_eur(amount_raw)
+        except (ValueError, TypeError, OverflowError):
             log.warning(
                 f"payment_profile {label!r} invalid amount_eur={amount_raw!r} — skipped"
             )

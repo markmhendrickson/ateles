@@ -644,6 +644,9 @@ def test_empty_read_from_a_configured_source_is_reported_and_marks_the_load_degr
     ("task_keywords", 7), ("task_keywords", True), ("amount_eur", [10]),
     ("amount_eur", 1e309), ("amount_eur", float("nan")), ("wise_recipient_id", 1e309),
     ("wise_recipient_id", float("nan")), ("wise_recipient_id", [1]),
+    ("amount_eur", True), ("amount_eur", False), ("amount_eur", 10.5), ("amount_eur", "10.5"),
+    ("amount_eur", "1_0"), ("amount_eur", "ten"), ("amount_eur", {"a": 1}), ("amount_eur", None),
+    ("amount_eur", "1e3"), ("amount_eur", "--5"), ("amount_eur", "\u0661\u0660"),
     ("btc_address", {"a": 1}), ("btc_address", 7), ("btc_address", ["x"]),
     ("contact_id", ["x"]), ("contact_category", 7), ("contact_platform", {"a": 1}),
     ("wise_reference", 7), ("neotoma_task_id", {"a": 1}),
@@ -737,3 +740,30 @@ def test_text_fields_read_missing_null_and_text_values_as_text(name):
     assert _text_field({name: None}, name) == ""
     assert _text_field({name: ""}, name) == ""
     assert _text_field({name: "synthetic"}, name) == "synthetic"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (10, 10), (10.0, 10), ("10", 10), (" 10 ", 10), ("+10", 10), (1, 1),
+])
+def test_amount_eur_accepts_only_whole_numbers(raw, expected):
+    from handlers.payment_profile import parse_amount_eur
+
+    assert parse_amount_eur(raw) == expected
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("amount", [True, 10.5, "10.5"])
+def test_coerced_amount_builds_no_handler_that_can_match_a_series_event(rail, amount, monkeypatch):
+    """The effect: a boolean or fractional amount holds the profile, so no handler is built and no
+    series-matching event can raise an approval with a coerced amount."""
+    from handlers import load_handlers
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch, rail)
+    entity = _profile(payment_type=rail, btc_address="synthetic-address",
+                      calendar_recurring_event_id=SERIES, amount_eur=amount)
+    _serve(monkeypatch, {"entities": [entity]})
+    stranded = []
+    assert load_handlers(stranded) == []
+    assert [s.reason for s in stranded] == ["invalid_amount"]
