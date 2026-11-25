@@ -279,6 +279,8 @@ DAEMON_CONFIG_NAMES: frozenset[str] = frozenset(
         "COTINGA_CALENDAR_IDS",
         "CYPHORHINUS_POLL_TIMEOUT",
         "CYPHORHINUS_TELEGRAM_CHAT_ID",
+        "DASHBOARD_GIT_SHA",  # commit the console service reports from /healthz
+        "DASHBOARD_LOCAL_ONLY",  # console service: loopback-only mode, set at start-up
         "DATA_DIR",
         "DECISION_QUEUE_READING_PATH",
         "DUE_DATE_HYGIENE_ENABLED",
@@ -352,6 +354,7 @@ DAEMON_CONFIG_NAMES: frozenset[str] = frozenset(
         "PHOENICURUS_STALE_RELEASE_BLOCK_DAYS",
         "PHOENICURUS_STALE_RELEASE_REESCALATE_HOURS",
         "PICULET_MAX_IMPORTS_PER_POLL",  # most new voice memos piculet imports in one poll, newest first (default 5)
+        "PORT",  # listen port of the console service
         "PRIORITY_RUBRIC_ENTITY_ID",
         "PYTHONPATH",
         "RECORD_MEETING_DIARIZE",
