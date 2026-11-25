@@ -132,10 +132,16 @@ export function repoRoot(): string {
   return resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 }
 
+/** The interpreter for the planning module: the installer pins one that can import `mcp`. */
+export function pythonBin(env: NodeJS.ProcessEnv = process.env): string {
+  const pinned = env.DASHBOARD_PYTHON?.trim();
+  return pinned ? pinned : "python3";
+}
+
 export function runPython(args: string[]): Promise<string> {
   return new Promise((resolveRun, reject) => {
     execFile(
-      "python3",
+      pythonBin(),
       args,
       { cwd: repoRoot(), timeout: TREE_JOB_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024, env: process.env },
       (err, stdout) => (err ? reject(err) : resolveRun(stdout)),

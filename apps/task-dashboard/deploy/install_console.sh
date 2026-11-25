@@ -84,11 +84,19 @@ if [ -z "$NODE_BIN" ]; then
 fi
 command -v npm >/dev/null 2>&1 || { echo "npm not found on PATH." >&2; exit 1; }
 
-# launchd starts with a bare PATH. The planning tab runs `python3` from the
-# repo; prefer the repo's own venv when it has one.
+# launchd starts with a bare PATH. The planning tab runs the repo's own MCP
+# module, so pin the interpreter the repo's shared MCP lookup chooses (lookup
+# only: nothing is created or installed here).
 AGENT_PATH="$(dirname "$NODE_BIN"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-if [ -x "$REPO_DIR/.venv/bin/python3" ]; then
-  AGENT_PATH="$REPO_DIR/.venv/bin:$AGENT_PATH"
+MCP_DIR="$REPO_DIR/execution/mcp/ateles"
+# shellcheck source=../../../execution/mcp/ateles/ateles_mcp_bootstrap.sh
+source "$MCP_DIR/ateles_mcp_bootstrap.sh"
+PYTHON_BIN="$(ateles_find_mcp_python || true)"
+echo "==> Planning tab Python: ${PYTHON_BIN:-none found} (needs the MCP dependencies)"
+if [ -z "$PYTHON_BIN" ]; then
+  echo "No Python with the MCP dependencies found." >&2
+  echo "Fix: uv venv $REPO_DIR/.mcp-venv && VIRTUAL_ENV=$REPO_DIR/.mcp-venv uv pip install -r $MCP_DIR/requirements.txt" >&2
+  exit 1
 fi
 GIT_SHA="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo "")"
 
@@ -98,6 +106,7 @@ RENDERED="$(sed \
   -e "s|{{LOG_DIR}}|$LOG_DIR|g" \
   -e "s|{{HOME}}|$HOME|g" \
   -e "s|{{PATH}}|$AGENT_PATH|g" \
+  -e "s|{{PYTHON}}|$PYTHON_BIN|g" \
   -e "s|{{PORT}}|$PORT|g" \
   -e "s|{{GIT_SHA}}|$GIT_SHA|g" \
   "$TEMPLATE")"

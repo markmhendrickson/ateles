@@ -281,6 +281,7 @@ DAEMON_CONFIG_NAMES: frozenset[str] = frozenset(
         "CYPHORHINUS_TELEGRAM_CHAT_ID",
         "DASHBOARD_GIT_SHA",  # commit the console service reports from /healthz
         "DASHBOARD_LOCAL_ONLY",  # console service: loopback-only mode, set at start-up
+        "DASHBOARD_PYTHON",  # interpreter the console runs the planning module with (a path)
         "DATA_DIR",
         "DECISION_QUEUE_READING_PATH",
         "DUE_DATE_HYGIENE_ENABLED",

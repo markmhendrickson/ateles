@@ -95,26 +95,42 @@ ateles_python_has_mcp_deps() {
     [ -x "$1" ] && "$1" -c 'import mcp, httpx, cryptography, jwt' >/dev/null 2>&1
 }
 
-ateles_select_mcp_python() {
-    local mcp_venv candidate python
-    mcp_venv="${ATELES_MCP_VENV:-$ATELES_REPO_ROOT/.mcp-venv}"
-    python=""
-
+# Candidate interpreters, one per line, in preference order. The repo-root
+# .venv is deliberately absent: it lacks `mcp`. ATELES_MCP_PYTHON_CANDIDATES
+# (newline-separated) replaces the list; it is a seam for tests.
+ateles_mcp_python_candidates() {
+    if [ -n "${ATELES_MCP_PYTHON_CANDIDATES:-}" ]; then
+        printf '%s\n' "$ATELES_MCP_PYTHON_CANDIDATES"
+        return 0
+    fi
     # The explicit Homebrew patterns keep a clean-shell --help useful on macOS
     # when the unversioned python lacks the MCP dependencies.
-    for candidate in \
-        "$mcp_venv/bin/python3" \
+    printf '%s\n' \
+        "${ATELES_MCP_VENV:-$ATELES_REPO_ROOT/.mcp-venv}/bin/python3" \
         "$(command -v python3 || true)" \
         /opt/homebrew/bin/python3.[0-9] \
         /opt/homebrew/bin/python3.[0-9][0-9] \
         /opt/homebrew/bin/python3 \
         /usr/local/bin/python3
-    do
+}
+
+# Lookup only: prints the first candidate with the MCP dependencies, or returns 1.
+# Never creates a venv and never installs anything.
+ateles_find_mcp_python() {
+    local candidate
+    while IFS= read -r candidate; do
         if ateles_python_has_mcp_deps "$candidate"; then
-            python="$candidate"
-            break
+            printf '%s\n' "$candidate"
+            return 0
         fi
-    done
+    done < <(ateles_mcp_python_candidates)
+    return 1
+}
+
+ateles_select_mcp_python() {
+    local mcp_venv python
+    mcp_venv="${ATELES_MCP_VENV:-$ATELES_REPO_ROOT/.mcp-venv}"
+    python="$(ateles_find_mcp_python || true)"
 
     if [ -z "$python" ]; then
         ateles_mcp_log "no interpreter with MCP and approval-signing dependencies found; bootstrapping $mcp_venv"

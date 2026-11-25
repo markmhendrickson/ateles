@@ -46,6 +46,8 @@
         <string>{{HOME}}</string>
         <key>PATH</key>
         <string>{{PATH}}</string>
+        <key>DASHBOARD_PYTHON</key>
+        <string>{{PYTHON}}</string>
         <key>DASHBOARD_LOCAL_ONLY</key>
         <string>1</string>
         <key>PORT</key>
