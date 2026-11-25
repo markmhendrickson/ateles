@@ -70,6 +70,10 @@ LENS_ORDER = ("pm", "arch", "security", "qa", "ux")
 JOB_TIMEOUT_SECONDS = 45 * 60  # approved per-job limit
 QUEUE_MAX_WAIT_SECONDS = 60 * 60  # approved queue limit
 MAX_ATTEMPTS = 2  # one try plus one retry
+# Round notes are prose. A larger --extra-brief is a broken input (a notes file
+# that was appended to itself reached 21 GB and filled the host disk), and
+# reading it would exhaust memory and write it again into every lens brief.
+MAX_EXTRA_BRIEF_BYTES = 200_000
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 APIS_DIR = SCRIPT_DIR.parent / "daemons" / "apis"
@@ -419,6 +423,22 @@ def classify_failure(env: dict[str, Any]) -> str:
     return "mechanical"
 
 
+def read_extra_brief(path: Path) -> str:
+    """The round notes, refused unless a regular file within the size cap.
+
+    Reads at most one byte past the cap, so a file that is still growing, or
+    whose size cannot be trusted, never lands whole in memory.
+    """
+    if not path.is_file():
+        raise ValueError("not a regular file")
+    with path.open("rb") as handle:
+        data = handle.read(MAX_EXTRA_BRIEF_BYTES + 1)
+    if len(data) > MAX_EXTRA_BRIEF_BYTES:
+        raise ValueError(
+            f"larger than the {MAX_EXTRA_BRIEF_BYTES}-byte cap for round notes")
+    return data.decode("utf-8")
+
+
 def run_lens(*, lens: str, repo: str, pr: int, head: str, task_entity_id: str,
              out_dir: Path, extra: str, python: str, dispatch_script: Path,
              dispatch: Callable[..., dict[str, Any]] = dispatch_once,
@@ -534,8 +554,8 @@ def main(argv: list[str] | None = None, *,
     extra = ""
     if args.extra_brief:
         try:
-            extra = Path(args.extra_brief).read_text()
-        except OSError as exc:
+            extra = read_extra_brief(Path(args.extra_brief))
+        except (OSError, ValueError) as exc:
             log(f"cannot read --extra-brief: {exc}")
             return 2
     try:
