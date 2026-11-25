@@ -419,7 +419,9 @@ def classify_journal_row(
             return "btc_valid_unresolved", "outcome unknown"
         if keys != allowed or row.get("state") not in (STATE_DONE, STATE_FAILED) or not _text(row.get("outcome_status")) or not _epoch(row.get("outcome_at")):
             return "invalid", "historical row shape or values malformed"
-        if row["state"] == STATE_DONE and row["outcome_status"] in {"failed", "manual_required"}:
+        # Only a plain failure is exempt. done/manual_required means the old writer hit an exception that can have
+        # come after the funding call, so money may have moved: it stays invalid and holds every profile.
+        if row["state"] == STATE_DONE and row["outcome_status"] == "failed":
             return "legacy_failed_terminal", ""
         if (row["state"] == STATE_DONE and row["outcome_status"] != "sent"
                 or row["state"] == STATE_FAILED and row["outcome_status"] not in {"failed", "manual_required"}):

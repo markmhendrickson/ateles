@@ -2199,7 +2199,7 @@ def test_unclassified_legacy_attempt_holds_all_wise_profiles_with_row_key(
 
 
 @pytest.mark.parametrize("route", ["payment_approval", "email", "telegram"])
-@pytest.mark.parametrize("status", ["failed", "manual_required"])
+@pytest.mark.parametrize("status", ["failed"])
 @pytest.mark.parametrize("rail", [None, "btc"])
 def test_legacy_terminal_failure_holds_only_own_obligation_on_every_route(
     approval_env, monkeypatch, route, status, rail
@@ -2223,7 +2223,7 @@ def test_legacy_terminal_failure_holds_only_own_obligation_on_every_route(
     journal.record_intent(path, another_key, "another-token", generation=2, rail=rail)
     data = journal.load(path)
     data["obligations"][another_key].update(
-        state="done", outcome_status="failed" if status == "manual_required" else "manual_required",
+        state="done", outcome_status="failed",
         outcome_at=time.time(),
     )
     journal._write(path, data)
@@ -2254,7 +2254,7 @@ def test_legacy_terminal_failure_holds_only_own_obligation_on_every_route(
         assert any("Monedula" in preview for preview in previews)
 
 
-@pytest.mark.parametrize("status", ["failed", "manual_required"])
+@pytest.mark.parametrize("status", ["failed"])
 def test_legacy_terminal_failure_never_reoffers_own_obligation(approval_env, monkeypatch, status):
     import consent_email
     import monedula
@@ -2908,3 +2908,55 @@ def test_wise_hold_has_one_decider_and_all_offer_paths_reach_it():
     assert calls(functions["journal_state_for_item"], "journal_entry_for_item")
     for name in ("request_and_collect", "_apply_session_journal", "main"):
         assert calls(functions[name], "journal_state_for_item"), name
+
+
+@pytest.mark.parametrize("rail", [None, "btc"])
+def test_legacy_manual_required_still_holds_every_profile(tmp_path, rail):
+    # done/manual_required came from an exception that can follow the funding call: money may have moved.
+    path = tmp_path / journal.JOURNAL_NAME
+    journal.init_journal(path)
+    journal.record_intent(path, "old-manual", "token", generation=1, rail=rail)
+    data = journal.load(path)
+    data["obligations"]["old-manual"].update(state="done", outcome_status="manual_required", outcome_at=time.time())
+    journal._write(path, data)
+    data = journal.load(path)
+    assert journal.classify_journal_row(data["obligations"]["old-manual"], data)[0] == "invalid"
+    assert journal.wise_replay_hold(data, "profile-any") is not None
+
+
+@pytest.mark.parametrize("status", ["failed", "manual_required"])
+def test_old_key_terminal_row_holds_its_own_session_instead_of_offering_it_again(
+    approval_env, monkeypatch, status
+):
+    """A row written before the Wise key changed sits under the OLD key. The current key finds nothing, so without the
+    cutover hold the same session would be offered for payment again (a possible double payment)."""
+    import consent_email
+    import monedula
+    import payment_approval
+    from handlers.payment_profile import PaymentProfile
+
+    world, approvals = approval_env
+    world.handler = wise.WiseTransferHandler(PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", payment_type="wise",
+        calendar_keywords=["yoga"], amount_eur=10, entity_id="profile-p",
+        wise_recipient_id=5, wise_recipient_name="Synthetic",
+    ))
+    event = world.calendars["primary"][0]
+    item = consent_email.build_pending_items(
+        [(world.handler, world.handler.matches([event]))], "2026-11-18"
+    )[0]
+    # the pre-session-window code keyed a single match on the run date and an EMPTY match id
+    old_key = consent_email._base_obligation_key(world.handler, monedula._yesterday().isoformat(), "")
+    assert old_key != item.obligation  # the current Wise key no longer equals the old one
+    path = consent_email.journal_path()
+    journal.record_intent(path, old_key, "old-token", generation=1)
+    data = journal.load(path)
+    data["obligations"][old_key].update(state="done", outcome_status=status, outcome_at=time.time())
+    journal._write(path, data)
+    monkeypatch.setattr(monedula, "_reconcile_wise_entries", lambda *a: True)
+    messages = []
+    monkeypatch.setattr(monedula, "_notify", lambda message, **kw: messages.append(message))
+    monkeypatch.setattr(payment_approval, "collect", lambda *a, **kw:
+                        pytest.fail("the old-key session was offered again"))
+    world.tick()
+    assert approvals.writes == 0 and world.sends == []
