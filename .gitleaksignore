@@ -37,3 +37,6 @@ d4093a9e47e7a75ac949f9172164077c5e1907c1:lib/daemon_runtime/test_policy_fetch_ca
 # ateles PR #1833: a synthetic fake credential in a redaction test, flagged in an EARLIER commit of the PR
 # (carried over from the closed PR #1832). The later state of the line is marked gitleaks:allow; the PR-range scan reads history.
 88f758247b40d0c827572213258952aef5bbd777:execution/daemons/apis/test_dispatch_artifact_completion.py:protected-patterns:409
+# ateles PR #1850: a synthetic fake client secret in a Google-mode test, flagged in an EARLIER commit of the PR.
+# The later state of the line is marked gitleaks:allow; the PR-range scan reads history.
+287a9a704786706e7b2cf12a7bc07186ba05e0df:apps/task-dashboard/server/localOnly.test.ts:protected-patterns:219

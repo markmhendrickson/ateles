@@ -21,9 +21,16 @@
  * point — a single route added later outside the `/api` prefix would be
  * silently public. Putting the gate above everything makes exposure require
  * deliberately moving a route above it, rather than merely forgetting a prefix.
+ *
+ * LOCAL-ONLY MODE (`DASHBOARD_LOCAL_ONLY=1`, read once at startup; see
+ * localOnly.ts) is the persistent console on the operator's own machine. It
+ * binds 127.0.0.1 only and puts a strict Host-header check in FRONT of the
+ * whole stack (step 0, in `runStack`), and the Google legs and gate (steps 2
+ * and 3) pass through. With the variable unset, every step below behaves
+ * exactly as it always has.
  */
 import { createServer } from "node:http";
-import { readFileSync, existsSync, statSync } from "node:fs";
+import { readFileSync, existsSync, statSync, realpathSync } from "node:fs";
 import { dirname, join, normalize, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -40,10 +47,17 @@ import {
   verifyGoogleCode,
 } from "./auth";
 import { registerApiRoutes, type MiddlewareHost } from "./neotomaProxy";
+import { isLoopbackAddress, refuseForeignHost, resolveServeMode } from "./localOnly";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DIST = join(HERE, "..", "dist");
-const PORT = Number(process.env.PORT) || 8080;
+/**
+ * Chosen once, from the environment, before any route exists. Throws (so the
+ * process exits without binding) on a local-only config that would bind a
+ * non-loopback address. No request input can change it.
+ */
+const MODE = resolveServeMode(process.env);
+const PORT = MODE.port;
 
 /**
  * The commit this build was made from, injected at build time. Reported by
@@ -68,6 +82,8 @@ const app: MiddlewareHost & { use(path: string, handler: Handler): void } = {
 };
 
 function runStack(req: any, res: any) {
+  // ── 0. Local-only: the DNS-rebinding defence, ahead of every route ────────
+  if (MODE.localOnly && refuseForeignHost(req, res, MODE.port)) return;
   const url = (req.url || "/").split("?")[0];
   let i = 0;
   const next = () => {
@@ -100,11 +116,21 @@ app.use("/healthz", (_req, res) => {
       ok: true,
       git_sha: GIT_SHA,
       auth_configured: authConfigured().ok,
+      ...(MODE.localOnly ? { local_only: true } : {}),
     }),
   );
 });
 
 // ── 2. The Google sign-in legs ──────────────────────────────────────────────
+
+/**
+ * Steps 2 and 3 exist only in the deployed mode. In local-only mode they pass
+ * the request on untouched; in the deployed mode they run exactly as written.
+ */
+const googleOnly =
+  (handler: Handler): Handler =>
+  (req, res, next) =>
+    MODE.localOnly ? next() : handler(req, res, next);
 
 /** The exact callback URL, which must match the one registered with Google. */
 function redirectUriFor(req: any): string {
@@ -113,7 +139,7 @@ function redirectUriFor(req: any): string {
   return `${proto}://${host}/auth/callback`;
 }
 
-app.use("/auth/login", (req, res) => {
+app.use("/auth/login", googleOnly((req, res) => {
   const cfg = authConfigured();
   if (!cfg.ok) {
     res.statusCode = 503;
@@ -136,9 +162,9 @@ app.use("/auth/login", (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.setHeader("Cache-Control", "no-store");
   res.end(loginCaptureHtml(buildAuthorizeUrl(redirectUriFor(req), state)));
-});
+}));
 
-app.use("/auth/callback", async (req, res) => {
+app.use("/auth/callback", googleOnly(async (req, res) => {
   const params = new URL(req.url || "/", "http://x").searchParams;
   const code = params.get("code") || "";
   const state = params.get("state") || "";
@@ -172,10 +198,10 @@ app.use("/auth/callback", async (req, res) => {
     res.statusCode = 403;
     res.end("This Google account is not authorized for this dashboard.");
   }
-});
+}));
 
 // ── 3. The gate ─────────────────────────────────────────────────────────────
-app.use("/", (req, res, next) => {
+app.use("/", googleOnly((req, res, next) => {
   // Fails CLOSED. An unconfigured deploy serves nobody rather than serving
   // the operator's graph to everybody.
   const cfg = authConfigured();
@@ -204,7 +230,7 @@ app.use("/", (req, res, next) => {
   res.statusCode = 302;
   res.setHeader("Location", `/auth/login?next=${encodeURIComponent(url)}`);
   res.end();
-});
+}));
 
 // ── 4. The read-only Neotoma proxy, shared with the dev server ──────────────
 registerApiRoutes(app);
@@ -243,12 +269,44 @@ app.use("/", (req, res) => {
   res.end(readFileSync(file));
 });
 
-createServer(runStack).listen(PORT, "0.0.0.0", () => {
-  const cfg = authConfigured();
-  console.log(`task-dashboard listening on 0.0.0.0:${PORT} (sha ${GIT_SHA || "unknown"})`);
-  if (!cfg.ok) {
-    console.error(
-      `REFUSING TO SERVE: auth not configured — missing ${cfg.missing.join(", ")}`,
-    );
+/** The request handler, exported so tests drive the real stack in-process. */
+export const handle = runStack;
+
+function start() {
+  const server = createServer(runStack);
+  server.listen(PORT, MODE.host, () => {
+    if (MODE.localOnly) {
+      // Belt and braces: check what the socket ACTUALLY bound, not what was asked.
+      const addr = server.address();
+      const bound = typeof addr === "object" && addr ? addr.address : String(addr);
+      if (!isLoopbackAddress(bound)) {
+        console.error(`REFUSING TO SERVE: local-only mode bound non-loopback address ${bound}`);
+        server.close();
+        process.exit(1);
+      }
+      console.log(
+        `task-dashboard LOCAL-ONLY on http://127.0.0.1:${PORT}/ (sha ${GIT_SHA || "unknown"}); ` +
+          `Google sign-in off, Host must be 127.0.0.1:${PORT} or localhost:${PORT}`,
+      );
+      return;
+    }
+    const cfg = authConfigured();
+    console.log(`task-dashboard listening on 0.0.0.0:${PORT} (sha ${GIT_SHA || "unknown"})`);
+    if (!cfg.ok) {
+      console.error(
+        `REFUSING TO SERVE: auth not configured — missing ${cfg.missing.join(", ")}`,
+      );
+    }
+  });
+}
+
+/** Listen only when run as the program (`node server-dist/serve.js`), not when imported by a test. */
+function isMain(): boolean {
+  try {
+    return realpathSync(process.argv[1] ?? "") === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
   }
-});
+}
+
+if (isMain()) start();
