@@ -234,6 +234,9 @@ def test_failed_envelope_does_not_echo_remote_text(tmp_path, capsys):
     rc, posts = run(tmp_path, Script(failed, failed), "--post")
     assert rc == 3 and posts == []
     for path in tmp_path.iterdir():
+        if path.name.endswith(".private.txt"):  # the failure note, owner-only
+            assert path.stat().st_mode & 0o777 == 0o600
+            continue
         assert CANARY not in path.read_text(), path.name
     captured = capsys.readouterr()
     assert CANARY not in captured.out + captured.err
@@ -817,3 +820,102 @@ def test_brief_requires_the_dash_separator(tmp_path):
     run(tmp_path, Script(ok_env()))
     brief = (tmp_path / "pm.brief.md").read_text()
     assert "must be the dash character shown" in brief
+
+
+# ── The private note a refused or failed dispatch leaves ──────────────────
+# Red without the change: no note was written, the attempt record carried no
+# run id for a refusal, and the dispatcher's reason was lost.
+
+
+def refused_env(reason, **kw):
+    return {"ok": False, "reason": reason, "error": reason, "provider": "claude",
+            "returncode": None, "stderr": "", "fly_run_id": "fly-0123456789abcdef", **kw}
+
+
+def failure_note(tmp_path, attempt=1):
+    path = tmp_path / f"pm.attempt{attempt}.failure.private.txt"
+    assert path.stat().st_mode & 0o777 == 0o600
+    return json.loads(path.read_text()), path
+
+
+def test_a_refused_dispatch_keeps_its_reason_and_run_id_privately(tmp_path, capsys):
+    reason = f"fly runner refused: login machine is not free ({CANARY})"
+    rc, posts = run(tmp_path, Script(refused_env(reason, stderr=f"child said {CANARY}")),
+                    "--post")
+    assert rc == 3
+    note, path = failure_note(tmp_path)
+    assert note["run_id"] == "fly-0123456789abcdef" and note["kind"] == "refusal"
+    assert note["reason"] == reason and note["error"] == reason
+    assert note["stderr_tail"] == f"child said {CANARY}"
+    attempt = json.loads((tmp_path / "summary.json").read_text())["lenses"][0]["attempts"][0]
+    assert attempt["run_id"] == "fly-0123456789abcdef"
+    assert attempt["failure_note"] == str(path)
+    # nothing new anywhere public
+    assert posts == []
+    captured = capsys.readouterr()
+    assert CANARY not in captured.out + captured.err
+    assert "failure.private" not in captured.out + captured.err
+    for other in tmp_path.iterdir():
+        if not other.name.endswith(".private.txt"):
+            assert CANARY not in other.read_text(), other.name
+
+
+def test_each_failed_attempt_keeps_its_own_note(tmp_path):
+    rc, _ = run(tmp_path, Script(fail_env("first try"), fail_env("second try")))
+    assert rc == 3
+    first, second = failure_note(tmp_path, 1)[0], failure_note(tmp_path, 2)[0]
+    assert (first["reason"], second["reason"]) == ("first try", "second try")
+    assert first["run_id"] == second["run_id"] == "fly-2"
+
+
+@pytest.mark.parametrize("secret", [
+    "ghs_" + "abcdefghij0123456789",
+    "github_pat_" + "11ABCDEFG0123456789_abcdef",
+    "sk-ant-oat01-abcdef0123456789",
+    "FlyV1 fm2_lJPECAAAAAAAA",
+    "Bearer abc.def.ghi",
+    "token=hunter2hunter2",
+    '"d": "c2hvcnQtcHJpdmF0ZS1rZXk"',
+    "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln",
+    "https://x-access-token:pw0rd-value@github.example/o/r",
+    "Zm9vYmFyYmF6cXV4Zm9vYmFyYmF6cXV4Zm9vYmFy",
+    "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqG\n-----END PRIVATE KEY-----",
+    "plain-env-value-0001",
+])
+def test_the_note_is_redacted(tmp_path, monkeypatch, secret):
+    monkeypatch.setenv("SOMETHING_API_TOKEN", "plain-env-value-0001")
+    text = f"launch refused: {secret} then stopped"
+    run(tmp_path, Script(refused_env(text, stderr=text)))
+    note, path = failure_note(tmp_path)
+    for fragment in ("abcdefghij0123456789", "11ABCDEFG", "abcdef0123456789", "fm2_lJPE",
+                     "abc.def.ghi", "hunter2", "c2hvcnQtcHJpdmF0ZS1rZXk", "eyJzdWIi",
+                     "pw0rd-value", "Zm9vYmFy", "MIGHAgEA", "plain-env-value-0001"):
+        assert fragment not in path.read_text()
+    assert note["reason"].startswith("launch refused: ")
+    assert note["reason"].endswith(" then stopped")
+
+
+def test_the_note_is_bounded_and_redacts_before_it_cuts(tmp_path):
+    secret = "ghs_" + "abcdefghij0123456789"  # built here: it only looks like a token
+    pad = "refused " + "x " * ((f.FAILURE_FIELD_CAP - 16) // 2)  # the cut falls inside it
+    run(tmp_path, Script(refused_env(pad + secret + " tail" * 50_000,
+                                     stderr="y " * 100_000 + "the end")))
+    note, path = failure_note(tmp_path)
+    assert all(len(note[k]) <= f.FAILURE_FIELD_CAP for k in ("reason", "error", "stderr_tail"))
+    assert "ghs_" not in path.read_text()
+    assert note["stderr_tail"].endswith("the end")
+    assert path.stat().st_size < 4 * f.FAILURE_FIELD_CAP
+
+
+def test_a_note_that_cannot_be_written_does_not_stop_the_fallback(tmp_path, monkeypatch, capsys):
+    def boom(path, text):
+        raise OSError(CANARY)
+
+    monkeypatch.setattr(f, "save_held_text", boom)
+    rc, _ = run(tmp_path, Script(refused_env("provider is refused")))
+    assert rc == 3
+    captured = capsys.readouterr()
+    assert "FALL BACK TO LOCAL LENS: pm" in captured.out
+    assert CANARY not in captured.out + captured.err
+    attempt = json.loads((tmp_path / "summary.json").read_text())["lenses"][0]["attempts"][0]
+    assert "failure_note" not in attempt

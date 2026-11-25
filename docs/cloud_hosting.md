@@ -126,6 +126,17 @@ child's temporary home are separate from that login state. The lifecycle must
 confirm the machine stopped and job material was cleared before another job
 can use it; a provider-auth failure is not permission to skip that boundary.
 
+A login claim whose update got no clear answer can be applied minutes later,
+so a machine that still reads clean at the old version keeps its reservation
+until the update is seen to land, the version moves, or 15 minutes pass on a
+settled machine. The start that follows an accepted update is sent again, a
+bounded number of times, only for Fly's 412 "machine build not ready". The
+reaper and Apis's periodic step also clear a job config nothing owns: the
+machine not running, the job naming its run, no ledger reservation for the
+machine or run, no holder of the provider's login lock, and no holder of the
+machine's lease, which the dispatcher then takes for the clear. A job that
+names no run, or whose ownership cannot be read, stays for an operator.
+
 The dispatcher retains Fly API authority and App private keys. Job credentials
 arrive as machine-level files under `/run/job/`, not Fly app secrets that would
 be injected into every machine. The runner consumes and removes those files

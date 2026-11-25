@@ -1153,6 +1153,8 @@ def main(argv: list[str] | None = None) -> int:
         emitter.emit_failure(reason)
         return 1
 
+    # A refused or failed Fly launch has a run id but no remote run.
+    fly_run_id = getattr(result, "fly_run_id", "")
     emitter.emit(
         {
             "ok": result.ok,
@@ -1169,6 +1171,8 @@ def main(argv: list[str] | None = None) -> int:
             **({"configuration_repair": result.configuration_repair}
                if getattr(result, "configuration_repair", "") else {}),
             **({"output_truncated": True} if getattr(result, "output_truncated", False) else {}),
+            **({"fly_run_id": fly_run_id}
+               if isinstance(fly_run_id, str) and fly_run_id else {}),
             # Every Fly run reports its identity and machine state, whether
             # its outcome is known or not: cleanup and outcome are separate.
             **(

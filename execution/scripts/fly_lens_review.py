@@ -16,7 +16,10 @@ ent_161873dfe2a269554d60187f). For each requested lens it:
   4. writes the verdict body in ``post_lens_verdict.py``'s form (attribution
      header line, bold verdict token line, findings) to ``<out>/<lens>.verdict.md``;
   5. records provider, duration, Fly run id and the reviewed head in
-     ``<out>/summary.json``;
+     ``<out>/summary.json``; for a refused or failed dispatch it also keeps a
+     bounded, redacted copy of the runner's reason in a private (mode 0600)
+     ``<out>/<lens>.attempt<N>.failure.private.txt``, named in that record and
+     never printed or posted;
   6. when Fly cannot deliver (refused, failed twice, queue wait over the
      limit) prints ``FALL BACK TO LOCAL LENS: <lens> (<reason>)`` and exits 3.
 
@@ -100,6 +103,23 @@ QUEUE_HINTS = ("queue", "waited", "wait ")
 # (shows as "no result recorded", exit 95). Only recognised when the dispatch
 # output says so; otherwise it reads as mechanical (see the runbook).
 DETERMINISTIC_HINTS = ("403", "exit 95", "exit code 95", "exit=95", "rc=95")
+
+# The private failure note: characters kept per field, and how much of a field
+# is scanned before it is cut (far more, so a cut never splits what is scanned).
+FAILURE_FIELD_CAP = 1500
+FAILURE_SCAN_CAP = 64 * 1024
+RUN_ID_CAP = 80
+_SECRET_NAME_RE = re.compile(
+    r"TOKEN|SECRET|BEARER|PASSWORD|PASSWD|KEY|JWK|MNEMONIC|CREDENTIAL|_PAT$", re.I)
+_SECRET_TEXT_RES = tuple(re.compile(pattern, re.I | re.S) for pattern in (
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)",
+    r"\b(?:bearer|flyv1)\s+\S+",
+    r"\b(?:gh[pousr]_|github_pat_|sk-|fm[12][a-z]?_|eyj)[A-Za-z0-9._~+/=\-]{6,}",
+    r"(?:token|secret|password|passwd|nonce|authorization|api[_-]?key|\"d\")"
+    r"[\"']?\s*[:=]\s*[\"']?[^\s\"',;}]+",
+    r"(?<=://)[^/\s:@]+:[^/\s@]+(?=@)",
+    r"[A-Za-z0-9+/=_\-]{32,}",  # any other long opaque run (an encoded value)
+))
 
 
 class FallBack(Exception):
@@ -407,6 +427,37 @@ def save_held_text(path: Path, held: str) -> None:
             fh.write("\n")
 
 
+def redact_reason(text: str) -> str:
+    """*text* with credential values removed: those in this process's own
+    credential-named environment variables, then anything shaped like one."""
+    for name, value in os.environ.items():
+        if _SECRET_NAME_RE.search(name) and len(value) >= 8:
+            text = text.replace(value, "[redacted]")
+    for pattern in _SECRET_TEXT_RES:
+        text = pattern.sub("[redacted]", text)
+    return text
+
+
+def env_run_id(env: dict[str, Any]) -> str:
+    """The dispatch's Fly run id: of a remote run, else of a refused or failed
+    launch; "" when the envelope names none."""
+    return str(env.get("remote_run_id") or env.get("fly_run_id") or "")[:RUN_ID_CAP]
+
+
+def save_failure_note(path: Path, env: dict[str, Any], kind: str) -> None:
+    """Keep why one dispatch was refused or failed, bounded and redacted, in a
+    private (mode 0600) file. The reason is the start of each message; of the
+    child's stderr, the end."""
+    note: dict[str, Any] = {"run_id": env_run_id(env), "kind": kind,
+                            "returncode": env.get("returncode")}
+    for field in ("reason", "error"):
+        text = str(env.get(field) or "")[:FAILURE_SCAN_CAP]
+        note[field] = redact_reason(text)[:FAILURE_FIELD_CAP]
+    stderr = str(env.get("stderr") or "")[-FAILURE_SCAN_CAP:]
+    note["stderr_tail"] = redact_reason(stderr)[-FAILURE_FIELD_CAP:]
+    save_held_text(path, json.dumps(note, indent=2))
+
+
 def classify_failure(env: dict[str, Any]) -> str:
     """'deterministic', 'refusal', 'queue', or 'mechanical' (retry once)."""
     text = " ".join(str(env.get(k, "")) for k in ("reason", "error", "stderr")).lower()
@@ -465,7 +516,7 @@ def run_lens(*, lens: str, repo: str, pr: int, head: str, task_entity_id: str,
         dur = round(clock() - t0, 1)
         att = {"attempt": attempt, "duration_s": dur, "ok": bool(env.get("ok")),
                "provider": env.get("provider"),
-               "run_id": env.get("remote_run_id") or "",
+               "run_id": env_run_id(env),
                "outcome_unknown": bool(env.get("remote_outcome_unknown"))}
         record["attempts"].append(att)
         (out_dir / f"{lens}.attempt{attempt}.json").write_text(json.dumps({
@@ -499,6 +550,13 @@ def run_lens(*, lens: str, repo: str, pr: int, head: str, task_entity_id: str,
         last_reason = f"dispatch {kind}"
         att["problem"] = last_reason
         log(f"{lens}: attempt {attempt} failed ({kind})")
+        note = out_dir / f"{lens}.attempt{attempt}.failure.private.txt"
+        try:
+            save_failure_note(note, env, kind)
+            att["failure_note"] = str(note)
+        except OSError:
+            # Diagnosis only: the fallback decision does not depend on it.
+            log(f"{lens}: attempt {attempt}: the private failure note was not written")
         if kind in ("refusal", "queue", "deterministic"):
             label = "queue wait" if kind == "queue" else kind
             record.update(status="fallback", reason=f"{label}: {last_reason}",
