@@ -271,7 +271,8 @@ OPTIONAL_FIELDS: dict[str, dict[str, type | tuple | str]] = {
     "config_env": {"ATELES_RUN_ID": str},
     "ledger_entry": {"machine_id": str, "lease_nonce": str, "unconfirmed": bool,
                      "lease_expires": NULLABLE_NUMBER, "untracked": bool,
-                     "unconfirmed_reason": str},
+                     "unconfirmed_reason": str, "claim_write_version": NONEMPTY_STR,
+                     "claim_write_at": NUMBER},
     # Every other kind declares that it has no optional fields.
     "machine": {}, "list_entry": {}, "lease_view": {}, "lease_grant": {}, "ledger": {},
     "owner_record": {}, "result_record": {},
@@ -1363,6 +1364,29 @@ class FlyLedger:
             del entry["lease_nonce"]
             if "lease_expires" in entry:
                 del entry["lease_expires"]
+            return True
+
+        self._update_entry(run_id, change)
+
+    def set_claim_write(self, run_id: str, version: str, at: float) -> None:
+        """Record, BEFORE it is sent, a login claim update that Fly may apply
+        late: the machine *version* it is conditional on, and when."""
+        def change(entry: dict) -> bool:
+            entry["claim_write_version"] = version
+            entry["claim_write_at"] = at
+            return True
+
+        self._update_entry(run_id, change)
+
+    def clear_claim_write(self, run_id: str) -> None:
+        """Forget the claim update: it landed, was refused, or can no longer
+        be applied."""
+        def change(entry: dict) -> bool:
+            if "claim_write_version" not in entry:
+                return False
+            del entry["claim_write_version"]
+            if "claim_write_at" in entry:
+                del entry["claim_write_at"]
             return True
 
         self._update_entry(run_id, change)
@@ -2839,6 +2863,26 @@ class _CrossProcessLoginLock:
         self._fd = fd
         return True
 
+    @contextlib.contextmanager
+    def held_if_idle(self):
+        """Yield True while holding the lock file, or False when any run, in
+        this process or another, holds this provider's login lock. Never
+        waits, so it is safe to use under the admission lock."""
+        if self.locked():
+            yield False
+            return
+        self.lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                idle = True
+            except BlockingIOError:
+                idle = False
+            yield idle
+        finally:
+            os.close(fd)  # closing the descriptor releases the lock
+
     def release(self) -> None:
         fd, self._fd = self._fd, None
         try:
@@ -3264,8 +3308,8 @@ class FlyExecutor:
                                                    pause=pause)  # fmt: skip
                     # Never start past the deadline: run() then clears the
                     # written config and releases the lease and reservation.
-                    self._refuse_past_deadline(job, deadline, "start")
-                    await self._request(launch, self.client.start(login_id, nonce=nonce), job)
+                    await self._start_login_machine(login_id, job, deadline, launch, nonce,
+                                                    pause=pause)  # fmt: skip
                     machine_id, instance_id = login_id, ""
                 else:
                     created = await self._request(
@@ -3446,10 +3490,84 @@ class FlyExecutor:
             return after
 
         after = await self._within_deadline(read_back(), job, deadline, "start")
+        if after is not None:
+            self._claim_write_may_apply(job.run_id, after)  # records that it landed
         if after is None or after["state"] in LOGIN_SETTLING_STATES:
             raise FlyApiError(409, "login machine did not settle to stopped after the write")
         if after["state"] != "stopped" or _config_run_id(after["config"]) != job.run_id:
             raise FlyApiError(409, "login machine config is not this run's after the write")
+
+    def _claim_write_may_apply(self, run_id: str, machine: dict) -> bool:
+        """Whether Fly may STILL apply *run_id*'s claim update, judged from
+        *machine*, a validated read. While it may, a read showing no job is
+        not evidence the machine is clean, and the reservation is kept.
+
+        It can no longer apply once the read carries this run's own job (it
+        landed), or shows a settled machine whose version has moved past the
+        one the update was conditional on, or ``LOGIN_PENDING_WRITE_SECONDS``
+        have passed on a settled machine (an update Fly never took leaves the
+        version unchanged for good; one that lands even later is cleared by
+        ``_clear_orphan_login_configs``). The first such answer is recorded."""
+        entry = self.ledger.entry(run_id)
+        if entry is None or "claim_write_version" not in entry:
+            return False
+        if _config_run_id(machine["config"]) != run_id:
+            if machine["state"] in LOGIN_SETTLING_STATES:
+                return True
+            if (machine["instance_id"] == entry["claim_write_version"]
+                    and ("claim_write_at" not in entry or self._clock()
+                         < entry["claim_write_at"] + LOGIN_PENDING_WRITE_SECONDS)):  # fmt: skip
+                return True
+        self.ledger.clear_claim_write(run_id)
+        return False
+
+    async def _start_login_machine(self, machine_id: str, job: FlyJob, deadline: float,
+                                   launch: "_LaunchState", nonce: str, *,
+                                   pause: Callable[[float], Any]) -> None:  # fmt: skip
+        """Start the claimed login machine, retrying ONLY Fly's 412 "machine
+        build not ready", which rejects the request before anything starts.
+
+        Before each retry the machine is read again and must still carry this
+        run's job and be stopped or settling. One found in any other state is
+        an uncertain launch: no further start is sent. Every other failure,
+        and the same refusal once ``LOGIN_START_BACKOFF_SECONDS`` is spent or
+        when the next wait would reach *deadline*, is handled as a single
+        start's was."""
+        async def attempt() -> "FlyApiError | None":
+            try:
+                await self.client.start(machine_id, nonce=nonce)
+            except FlyApiError as exc:
+                if _start_not_ready(exc):
+                    return exc
+                raise
+            return None
+
+        async def read() -> dict | None:
+            machine = await self.client.get(machine_id)
+            if machine is not None:
+                machine = await self._settle_login_machine(machine)
+            return machine
+
+        waits = LOGIN_START_BACKOFF_SECONDS
+        for number in range(len(waits) + 1):
+            self._refuse_past_deadline(job, deadline, "start")
+            refused = await self._request(launch, attempt(), job)
+            if refused is None:
+                return
+            launch.requested = False  # rejected outright: nothing was started
+            if number == len(waits) or self._clock() + waits[number] >= deadline:
+                break
+            log.warning(f"[fly] run={job.run_id} login machine {machine_id} was not ready to "
+                        f"start (attempt {number + 1}); retrying in {waits[number]:g}s")
+            await pause(waits[number])
+            machine = await self._within_deadline(read(), job, deadline, "start")
+            if machine is None or _config_run_id(machine["config"]) != job.run_id:
+                break  # no longer this run's job: nothing more is sent
+            if machine["state"] not in LOGIN_NOT_RUNNING_STATES | LOGIN_SETTLING_STATES:
+                launch.requested = True
+                raise FlyUncertainLaunch(
+                    f"login machine is {machine['state']} after a refused start")
+        raise FlyLaunchError(str(refused))
 
     def _refuse_past_deadline(self, job: FlyJob, deadline: float, what: str, *,
                               now: float | None = None) -> None:  # fmt: skip
@@ -3529,11 +3647,16 @@ class FlyExecutor:
         body: dict = {"config": cfg, "skip_launch": True,
                       "current_version": machine["instance_id"]}  # fmt: skip
         self._refuse_past_deadline(job, deadline, "another claim" if retry else "the claim")
+        # Recorded first: an update with no clear answer may still be applied.
+        self.ledger.set_claim_write(job.run_id, machine["instance_id"], self._clock())
         launch.config_written = True  # from here the stored config may hold this job
         try:
             await self.client.update(machine_id, body, nonce=nonce)
-        except FlyApiError as exc:
-            if exc.status in (409, 412):
+        except (FlyApiError, httpx.HTTPError) as exc:
+            refused = isinstance(exc, FlyApiError) and exc.status in (409, 412)
+            if refused or _definitely_not_executed(exc):
+                self.ledger.clear_claim_write(job.run_id)  # nothing was or will be stored
+            if refused:
                 return exc  # refused (changed or reverted): nothing was stored
             raise
         return None
@@ -3599,10 +3722,12 @@ class FlyExecutor:
             machine = await self._settle_login_machine(machine)
         if machine is None:
             return True
+        pending = self._claim_write_may_apply(run_id, machine)  # records one that landed
         cfg = copy.deepcopy(machine["config"])
         owner = _config_run_id(cfg)
         if owner and owner != run_id:
-            return True  # positively another run's config: this run's job is not stored
+            # Positively another run's config: this run's job is not stored.
+            return not pending
         if not owner and _has_job_config(cfg):
             log.warning(f"[fly] login machine {machine_id} holds an unattributed job config")
             return False
@@ -3634,6 +3759,10 @@ class FlyExecutor:
         if _has_job_config(after["config"]):
             log.warning(f"[fly] login machine {machine_id} still holds job files after "
                         "the clear")  # fmt: skip
+            return False
+        if self._claim_write_may_apply(run_id, after):
+            log.warning(f"[fly] run={run_id} login machine {machine_id} reads clean, but the "
+                        "claim update may still be applied; the reservation is kept")
             return False
         return True
 
@@ -3902,6 +4031,10 @@ class FlyExecutor:
         nonce = entry["lease_nonce"] if "lease_nonce" in entry else ""
         if machine_id:
             verdict = await self._ownership(machine_id, run_id, login=login)
+            if verdict == "idle" and "claim_write_version" in entry:
+                # No job to be seen, but the claim may still be applied: only
+                # the clean-up below can show that it no longer can.
+                verdict = "ours"
             if verdict == "gone":
                 confirmed = True
             elif verdict == "ours":
@@ -4194,9 +4327,61 @@ class FlyExecutor:
             )  # fmt: skip
             if await self._settle_locked(key):  # admission is held
                 settled.append(key)
+        await self._clear_orphan_login_configs()  # admission is held
         if settled:
             log.warning(f"[fly] reaper settled {settled}")
         return settled
+
+    async def _clear_orphan_login_configs(self) -> None:
+        """Clear a job config that a login machine holds with no owner, so it
+        does not refuse every later run. The caller holds the admission lock."""
+        for provider, machine_id in self.config.login_machines.items():
+            try:
+                await self._clear_orphan_login_config(provider, machine_id)
+            except Exception as exc:  # noqa: BLE001 — unknown ownership: left alone
+                log.warning(f"[fly] could not check the {provider} login machine for an "
+                            f"orphaned job config: {type(exc).__name__}")
+
+    async def _clear_orphan_login_config(self, provider: str, machine_id: str) -> None:
+        """One machine's orphaned job config, cleared only when ALL of these
+        hold; anything else, or any failed read, leaves the machine untouched.
+
+        * No run holds the provider's login lock (this process, or any other
+          sharing the ledger directory); it is held here throughout.
+        * The machine is not running and its config names the run it belongs
+          to. A job nobody can attribute is never cleared.
+        * The ledger, readable, has no reservation for this machine or run,
+          and the run is not live here. Every dispatcher sharing the ledger
+          reserves, under the admission lock, before it touches a machine.
+        * Nobody holds the machine's lease, and this process then takes it. A
+          dispatcher on any ledger takes the lease before writing a job, keeps
+          it until its clean-up is verified, and ends its run before the lease
+          expires.
+
+        The clear itself is ``_scrub_login_machine``: re-read under the lease,
+        the same run only, version-checked, and read back."""
+        with _login_lock(provider, self.config.ledger_path.parent).held_if_idle() as idle:
+            if not idle:
+                return
+            machine = await self.client.get(machine_id)
+            if machine is None or machine["state"] not in LOGIN_NOT_RUNNING_STATES:
+                return
+            run_id = _config_run_id(machine["config"])
+            if not run_id or run_id in self._active:
+                return
+            entries = self.ledger.snapshot(self._clock())["in_flight"]
+            if run_id in entries or self.ledger.find_by_machine(machine_id):
+                return
+            if await self.client.get_lease(machine_id) is not None:
+                return
+            nonce, _ = await self.client.acquire_lease(
+                machine_id, ttl=LOGIN_CLEANUP_LEASE_TTL, description=_lease_description(run_id))
+            try:
+                if await self._scrub_login_machine(machine_id, run_id, nonce):
+                    log.warning(f"[fly] cleared an orphaned job config (run={run_id}) from "
+                                f"login machine {machine_id}")
+            finally:
+                await self._release_lease(machine_id, nonce, run_id)
 
     async def settle_marked(self) -> list[str]:
         """Apis's periodic step: settle reservations marked for the reaper
@@ -4208,12 +4393,15 @@ class FlyExecutor:
         lease, then settle. A machine that cannot be read, is running, or
         holds another run's or an unattributable job keeps its reservation,
         still marked. A login machine a job in this process holds is skipped,
-        as the reaper skips it. Nothing is done, and no Fly call made, when
-        no reservation is marked."""
+        as the reaper skips it.
+
+        Each configured login machine is then checked for an orphaned job
+        config (``_clear_orphan_login_config``). With no login machine and no
+        marked reservation, nothing is done and no Fly call made."""
         settled: list[str] = []
         marked = [rid for rid, e in self.ledger.snapshot()["in_flight"].items()
                   if e.get("unconfirmed") is True]  # fmt: skip
-        if not marked:
+        if not marked and not self.config.login_machines:
             return settled
         async with self._admission():
             now = self._clock()
@@ -4232,6 +4420,7 @@ class FlyExecutor:
                     continue  # a job holds that machine; its launch reconciles first
                 if await self._settle_locked(run_id):  # admission is held
                     settled.append(run_id)
+            await self._clear_orphan_login_configs()  # admission is held
         if settled:
             log.warning(f"[fly] periodic step settled marked reservations {settled}")
         return settled
@@ -4280,8 +4469,22 @@ LOGIN_CLAIM_BACKOFF_SECONDS = (2.0, 5.0, 15.0, 30.0, 60.0, 120.0)
 # pass.
 SCRUB_RETRY_SECONDS = (2.0, 5.0, 15.0, 30.0, 60.0)
 # A short lease taken only to clear a stopped login machine whose run's own
-# lease has expired (recovery of an unconfirmed reservation).
+# lease has expired (recovery of an unconfirmed reservation, or of an orphaned
+# job config).
 LOGIN_CLEANUP_LEASE_TTL = 120
+# How long a claim update with no observed effect may still be applied by Fly
+# (a timed-out write has landed minutes later). Until then a clean read of the
+# machine at the same version does not release the reservation.
+LOGIN_PENDING_WRITE_SECONDS = 900
+# Fly can refuse the start that follows a config update with 412 while it is
+# still building the new version; the start is sent again after each of these
+# waits (about 50 seconds, five starts in all).
+LOGIN_START_BACKOFF_SECONDS = (2.0, 5.0, 15.0, 30.0)
+
+
+def _start_not_ready(exc: "FlyApiError") -> bool:
+    """Fly's "not built yet, retry the start request" refusal, and no other."""
+    return exc.status == 412 and "machine build not ready" in exc.detail.lower()
 
 
 def _lease_description(run_id: str) -> str:
