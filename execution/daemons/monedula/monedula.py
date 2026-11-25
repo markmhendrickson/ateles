@@ -1672,12 +1672,16 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
             for match, item in zip(matches, items):
                 eid = event_id_of(match)
                 if isinstance(handler, WiseTransferHandler):
-                    legacy_paid = any(
-                        (row := data["obligations"].get(legacy)) is not None
-                        and payment_journal.classify_journal_row(row, data)[0] == "legacy_settled"
+                    legacy_rows = [
+                        (legacy, data["obligations"][legacy])
                         for legacy in legacy_obligation_keys(
                             handler, match, matches, _yesterday().isoformat()
                         )
+                        if legacy in data["obligations"]
+                    ]
+                    legacy_paid = any(
+                        payment_journal.classify_journal_row(row, data)[0] == "legacy_settled"
+                        for _legacy, row in legacy_rows
                     )
                     if legacy_paid:
                         if eid:
@@ -1685,6 +1689,19 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                             if payment_journal.session_state(data, key) is None:
                                 payment_journal.note_pending(jpath, key, ended_at=_match_ended_at(match))
                             payment_journal.set_session_state(jpath, key, payment_journal.SESSION_SETTLED)
+                        continue
+                    # An old-key row that is not a settled payment (a failure, an unknown outcome) means this very
+                    # session was attempted before the key changed: hold it, exactly as the non-Wise branch does,
+                    # instead of offering it again because the current key finds nothing.
+                    legacy_open = next(
+                        ((legacy, row) for legacy, row in legacy_rows
+                         if payment_journal.classify_journal_row(row, data)[0] != "legacy_settled"),
+                        None,
+                    )
+                    if legacy_open is not None:
+                        _notify_wise_hold({**legacy_open[1], "_journal_key": legacy_open[0]}, item.obligation)
+                        if eid:
+                            seen_keys.add(payment_journal.session_key(handler.name, eid))
                         continue
                 entry = journal_entry_for_item(data, item)
                 if entry is not None and isinstance(handler, WiseTransferHandler):
@@ -1923,8 +1940,8 @@ def _reconcile_wise_entries(handlers: list) -> bool:
     clean = True
     for obligation, entry in wise_entries.items():
         kind, reason = payment_journal.classify_journal_row(entry, data)
-        if kind == "legacy_settled":
-            # Old paid rows have no transfer-status history or monitoring ID.
+        if kind in {"legacy_settled", "legacy_failed_terminal"}:
+            # Old terminal rows have no transfer-status history or monitoring ID.
             continue
         if kind not in {"wise_modern_resolved", "wise_modern_unresolved"}:
             _notify(

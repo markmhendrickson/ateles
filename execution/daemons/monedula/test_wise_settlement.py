@@ -2162,10 +2162,9 @@ def test_wise_profile_releases_only_after_effects_and_session_settlement(attempt
     assert journal.wise_replay_hold(journal.load(attempt), "synthetic-profile") is None
 
 
-@pytest.mark.parametrize("legacy_outcome", [None, "manual_required", "failed"])
 @pytest.mark.parametrize("route", ["payment_approval", "email", "telegram"])
 def test_unclassified_legacy_attempt_holds_all_wise_profiles_with_row_key(
-    approval_env, monkeypatch, route, legacy_outcome
+    approval_env, monkeypatch, route
 ):
     import consent_email
     import monedula
@@ -2176,10 +2175,6 @@ def test_unclassified_legacy_attempt_holds_all_wise_profiles_with_row_key(
     path = consent_email.journal_path()
     old_key = "legacy-unclassified-attempt"
     journal.record_intent(path, old_key, "old-token", generation=1)
-    if legacy_outcome is not None:
-        data = journal.load(path)
-        data["obligations"][old_key].update(state="done", outcome_status=legacy_outcome)
-        journal._write(path, data)
     world.handler = wise.WiseTransferHandler(PaymentProfile(
         prefix="OTHER", label="Other", payment_type="wise", calendar_keywords=["yoga"],
         amount_eur=10, entity_id="profile-q", wise_recipient_id=5,
@@ -2201,6 +2196,95 @@ def test_unclassified_legacy_attempt_holds_all_wise_profiles_with_row_key(
     assert any(old_key in message and "Old attempt needs to be reconciled by hand"
                in message and "Wise Activity" in message and "not lost" in message
                for message in messages)
+
+
+@pytest.mark.parametrize("route", ["payment_approval", "email", "telegram"])
+@pytest.mark.parametrize("status", ["failed"])
+@pytest.mark.parametrize("rail", [None, "btc"])
+def test_legacy_terminal_failure_holds_only_own_obligation_on_every_route(
+    approval_env, monkeypatch, route, status, rail
+):
+    import consent_email
+    import monedula
+    from handlers.payment_profile import PaymentProfile
+    from types import SimpleNamespace
+
+    world, approvals = approval_env
+    path = consent_email.journal_path()
+    old_key = "legacy-failed-attempt"
+    journal.record_intent(path, old_key, "old-token", generation=1, rail=rail)
+    data = journal.load(path)
+    row = data["obligations"][old_key]
+    row.update(state="done", outcome_status=status, outcome_at=time.time())
+    journal._write(path, data)
+    assert journal.classify_journal_row(row, data)[0] == "legacy_failed_terminal"
+    assert journal.obligation_state(journal.load(path), old_key) == journal.STATE_FAILED
+    another_key = "another-old-failed-attempt"
+    journal.record_intent(path, another_key, "another-token", generation=2, rail=rail)
+    data = journal.load(path)
+    data["obligations"][another_key].update(
+        state="done", outcome_status="failed",
+        outcome_at=time.time(),
+    )
+    journal._write(path, data)
+    assert journal.wise_replay_hold(journal.load(path), "profile-q") is None
+
+    world.handler = wise.WiseTransferHandler(PaymentProfile(
+        prefix="OTHER", label="Other", payment_type="wise", calendar_keywords=["yoga"],
+        amount_eur=10, entity_id="profile-q", wise_recipient_id=5,
+        wise_recipient_name="Synthetic",
+    ))
+    monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", route)
+    monkeypatch.setattr(monedula, "_reconcile_wise_entries", lambda *a: True)
+    monkeypatch.setattr(wise, "_wise_get", lambda *a, **kw: pytest.fail("Wise API read"))
+    monkeypatch.setattr(wise, "_wise_post", lambda *a, **kw: pytest.fail("Wise API write"))
+    messages = []
+    previews = []
+    monkeypatch.setattr(monedula, "_notify", lambda message, **kw: messages.append(message))
+    monkeypatch.setattr(monedula, "telegram_send", lambda message: previews.append(message))
+    monkeypatch.setattr(monedula, "telegram_poll_approval",
+                        lambda **kw: SimpleNamespace(kind="reply", text="no"))
+    world.tick()
+    assert not any(key in message for key in (old_key, another_key) for message in messages)
+    if route == "payment_approval":
+        assert approvals.writes == 1
+    elif route == "email":
+        assert len(world.sends) == 1
+    else:
+        assert any("Monedula" in preview for preview in previews)
+
+
+@pytest.mark.parametrize("status", ["failed"])
+def test_legacy_terminal_failure_never_reoffers_own_obligation(approval_env, monkeypatch, status):
+    import consent_email
+    import monedula
+    import payment_approval
+    from handlers.payment_profile import PaymentProfile
+
+    world, approvals = approval_env
+    world.handler = wise.WiseTransferHandler(PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", payment_type="wise",
+        calendar_keywords=["yoga"], amount_eur=10, entity_id="profile-p",
+        wise_recipient_id=5, wise_recipient_name="Synthetic",
+    ))
+    event = world.calendars["primary"][0]
+    item = consent_email.build_pending_items(
+        [(world.handler, world.handler.matches([event]))], "2026-11-18"
+    )[0]
+    path = consent_email.journal_path()
+    journal.record_intent(path, item.obligation, "old-token", generation=1)
+    data = journal.load(path)
+    data["obligations"][item.obligation].update(
+        state="done", outcome_status=status, outcome_at=time.time()
+    )
+    journal._write(path, data)
+    assert journal.obligation_state(journal.load(path), item.obligation) == journal.STATE_FAILED
+    assert consent_email.journal_state_for_item(journal.load(path), item) == journal.STATE_INTENT
+    monkeypatch.setattr(monedula, "_reconcile_wise_entries", lambda *a: True)
+    monkeypatch.setattr(payment_approval, "collect", lambda *a, **kw:
+                        pytest.fail("old obligation offered again"))
+    world.tick()
+    assert approvals.writes == 0 and world.sends == []
 
 
 def test_many_legacy_sent_rows_never_hold_later_wise_offers(approval_env, monkeypatch):
@@ -2235,6 +2319,64 @@ def test_legacy_wise_done_sent_without_status_history_never_holds(tmp_path):
     assert journal.is_legacy_settled_wise_row(journal.load(path)["obligations"]["old-paid"])
     assert journal.obligation_state(journal.load(path), "old-paid") == journal.STATE_DONE
     assert journal.wise_replay_hold(journal.load(path), "profile-p") is None
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda row: row.update(extra=True),
+    lambda row: row.update(outcome_status="unreported"),
+    lambda row: row.pop("outcome_at"),
+    lambda row: row.update(outcome_at="not-an-epoch"),
+    lambda row: row.update(outcome_status=0),
+    lambda row: row.pop("token"),
+])
+def test_corrupt_legacy_terminal_failure_holds_every_profile(tmp_path, mutation):
+    path = tmp_path / journal.JOURNAL_NAME
+    journal.init_journal(path)
+    journal.record_intent(path, "old-failed", "old-token", generation=1)
+    data = journal.load(path)
+    row = data["obligations"]["old-failed"]
+    row.update(state="done", outcome_status="failed", outcome_at=time.time())
+    mutation(row)
+    journal._write(path, data)
+    assert journal.classify_journal_row(row, data)[0] == "invalid"
+    assert journal.wise_replay_hold(data, "unrelated-profile")[0] == "old-failed"
+
+
+def test_real_shape_terminal_failures_allow_many_new_wise_offers(tmp_path, capsys):
+    import wise_journal_hold_census as census
+
+    path = tmp_path / journal.JOURNAL_NAME
+    journal.init_journal(path)
+    for index, status in enumerate(("sent", "sent", "failed", "failed")):
+        key = f"old-{index}"
+        journal.record_intent(path, key, f"old-token-{index}", generation=index + 1)
+        data = journal.load(path)
+        data["obligations"][key].update(
+            state="done", outcome_status=status, outcome_at=time.time()
+        )
+        journal._write(path, data)
+    data = journal.load(path)
+    for index in range(3):
+        assert journal.wise_replay_hold(data, f"new-profile-{index}") is None
+    assert census.main(["census", str(path)]) == 0
+    output = capsys.readouterr().out
+    assert "legacy_settled_sent: 2" in output
+    assert "old failed row: holds only its own obligation: 2" in output
+    assert "rows that would hold ALL Wise obligations: 0" in output
+    assert "RESULT: no new Wise obligation would be blocked" in output
+
+
+def test_census_legacy_intent_still_blocks_all_profiles(tmp_path, capsys):
+    import wise_journal_hold_census as census
+
+    path = tmp_path / journal.JOURNAL_NAME
+    journal.init_journal(path)
+    journal.record_intent(path, "old-unknown", "old-token", generation=1)
+    assert census.main(["census", str(path)]) == 0
+    output = capsys.readouterr().out
+    assert "unclassified_UNRESOLVED_all_profiles: 1" in output
+    assert "rows that would hold ALL Wise obligations: 1" in output
+    assert "RESULT: some Wise obligations would be blocked" in output
 
 
 @pytest.mark.parametrize("missing_field", sorted(journal._MODERN_SETTLED_WISE_FIELDS))
@@ -2381,8 +2523,8 @@ def test_census_reports_valid_journal_without_writing(attempt, capsys):
     assert attempt.read_bytes() == before
 
 
-@pytest.mark.parametrize("shape", ["legacy", "unknown_rail", "stripped_modern"])
-def test_reconciliation_skips_only_exact_legacy_paid_row(tmp_path, monkeypatch, shape):
+@pytest.mark.parametrize("shape", ["legacy", "legacy_failed", "unknown_rail", "stripped_modern"])
+def test_reconciliation_skips_only_exact_legacy_terminal_rows(tmp_path, monkeypatch, shape):
     import consent_email
     import monedula
 
@@ -2401,6 +2543,10 @@ def test_reconciliation_skips_only_exact_legacy_paid_row(tmp_path, monkeypatch, 
     else:
         journal.record_intent(path, "held-key", "token", generation=1)
         journal.record_outcome(path, "held-key", "sent")
+        if shape == "legacy_failed":
+            data = journal.load(path)
+            data["obligations"]["held-key"]["outcome_status"] = "failed"
+            journal._write(path, data)
         if shape == "unknown_rail":
             data = journal.load(path)
             data["obligations"]["held-key"]["rail"] = "unexpected"
@@ -2411,8 +2557,8 @@ def test_reconciliation_skips_only_exact_legacy_paid_row(tmp_path, monkeypatch, 
     messages = []
     monkeypatch.setattr(monedula, "_notify", lambda message, **kw: messages.append(message))
     result = monedula._reconcile_wise_entries([])
-    assert result is (shape == "legacy")
-    if shape != "legacy":
+    assert result is (shape in {"legacy", "legacy_failed"})
+    if shape not in {"legacy", "legacy_failed"}:
         assert any("held-key" in message for message in messages)
 
 
@@ -2762,3 +2908,100 @@ def test_wise_hold_has_one_decider_and_all_offer_paths_reach_it():
     assert calls(functions["journal_state_for_item"], "journal_entry_for_item")
     for name in ("request_and_collect", "_apply_session_journal", "main"):
         assert calls(functions[name], "journal_state_for_item"), name
+
+
+@pytest.mark.parametrize("rail", [None, "btc"])
+def test_legacy_manual_required_still_holds_every_profile(tmp_path, rail):
+    # done/manual_required came from an exception that can follow the funding call: money may have moved.
+    path = tmp_path / journal.JOURNAL_NAME
+    journal.init_journal(path)
+    journal.record_intent(path, "old-manual", "token", generation=1, rail=rail)
+    data = journal.load(path)
+    data["obligations"]["old-manual"].update(state="done", outcome_status="manual_required", outcome_at=time.time())
+    journal._write(path, data)
+    data = journal.load(path)
+    assert journal.classify_journal_row(data["obligations"]["old-manual"], data)[0] == "invalid"
+    assert journal.wise_replay_hold(data, "profile-any") is not None
+
+
+@pytest.mark.parametrize("status", ["failed", "manual_required"])
+def test_old_key_terminal_row_holds_its_own_session_instead_of_offering_it_again(
+    approval_env, monkeypatch, status
+):
+    """A row written before the Wise key changed sits under the OLD key. The current key finds nothing, so without the
+    cutover hold the same session would be offered for payment again (a possible double payment)."""
+    import consent_email
+    import monedula
+    import payment_approval
+    from handlers.payment_profile import PaymentProfile
+
+    world, approvals = approval_env
+    world.handler = wise.WiseTransferHandler(PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", payment_type="wise",
+        calendar_keywords=["yoga"], amount_eur=10, entity_id="profile-p",
+        wise_recipient_id=5, wise_recipient_name="Synthetic",
+    ))
+    event = world.calendars["primary"][0]
+    item = consent_email.build_pending_items(
+        [(world.handler, world.handler.matches([event]))], "2026-11-18"
+    )[0]
+    # the pre-session-window code keyed a single match on the run date and an EMPTY match id
+    old_key = consent_email._base_obligation_key(world.handler, monedula._yesterday().isoformat(), "")
+    assert old_key != item.obligation  # the current Wise key no longer equals the old one
+    path = consent_email.journal_path()
+    journal.record_intent(path, old_key, "old-token", generation=1)
+    data = journal.load(path)
+    data["obligations"][old_key].update(state="done", outcome_status=status, outcome_at=time.time())
+    journal._write(path, data)
+    monkeypatch.setattr(monedula, "_reconcile_wise_entries", lambda *a: True)
+    messages = []
+    monkeypatch.setattr(monedula, "_notify", lambda message, **kw: messages.append(message))
+    monkeypatch.setattr(payment_approval, "collect", lambda *a, **kw:
+                        pytest.fail("the old-key session was offered again"))
+    world.tick()
+    assert approvals.writes == 0 and world.sends == []
+
+
+def test_census_reports_manual_required_as_holding_all_profiles(tmp_path, capsys):
+    import wise_journal_hold_census as census
+
+    path = tmp_path / journal.JOURNAL_NAME
+    journal.init_journal(path)
+    journal.record_intent(path, "old-manual", "old-token", generation=1)
+    data = journal.load(path)
+    data["obligations"]["old-manual"].update(state="done", outcome_status="manual_required", outcome_at=time.time())
+    journal._write(path, data)
+    assert census.main(["census", str(path)]) == 0
+    output = capsys.readouterr().out
+    assert "unclassified_UNRESOLVED_all_profiles: 1" in output
+    assert "rows that would hold ALL Wise obligations: 1" in output
+    assert "old failed row" not in output
+
+
+def test_old_key_hold_alert_is_deduplicated_across_ticks(approval_env, monkeypatch):
+    """The cutover hold never settles the session, so it recurs every tick: its alert must carry a dedupe key."""
+    import consent_email
+    import monedula
+    import payment_approval
+    from handlers.payment_profile import PaymentProfile
+
+    world, approvals = approval_env
+    world.handler = wise.WiseTransferHandler(PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", payment_type="wise",
+        calendar_keywords=["yoga"], amount_eur=10, entity_id="profile-p",
+        wise_recipient_id=5, wise_recipient_name="Synthetic",
+    ))
+    old_key = consent_email._base_obligation_key(world.handler, monedula._yesterday().isoformat(), "")
+    path = consent_email.journal_path()
+    journal.record_intent(path, old_key, "old-token", generation=1)
+    data = journal.load(path)
+    data["obligations"][old_key].update(state="done", outcome_status="failed", outcome_at=time.time())
+    journal._write(path, data)
+    monkeypatch.setattr(monedula, "_reconcile_wise_entries", lambda *a: True)
+    monkeypatch.setattr(payment_approval, "collect", lambda *a, **kw: pytest.fail("offered again"))
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda message, **kw: alerts.append((message, kw)))
+    world.tick()
+    world.tick()
+    holds = [kw for message, kw in alerts if "payment held by Wise attempt" in message]
+    assert holds and all(kw.get("dedupe_key") == f"monedula:wise_hold:{old_key}" for kw in holds)

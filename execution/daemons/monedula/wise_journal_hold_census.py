@@ -24,6 +24,8 @@ def classify(row: object, data: dict) -> str:
         return "btc"
     if kind == "legacy_settled":
         return "legacy_settled_sent"
+    if kind == "legacy_failed_terminal":
+        return "old failed row: holds only its own obligation"
     if kind == "wise_modern_resolved":
         return "wise_new_resolved_paid"
     if isinstance(row, dict) and row.get("rail") == "wise" and isinstance(row.get("profile_entity_id"), str) and row["profile_entity_id"].strip():
