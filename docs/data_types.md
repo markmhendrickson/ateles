@@ -211,3 +211,23 @@ Periodic self-evaluation by a strategic agent against its `agent_strategy`. Fiel
 **Schema ID**: `8f10fe72-2924-422c-b2ee-d537d9952576` · **v1.0**
 
 Recurring payment configuration used by Monedula. Contains IBANs and transfer amounts — never commit this schema's entity data to plaintext files.
+Optional `calendar_recurring_event_id` narrows calendar matching to that exact
+series (`recurringEventId` on an occurrence, or `id` on a parent with no
+`recurringEventId`) while still requiring a title keyword. An id must be a
+nonempty string of at most 1024 characters measured before any transformation,
+with no control characters or surrounding whitespace. `null` and `""` mean
+unset; any other invalid configured value strands the profile with
+`invalid_calendar_series_id`, and a stranded profile is held. Env-var profiles
+are used only when no Neotoma base URL is configured (an env-only install); with
+a Neotoma source configured they are never used, whatever the read returns, and
+a failed or rejected read is reported as a stranding. A present but null, blank or invalid
+`recurringEventId` never matches, even when `id` equals the series id. Event
+ids obey the same bounds and compare by
+exact string equality. Without a configured id, keyword-only matching remains.
+Payment and session keys remain event-id based. A series session shown on two
+calendars raises one approval per copy, as before this change; deduplicating
+copies needs a separate design for moved occurrences, unconfirmed transfers,
+and approvals recorded under old keys. A rejected key stays rejected.
+Keyword-matching events outside the configured series raise no approval;
+Monedula sends one operator-visible WARN notice per profile and calendar date
+with the count and date. If one should be paid, check the profile's series id.

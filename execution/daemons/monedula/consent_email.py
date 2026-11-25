@@ -46,6 +46,7 @@ from lib.approval.email_channel import (
 from lib.approval.tokens import subject_marker, token_for
 
 import payment_journal
+from handler_base import event_matches_profile
 from wise_hold_message import hold_text
 
 log = logging.getLogger(__name__)
@@ -401,6 +402,13 @@ def build_pending_items(
     for handler, matches in triggered:
         label, amount, is_calendar = _profile_fields(handler)
         match_list = matches or [None]
+        profile = getattr(handler, "profile", None)
+        if getattr(profile, "calendar_recurring_event_id", ""):
+            match_list = [
+                m for m in match_list
+                if isinstance(m, dict) and isinstance(m.get("event"), dict)
+                and event_matches_profile(profile, m["event"])
+            ]
         multi = len(match_list) > 1
         for idx, match in enumerate(match_list):
             # A real calendar event id always identifies the session, so the

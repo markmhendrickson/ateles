@@ -335,6 +335,38 @@ def _clear_notify_dedupe(dedupe_key: str) -> None:
         pass
 
 
+def _notify_series_mismatches(handler: Any, events: list[dict], fallback_date: str) -> None:
+    """Report keyword hits outside a configured series once per profile/day."""
+    from consent_email import event_session_date
+    from handler_base import event_matches_profile, title_matches_profile
+
+    profile = getattr(handler, "profile", None)
+    series_id = getattr(profile, "calendar_recurring_event_id", "")
+    if not series_id:
+        return
+    counts: dict[str, int] = {}
+    for event in events:
+        if title_matches_profile(profile, event) and not event_matches_profile(profile, event):
+            event_date = (
+                event_session_date({"event": event})
+                or event_session_date({"event": {"start": event.get("end")}})
+                or fallback_date
+            )
+            counts[event_date] = counts.get(event_date, 0) + 1
+    profile_key = hashlib.sha256(
+        f"{handler.name}|{series_id}".encode()
+    ).hexdigest()[:16]
+    for event_date, count in counts.items():
+        _notify(
+            f"monedula: no payment approval was raised for {count} event(s) "
+            f"on {event_date} whose title matches {profile.label} but are not in "
+            "its configured calendar series; if one should be paid, check "
+            "the profile's series id.",
+            priority="warn",
+            dedupe_key=f"monedula:series_mismatch:{profile_key}:{event_date}",
+        )
+
+
 # Stable dedupe key for the consent-channel-timeout alert (ateles#1127). Must
 # NOT vary per tick — no timestamp, no streak count, no pending-handler list —
 # or it defeats the dedupe the same way a changing message would. Scoped to
@@ -2187,8 +2219,9 @@ def main() -> bool:
     yesterday = _yesterday()
     yesterday_str = yesterday.isoformat()
 
-    # Load handlers from env-var-defined payment profiles.
-    # Set MONEDULA_PROFILES=THERAPY,YOGA (and corresponding profile env vars).
+    # Load handlers from the payment profile source: Neotoma payment_profile entities when a
+    # Neotoma base URL is configured, otherwise the process-settings profiles
+    # (MONEDULA_PROFILES=THERAPY,YOGA and their per-profile settings).
     from handlers import load_handlers
 
     # Collect every ACTIVE profile the loader could not act on. Each of these
@@ -2301,6 +2334,7 @@ def main() -> bool:
     # Find triggered handlers from calendar
     triggered: list[tuple] = []  # [(handler, [match, ...]), ...]
     for handler in all_handlers:
+        _notify_series_mismatches(handler, events, yesterday_str)
         matches = handler.matches(events)
         if matches:
             triggered.append((handler, matches))

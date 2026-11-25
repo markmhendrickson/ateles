@@ -120,6 +120,33 @@ ruling 2026-11-12). The default and only automatic channel is `payment_approval`
 - **Calendars:** every calendar the account can read is scanned, including shared
   calendars others can write to. Events on them can raise approval requests;
   nothing is paid without the operator's per-payment answer.
+- **Series matching:** a profile with `calendar_recurring_event_id` matches only
+  occurrences whose `recurringEventId` equals that value, or the series parent
+  whose own `id` equals it and has no `recurringEventId`, and whose title
+  contains a configured keyword. Configured and event ids must be exact
+  nonempty strings of at most 1024 raw characters, without control characters
+  or surrounding whitespace. `null` and `""` mean unset; other invalid
+  configured values strand the profile with `invalid_calendar_series_id`,
+  and a stranded profile is held. Env-var profiles are used only when no
+  Neotoma base URL is configured (an env-only install); with a Neotoma source
+  configured they are never used, whatever the read returns (a failure, a
+  rejected response, no profile or only paused ones), because an env-var
+  profile carries no series binding. A failed or rejected read is reported
+  as a stranding.
+  A `recurringEventId` that is present on an event but null, blank or invalid
+  never matches, even when the event's own `id` equals the series id.
+  Comparison is exact, without case folding or Unicode normalization. A
+  profile without the field keeps keyword-only matching. Payment and session
+  keys remain event-id based; a rejected key stays rejected on later ticks.
+  A series session shown on two calendars raises one approval per copy, as
+  before this change. Deduplicating copies needs a separate design for moved
+  occurrences, unconfirmed transfers, and approvals recorded under old keys.
+- **Series mismatch notice:** if a series-bound profile sees a keyword-matching
+  event outside its configured series, Monedula sends one WARN notice per
+  profile and calendar date through the existing notifier. The notice gives
+  the count and date without event titles or identifiers. No payment approval
+  is raised for those events. If one should be paid, check the profile's
+  configured series id before the next tick.
 - **Cutover:** a session already paid under the pre-window obligation key is
   recognised by that legacy key and marked settled, never raised again.
 

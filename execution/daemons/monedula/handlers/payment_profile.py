@@ -7,6 +7,7 @@ No business-specific values are hardcoded here.
 Each profile is identified by a PREFIX (e.g. "THERAPY", "YOGA") and reads:
   <PREFIX>_LABEL          Human-readable label for Telegram messages
   <PREFIX>_CALENDAR_KEYWORDS  Comma-separated keywords to match against calendar event titles
+  <PREFIX>_CALENDAR_RECURRING_EVENT_ID  Optional exact calendar series id
   <PREFIX>_PAYMENT_TYPE   "wise" | "btc"
   <PREFIX>_CONTACT_ID     (wise only) Neotoma contact_id prefix for IBAN lookup
   <PREFIX>_CONTACT_CATEGORY  (wise only) Fallback category for contact lookup
@@ -43,10 +44,17 @@ operator's private .env, never in this public file):
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
+
+try:
+    from ..handler_base import valid_configured_series_id
+except ImportError:
+    from handler_base import valid_configured_series_id
 
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
 # User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
@@ -65,6 +73,7 @@ class PaymentProfile:
     calendar_keywords: list[str]  # event title match keywords
     payment_type: Literal["wise", "btc"]
     amount_eur: int
+    calendar_recurring_event_id: str = ""  # optional exact calendar series id
 
     # Wise-specific
     contact_id: str = ""  # Neotoma contact_id prefix for IBAN lookup
@@ -128,6 +137,79 @@ def parse_wise_recipient_id(raw: Any) -> int | None:
     return raw
 
 
+def parse_amount_eur(raw: Any) -> int:
+    """Normalise a stored ``amount_eur`` to a whole number of euros.
+
+    Accepts an int, an integral float, or a string of plain digits. A boolean, a fractional or
+    non-finite number, a string that is not plain digits, and anything else raises ``ValueError``
+    or ``TypeError``: an amount must never be coerced (a boolean would read as 1 and a fraction
+    would be truncated).
+    """
+    if isinstance(raw, bool):
+        raise TypeError("amount_eur must be a number, not a boolean")
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        if raw != raw or raw in (float("inf"), float("-inf")) or not raw.is_integer():
+            raise ValueError("amount_eur must be a whole number")
+        return int(raw)
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not re.fullmatch(r"[+-]?[0-9]+", text):
+            raise ValueError("amount_eur must be plain digits")
+        return int(text)
+    raise TypeError("amount_eur must be a number")
+
+
+def _bool_field(snap: dict, name: str) -> bool:
+    """A stored boolean: missing or null reads as False, a real boolean is kept, and the exact
+    text "true" or "false" (any case) maps to its meaning. Anything else (any other text such as
+    "yes" or "0", a number, a list, a mapping) is malformed and raises TypeError: a truthiness
+    coercion would read the text "false" as True."""
+    value = snap.get(name)
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+        return value.strip().lower() == "true"
+    raise TypeError(f"{name} must be a boolean")
+
+
+def _text_field(snap: dict, name: str) -> str:
+    """A stored text field: missing or null reads as empty text; anything that is not text (a
+    mapping, a list, a number, a boolean) is malformed and raises TypeError so the caller holds
+    that one profile instead of passing the value through."""
+    value = snap.get(name, "")
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be text")
+    return value
+
+
+def _keyword_list(raw: Any) -> list[str]:
+    """Parse a stored keyword collection: a list of text, a JSON list, or a comma-separated string.
+
+    Anything else (a mapping, a number, a boolean, a null, a JSON object or scalar, a list that
+    holds non-text) is malformed and raises TypeError, so the caller holds that one profile with
+    a malformed-profile stranding instead of coercing the value (iterating a mapping would
+    silently load its keys as keywords).
+    """
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            raw = [k.strip() for k in raw.split(",") if k.strip()]
+    if not isinstance(raw, (list, tuple)):
+        raise TypeError("keywords must be a list of text")
+    if not all(isinstance(k, str) for k in raw):
+        # every entry must be text, including falsy ones (None, 0, False) that a truthiness
+        # filter would drop silently; only empty text entries are ignored
+        raise TypeError("keywords must be text")
+    return [k.strip().lower() for k in raw if k.strip()]
+
+
 def load_profiles_from_neotoma(
     strandings: list | None = None,
 ) -> list[PaymentProfile]:
@@ -137,8 +219,8 @@ def load_profiles_from_neotoma(
     Queries Neotoma for active payment_profile entities belonging to this
     operator, constructs PaymentProfile objects from snapshot fields.
 
-    Falls back to empty list on any error — caller should then call
-    load_profiles() to use env-var fallback.
+    Returns an empty list on any error. ``load_profiles_with_neotoma_fallback`` decides
+    whether env-var profiles may be used: only when no Neotoma base URL is configured.
 
     ``strandings``, when supplied, is appended to with one ``Stranding`` per
     ACTIVE profile that was rejected, and one for a failed fetch. Every
@@ -148,7 +230,7 @@ def load_profiles_from_neotoma(
     (ateles#553). The caller escalates whatever lands in this list.
 
     Passing ``None`` keeps the historical warn-and-continue behaviour, which
-    is what the env-var fallback path and older callers expect.
+    older callers expect.
 
     Required env vars:
       NEOTOMA_BEARER_TOKEN   Neotoma API auth token
@@ -163,9 +245,11 @@ def load_profiles_from_neotoma(
         REASON_BAD_LEGAL_TYPE,
         REASON_BAD_PAYMENT_TYPE,
         REASON_BAD_RECIPIENT_ID,
+        REASON_BAD_CALENDAR_SERIES_ID,
         NEOTOMA_TIMEOUT_SEC,
         REASON_FETCH_FAILED,
         REASON_FETCH_REJECTED,
+        REASON_MALFORMED_PROFILE,
         REASON_MISSING_LABEL,
         REASON_UNREACHABLE,
         Stranding,
@@ -288,20 +372,66 @@ def load_profiles_from_neotoma(
         )
         return []
 
-    items: list[dict] = []
+    # A successful response must carry an explicit profile collection (possibly empty). A body
+    # without one (an error object, an unexpected shape) is reported as a rejected read so the
+    # caller escalates it; it is never read as "no profiles configured".
+    items: list[dict] | None = None
     if isinstance(data, list):
         items = data
     elif isinstance(data, dict):
-        items = data.get("entities") or data.get("items") or data.get("results") or []
+        # Exactly ONE recognised collection key may be present, and it must be a list: a
+        # malformed value under one key, or two recognised keys that could disagree, is a
+        # rejected read, never a pick of whichever key happens to look valid.
+        present = [key for key in ("entities", "items", "results") if key in data]
+        if len(present) == 1 and isinstance(data[present[0]], list):
+            items = data[present[0]]
+    if (
+        items is None
+        or not all(isinstance(entry, dict) for entry in items)
+        # a truthy non-object snapshot is a malformed record: reject the whole read
+        or not all(isinstance(entry.get("snapshot") or {}, dict) for entry in items)
+    ):
+        log.error("Neotoma payment_profile fetch returned no valid profile collection")
+        _strand(
+            "",
+            "(all profiles)",
+            REASON_FETCH_REJECTED,
+            "Neotoma answered the payment profile fetch without a valid profile "
+            "collection. Check the Neotoma host and any proxy in front of it.",
+        )
+        return []
+
+    if not items:
+        # An empty collection from a configured source cannot be told from a failed read (a 2xx
+        # body can dress either one in any metadata), so it is reported as a rejected read: the
+        # caller then neither claims the day nor clears pending consent.
+        log.warning("Neotoma returned an empty payment profile collection")
+        _strand(
+            "",
+            "(all profiles)",
+            REASON_FETCH_REJECTED,
+            "Neotoma returned no payment profile. An empty answer cannot be told from a "
+            "failed one, so no profiles were loaded this run. Check the Neotoma host and "
+            "that the payment profiles exist.",
+        )
+        return []
 
     profiles: list[PaymentProfile] = []
-    for item in items:
+
+    def _parse_item(item: dict) -> None:
         snap: dict = item.get("snapshot") or {}
-        if snap.get("status", "active") not in ("active",):
-            continue  # skip paused/archived
+        status = snap.get("status", "active")
+        if not isinstance(status, str):
+            # an ABSENT status means active (the legacy default); an explicit null or any other
+            # non-text value is malformed and reported, never silently skipped
+            raise TypeError("status must be text")
+        if status not in ("active",):
+            return  # skip paused/archived
 
         label = snap.get("label", "")
         prefix = snap.get("prefix", label.upper().replace(" ", "_"))
+        if (label and not isinstance(label, str)) or not isinstance(prefix, str):
+            raise TypeError("label and prefix must be text")
         if not label:
             log.warning(
                 f"payment_profile entity {item.get('entity_id')} missing label — skipped"
@@ -313,18 +443,20 @@ def load_profiles_from_neotoma(
                 "Active payment_profile has no label, so it cannot be identified "
                 "to the operator or matched to a handler.",
             )
-            continue
+            return
 
-        keywords_raw: list | str = snap.get("calendar_keywords", [])
-        if isinstance(keywords_raw, str):
-            try:
-                keywords_raw = json.loads(keywords_raw)
-            except (ValueError, TypeError):
-                keywords_raw = [k.strip() for k in keywords_raw.split(",") if k.strip()]
-        calendar_keywords = [str(k).strip().lower() for k in keywords_raw if k]
+        calendar_keywords = _keyword_list(snap.get("calendar_keywords", []))
+        recurring_id = snap.get("calendar_recurring_event_id")
+        if not valid_configured_series_id(recurring_id):
+            log.warning("payment_profile has malformed calendar series id — skipped")
+            _strand(
+                item.get("entity_id"), label, REASON_BAD_CALENDAR_SERIES_ID,
+                "Calendar series id is invalid; this profile was held. Check its type, length and control characters.",
+            )
+            return
 
-        due_date = str(snap.get("due_date") or "").strip()
-        one_off = bool(snap.get("one_off")) or (not calendar_keywords and bool(due_date))
+        due_date = _text_field(snap, "due_date").strip()
+        one_off = _bool_field(snap, "one_off") or (not calendar_keywords and bool(due_date))
 
         # A profile needs at least one trigger: calendar keywords (recurring,
         # attendance-gated) or a due date (one-off invoice). With neither it is
@@ -342,9 +474,12 @@ def load_profiles_from_neotoma(
                 "attendance-gated trigger) nor due_date (the one-off trigger), so "
                 "matches() can never fire for it. Set one of the two.",
             )
-            continue
+            return
 
-        payment_type_raw = str(snap.get("payment_type", "wise")).lower()
+        payment_type_stored = snap.get("payment_type", "wise")
+        if not isinstance(payment_type_stored, str):
+            raise TypeError("payment_type must be text")
+        payment_type_raw = payment_type_stored.lower()
         if payment_type_raw not in ("wise", "btc"):
             log.warning(
                 f"payment_profile {label!r} unknown payment_type={payment_type_raw!r} — skipped"
@@ -356,13 +491,13 @@ def load_profiles_from_neotoma(
                 f"payment_type={payment_type_raw!r} is not a rail Monedula can "
                 f"execute (expected 'wise' or 'btc').",
             )
-            continue
+            return
         payment_type: Literal["wise", "btc"] = payment_type_raw  # type: ignore[assignment]
 
         amount_raw = snap.get("amount_eur", 0)
         try:
-            amount_eur = int(amount_raw)
-        except (ValueError, TypeError):
+            amount_eur = parse_amount_eur(amount_raw)
+        except (ValueError, TypeError, OverflowError):
             log.warning(
                 f"payment_profile {label!r} invalid amount_eur={amount_raw!r} — skipped"
             )
@@ -373,7 +508,7 @@ def load_profiles_from_neotoma(
                 "amount_eur is not a whole number of euros, so no transfer can "
                 "be constructed from this profile.",
             )
-            continue
+            return
 
         if amount_eur <= 0:
             log.warning(
@@ -386,19 +521,11 @@ def load_profiles_from_neotoma(
                 "amount_eur must be positive; the profile is active but "
                 "describes no payable amount.",
             )
-            continue
+            return
 
-        task_kw_raw: list | str = snap.get("task_keywords", [])
-        if isinstance(task_kw_raw, str):
-            try:
-                task_kw_raw = json.loads(task_kw_raw)
-            except (ValueError, TypeError):
-                task_kw_raw = [k.strip() for k in task_kw_raw.split(",") if k.strip()]
-        task_keywords = [
-            str(k).strip().lower() for k in task_kw_raw if k
-        ] or calendar_keywords
+        task_keywords = _keyword_list(snap.get("task_keywords", [])) or calendar_keywords
 
-        legal_type_raw = str(snap.get("wise_legal_type") or "PRIVATE").strip().upper()
+        legal_type_raw = _text_field(snap, "wise_legal_type").strip().upper() or "PRIVATE"
         if legal_type_raw not in _WISE_LEGAL_TYPES:
             log.warning(
                 f"payment_profile {label!r} invalid wise_legal_type="
@@ -412,7 +539,7 @@ def load_profiles_from_neotoma(
                 f"wise_legal_type={legal_type_raw!r} is not accepted by Wise "
                 f"(expected one of {sorted(_WISE_LEGAL_TYPES)}).",
             )
-            continue
+            return
 
         try:
             recipient_id = parse_wise_recipient_id(snap.get("wise_recipient_id"))
@@ -424,31 +551,55 @@ def load_profiles_from_neotoma(
                 REASON_BAD_RECIPIENT_ID,
                 f"{exc}. Payments for this profile are held until it is fixed.",
             )
-            continue
+            return
 
-        profiles.append(
+        profile = (
             PaymentProfile(
                 prefix=prefix,
                 label=label,
                 calendar_keywords=calendar_keywords,
+                calendar_recurring_event_id=recurring_id or "",
                 payment_type=payment_type,
                 amount_eur=amount_eur,
-                contact_id=snap.get("contact_id", ""),
-                contact_category=snap.get("contact_category", ""),
-                contact_platform=snap.get("contact_platform", ""),
-                wise_reference=snap.get("wise_reference", ""),
+                contact_id=_text_field(snap, "contact_id"),
+                contact_category=_text_field(snap, "contact_category"),
+                contact_platform=_text_field(snap, "contact_platform"),
+                wise_reference=_text_field(snap, "wise_reference"),
                 wise_legal_type=legal_type_raw,
-                wise_iban=str(snap.get("wise_iban") or "").strip(),
-                wise_recipient_name=str(snap.get("wise_recipient_name") or "").strip(),
+                wise_iban=_text_field(snap, "wise_iban").strip(),
+                wise_recipient_name=_text_field(snap, "wise_recipient_name").strip(),
                 wise_recipient_id=recipient_id,
-                btc_address=snap.get("btc_address", ""),
+                btc_address=_text_field(snap, "btc_address"),
                 due_date=due_date,
                 one_off=one_off,
-                entity_id=str(item.get("entity_id") or "").strip(),
-                neotoma_task_id=snap.get("neotoma_task_id", ""),
+                entity_id=_text_field(item, "entity_id").strip(),
+                neotoma_task_id=_text_field(snap, "neotoma_task_id"),
                 task_keywords=task_keywords,
             )
         )
+        # derived properties must work before the profile is accepted, so a malformed field can
+        # never escape later (for example the profile's name)
+        profile.name
+        profiles.append(profile)
+
+    for item in items:
+        try:
+            _parse_item(item)
+        except Exception as exc:  # noqa: BLE001 - one malformed entry must never abort the read
+            # A malformed field must hold that one profile and be reported, never raise out of the
+            # whole read.
+            log.error(
+                f"payment_profile {str(item.get('entity_id'))[:60]} could not be read "
+                f"({type(exc).__name__}) — skipped"
+            )
+            safe_id = item.get("entity_id") if isinstance(item.get("entity_id"), str) else ""
+            _strand(
+                safe_id,
+                f"(unreadable {safe_id})",
+                REASON_MALFORMED_PROFILE,
+                "An active payment_profile has a malformed field and could not be read; it is "
+                "held until it is fixed.",
+            )
 
     log.info(
         f"Loaded {len(profiles)} payment profile(s) from Neotoma: "
@@ -461,26 +612,46 @@ def load_profiles_with_neotoma_fallback(
     strandings: list | None = None,
 ) -> list[PaymentProfile]:
     """
-    Load PaymentProfiles: try Neotoma first, fall back to env vars.
+    Load PaymentProfiles from the configured source: Neotoma, or env vars only when no Neotoma
+    base URL is configured.
 
     Phase 5 entrypoint. Monedula callers should use this instead of
     load_profiles() to transparently prefer Neotoma-sourced profiles.
 
+    When a Neotoma base URL IS configured, env-var profiles are NEVER used, whatever the read
+    returned (a failure, a rejected or malformed response, no profile, or only paused ones).
+    An env-var profile carries no calendar series binding, so it would resume title-only
+    matching for a payment whose configured profile requires a series, or resurrect a paused
+    payment. A failed read is reported as a stranding for the caller to escalate.
+
     ``strandings`` is forwarded to the Neotoma loader; see its docstring.
     """
+    if not os.environ.get("NEOTOMA_BASE_URL", "").strip():
+        # An env-only install: env-var profiles are the only source.
+        log.info("No Neotoma source configured — using env-var payment profiles")
+        return load_profiles(strandings)
+
+    collected: list = []
     try:
-        profiles = load_profiles_from_neotoma(strandings)
+        profiles = load_profiles_from_neotoma(collected)
     except RuntimeError as exc:
-        # Neotoma is unconfigured, not unreachable. That is loud in the log but
-        # recoverable here, because env-var profiles are a real second source —
-        # so fall through rather than taking the whole run down.
         log.error(f"Neotoma payment profiles unavailable: {exc}")
         profiles = []
-    if profiles:
-        return profiles
+        from strandings import REASON_FETCH_FAILED, Stranding
 
-    log.info("No Neotoma payment profiles found — falling back to env vars")
-    return load_profiles(strandings)
+        collected.append(Stranding(
+            entity_id="", label="(all profiles)", reason=REASON_FETCH_FAILED,
+            detail="The configured Neotoma source failed during the payment profile "
+                   "read; no profiles were loaded this run, so none can be proposed.",
+        ))
+    if strandings is not None:
+        strandings.extend(collected)
+    if not profiles:
+        log.warning(
+            "Neotoma is configured but yielded no usable payment profile; "
+            "env-var profiles are not used when a Neotoma source is configured"
+        )
+    return profiles
 
 
 def load_profiles(strandings: list | None = None) -> list[PaymentProfile]:
@@ -530,6 +701,18 @@ def _load_profile(
         log.warning(f"[{prefix}] {prefix}_CALENDAR_KEYWORDS not set — profile skipped")
         return None
 
+    recurring_id = os.environ.get(f"{prefix}_CALENDAR_RECURRING_EVENT_ID", "")
+    if not valid_configured_series_id(recurring_id):
+        log.warning(f"[{prefix}] Invalid calendar series id — profile skipped")
+        if strandings is not None:
+            from strandings import REASON_BAD_CALENDAR_SERIES_ID, Stranding
+
+            strandings.append(Stranding(
+                entity_id="", label=label, reason=REASON_BAD_CALENDAR_SERIES_ID,
+                detail="Calendar series id is invalid; this profile was held. Check its type, length and control characters.",
+            ))
+        return None
+
     payment_type_raw = env("PAYMENT_TYPE", "wise").lower()
     if payment_type_raw not in ("wise", "btc"):
         log.warning(
@@ -577,6 +760,7 @@ def _load_profile(
         prefix=prefix,
         label=label,
         calendar_keywords=calendar_keywords,
+        calendar_recurring_event_id=recurring_id,
         payment_type=payment_type,
         amount_eur=amount_eur,
         # wise

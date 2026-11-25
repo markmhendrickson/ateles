@@ -1,0 +1,989 @@
+# ruff: noqa: F811  (the shared ``env`` fixture is imported, not redefined)
+"""Series scoped payment matching and approval effects, with synthetic data."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import consent_email  # noqa: E402
+import monedula  # noqa: E402
+import payment_journal  # noqa: E402
+from handler_base import event_matches_profile, valid_calendar_id  # noqa: E402
+from handlers import btc_transfer, wise_transfer  # noqa: E402
+from handlers.btc_transfer import BtcTransferHandler  # noqa: E402
+from handlers.payment_profile import (  # noqa: E402
+    load_profiles_with_neotoma_fallback,
+    PaymentProfile,
+    _load_profile,
+    load_profiles_from_neotoma,
+)
+from handlers.wise_transfer import WiseTransferHandler  # noqa: E402
+from strandings import REASON_BAD_CALENDAR_SERIES_ID  # noqa: E402
+from test_payment_approval import env  # noqa: E402,F401
+from test_session_payments import SESSION_END, _event  # noqa: E402
+from test_strandings import _profile, _serve  # noqa: E402
+
+
+SERIES = "synthetic-series"
+RAILS = [(BtcTransferHandler, "btc"), (WiseTransferHandler, "wise")]
+_REAL_NOTIFY = monedula._notify
+
+
+def _payment_profile(payment_type="wise", series=SERIES) -> PaymentProfile:
+    return PaymentProfile(
+        prefix="TEST",
+        label="Example class",
+        calendar_keywords=["movement", "class"],
+        payment_type=payment_type,
+        amount_eur=10,
+        calendar_recurring_event_id=series,
+        wise_recipient_id=7,
+        wise_recipient_name="Example Recipient",
+        wise_reference="example",
+        btc_address="synthetic-address",
+    )
+
+
+def _session(eid, *, recurring=SERIES, title="Movement class", end=SESSION_END):
+    event = _event(eid, title, end)
+    if recurring is not None:
+        event["recurringEventId"] = recurring
+    return event
+
+
+@pytest.mark.parametrize("handler_type,rail", RAILS)
+def test_series_match_requires_title_and_exact_identity_on_both_rails(handler_type, rail):
+    handler = handler_type(_payment_profile(rail))
+    wrong = _session("wrong", recurring="other-series")
+    missing = _session("missing", recurring=None)
+    instance = _session("instance")
+    parent = _session(SERIES, recurring=None)
+    wrong_title = _session("wrong-title", title="Other activity")
+    assert handler.matches([wrong, missing, wrong_title]) == []
+    assert [m["event"]["id"] for m in handler.matches([instance, parent])] == [
+        "instance", SERIES,
+    ]
+    handler.profile.calendar_recurring_event_id = ""
+    assert [m["event"]["id"] for m in handler.matches([wrong, missing])] == [
+        "wrong", "missing",
+    ]
+    handler.profile.calendar_recurring_event_id = SERIES
+    assert handler.matches([_session("case", recurring=SERIES.upper())]) == []
+
+
+BAD_CONFIGURED = [
+    " ",
+    " " * 1025,
+    " " * 1024 + "x",
+    "x" * 1025,
+    "bad\nseries",
+    "bad\x7fseries",
+    "bad\x85series",
+    " " + SERIES,
+    SERIES + " ",
+    27,
+    [SERIES],
+]
+
+
+@pytest.mark.parametrize("handler_type,rail", RAILS)
+@pytest.mark.parametrize("value", BAD_CONFIGURED)
+def test_invalid_configured_series_fails_closed_in_shared_matcher(handler_type, rail, value):
+    profile = _payment_profile(rail, value)
+    event = _session(SERIES, recurring=None)
+    assert event_matches_profile(profile, event) is False
+    assert handler_type(profile).matches([event]) == []
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("value", BAD_CONFIGURED)
+def test_invalid_configured_series_strands_both_loaders(rail, value, monkeypatch, caplog):
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _serve(monkeypatch, {"entities": [_profile(
+        payment_type=rail, calendar_recurring_event_id=value,
+    )]})
+    stranded = []
+    assert load_profiles_from_neotoma(stranded) == []
+    assert [s.reason for s in stranded] == [REASON_BAD_CALENDAR_SERIES_ID]
+    assert stranded[0].detail == (
+        "Calendar series id is invalid; this profile was held. "
+        "Check its type, length and control characters."
+    )
+
+    monkeypatch.setenv("TEST_CALENDAR_KEYWORDS", "movement")
+    monkeypatch.setenv("TEST_PAYMENT_TYPE", rail)
+    monkeypatch.setenv("TEST_AMOUNT_EUR", "10")
+    monkeypatch.setattr(os, "environ", dict(os.environ, TEST_CALENDAR_RECURRING_EVENT_ID=value))
+    stranded = []
+    assert _load_profile("TEST", stranded) is None
+    assert [s.reason for s in stranded] == [REASON_BAD_CALENDAR_SERIES_ID]
+    assert stranded[0].detail == (
+        "Calendar series id is invalid; this profile was held. "
+        "Check its type, length and control characters."
+    )
+    assert all("Invalid calendar series id" in r.message or
+               "malformed calendar series id" in r.message
+               for r in caplog.records if "calendar series id" in r.message)
+
+
+@pytest.mark.parametrize("handler_type,rail", RAILS)
+@pytest.mark.parametrize("value", [None, ""])
+def test_unset_series_keeps_keyword_only_matching(handler_type, rail, value):
+    profile = _payment_profile(rail, value)
+    assert len(handler_type(profile).matches([_session("other", recurring="another")])) == 1
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("value", [None, ""])
+def test_unset_series_loads_as_keyword_only(rail, value, monkeypatch):
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _serve(monkeypatch, {"entities": [_profile(
+        payment_type=rail, calendar_recurring_event_id=value,
+    )]})
+    assert load_profiles_from_neotoma()[0].calendar_recurring_event_id == ""
+    monkeypatch.setenv("TEST_CALENDAR_KEYWORDS", "movement")
+    monkeypatch.setenv("TEST_PAYMENT_TYPE", rail)
+    monkeypatch.setenv("TEST_AMOUNT_EUR", "10")
+    monkeypatch.setenv("TEST_CALENDAR_RECURRING_EVENT_ID", value or "")
+    assert _load_profile("TEST").calendar_recurring_event_id == ""
+
+
+@pytest.mark.parametrize("handler_type,rail", RAILS)
+@pytest.mark.parametrize("field,value", [
+    ("id", " " + SERIES), ("id", SERIES + " "),
+    ("id", "x" * 1025), ("id", "bad\nvalue"), ("id", 17),
+    ("recurringEventId", "other-series"), ("recurringEventId", ""),
+    ("recurringEventId", " " + SERIES), ("recurringEventId", SERIES + " "),
+    ("recurringEventId", "x" * 1025), ("recurringEventId", "bad\x7fvalue"),
+    ("recurringEventId", 17),
+])
+def test_invalid_event_ids_and_conflicting_recurrence_never_match(handler_type, rail, field, value):
+    profile = _payment_profile(rail)
+    event = _session(SERIES, recurring=None)
+    event[field] = value
+    assert not event_matches_profile(profile, event)
+    assert handler_type(profile).matches([event]) == []
+
+
+@pytest.mark.parametrize("handler_type,rail", RAILS)
+@pytest.mark.parametrize("bad_id", [" " + SERIES, SERIES + " ", "x" * 1025, 17])
+def test_invalid_instance_id_fails_even_with_matching_recurrence(handler_type, rail, bad_id):
+    profile = _payment_profile(rail)
+    event = _session(bad_id)
+    assert not event_matches_profile(profile, event)
+    assert handler_type(profile).matches([event]) == []
+
+
+@pytest.mark.parametrize("handler_type,rail", RAILS)
+def test_instance_parent_and_missing_recurrence_rules(handler_type, rail):
+    handler = handler_type(_payment_profile(rail))
+    instance = _session("instance")
+    parent = _session(SERIES, recurring=None)
+    other_parent = _session("other", recurring=None)
+    conflicting = _session(SERIES, recurring="another-series")
+    assert [m["event"]["id"] for m in handler.matches(
+        [instance, parent, other_parent, conflicting]
+    )] == ["instance", SERIES]
+    assert valid_calendar_id("x" * 1024)
+    assert not valid_calendar_id("x" * 1025)
+
+
+def test_calendar_fetch_keeps_recurring_event_id(env):
+    world, _neo = env
+    world.calendars["primary"] = [_session("instance")]
+    assert monedula.fetch_recent_events()[0]["recurringEventId"] == SERIES
+
+
+@pytest.mark.parametrize("module", [btc_transfer, wise_transfer])
+def test_next_event_search_filters_by_series(module, monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda _name: "/synthetic/gws")
+    response_events = [_session("wrong", recurring="other-series")]
+
+    def fake_gws(command, **_kwargs):
+        params = json.loads(command[command.index("--params") + 1])
+        assert params["singleEvents"] is True
+        assert "fields" not in params
+        return subprocess.CompletedProcess(
+            command, 0, json.dumps({"items": response_events}), ""
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_gws)
+    profile = _payment_profile()
+    assert module._find_next_event_due_date(profile) is None
+    response_events.append(_session("instance"))
+    assert module._find_next_event_due_date(profile) == "2026-11-12"
+
+
+@pytest.mark.parametrize("handler_type,rail", RAILS)
+def test_calendar_copies_raise_two_approvals_by_design(env, handler_type, rail):
+    world, neo = env
+    world.handler = handler_type(_payment_profile(rail))
+    world.calendars = {
+        "primary": [_session("event-b")],
+        "shared": [_session("event-a")],
+    }
+    world.tick()
+    assert neo.writes == 2  # Follow-up: identity for moved copies and old approvals.
+    assert {row["session"] for row in neo.rows.values()} == {"event-a", "event-b"}
+    assert {row["payment_key"] for row in neo.rows.values()} == {
+        consent_email.obligation_key(world.handler, "2026-11-11", eid)
+        for eid in ("event-a", "event-b")
+    }
+
+
+@pytest.mark.parametrize("handler_type,rail", RAILS)
+def test_rejected_event_key_stays_rejected_on_next_tick(env, handler_type, rail):
+    world, neo = env
+    world.handler = handler_type(_payment_profile(rail))
+    world.calendars = {"primary": [_session("event-a")]}
+    world.tick()
+    key = neo.only["payment_key"]
+    neo.resolve(key, "rejected", "no")
+    world.tick(minutes=15)
+    assert neo.writes == 1
+    assert neo.rows[key]["status"] == "rejected"
+    assert payment_journal.session_state(world.journal, "test:event-a") == "skipped"
+
+
+@pytest.mark.parametrize("handler_type,rail", RAILS)
+@pytest.mark.parametrize("series", [SERIES, ""])
+def test_series_and_unset_profiles_keep_origin_main_event_keys(env, handler_type, rail, series):
+    world, _neo = env
+    handler = handler_type(_payment_profile(rail, series))
+    event = _session("event-a")
+    (item,) = consent_email.build_pending_items(
+        [(handler, handler.matches([event]))], "2026-11-11"
+    )
+    assert item.match_id == "event-a"
+    basis = "|".join([
+        handler.name, "2026-11-11", "event-a",
+        consent_email.payee_identity(handler), "10", "EUR",
+    ])
+    expected = hashlib.sha256(basis.encode()).hexdigest()[:32]
+    if rail == "wise":
+        # origin/main binds a Wise approval to its profile, task and transfer terms (the Wise key)
+        profile = handler.profile
+        wise_basis = "|".join((
+            expected,
+            str(profile.entity_id or ""),
+            str(profile.neotoma_task_id or ""),
+            str(profile.wise_reference or ""),
+            "",
+        ))
+        expected = hashlib.sha256(wise_basis.encode()).hexdigest()[:32]
+    assert item.obligation == expected
+    assert payment_journal.session_key(handler.name, item.match_id) == "test:event-a"
+
+
+def test_consent_builder_excludes_wrong_series_without_deduplication():
+    handler = BtcTransferHandler(_payment_profile("btc"))
+    events = [_session("wrong", recurring="other-series"), _session("b"), _session("a")]
+    matches = [{"event": e, "summary": e["summary"]} for e in events]
+    items = consent_email.build_pending_items([(handler, matches)], "2026-11-11")
+    assert [item.match_id for item in items] == ["b", "a"]
+    _subject, body = consent_email.build_request_body(items, superseded=False)
+    assert "wrong" not in body
+
+
+def test_mismatch_notice_dedupes_across_ticks_and_restart(env, monkeypatch, tmp_path):
+    from lib.notify import Notifier
+
+    world, neo = env
+    world.handler = BtcTransferHandler(_payment_profile("btc"))
+    world.calendars = {"primary": [_session("other", recurring="other-series")]}
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    sent = []
+
+    def notifier():
+        n = Notifier(rubric={})
+        n._in_silence_window = lambda: False
+        n._deliver = lambda message, **kwargs: sent.append(message) or True
+        n._deliver_email = lambda message: sent.append(message) or True
+        return n
+
+    current = notifier()
+    monkeypatch.setattr(monedula, "_notify", _REAL_NOTIFY)
+    monkeypatch.setattr(monedula, "_get_notifier", lambda: current)
+    world.tick()
+    world.tick(minutes=15)
+    current = notifier()
+    world.tick(minutes=15)
+    notices = [m for m in sent if "not in its configured calendar series" in m]
+    assert len(notices) == 1
+    assert "1 event(s) on 2026-11-11" in notices[0]
+    assert "other-series" not in notices[0] and "other" not in notices[0]
+    assert neo.writes == 0
+    world.calendars = {"primary": [_session("plain", title="Unrelated activity")]}
+    world.tick(minutes=15)
+    assert len([m for m in sent if "not in its configured calendar series" in m]) == 1
+
+
+@pytest.mark.parametrize("event,expected_writes", [
+    (_session("unrelated", title="Unrelated activity"), 0),
+    (_session("instance"), 1),
+])
+def test_no_mismatch_notice_without_wrong_series_keyword_hit(env, monkeypatch, event, expected_writes):
+    world, neo = env
+    world.handler = WiseTransferHandler(_payment_profile("wise"))
+    world.calendars = {"primary": [event]}
+    notices = []
+    monkeypatch.setattr(monedula, "_notify", lambda message, **kwargs: notices.append(message))
+    world.tick()
+    assert not [message for message in notices if "configured calendar series" in message]
+    assert neo.writes == expected_writes
+
+
+@pytest.mark.parametrize("handler_type,rail", RAILS)
+@pytest.mark.parametrize("value", [None, "", "   ", 17, False])
+def test_present_empty_or_null_recurrence_is_not_a_series_parent(handler_type, rail, value):
+    """A recurringEventId that is present but null or blank is recurrence metadata, never the
+    'no metadata' parent case, even when the event's own id equals the series id."""
+    profile = _payment_profile(rail)
+    event = _session(SERIES, recurring=None)
+    event["recurringEventId"] = value
+    assert not event_matches_profile(profile, event)
+    assert handler_type(profile).matches([event]) == []
+    handler = handler_type(profile)
+    items = consent_email.build_pending_items(
+        [(handler, [{"event": event, "summary": event["summary"]}])], "2026-11-11"
+    )
+    assert items == []
+    # control: the same event with the field genuinely absent is the series parent
+    parent = _session(SERIES, recurring=None)
+    assert "recurringEventId" not in parent
+    assert len(handler.matches([parent])) == 1
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("pass_strandings", [True, False])
+def test_invalid_series_profile_is_held_not_replaced_by_env_profile(
+    rail, pass_strandings, monkeypatch
+):
+    """When the Neotoma profile is stranded for an invalid series id, the env-var profile
+    (which has no series id) must not take its place and resume title-only matching."""
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _serve(monkeypatch, {"entities": [_profile(
+        payment_type=rail, calendar_recurring_event_id="x" * 1025,
+    )]})
+    monkeypatch.setenv("MONEDULA_PROFILES", "TEST")
+    monkeypatch.setenv("TEST_LABEL", "Example class")
+    monkeypatch.setenv("TEST_CALENDAR_KEYWORDS", "movement")
+    monkeypatch.setenv("TEST_PAYMENT_TYPE", rail)
+    monkeypatch.setenv("TEST_AMOUNT_EUR", "10")
+    stranded = [] if pass_strandings else None
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+    if pass_strandings:
+        assert [s.reason for s in stranded] == [REASON_BAD_CALENDAR_SERIES_ID]
+
+
+@pytest.mark.parametrize("handler_type,rail", RAILS)
+@pytest.mark.parametrize("event,expected_writes", [
+    (_session("other-instance", recurring="other-series"), 0),
+    (_session("no-recurrence"), 0),
+    (_session("instance"), 1),
+])
+def test_wrong_series_keyword_event_raises_no_approval_end_to_end(
+    env, monkeypatch, handler_type, rail, event, expected_writes
+):
+    """The reported defect through the real tick on BOTH rails: a keyword-matching event outside
+    the configured series writes no payment_approval; the real series instance writes one."""
+    if event["id"] == "no-recurrence":
+        event.pop("recurringEventId", None)
+    world, neo = env
+    world.handler = handler_type(_payment_profile(rail))
+    world.calendars = {"primary": [event]}
+    monkeypatch.setattr(monedula, "_notify", lambda message, **kwargs: None)
+    world.tick()
+    assert neo.writes == expected_writes
+
+
+def _env_profile(monkeypatch, rail="btc"):
+    monkeypatch.setenv("MONEDULA_PROFILES", "TEST")
+    monkeypatch.setenv("TEST_LABEL", "Example class")
+    monkeypatch.setenv("TEST_CALENDAR_KEYWORDS", "movement")
+    monkeypatch.setenv("TEST_PAYMENT_TYPE", rail)
+    monkeypatch.setenv("TEST_AMOUNT_EUR", "10")
+    monkeypatch.setenv("TEST_BTC_ADDRESS", "synthetic-address")
+
+
+def _fail_fetch(monkeypatch, error):
+    def _raise(req, timeout=None):
+        raise error
+    monkeypatch.setattr("urllib.request.urlopen", _raise)
+
+
+@pytest.mark.parametrize("failure", [
+    "unreachable", "server_error", "rejected", "bad_amount", "invalid_series",
+])
+@pytest.mark.parametrize("pass_strandings", [True, False])
+def test_configured_neotoma_source_that_yields_no_profile_never_loads_env_profiles(
+    failure, pass_strandings, monkeypatch
+):
+    """A configured Neotoma source that fails, is rejected, or strands every active profile must
+    not be replaced by an env-var profile (it has no series binding: title-only matching)."""
+    import io
+    import urllib.error
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    if failure == "unreachable":
+        _fail_fetch(monkeypatch, urllib.error.URLError("synthetic outage"))
+    elif failure == "server_error":
+        _fail_fetch(monkeypatch, urllib.error.HTTPError(
+            "https://example.invalid", 503, "Unavailable", {}, io.BytesIO(b"")))
+    elif failure == "rejected":
+        _fail_fetch(monkeypatch, urllib.error.HTTPError(
+            "https://example.invalid", 403, "Forbidden", {}, io.BytesIO(b"")))
+    elif failure == "bad_amount":
+        _serve(monkeypatch, {"entities": [_profile(
+            payment_type="btc", amount_eur="not-a-number",
+            calendar_recurring_event_id=SERIES,
+        )]})
+    else:
+        _serve(monkeypatch, {"entities": [_profile(
+            payment_type="btc", calendar_recurring_event_id="x" * 1025,
+        )]})
+    stranded = [] if pass_strandings else None
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+    if pass_strandings:
+        assert stranded, "the stranding must still be escalated by the caller"
+
+
+def test_env_fallback_remains_for_env_only_install(monkeypatch):
+    """Control: with no Neotoma base URL (an env-only install) the env profile loads as before."""
+    monkeypatch.delenv("NEOTOMA_BASE_URL", raising=False)
+    _env_profile(monkeypatch)
+    profiles = load_profiles_with_neotoma_fallback([])
+    assert [p.prefix for p in profiles] == ["TEST"]
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("body", [
+    {"error": "synthetic"}, {}, {"entities": None}, {"entities": "none"},
+    {"entities": [17]}, "unexpected", 17, None,
+    {"entities": "bad", "items": []}, {"entities": None, "results": []},
+    {"entities": [], "items": []}, {"items": [], "results": []},
+    {"entities": [{"entity_id": "a", "snapshot": {}}], "items": []},
+])
+@pytest.mark.parametrize("pass_strandings", [True, False])
+def test_successful_response_without_a_valid_profile_collection_is_a_rejected_read(
+    rail, body, pass_strandings, monkeypatch
+):
+    """A 2xx body that lacks an explicit, valid profile collection must not read as 'no profiles
+    configured' (which enables the env-var fallback); it holds, on both rails' configurations."""
+    from strandings import REASON_FETCH_REJECTED
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch, rail)
+    _serve(monkeypatch, body)
+    stranded = [] if pass_strandings else None
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+    if pass_strandings:
+        assert [s.reason for s in stranded] == [REASON_FETCH_REJECTED]
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("status", ["paused", "archived", "retired", "", None])
+@pytest.mark.parametrize("pass_strandings", [True, False])
+def test_populated_collection_with_no_active_profile_never_loads_env_profiles(
+    rail, status, pass_strandings, monkeypatch
+):
+    """A non-empty Neotoma collection whose profiles are all inactive or of an unrecognised status
+    must not activate an env-var profile (no series binding, and it would resurrect a pause)."""
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch, rail)
+    _serve(monkeypatch, {"entities": [_profile(
+        payment_type=rail, status=status, calendar_recurring_event_id=SERIES,
+    )]})
+    stranded = [] if pass_strandings else None
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+
+
+def test_active_profile_alongside_inactive_ones_is_returned(monkeypatch):
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    _serve(monkeypatch, {"entities": [
+        _profile(status="paused"),
+        _profile(payment_type="btc", btc_address="synthetic-address"),
+    ]})
+    assert len(load_profiles_with_neotoma_fallback([])) == 1
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("pass_strandings", [True, False])
+def test_runtime_error_from_a_configured_neotoma_source_never_loads_env_profiles(
+    rail, pass_strandings, monkeypatch
+):
+    """Any RuntimeError while the Neotoma base URL IS configured is a failed read (hold and
+    escalate), never 'unconfigured'; only an absent base URL falls back to env profiles."""
+    from strandings import REASON_FETCH_FAILED
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch, rail)
+
+    def _raise(req, timeout=None):
+        raise RuntimeError("synthetic read failure")
+
+    monkeypatch.setattr("urllib.request.urlopen", _raise)
+    stranded = [] if pass_strandings else None
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+    if pass_strandings:
+        assert [s.reason for s in stranded] == [REASON_FETCH_FAILED]
+
+
+def test_profile_with_the_status_field_absent_loads_as_active(monkeypatch):
+    """Legacy default, deliberate and now pinned: an entity with NO status field is active."""
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    entity = _profile(payment_type="btc", btc_address="synthetic-address")
+    entity["snapshot"].pop("status", None)
+    _serve(monkeypatch, {"entities": [entity]})
+    profiles = load_profiles_with_neotoma_fallback([])
+    assert len(profiles) == 1 and profiles[0].label == "Test profile"
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("snapshot", ["not-an-object", ["list"], 7, True])
+@pytest.mark.parametrize("pass_strandings", [True, False])
+def test_non_object_snapshot_in_a_collection_is_a_rejected_read(
+    rail, snapshot, pass_strandings, monkeypatch
+):
+    from strandings import REASON_FETCH_REJECTED
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch, rail)
+    _serve(monkeypatch, {"entities": [{"entity_id": "ent_synthetic", "snapshot": snapshot}]})
+    stranded = [] if pass_strandings else None
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+    if pass_strandings:
+        assert [s.reason for s in stranded] == [REASON_FETCH_REJECTED]
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("pass_strandings", [True, False])
+@pytest.mark.parametrize("body", [
+    # an empty collection, however the response dresses it: none of these may reach the env profile
+    {"entities": []}, {"items": []}, {"results": []}, [],
+    {"entities": [], "total": 0}, {"entities": [], "total": 1}, {"entities": [], "total": "0"},
+    {"entities": [], "next_cursor": "synthetic-cursor"}, {"entities": [], "has_more": True},
+    {"entities": [], "error": "synthetic"}, {"entities": [], "errors": ["synthetic"]},
+    {"entities": [], "success": False}, {"entities": [], "success": "false"},
+    {"entities": [], "ok": 0}, {"entities": [], "ok": "no"},
+    {"entities": [], "status": "error"}, {"entities": [], "status": "fail"},
+    {"entities": [], "status": 503}, {"entities": [], "result": "failed"},
+    {"entities": [], "read_contract": {"coverage": {"page_exhausted": False}}},
+    {"entities": [], "unrecognised_flag": "anything"},
+])
+def test_no_response_from_a_configured_neotoma_source_can_reach_the_env_profile(
+    rail, pass_strandings, body, monkeypatch
+):
+    """The whole class by construction: with a Neotoma base URL configured, whatever a successful
+    read returns (an empty collection however it is dressed, a failure report, a contradicted page)
+    loads no env-var profile, on both rails, with and without a strandings list."""
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch, rail)
+    _serve(monkeypatch, body)
+    stranded = [] if pass_strandings else None
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+def test_env_profile_loads_only_without_a_configured_neotoma_source(rail, monkeypatch):
+    """The one rule: env-var profiles are the source only when no Neotoma base URL is configured
+    (blank counts as unconfigured)."""
+    _env_profile(monkeypatch, rail)
+    for value in (None, "", "   "):
+        if value is None:
+            monkeypatch.delenv("NEOTOMA_BASE_URL", raising=False)
+        else:
+            monkeypatch.setenv("NEOTOMA_BASE_URL", value)
+        assert [p.prefix for p in load_profiles_with_neotoma_fallback([])] == ["TEST"]
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _serve(monkeypatch, {"entities": []})
+    assert load_profiles_with_neotoma_fallback([]) == []
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("body", [
+    {"entities": []}, {"items": []}, {"results": []}, [],
+    {"entities": [], "error": "synthetic"}, {"entities": [], "errors": ["synthetic"]},
+    {"entities": [], "success": False}, {"entities": [], "ok": 0},
+    {"entities": [], "status": "fail"}, {"entities": [], "status": 503},
+    {"entities": [], "total": 1}, {"entities": [], "next_cursor": "synthetic-cursor"},
+    {"entities": [], "unrecognised_flag": "anything"},
+])
+def test_empty_read_from_a_configured_source_is_reported_and_marks_the_load_degraded(
+    rail, body, monkeypatch
+):
+    """An empty collection cannot be told from a failed read, so a configured source that returns
+    one is reported (a rejected-fetch stranding): the tick is then degraded and neither claims the
+    day nor clears pending consent."""
+    from strandings import REASON_FETCH_REJECTED
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch, rail)
+    _serve(monkeypatch, body)
+    stranded = []
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+    assert [s.reason for s in stranded] == [REASON_FETCH_REJECTED]
+    assert monedula._profile_load_degraded([], stranded) is True
+
+
+@pytest.mark.parametrize("field,value", [
+    ("calendar_keywords", None), ("calendar_keywords", 7), ("calendar_keywords", True),
+    ("task_keywords", 7), ("task_keywords", True), ("amount_eur", [10]),
+    ("amount_eur", 1e309), ("amount_eur", float("nan")), ("wise_recipient_id", 1e309),
+    ("wise_recipient_id", float("nan")), ("wise_recipient_id", [1]),
+    ("one_off", "yes"), ("one_off", "0"), ("one_off", 1), ("one_off", ["x"]), ("one_off", {"a": 1}),
+    ("status", 7), ("status", ["active"]), ("status", {"a": 1}), ("status", True), ("status", None),
+    ("due_date", 7), ("due_date", {"a": 1}), ("due_date", ["2026-11-24"]),
+    ("payment_type", 7), ("payment_type", None), ("payment_type", ["wise"]),
+    ("wise_legal_type", 7), ("wise_legal_type", ["PRIVATE"]), ("wise_legal_type", {"a": 1}),
+    ("wise_iban", 7), ("wise_iban", {"a": 1}), ("wise_recipient_name", 7),
+    ("wise_recipient_name", ["x"]),
+    ("amount_eur", True), ("amount_eur", False), ("amount_eur", 10.5), ("amount_eur", "10.5"),
+    ("amount_eur", "1_0"), ("amount_eur", "ten"), ("amount_eur", {"a": 1}), ("amount_eur", None),
+    ("amount_eur", "1e3"), ("amount_eur", "--5"), ("amount_eur", "\u0661\u0660"),
+    ("btc_address", {"a": 1}), ("btc_address", 7), ("btc_address", ["x"]),
+    ("contact_id", ["x"]), ("contact_category", 7), ("contact_platform", {"a": 1}),
+    ("wise_reference", 7), ("neotoma_task_id", {"a": 1}),
+    ("prefix", 7), ("prefix", ["x"]), ("prefix", True), ("label", 7), ("label", ["x"]),
+    ("calendar_keywords", [None, "movement"]), ("calendar_keywords", [0]),
+    ("calendar_keywords", [False, "movement"]), ("calendar_keywords", [{}]),
+    ("task_keywords", [None]), ("task_keywords", [0, "movement"]),
+    ("calendar_keywords", {"movement": "x"}), ("calendar_keywords", '{"movement": 1}'),
+    ("calendar_keywords", '"movement"'), ("calendar_keywords", [{"a": 1}]),
+    ("task_keywords", {"movement": "x"}), ("task_keywords", '{"movement": 1}'),
+    ("task_keywords", [["nested"]]),
+])
+def test_malformed_profile_field_holds_that_profile_only_and_is_reported(field, value, monkeypatch):
+    """A malformed field raises nowhere: that one profile is held with its own stranding, a healthy
+    sibling still loads, and no process-settings profile is used."""
+    from strandings import REASON_FETCH_FAILED, REASON_FETCH_REJECTED, REASON_MALFORMED_PROFILE
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    bad = _profile(payment_type="btc", btc_address="synthetic-address")
+    bad["snapshot"]["label"] = "Bad profile"
+    bad["snapshot"][field] = value
+    good = _profile(payment_type="btc", btc_address="synthetic-address")
+    good["snapshot"]["label"] = "Good profile"
+    _serve(monkeypatch, {"entities": [bad, good]})
+    stranded = []
+    profiles = load_profiles_with_neotoma_fallback(stranded)
+    assert [p.label for p in profiles] == ["Good profile"]
+    assert len(stranded) == 1 and stranded[0].reason in (
+        REASON_MALFORMED_PROFILE, "invalid_amount", "invalid_wise_recipient_id",
+        "unknown_payment_type", "invalid_wise_legal_type")
+    assert stranded[0].reason not in (REASON_FETCH_FAILED, REASON_FETCH_REJECTED)
+    assert monedula._profile_load_degraded(profiles, stranded) is False
+
+
+def test_only_malformed_profile_is_reported_and_degrades_the_load(monkeypatch):
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    bad = _profile(payment_type="btc", btc_address="synthetic-address")
+    bad["snapshot"]["calendar_keywords"] = None
+    _serve(monkeypatch, {"entities": [bad]})
+    stranded = []
+    assert load_profiles_with_neotoma_fallback(stranded) == []
+    assert len(stranded) == 1
+    assert monedula._profile_load_degraded([], stranded) is True
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("field", ["calendar_keywords", "task_keywords"])
+@pytest.mark.parametrize("value", [
+    {"movement": "unexpected"}, '{"movement": 1}', '"movement"', [{"a": 1}], 7, True,
+])
+def test_mapped_or_scalar_keywords_strand_the_profile_and_build_no_handler(
+    rail, field, value, monkeypatch
+):
+    """The effect on both rails: a keyword field that is a mapping, a JSON object or scalar, a list
+    of non-text, a number or a boolean holds the profile (malformed-profile stranding) and builds no
+    handler, so nothing can reach payment approval."""
+    from handlers import load_handlers
+    from strandings import REASON_MALFORMED_PROFILE
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch, rail)
+    entity = _profile(payment_type=rail, btc_address="synthetic-address",
+                      calendar_recurring_event_id=SERIES)
+    entity["snapshot"]["calendar_keywords"] = ["movement"]
+    entity["snapshot"][field] = value
+    _serve(monkeypatch, {"entities": [entity]})
+    stranded = []
+    assert load_handlers(stranded) == []
+    assert [s.reason for s in stranded] == [REASON_MALFORMED_PROFILE]
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (["Movement", " yoga "], ["movement", "yoga"]), ("movement, Yoga", ["movement", "yoga"]),
+    (["  ", "x"], ["x"]),
+    ('["Movement", "yoga"]', ["movement", "yoga"]), ("", []), ([], []), (["", "x"], ["x"]),
+])
+def test_valid_keyword_collections_still_parse(raw, expected):
+    from handlers.payment_profile import _keyword_list
+
+    assert _keyword_list(raw) == expected
+
+
+@pytest.mark.parametrize("name", [
+    "contact_id", "contact_category", "contact_platform", "wise_reference", "btc_address",
+    "neotoma_task_id",
+])
+def test_text_fields_read_missing_null_and_text_values_as_text(name):
+    from handlers.payment_profile import _text_field
+
+    assert _text_field({}, name) == ""
+    assert _text_field({name: None}, name) == ""
+    assert _text_field({name: ""}, name) == ""
+    assert _text_field({name: "synthetic"}, name) == "synthetic"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (10, 10), (10.0, 10), ("10", 10), (" 10 ", 10), ("+10", 10), (1, 1),
+])
+def test_amount_eur_accepts_only_whole_numbers(raw, expected):
+    from handlers.payment_profile import parse_amount_eur
+
+    assert parse_amount_eur(raw) == expected
+
+
+@pytest.mark.parametrize("rail", ["btc", "wise"])
+@pytest.mark.parametrize("amount", [True, 10.5, "10.5"])
+def test_coerced_amount_builds_no_handler_that_can_match_a_series_event(rail, amount, monkeypatch):
+    """The effect: a boolean or fractional amount holds the profile, so no handler is built and no
+    series-matching event can raise an approval with a coerced amount."""
+    from handlers import load_handlers
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch, rail)
+    entity = _profile(payment_type=rail, btc_address="synthetic-address",
+                      calendar_recurring_event_id=SERIES, amount_eur=amount)
+    _serve(monkeypatch, {"entities": [entity]})
+    stranded = []
+    assert load_handlers(stranded) == []
+    assert [s.reason for s in stranded] == ["invalid_amount"]
+
+
+@pytest.mark.parametrize("stored,expected", [
+    (None, False), (False, False), (True, True), ("false", False), ("FALSE", False),
+    (" true ", True), ("True", True),
+])
+def test_one_off_reads_booleans_by_meaning_not_by_truthiness(stored, expected):
+    from handlers.payment_profile import _bool_field
+
+    assert _bool_field({"one_off": stored}, "one_off") is expected
+    assert _bool_field({}, "one_off") is False
+
+
+@pytest.mark.parametrize("stored", ["yes", "0", "1", "", 1, 0, ["x"], {"a": 1}])
+def test_one_off_rejects_everything_that_is_not_a_boolean(stored):
+    from handlers.payment_profile import _bool_field
+
+    with pytest.raises(TypeError):
+        _bool_field({"one_off": stored}, "one_off")
+
+
+@pytest.mark.parametrize("stored,one_off", [("false", False), (False, False), ("true", True), (True, True)])
+def test_recurring_wise_profile_with_text_boolean_keeps_its_real_meaning(stored, one_off, monkeypatch):
+    """The effect: a recurring Wise profile stored with the text "false" stays recurring (it is not
+    treated as one-off, which would archive it after an approved payment); only an unreadable value
+    holds the profile."""
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    entity = _profile(payment_type="wise", calendar_recurring_event_id=SERIES, one_off=stored)
+    _serve(monkeypatch, {"entities": [entity]})
+    profiles = load_profiles_with_neotoma_fallback([])
+    assert [p.one_off for p in profiles] == [one_off]
+
+
+def test_every_stored_field_is_read_through_a_typed_accessor():
+    """Source guard: a raw read of a stored field in the Neotoma loader must be one of the few
+    that are validated on the next lines; every other field must go through a typed accessor, so a
+    new field cannot be added as an unchecked coercion."""
+    import inspect
+    import re
+
+    import handlers.payment_profile as module
+
+    source = inspect.getsource(module.load_profiles_from_neotoma)
+    raw_allowed = {
+        "status", "label", "prefix", "calendar_recurring_event_id", "payment_type", "amount_eur",
+    }
+    wrappers = ("_keyword_list(", "parse_wise_recipient_id(")
+    offenders = []
+    for line in source.splitlines():
+        for name in re.findall(r'snap\.get\("([a-z_]+)"', line):
+            if name not in raw_allowed and not any(w in line for w in wrappers):
+                offenders.append((name, line.strip()))
+    assert offenders == [], offenders
+    typed = set(re.findall(r'_(?:text|bool)_field\(snap, "([a-z_]+)"', source))
+    assert {"due_date", "one_off", "wise_legal_type", "wise_iban", "wise_recipient_name",
+            "contact_id", "contact_category", "contact_platform", "wise_reference",
+            "btc_address", "neotoma_task_id"} <= typed
+
+
+class _InertClient:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+@pytest.mark.parametrize("stored,archived", [("false", False), (False, False), (None, False),
+                                              ("true", True), (True, True)])
+def test_post_payment_archives_only_a_genuinely_one_off_profile(stored, archived, monkeypatch):
+    """The Wise post-payment effect: a recurring profile stored with the text "false" is NOT closed
+    and archived after an approved payment; only a genuinely one-off profile is. A profile stored
+    with an unreadable value never reaches this path (it is held at load)."""
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    entity = _profile(payment_type="wise", calendar_recurring_event_id=SERIES)
+    if stored is not None:
+        entity["snapshot"]["one_off"] = stored
+    _serve(monkeypatch, {"entities": [entity]})
+    profile = load_profiles_with_neotoma_fallback([])[0]
+
+    closed = []
+    monkeypatch.setattr(wise_transfer, "_find_task_id", lambda profile: "ent_synthetic_task")
+    monkeypatch.setattr(wise_transfer.task_writes, "make_client", lambda: (_InertClient(), "base"))
+    monkeypatch.setattr(wise_transfer.task_writes, "append_note", lambda *a, **k: True)
+    monkeypatch.setattr(wise_transfer, "_close_one_off", lambda *a, **k: closed.append(a))
+    monkeypatch.setattr(wise_transfer, "_find_next_event_due_date", lambda profile: None)
+    wise_transfer._update_task_impl(profile, {"status": "sent", "transfer_id": "synthetic"})
+    assert bool(closed) is archived
+
+
+@pytest.mark.parametrize("stored", ["yes", "0", 1, ["x"]])
+def test_unreadable_one_off_holds_the_profile_so_nothing_can_archive_it(stored, monkeypatch):
+    from handlers import load_handlers
+    from strandings import REASON_MALFORMED_PROFILE
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    entity = _profile(payment_type="wise", calendar_recurring_event_id=SERIES)
+    entity["snapshot"]["one_off"] = stored
+    _serve(monkeypatch, {"entities": [entity]})
+    stranded = []
+    assert load_handlers(stranded) == []
+    assert [s.reason for s in stranded] == [REASON_MALFORMED_PROFILE]
+
+
+@pytest.mark.parametrize("raw", [[None], [0], [False], [{}], [[]], ["x", None], '[null, "x"]', "[0]"])
+def test_falsy_non_text_keyword_entries_are_rejected_not_dropped(raw):
+    from handlers.payment_profile import _keyword_list
+
+    with pytest.raises(TypeError):
+        _keyword_list(raw)
+
+
+@pytest.mark.parametrize("entity_id", [{"a": 1}, ["x"], 7, True])
+def test_non_text_entity_id_holds_that_profile_only(entity_id, monkeypatch):
+    from strandings import REASON_MALFORMED_PROFILE
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    bad = _profile(payment_type="btc", btc_address="synthetic-address")
+    bad["snapshot"]["label"] = "Bad profile"
+    bad["entity_id"] = entity_id
+    good = _profile(payment_type="btc", btc_address="synthetic-address")
+    good["snapshot"]["label"] = "Good profile"
+    _serve(monkeypatch, {"entities": [bad, good]})
+    stranded = []
+    assert [p.label for p in load_profiles_with_neotoma_fallback(stranded)] == ["Good profile"]
+    assert [s.reason for s in stranded] == [REASON_MALFORMED_PROFILE]
+    assert all(isinstance(s.entity_id, str) for s in stranded)
+
+
+@pytest.mark.parametrize("keywords", [[False], [0], [None], [0.0]])
+@pytest.mark.parametrize("due_date", [20261124, "2026-11-24"])
+def test_wise_one_off_cannot_be_triggered_by_falsy_keywords_or_a_numeric_due_date(
+    keywords, due_date, monkeypatch
+):
+    """The effect on the Wise route: a malformed keyword list or a numeric due date builds no
+    handler, produces no due-date match and records the malformed-profile stranding. (The valid
+    text date with a falsy keyword entry is held for the keyword entry; the numeric date alone is
+    held for the date.)"""
+    from handlers import load_handlers
+    from strandings import REASON_MALFORMED_PROFILE
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    entity = _profile(payment_type="wise")
+    entity["snapshot"]["calendar_keywords"] = keywords
+    entity["snapshot"]["due_date"] = due_date
+    _serve(monkeypatch, {"entities": [entity]})
+    stranded = []
+    assert load_handlers(stranded) == []
+    assert [s.reason for s in stranded] == [REASON_MALFORMED_PROFILE]
+
+
+@pytest.mark.parametrize("field,value", [("wise_iban", {}), ("wise_recipient_name", []), ("one_off", "false"),
+                                          ("one_off", "yes")])
+def test_empty_non_text_values_are_not_treated_as_missing(field, value, monkeypatch):
+    """A falsy non-text value ({} or []) must not read as 'not set': text fields reject it, and the
+    one-off flag reads only real booleans and the exact text true or false."""
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    entity = _profile(payment_type="wise", calendar_recurring_event_id=SERIES)
+    entity["snapshot"][field] = value
+    _serve(monkeypatch, {"entities": [entity]})
+    stranded = []
+    profiles = load_profiles_with_neotoma_fallback(stranded)
+    if field == "one_off" and value == "false":
+        assert [p.one_off for p in profiles] == [False] and stranded == []
+    else:
+        assert profiles == [] and len(stranded) == 1
+
+
+def test_absent_status_means_active_but_explicit_null_is_reported(monkeypatch):
+    from strandings import REASON_MALFORMED_PROFILE
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    _env_profile(monkeypatch)
+    absent = _profile(payment_type="btc", btc_address="synthetic-address")
+    absent["snapshot"].pop("status", None)
+    absent["snapshot"]["label"] = "Absent status"
+    null = _profile(payment_type="btc", btc_address="synthetic-address")
+    null["snapshot"]["status"] = None
+    null["snapshot"]["label"] = "Null status"
+    _serve(monkeypatch, {"entities": [absent, null]})
+    stranded = []
+    assert [p.label for p in load_profiles_with_neotoma_fallback(stranded)] == ["Absent status"]
+    assert [s.reason for s in stranded] == [REASON_MALFORMED_PROFILE]

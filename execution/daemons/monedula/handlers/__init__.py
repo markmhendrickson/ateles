@@ -21,8 +21,10 @@ def load_handlers(strandings: list | None = None) -> list[PaymentHandler]:
     """
     Load all active payment handlers.
 
-    Phase 5+: tries Neotoma payment_profile entities first, falls back to
-    env-var-defined profiles (MONEDULA_PROFILES=THERAPY,YOGA).
+    Phase 5+: loads Neotoma payment_profile entities when a Neotoma base URL is
+    configured, and never falls back to the process settings in that case.
+    Profiles defined in the process settings (MONEDULA_PROFILES=THERAPY,YOGA)
+    are the source only for an install with no Neotoma base URL.
 
     ``strandings`` collects active profiles that could not be loaded, so the
     caller can escalate them rather than let them vanish into the log

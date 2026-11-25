@@ -19,10 +19,64 @@ The result dict returned by execute() must include at least:
 from __future__ import annotations
 
 import abc
+import unicodedata
 from typing import Any
 
 STATUS_FUNDING_PENDING = "funding_pending"
 STATUS_SUBMISSION_UNKNOWN = "submission_unknown"
+
+
+MAX_CALENDAR_ID_LENGTH = 1024
+
+
+def valid_calendar_id(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value == value.strip()
+        and len(value) <= MAX_CALENDAR_ID_LENGTH
+        and not any(unicodedata.category(char) == "Cc" for char in value)
+    )
+
+
+def valid_configured_series_id(value: Any) -> bool:
+    return value is None or value == "" or valid_calendar_id(value)
+
+
+def event_matches_profile(profile: Any, event: dict) -> bool:
+    """Match an event's title and, when configured, its exact series identity."""
+    if not title_matches_profile(profile, event):
+        return False
+    series_id = getattr(profile, "calendar_recurring_event_id", "")
+    if not valid_configured_series_id(series_id):
+        return False
+    if not series_id:
+        return True
+    event_id = event.get("id")
+    if not valid_calendar_id(event_id):
+        return False
+    # Presence, not value: a present recurringEventId (even null or blank) is recurrence
+    # metadata and must be a valid id equal to the series id; only a missing field means
+    # the event could be the series parent itself.
+    if "recurringEventId" in event:
+        recurring = event["recurringEventId"]
+        return valid_calendar_id(recurring) and recurring == series_id
+    return event_id == series_id
+
+
+def title_matches_profile(profile: Any, event: dict) -> bool:
+    """Keyword check shared by matching and mismatch notice counting."""
+    if not isinstance(event, dict):
+        return False
+    summary = event.get("summary") or ""
+    return isinstance(summary, str) and any(
+        keyword in summary.lower() for keyword in profile.calendar_keywords
+    )
+
+
+def matching_events(profile: Any, events: list[dict]) -> list[dict]:
+    """Return every matching event in calendar input order."""
+    return [event for event in events if event_matches_profile(profile, event)]
 
 
 class PaymentHandler(abc.ABC):

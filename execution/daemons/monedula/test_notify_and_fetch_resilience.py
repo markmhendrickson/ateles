@@ -201,11 +201,15 @@ def test_fetch_retries_a_transient_failure_once_then_loads(monkeypatch):
         calls.append(timeout)
         if len(calls) == 1:
             raise TimeoutError("read timed out")
-        return _Resp(json.dumps({"entities": []}).encode())
+        profile = {"entity_id": "ent_test0000000000000000000", "snapshot": {
+            "label": "Test profile", "prefix": "TEST", "status": "active",
+            "payment_type": "wise", "amount_eur": 10, "calendar_keywords": ["test"],
+        }}
+        return _Resp(json.dumps({"entities": [profile]}).encode())
 
     monkeypatch.setattr("urllib.request.urlopen", flaky)
     found: list = []
-    load_profiles_from_neotoma(found)
+    assert len(load_profiles_from_neotoma(found)) == 1
     assert len(calls) == 2, "one bounded retry"
     assert found == [], "a recovered fetch is not a stranding"
     assert calls[0] == st.NEOTOMA_TIMEOUT_SEC == 30
