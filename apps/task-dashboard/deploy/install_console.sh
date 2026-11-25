@@ -84,32 +84,18 @@ if [ -z "$NODE_BIN" ]; then
 fi
 command -v npm >/dev/null 2>&1 || { echo "npm not found on PATH." >&2; exit 1; }
 
-# launchd starts with a bare PATH. The planning tab runs the repo's own Python
-# module, which imports `mcp`. The repo venv does not always carry it, so probe
-# candidates in order and use the first interpreter that can import it.
+# launchd starts with a bare PATH. The planning tab runs the repo's own MCP
+# module, so pin the interpreter the repo's shared MCP lookup chooses (lookup
+# only: nothing is created or installed here).
 AGENT_PATH="$(dirname "$NODE_BIN"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-PYTHON_BIN=""
-# CONSOLE_PYTHON_CANDIDATES (newline-separated paths) replaces the default list; the tests use it.
-if [ -n "${CONSOLE_PYTHON_CANDIDATES:-}" ]; then
-  CANDIDATES="$CONSOLE_PYTHON_CANDIDATES"
-else
-  CANDIDATES="$REPO_DIR/.venv/bin/python3
-/opt/homebrew/bin/python3
-/usr/local/bin/python3
-$(command -v python3 || true)"
-fi
-while IFS= read -r candidate; do
-  if [ -n "$candidate" ] && [ -x "$candidate" ] && "$candidate" -c 'import mcp' >/dev/null 2>&1; then
-    PYTHON_BIN="$candidate"
-    break
-  fi
-done <<EOF_CANDIDATES
-$CANDIDATES
-EOF_CANDIDATES
-echo "==> Planning tab Python: ${PYTHON_BIN:-none found} (probed for the mcp module)"
+MCP_DIR="$REPO_DIR/execution/mcp/ateles"
+# shellcheck source=../../../execution/mcp/ateles/ateles_mcp_bootstrap.sh
+source "$MCP_DIR/ateles_mcp_bootstrap.sh"
+PYTHON_BIN="$(ateles_find_mcp_python || true)"
+echo "==> Planning tab Python: ${PYTHON_BIN:-none found} (needs the MCP dependencies)"
 if [ -z "$PYTHON_BIN" ]; then
-  echo "No Python with the 'mcp' module found (tried the repo venv, Homebrew and PATH)." >&2
-  echo "Install it first, e.g. /opt/homebrew/bin/python3 -m pip install mcp, then rerun." >&2
+  echo "No Python with the MCP dependencies found." >&2
+  echo "Fix: uv venv $REPO_DIR/.mcp-venv && VIRTUAL_ENV=$REPO_DIR/.mcp-venv uv pip install -r $MCP_DIR/requirements.txt" >&2
   exit 1
 fi
 GIT_SHA="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo "")"

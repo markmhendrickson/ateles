@@ -29,7 +29,7 @@ function fake(name: string) {
   chmodSync(p, 0o755);
 }
 
-/** A fake interpreter: `-c 'import mcp'` succeeds only when `hasMcp`; it is never a real Python. */
+/** A fake interpreter: the dependency import succeeds only when `hasMcp`; it is never a real Python. */
 function fakePython(name: string, hasMcp: boolean): string {
   const p = join(bin, name);
   writeFileSync(p, `#!/bin/sh\necho "${name} $*" >> "${pyLog}"\nexit ${hasMcp ? 0 : 1}\n`);
@@ -42,7 +42,7 @@ let candidates: string[];
 function install(...args: string[]): string {
   return execFileSync("bash", [SCRIPT, ...args], {
     encoding: "utf8",
-    env: { HOME: home, PATH: `${bin}:/usr/bin:/bin`, CONSOLE_PYTHON_CANDIDATES: candidates.join("\n") },
+    env: { HOME: home, PATH: `${bin}:/usr/bin:/bin`, ATELES_MCP_PYTHON_CANDIDATES: candidates.join("\n") },
   });
 }
 
@@ -135,7 +135,7 @@ describe("install_console.sh planning-tab Python", () => {
     const plist = readFileSync(plistPath(), "utf8");
     expect(plist).toMatch(/<key>DASHBOARD_PYTHON<\/key>\s*<string>[^<]*\/python-with-mcp<\/string>/);
     const probed = readFileSync(pyLog, "utf8");
-    expect(probed).toContain("python-without-mcp -c import mcp");
+    expect(probed).toContain("python-without-mcp -c import mcp, httpx, cryptography, jwt");
     expect(probed).not.toContain("python-later");
   });
 
@@ -148,8 +148,22 @@ describe("install_console.sh planning-tab Python", () => {
       failure = e as { status?: number; stderr?: string };
     }
     expect(failure.status).toBe(1);
-    expect(String(failure.stderr)).toContain("No Python with the 'mcp' module found");
+    expect(String(failure.stderr)).toContain("No Python with the MCP dependencies found");
+    expect(String(failure.stderr)).toContain(".mcp-venv");
     expect(readdirSync(home)).toEqual([]);
     expect(calls()).toEqual([]);
+  });
+
+  it("prefers the repo's MCP venv (ATELES_MCP_VENV) over any other interpreter, using the shared lookup", () => {
+    const venv = join(root, "mcp-venv");
+    mkdirSync(join(venv, "bin"), { recursive: true });
+    writeFileSync(join(venv, "bin", "python3"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(venv, "bin", "python3"), 0o755);
+    // No candidate override: the shared lookup's own order decides, and the venv comes first.
+    execFileSync("bash", [SCRIPT], {
+      encoding: "utf8",
+      env: { HOME: home, PATH: `${bin}:/usr/bin:/bin`, ATELES_MCP_VENV: venv },
+    });
+    expect(readFileSync(plistPath(), "utf8")).toContain(`<string>${join(venv, "bin", "python3")}</string>`);
   });
 });
