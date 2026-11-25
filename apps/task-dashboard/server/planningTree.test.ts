@@ -4,7 +4,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { OPEN_TASK_STATUSES } from "../src/taskSearch";
-import { createPlanningTree, treeArgs } from "./planningTree";
+import { createPlanningTree, pythonBin, treeArgs } from "./planningTree";
 
 const ok = JSON.stringify({ ok: true, nodes: [], roots: [] });
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -74,5 +74,15 @@ describe("treeArgs", () => {
     const args = treeArgs();
     expect(args[args.indexOf("--open-statuses") + 1]).toBe(OPEN_TASK_STATUSES.join(","));
     expect(args).toContain("execution.mcp.ateles.planning_tree");
+  });
+});
+
+describe("pythonBin", () => {
+  it("uses the interpreter the installer pinned", () => {
+    expect(pythonBin({ DASHBOARD_PYTHON: "/opt/homebrew/bin/python3" })).toBe("/opt/homebrew/bin/python3");
+  });
+  it("falls back to python3 when nothing is pinned or the pin is blank", () => {
+    expect(pythonBin({})).toBe("python3");
+    expect(pythonBin({ DASHBOARD_PYTHON: "  " })).toBe("python3");
   });
 });

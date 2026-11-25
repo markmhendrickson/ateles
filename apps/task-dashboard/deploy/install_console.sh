@@ -84,11 +84,21 @@ if [ -z "$NODE_BIN" ]; then
 fi
 command -v npm >/dev/null 2>&1 || { echo "npm not found on PATH." >&2; exit 1; }
 
-# launchd starts with a bare PATH. The planning tab runs `python3` from the
-# repo; prefer the repo's own venv when it has one.
+# launchd starts with a bare PATH. The planning tab runs the repo's own Python
+# module, which imports `mcp`. The repo venv does not always carry it, so probe
+# candidates in order and use the first interpreter that can import it.
 AGENT_PATH="$(dirname "$NODE_BIN"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-if [ -x "$REPO_DIR/.venv/bin/python3" ]; then
-  AGENT_PATH="$REPO_DIR/.venv/bin:$AGENT_PATH"
+PYTHON_BIN=""
+for candidate in "$REPO_DIR/.venv/bin/python3" /opt/homebrew/bin/python3 /usr/local/bin/python3 "$(command -v python3 || true)"; do
+  if [ -n "$candidate" ] && [ -x "$candidate" ] && "$candidate" -c 'import mcp' >/dev/null 2>&1; then
+    PYTHON_BIN="$candidate"
+    break
+  fi
+done
+if [ -z "$PYTHON_BIN" ]; then
+  echo "No Python with the 'mcp' module found (tried the repo venv, Homebrew and PATH)." >&2
+  echo "Install it first, e.g. /opt/homebrew/bin/python3 -m pip install mcp, then rerun." >&2
+  exit 1
 fi
 GIT_SHA="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo "")"
 
@@ -98,6 +108,7 @@ RENDERED="$(sed \
   -e "s|{{LOG_DIR}}|$LOG_DIR|g" \
   -e "s|{{HOME}}|$HOME|g" \
   -e "s|{{PATH}}|$AGENT_PATH|g" \
+  -e "s|{{PYTHON}}|$PYTHON_BIN|g" \
   -e "s|{{PORT}}|$PORT|g" \
   -e "s|{{GIT_SHA}}|$GIT_SHA|g" \
   "$TEMPLATE")"
