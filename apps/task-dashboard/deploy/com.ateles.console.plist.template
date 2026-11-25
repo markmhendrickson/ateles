@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.ateles.console: the Ateles console (apps/task-dashboard), served
+  persistently on this Mac at http://127.0.0.1:5273/ in LOCAL-ONLY mode:
+  bound to 127.0.0.1, Google sign-in replaced by a strict Host-header check.
+
+  THIS FILE CARRIES NO SECRET. The Neotoma credential is read by the Node
+  process itself (environment, then the operator's Neotoma env file, only the
+  two NEOTOMA_ keys) exactly as server/neotomaProxy.ts always has. Never add a
+  credential key here: install_console.sh refuses to install a plist with one.
+
+  Double-brace placeholders are filled by install_console.sh, which copies the
+  result to ~/Library/LaunchAgents/com.ateles.console.plist.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ateles.console</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{NODE}}</string>
+        <string>{{APP_DIR}}/server-dist/serve.js</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{{APP_DIR}}</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <!-- A refused start (bad config) exits 1; do not restart it in a hot loop. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/com.ateles.console.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/com.ateles.console.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>{{HOME}}</string>
+        <key>PATH</key>
+        <string>{{PATH}}</string>
+        <key>DASHBOARD_LOCAL_ONLY</key>
+        <string>1</string>
+        <key>PORT</key>
+        <string>{{PORT}}</string>
+        <key>DASHBOARD_GIT_SHA</key>
+        <string>{{GIT_SHA}}</string>
+    </dict>
+</dict>
+</plist>
