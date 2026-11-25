@@ -216,7 +216,7 @@ describe("serve.ts in local-only mode", () => {
 describe("serve.ts in the deployed (Google) mode is unchanged", () => {
   const configured = {
     DASHBOARD_GOOGLE_CLIENT_ID: "client-id",
-    DASHBOARD_GOOGLE_CLIENT_SECRET: "client-secret",
+    DASHBOARD_GOOGLE_CLIENT_SECRET: "client-secret", // gitleaks:allow (synthetic test value)
     DASHBOARD_APPROVED_EMAILS: "someone@example.com",
     DASHBOARD_SESSION_KEY: "k".repeat(32),
   };
