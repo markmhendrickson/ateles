@@ -2112,6 +2112,10 @@ class SkillResult:
     policy_unavailable: bool = False
     remote_run_id: str = ""
     remote_machine_state: str = ""
+    # The run id of a Fly dispatch that was refused, or whose launch failed,
+    # with nothing run: it names the attempt for diagnosis only. Unlike
+    # ``remote_run_id`` it says nothing about a remote run having happened.
+    fly_run_id: str = ""
     # A configuration the operator must repair before this dispatch can run
     # (not a wait): per provider, naming the setting, never a value.
     configuration_repair: str = ""
@@ -4586,7 +4590,7 @@ async def _run_skill_once(
                     log.warning(f"[apis] {skill} dispatch deferred — {msg}")
                     return SkillResult(
                         skill, False, None, "", "", error=msg, provider=provider,
-                        cooled_until=exc.cooled_until,
+                        cooled_until=exc.cooled_until, fly_run_id=_fly_job.run_id,
                     )  # fmt: skip
                 except (fly_runner.FlyIneligible, fly_runner.FlyLaunchError) as exc:
                     reason = (
@@ -4597,6 +4601,7 @@ async def _run_skill_once(
                     _refusal = _fly_refusal_or_fallback(
                         reason, getattr(exc, "provider_specific", False))
                     if _refusal is not None:
+                        _refusal.fly_run_id = _fly_job.run_id
                         return _refusal
                     if _fly_job.neotoma_tools_unavailable:
                         # FlyIneligible is raised BEFORE any launch is requested;

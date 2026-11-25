@@ -59,6 +59,13 @@ list cannot be read, `all` also runs legal.
   bold verdict token and findings: the form `post_lens_verdict.py` reads), plus
   `<lens>.brief.md`, per-attempt JSON, and `summary.json` (provider, duration,
   Fly run id, reviewed head, attempts, verdict).
+- For a refused or failed dispatch, keeps the runner's reason, the child's
+  stderr tail and the Fly run id in
+  `<out-dir>/<lens>.attempt<N>.failure.private.txt` (mode 0600, each field cut
+  to 1500 characters, credential-shaped text redacted). The attempt record in
+  `summary.json` names the file and the run id. Read it to diagnose a fallback;
+  do not paste it into a pull request, an issue or a log. Redaction is by
+  pattern, so treat the file as private.
 - Posts nothing unless `--post`, which then calls `post_lens_verdict.py` per
   verdict (it refuses if the PR is no longer at the reviewed head). Without
   `--post`, post by hand with that script, using the head from `summary.json`.
