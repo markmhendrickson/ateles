@@ -313,6 +313,48 @@ def test_extra_brief_passed_through(tmp_path):
     assert "ROUND TWO: check the fixed retry path" in (tmp_path / "pm.brief.md").read_text()
 
 
+@pytest.mark.parametrize("kind", ["oversize", "directory", "missing", "device"])
+def test_bad_extra_brief_is_refused_before_any_brief_or_dispatch(tmp_path, kind, capsys):
+    extra = tmp_path / "notes.md"
+    if kind == "oversize":
+        extra.write_bytes(b"x" * (f.MAX_EXTRA_BRIEF_BYTES + 1))
+    elif kind == "directory":
+        extra.mkdir()
+    elif kind == "device":
+        extra = Path(os.devnull)
+    d = Script()
+    rc, posts = run(tmp_path, d, "--extra-brief", str(extra))
+    assert rc == 2 and posts == [] and d.calls == []
+    assert not (tmp_path / "pm.brief.md").exists()
+    assert "cannot read --extra-brief" in capsys.readouterr().err
+
+
+def test_extra_brief_at_the_cap_is_accepted(tmp_path):
+    extra = tmp_path / "notes.md"
+    extra.write_bytes(b"x" * f.MAX_EXTRA_BRIEF_BYTES)
+    rc, _ = run(tmp_path, Script(ok_env()), "--extra-brief", str(extra))
+    assert rc == 0
+
+
+def test_extra_brief_read_is_bounded(tmp_path, monkeypatch):
+    extra = tmp_path / "notes.md"
+    extra.write_bytes(b"x" * (f.MAX_EXTRA_BRIEF_BYTES * 3))
+    asked = []
+    real_open = Path.open
+
+    def spy_open(self, *a, **kw):
+        handle = real_open(self, *a, **kw)
+        if self == extra:
+            real_read = handle.read
+            handle.read = lambda n=-1: asked.append(n) or real_read(n)
+        return handle
+
+    monkeypatch.setattr(Path, "open", spy_open)
+    with pytest.raises(ValueError):
+        f.read_extra_brief(extra)
+    assert asked == [f.MAX_EXTRA_BRIEF_BYTES + 1]
+
+
 def test_all_runs_five_lenses_sequentially(tmp_path):
     envs = [ok_env(block(GOOD.replace("Pavo", r).replace("pm lens", lname + " lens")))
             for r, lname in [("Pavo", "pm"), ("Waxwing", "arch"), ("Falco", "security"),
