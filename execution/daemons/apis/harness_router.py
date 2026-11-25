@@ -116,6 +116,68 @@ def configured_providers() -> list[str]:
     return ordered
 
 
+# A task may require one provider with the tag ``harness-provider:<name>``,
+# <name> being one of FRONTIER_PROVIDERS.
+TASK_PIN_PREFIX = "harness-provider:"
+# A tag that BEGINS like this is an attempt at a pin. Deliberately wider than
+# what is accepted, so a near miss (case, spacing, ``_`` or ``=``) refuses the
+# dispatch instead of silently running unpinned. A tag that only mentions the
+# words (``harness-provider-notes``, ``about harness-provider:codex``) is an
+# ordinary tag.
+_TASK_PIN_ATTEMPT_RE = re.compile(r"\s*harness[-_ ]*provider\s*[:=]", re.IGNORECASE)
+
+
+class ProviderPinRefused(ValueError):
+    """A task's tags cannot be read as at most one supported provider pin."""
+
+
+def task_provider_pin(tags: object) -> str | None:
+    """The provider a task's ``tags`` require, or None when they pin none.
+
+    Accepted only as the exact tag ``harness-provider:claude``, ``:codex`` or
+    ``:cursor`` (repeating one is harmless). Fails closed with
+    ``ProviderPinRefused`` on any other attempt at a pin, on two different
+    pins, and on a tags value that is not a list yet mentions a pin. ``tags``
+    may be the list itself or its JSON text.
+    """
+    if tags is None:
+        return None
+    if isinstance(tags, str):
+        try:
+            decoded = json.loads(tags)
+        except ValueError:
+            decoded = None
+        if isinstance(decoded, list):
+            tags = decoded
+    if not isinstance(tags, (list, tuple)):
+        if _TASK_PIN_ATTEMPT_RE.search(str(tags)):
+            raise ProviderPinRefused(
+                "the task's tags mention a harness provider pin but are not a list"
+            )
+        return None
+    supported = {f"{TASK_PIN_PREFIX}{name}": name for name in FRONTIER_PROVIDERS}
+    pins: set[str] = set()
+    for tag in tags:
+        if isinstance(tag, str):
+            attempted = _TASK_PIN_ATTEMPT_RE.match(tag)
+        else:
+            attempted = _TASK_PIN_ATTEMPT_RE.search(str(tag))
+        if not attempted:
+            continue
+        if not isinstance(tag, str) or tag not in supported:
+            raise ProviderPinRefused(
+                f"unsupported harness provider pin {str(tag)[:80]!r}; use exactly one "
+                f"of: {', '.join(supported)}"
+            )
+        pins.add(supported[tag])
+    if len(pins) > 1:
+        raise ProviderPinRefused(
+            "the task pins more than one harness provider: "
+            + ", ".join(sorted(pins))
+        )
+    return next(iter(pins), None)
+
+
 def _headroom_path() -> Path:
     configured_path = os.environ.get("APIS_HARNESS_HEADROOM_FILE", "").strip()
     return (
