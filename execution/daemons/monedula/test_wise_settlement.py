@@ -2960,3 +2960,48 @@ def test_old_key_terminal_row_holds_its_own_session_instead_of_offering_it_again
                         pytest.fail("the old-key session was offered again"))
     world.tick()
     assert approvals.writes == 0 and world.sends == []
+
+
+def test_census_reports_manual_required_as_holding_all_profiles(tmp_path, capsys):
+    import wise_journal_hold_census as census
+
+    path = tmp_path / journal.JOURNAL_NAME
+    journal.init_journal(path)
+    journal.record_intent(path, "old-manual", "old-token", generation=1)
+    data = journal.load(path)
+    data["obligations"]["old-manual"].update(state="done", outcome_status="manual_required", outcome_at=time.time())
+    journal._write(path, data)
+    assert census.main(["census", str(path)]) == 0
+    output = capsys.readouterr().out
+    assert "unclassified_UNRESOLVED_all_profiles: 1" in output
+    assert "rows that would hold ALL Wise obligations: 1" in output
+    assert "old failed row" not in output
+
+
+def test_old_key_hold_alert_is_deduplicated_across_ticks(approval_env, monkeypatch):
+    """The cutover hold never settles the session, so it recurs every tick: its alert must carry a dedupe key."""
+    import consent_email
+    import monedula
+    import payment_approval
+    from handlers.payment_profile import PaymentProfile
+
+    world, approvals = approval_env
+    world.handler = wise.WiseTransferHandler(PaymentProfile(
+        prefix="SYNTHETIC", label="Synthetic", payment_type="wise",
+        calendar_keywords=["yoga"], amount_eur=10, entity_id="profile-p",
+        wise_recipient_id=5, wise_recipient_name="Synthetic",
+    ))
+    old_key = consent_email._base_obligation_key(world.handler, monedula._yesterday().isoformat(), "")
+    path = consent_email.journal_path()
+    journal.record_intent(path, old_key, "old-token", generation=1)
+    data = journal.load(path)
+    data["obligations"][old_key].update(state="done", outcome_status="failed", outcome_at=time.time())
+    journal._write(path, data)
+    monkeypatch.setattr(monedula, "_reconcile_wise_entries", lambda *a: True)
+    monkeypatch.setattr(payment_approval, "collect", lambda *a, **kw: pytest.fail("offered again"))
+    alerts = []
+    monkeypatch.setattr(monedula, "_notify", lambda message, **kw: alerts.append((message, kw)))
+    world.tick()
+    world.tick()
+    holds = [kw for message, kw in alerts if "payment held by Wise attempt" in message]
+    assert holds and all(kw.get("dedupe_key") == f"monedula:wise_hold:{old_key}" for kw in holds)
