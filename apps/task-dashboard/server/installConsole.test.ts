@@ -82,7 +82,9 @@ describe("install_console.sh", () => {
     expect(calls()).toEqual([
       expect.stringMatching(/^npm --prefix .* ci/),
       expect.stringMatching(/^npm --prefix .* run build:deploy$/),
-      "launchctl list",
+      "launchctl list com.ateles.console",
+      // The fake reports the job as loaded, so the installer unloads before loading.
+      `launchctl unload ${plistPath()}`,
       expect.stringMatching(/^launchctl load .*com\.ateles\.console\.plist$/),
     ]);
   });

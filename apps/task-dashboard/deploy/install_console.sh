@@ -124,7 +124,10 @@ fi
 echo "==> (Re)loading $LABEL"
 if [ "$DRY_RUN" = 1 ]; then
   echo "[dry-run] would run: launchctl unload $PLIST_DEST (if loaded)"
-elif launchctl list 2>/dev/null | grep -q "$LABEL"; then
+# `launchctl list <label>` exits non-zero when the job is not loaded. (Not
+# `launchctl list | grep -q`: under pipefail an early-exiting grep can SIGPIPE
+# launchctl and read a loaded job as absent, skipping the reload.)
+elif launchctl list "$LABEL" >/dev/null 2>&1; then
   launchctl unload "$PLIST_DEST" 2>/dev/null || true
 fi
 run launchctl load "$PLIST_DEST"
