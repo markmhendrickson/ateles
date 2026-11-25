@@ -105,6 +105,59 @@ Vite on port 5273 with HMR, no sign-in, reading Neotoma through the same
 `/api/*` routes the deployed server exposes. This is still the loop for
 iterating on the app.
 
+### The persistent local console (one link: http://127.0.0.1:5273/)
+
+To have the console always available on this Mac, not only while
+`npm run dev` is running, install it as a launchd LaunchAgent. It serves the
+built app, the planning tab included, at **http://127.0.0.1:5273/** and starts
+again after a crash, a logout and login, or a reboot (once you log in: a
+LaunchAgent runs in your login session, not before it).
+
+```bash
+apps/task-dashboard/deploy/install_console.sh --dry-run    # print every step and the plist; changes nothing
+apps/task-dashboard/deploy/install_console.sh              # build, install, (re)load; safe to re-run
+node apps/task-dashboard/deploy/verify_console.mjs         # check the running console
+apps/task-dashboard/deploy/install_console.sh --uninstall  # unload and remove the plist (logs are kept)
+```
+
+- It serves the checkout the script lives in. For a console that does not
+  change under you, run it from the deploy checkout (`~/ateles-rc-src`), not
+  from a working clone whose branch moves. Re-run it to pick up new code.
+- Logs: `~/Library/Logs/ateles/com.ateles.console.{log,err}`.
+- Port 5273 is also Vite's default. With the console installed, `npm run dev`
+  moves to the next free port (Vite prints it) rather than failing.
+- `verify_console.mjs` checks three things against the running process:
+  `/healthz` answers and reports `local_only: true`; `/api/planning-tree`
+  reaches a non-empty tree (it polls, because the build takes minutes); and a
+  request with a foreign `Host` header is refused with 403.
+
+**What local-only mode does.** The installed agent runs
+`server-dist/serve.js` with `DASHBOARD_LOCAL_ONLY=1`, read once at startup
+(nothing a request sends can turn it on or off). In this mode the server:
+
+- binds `127.0.0.1` only, and refuses to start if anything would make it bind
+  another address (`DASHBOARD_BIND_HOST` set to anything else, a flag value
+  other than exactly `1`, or a port that is not a fixed number); it also checks
+  the address it actually bound and exits if that is not loopback;
+- replaces Google sign-in with a strict `Host` check in front of every route,
+  `/healthz` included: the header must be exactly `127.0.0.1:5273` or
+  `localhost:5273`, otherwise 403 with no body. This is the defence against DNS
+  rebinding, where a web page you visit points its own name at 127.0.0.1 to
+  read local services: the browser still sends that page's name as `Host`, so
+  it is refused.
+
+**What it does not protect against.** Any other program running on this Mac,
+as any user, can connect to 127.0.0.1 and send a correct `Host` header; on a
+single-user Mac that means software you run. It is not reachable from other
+devices; use the deployed (Google sign-in) instance for those. The Neotoma
+credential stays in the Node process exactly as in dev (environment first, then
+the operator's Neotoma env file, only the two `NEOTOMA_*` keys); the plist
+carries no secret, and the installer refuses to install one that names a
+credential key.
+
+Unset, `DASHBOARD_LOCAL_ONLY` leaves the deployed, Google-gated server exactly
+as described below.
+
 ### The planning tree (`#/planning`)
 
 Screen S5 of `docs/product/console.md`. `GET /api/planning-tree` starts a
