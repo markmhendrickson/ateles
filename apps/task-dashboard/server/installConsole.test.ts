@@ -21,6 +21,7 @@ let root: string;
 let home: string;
 let bin: string;
 let callLog: string;
+let pyLog: string;
 
 function fake(name: string) {
   const p = join(bin, name);
@@ -28,10 +29,20 @@ function fake(name: string) {
   chmodSync(p, 0o755);
 }
 
+/** A fake interpreter: `-c 'import mcp'` succeeds only when `hasMcp`; it is never a real Python. */
+function fakePython(name: string, hasMcp: boolean): string {
+  const p = join(bin, name);
+  writeFileSync(p, `#!/bin/sh\necho "${name} $*" >> "${pyLog}"\nexit ${hasMcp ? 0 : 1}\n`);
+  chmodSync(p, 0o755);
+  return p;
+}
+
+let candidates: string[];
+
 function install(...args: string[]): string {
   return execFileSync("bash", [SCRIPT, ...args], {
     encoding: "utf8",
-    env: { HOME: home, PATH: `${bin}:/usr/bin:/bin` },
+    env: { HOME: home, PATH: `${bin}:/usr/bin:/bin`, CONSOLE_PYTHON_CANDIDATES: candidates.join("\n") },
   });
 }
 
@@ -43,9 +54,11 @@ beforeEach(() => {
   home = join(root, "home");
   bin = join(root, "bin");
   callLog = join(root, "calls.log");
+  pyLog = join(root, "python.log");
   mkdirSync(home);
   mkdirSync(bin);
   for (const n of ["node", "npm", "launchctl"]) fake(n);
+  candidates = [fakePython("python-with-mcp", true)];
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
@@ -60,6 +73,8 @@ describe("install_console.sh --dry-run", () => {
     expect(out).toMatch(/<key>DASHBOARD_LOCAL_ONLY<\/key>\s*<string>1<\/string>/);
     expect(out).toMatch(/<key>PORT<\/key>\s*<string>5273<\/string>/);
     expect(out).toMatch(/http:\/\/127\.0\.0\.1:5273\//);
+    expect(out).toContain("Planning tab Python:");
+    expect(out).toMatch(/<key>DASHBOARD_PYTHON<\/key>\s*<string>[^<]*\/python-with-mcp<\/string>/);
   });
 
   it("previews an uninstall without removing anything", () => {
@@ -110,5 +125,31 @@ describe("install_console.sh", () => {
     install("--uninstall");
     expect(existsSync(plistPath())).toBe(false);
     expect(calls()).toContain(`launchctl unload ${plistPath()}`);
+  });
+});
+
+describe("install_console.sh planning-tab Python", () => {
+  it("pins the first candidate that can import mcp and skips one that cannot", () => {
+    candidates = [fakePython("python-without-mcp", false), fakePython("python-with-mcp", true), fakePython("python-later", true)];
+    install();
+    const plist = readFileSync(plistPath(), "utf8");
+    expect(plist).toMatch(/<key>DASHBOARD_PYTHON<\/key>\s*<string>[^<]*\/python-with-mcp<\/string>/);
+    const probed = readFileSync(pyLog, "utf8");
+    expect(probed).toContain("python-without-mcp -c import mcp");
+    expect(probed).not.toContain("python-later");
+  });
+
+  it("refuses with a clear message and writes and invokes nothing when no candidate has mcp", () => {
+    candidates = [fakePython("python-without-mcp", false), join(root, "does-not-exist")];
+    let failure: { status?: number; stderr?: string } = {};
+    try {
+      install();
+    } catch (e) {
+      failure = e as { status?: number; stderr?: string };
+    }
+    expect(failure.status).toBe(1);
+    expect(String(failure.stderr)).toContain("No Python with the 'mcp' module found");
+    expect(readdirSync(home)).toEqual([]);
+    expect(calls()).toEqual([]);
   });
 });
