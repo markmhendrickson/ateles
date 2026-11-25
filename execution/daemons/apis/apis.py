@@ -684,6 +684,8 @@ from routing import (  # noqa: E402
     resolve_skill as _resolve_skill,
 )
 
+from harness_router import ProviderPinRefused, task_provider_pin  # noqa: E402
+
 import github_gateway  # noqa: E402
 import audit_queue  # noqa: E402
 
@@ -954,6 +956,24 @@ async def _spawn_harness_skill(
     # recognizable class never silently runs cheap.
     action_class = _dispatch_action_class(skill, snapshot)
 
+    # A task may require one harness provider (`harness-provider:<name>` tag).
+    # Read here, on every attempt: this is the one spawn every task dispatch
+    # goes through. A pin that cannot be honoured as written refuses before any
+    # effect, never runs unpinned.
+    try:
+        pin = task_provider_pin(snapshot.get("tags"))
+        if pin and not build_delivery.is_delivery_dispatch(skill, action_class):
+            raise ProviderPinRefused(
+                "a harness provider pin is supported only on a PR-delivery task")
+    except ProviderPinRefused as exc:
+        reason = f"build not started: harness provider pin refused: {exc}"
+        log.error(f"[{DAEMON_NAME}] {skill} task {entity_id}: {reason}")
+        if snapshot.get("task_type") == "existing_pr_correction":
+            return _correction_not_started(skill, reason)
+        return SkillResult(skill, False, None, "", "", error=reason)
+    # Passed to every run_skill call below, only when the task pins a provider.
+    pinned: dict[str, str] = {"required_provider": pin} if pin else {}
+
     # A builder task cleared to deliver (the `open_or_merge_pr` class — the one
     # the gate holds for the operator) gets what delivery needs, exactly as the
     # swarm build handoff does: a dedicated worktree as cwd (git-root grants on
@@ -1010,7 +1030,7 @@ async def _spawn_harness_skill(
                 key=key, run_agent_session_id=run_agent_session_id, notifier=notifier,
                 action_class=action_class, target=target, task_snapshot=snapshot,
                 task_lifecycle_version=_lifecycle_version,
-                task_lifecycle_provenance=_lifecycle_provenance,
+                task_lifecycle_provenance=_lifecycle_provenance, **pinned,
             )  # fmt: skip
             if fly_result is not None:
                 return fly_result
@@ -1054,6 +1074,7 @@ async def _spawn_harness_skill(
             notifier=notifier,
             action_class=action_class,
             **delivery,
+            **pinned,
         )
     return result
 
@@ -1328,7 +1349,8 @@ def _correction_policy_reader(entity_id, snapshot, repository, target, claim, *,
 async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, role: str | None,
                                  repository: str, key, run_agent_session_id: str | None,
                                  notifier, action_class: str, target=None, task_snapshot=None,
-                                 task_lifecycle_version=None, task_lifecycle_provenance=None):  # fmt: skip
+                                 task_lifecycle_version=None, task_lifecycle_provenance=None,
+                                 required_provider: str | None = None):  # fmt: skip
     """A task-routed build delivered on Fly, or None to run it locally."""
     try:
         receipt_key = build_delivery.fly_delivery_key(
@@ -1384,6 +1406,8 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
 
         async def launch():
             extra = {"exclude_providers": refused_providers} if refused_providers else {}
+            if required_provider:
+                extra["required_provider"] = required_provider
             return await run_skill(
                 skill, fly_prompt, role=role or skill, task_entity_id=entity_id,
                 agent_session_id=run_agent_session_id or "", notifier=notifier,

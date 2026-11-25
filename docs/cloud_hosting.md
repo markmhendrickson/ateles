@@ -111,6 +111,22 @@ Forcing the executor does not grant an otherwise ineligible role access.
 Provider activation remains a separate setting and ruling: configuring a Claude
 login does not reactivate Claude for automatic swarm work.
 
+### Requiring one provider for a task
+
+A PR-delivery task that Apis dispatches may carry the tag
+`harness-provider:claude`, `harness-provider:codex` or
+`harness-provider:cursor` (the existing `tags` field). Every attempt then uses
+that provider only: first dispatch, watchdog retry, deferred or reconciled
+dispatch, release of an approved checkpoint, the Fly job and the local run when
+Fly declines it. The pin only narrows the router's choice. The provider must be
+enabled and pass the same binary, cooling, usage, headroom and Fly checks;
+otherwise the run is refused with the reason and nothing fails over. A near
+miss (other spelling, case or value), two different pins, or a pin on a task
+that is not a PR delivery refuses the dispatch. Checkpoint, action and approval
+gates are unchanged, and changing the tags of a held task still requires fresh
+approval. Tags are read from the task only on this path: `dispatch_role.py`
+takes `--provider`, and the issue and pull-request pipelines ignore task tags.
+
 ## Provider login and job credentials
 
 Each provider uses its own single login machine and persistent login volume;

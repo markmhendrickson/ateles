@@ -5214,6 +5214,7 @@ async def run_skill(
     fly_delivery: dict | None = None,
     agent_git_identity: bool = False,
     exclude_providers: tuple[str, ...] = (),
+    required_provider: str | None = None,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
 
@@ -5230,6 +5231,15 @@ async def run_skill(
     ``exclude_providers``: providers this dispatch must not select. An
     existing-PR correction's caller names the ones Fly already refused for a
     provider-only reason, so its next dispatch takes the next Fly candidate.
+
+    ``required_provider``: the one provider this dispatch may use, taken from
+    a task's ``harness-provider:<name>`` tag. Unlike ``provider`` (a
+    diagnostic pin), it can only narrow what an unpinned run could choose: the
+    provider must be enabled (``APIS_HARNESS_PROVIDERS``, or selectable only
+    on Fly for this dispatch), including when a Fly run falls back to the Mac.
+    Every eligibility, cooling, usage and headroom check applies, and nothing
+    fails over to another provider: otherwise the run is refused with the
+    reason. A conflicting ``provider`` is refused. None changes nothing.
 
     ``runner`` / ``repository``: forwarded to every ``_run_skill_once``
     attempt; see that function (ateles#1456, the Fly executor).
@@ -5352,6 +5362,13 @@ async def run_skill(
     if fly_delivery is not None:
         runner = "fly"  # a delivery runs on Fly or the builder runs it locally
     fly_bound, fly_extra = _fly_routing(runner, action_class)
+    if required_provider is not None:
+        refusal = _required_provider_refusal(required_provider, provider, fly_extra)
+        if refusal:
+            log.error(f"[apis] {skill} dispatch refused — {refusal}")
+            return SkillResult(skill, False, None, "", "", error=refusal)
+        # From here the router's existing hard pin: one candidate, no failover.
+        provider = required_provider
 
     async def attempt(selected: str, fallback_model: str | None = None) -> SkillResult:
         # A model whose own usage cap is spent is not launched: the next model
@@ -5445,7 +5462,10 @@ async def run_skill(
             repository=repository,
             fly_delivery=fly_delivery,
             local_fallback_check=(
-                (lambda name: _local_fallback_refusal(name, pinned=provider is not None))
+                # A task's required provider gets no pinned exemption: running
+                # on the Mac it must be enabled there, like any unpinned run.
+                (lambda name: _local_fallback_refusal(
+                    name, pinned=provider is not None and required_provider is None))
                 if selected in fly_bound else None
             ),
         )
@@ -5480,7 +5500,7 @@ async def run_skill(
         and not local_review
         and local_provider.is_eligible(work_class, local_provider.load_config())
     )
-    return await _run_provider_attempts(
+    result = await _run_provider_attempts(
         skill,
         attempt,
         fallback_models_for=(
@@ -5503,6 +5523,34 @@ async def run_skill(
         exclude_providers=tuple(exclude_providers),
         model_fallback=True,
     )
+    if required_provider is not None and not result.ok and result.error:
+        result.error = (
+            f"{result.error} (the task requires harness provider "
+            f"{required_provider!r}; no other provider is tried)"
+        )
+    return result
+
+
+def _required_provider_refusal(
+    required: str, provider: str | None, fly_extra: tuple[str, ...]
+) -> str | None:
+    """Why a task's required provider cannot be used at all, or None.
+
+    Only enablement is judged here; cooling, usage, headroom and the binary are
+    the router's own checks, applied to the pinned candidate afterwards."""
+    if required not in FRONTIER_PROVIDERS:
+        return f"required harness provider {required!r} is not supported"
+    if provider not in (None, required):
+        return (
+            f"required harness provider {required!r} conflicts with the "
+            f"requested provider {provider!r}"
+        )
+    if required not in configured_providers() and required not in fly_extra:
+        return (
+            f"required harness provider {required!r} is not enabled for this "
+            "dispatch (APIS_HARNESS_PROVIDERS); no other provider is tried"
+        )
+    return None
 
 
 def _tier_bound_binaries(
