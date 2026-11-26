@@ -128,7 +128,7 @@ def _run_import(monkeypatch, tmp_path, memo_dir_is_source):
     memos.mkdir()
     other = tmp_path / "Desktop"
     other.mkdir()
-    memo = (memos if memo_dir_is_source else other) / "20261125 043242-SYNTHETIC.m4a"
+    memo = (memos if memo_dir_is_source else other) / "20260101 000000-SYNTHETIC.m4a"
     memo.write_bytes(b"synthetic")
     monkeypatch.setattr(iad, "VOICE_MEMOS_PATH", memos)
     monkeypatch.setattr(iad, "AUDIO_IMPORTS_DIR", tmp_path / "imports")
