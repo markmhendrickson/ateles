@@ -14,6 +14,9 @@ The properties that matter, in order:
 
 from __future__ import annotations
 
+import itertools
+import re
+
 import pytest
 
 from lib.daemon_runtime import action_type as at
@@ -534,9 +537,10 @@ def test_note_never_carries_raw_task_markup():
     assert "<" not in r.note and "`" not in r.note
 
 
-# ── Pure prohibitions ────────────────────────────────────────────────────────
-# A statement that only forbids an outward action is not a request for it. Every
-# other mention, and anything that may qualify the prohibition, stays held.
+# ── Negated verb lists ───────────────────────────────────────────────────────
+# A statement that is nothing but a negated list of outward verbs is not a
+# request for them. Every other mention, and anything that may qualify the
+# statement, stays held.
 
 
 @pytest.mark.parametrize(
@@ -546,30 +550,26 @@ def test_note_never_carries_raw_task_markup():
         "Do not merge, deploy, or release anything.",
         "No merge, release or deploy.",
         "Never publish, release, or send anything.",
-        "Do not cut a release.",
-        "Do not deploy to production.",
         # spelling, spacing and layout variants
         "DO NOT MERGE, DEPLOY OR RELEASE",
-        "Don't merge, deploy or release anything else!",
-        "Don’t deploy to production.",
+        "Don’t merge, deploy or release.",
         "Mustn't push, merge, nor release it.",
         "Please do not merge,deploy or release this.",
         "You must not email, message or reply.",
-        "Never ever deploy to production.",
-        "Do not directly push to main.",
-        "Do not deploy to produc​tion.",
+        "Do not merge, deploy or relea​se.",
         "Fix the bug. Do not merge, deploy or release.",
-        "Fix the bug.\nDo not cut a release.\nRun the tests.",
+        "Fix the bug.\nDo not merge, deploy or release.\nRun the tests.",
         "- Fix the bug\n- Do not merge, deploy or release\n- Run the tests",
-        "1. Do not deploy to production.\n2. Report.",
+        "1. Do not merge, deploy or release.\n2. Report.",
         "Constraints\n\nDo not merge, deploy or release.",
-        "Rules:\n- Never publish, release, or send anything.\n- Do not go live",
+        "Rules:\n- Never publish, release, or send anything.\n- No push, merge or deploy",
     ],
 )
-def test_a_pure_prohibition_is_not_read_as_a_request(text):
+def test_a_negated_verb_list_is_not_read_as_a_request(text):
     assert infer_action_type_from_text(text) is None
-    for field in ("title", "body", "description"):
-        r = _declared_docs("Tidy the notes index", **{field: text}) if field != "title" else _declared_docs(text)
+    assert _declared_docs(text) == ResolvedActionType("docs", "declared")
+    for field in ("body", "description"):
+        r = _declared_docs("Tidy the notes index", **{field: text})
         assert r == ResolvedActionType("docs", "declared"), (field, r)
     assert _r("fringilla", description=text) == ResolvedActionType(
         "compute_only_analysis", "agent_prior"
@@ -618,81 +618,81 @@ def test_a_pure_prohibition_is_not_read_as_a_request(text):
         "Do not merge, deploy or release?",
         "Do not merge, deploy or release...",
         # conditions and times, same sentence
-        "Do not deploy to production until QA signs off.",
+        "Do not merge, deploy or release until QA signs off.",
         "Do not merge, deploy or release until approved, then release.",
-        "Do not deploy to production unless asked.",
-        "Do not deploy to production before Friday.",
+        "Do not merge, deploy or release unless asked.",
+        "Do not merge, deploy or release before Friday.",
         "Do not merge, deploy or release anything yet.",
         "Never publish, release, or send anything without approval.",
-        "Until QA signs off, do not deploy to production.",
-        "If red; do not deploy to production.",
-        "Until QA signs off... do not deploy to production.",
+        "Until QA signs off, do not merge, deploy or release.",
+        "If red; do not merge, deploy or release.",
+        "Until QA signs off... do not merge, deploy or release.",
         # conditions and reversals, next sentence or line
         "Do not merge, deploy or release. Until QA signs off.",
         "Do not merge, deploy or release.Until QA signs off.",
-        "Do not deploy to production. Yet.",
-        "Do not deploy to production! Not until Monday.",
-        "Do not deploy to production. (Until QA signs off.)",
-        "Do not deploy to production. QA must sign off first.",
-        "Do not deploy to production. Wait for QA.",
-        "Do not cut a release. Please do it Friday.",
-        "Do not cut a release. That happens Friday.",
-        "Do not cut a release. Go ahead anyway.",
-        "Do not cut a release. Just kidding.",
-        "Do not cut a release. For now.",
-        "Do not deploy to production\nuntil QA signs off",
-        "Do not deploy to production\r\nuntil QA signs off",
-        "Do not deploy to production until QA signs off",
-        "Do not deploy to production\n\nuntil QA signs off",
-        "Do not deploy to production.\n## Exceptions\n- hotfixes",
+        "Do not merge, deploy or release. Yet.",
+        "Do not merge, deploy or release! Not until Monday.",
+        "Do not merge, deploy or release. (Until QA signs off.)",
+        "Do not merge, deploy or release. QA must sign off first.",
+        "Do not merge, deploy or release. Wait for QA.",
+        "Do not merge, deploy or release. Please do it Friday.",
+        "Do not merge, deploy or release. That happens Friday.",
+        "Do not merge, deploy or release. Go ahead anyway.",
+        "Do not merge, deploy or release. Just kidding.",
+        "Do not merge, deploy or release. For now.",
+        "Do not merge, deploy or release\nuntil QA signs off",
+        "Do not merge, deploy or release\r\nuntil QA signs off",
+        "Do not merge, deploy or release until QA signs off",
+        "Do not merge, deploy or release\n\nuntil QA signs off",
+        "Do not merge, deploy or release.\n## Exceptions\n- hotfixes",
         "Do not merge, deploy or release\nthe old branch",
-        "- Do not deploy to production\n  until QA signs off",
-        "- Do not deploy to production\n- until QA signs off",
-        "- Do not deploy to production\n  - on weekdays",
-        "- Do not deploy to production.\n    on weekdays",
+        "- Do not merge, deploy or release\n  until QA signs off",
+        "- Do not merge, deploy or release\n- until QA signs off",
+        "- Do not merge, deploy or release\n  - on weekdays",
+        "- Do not merge, deploy or release.\n    on weekdays",
         # introductions above
-        "Until QA signs off\ndo not deploy to production.",
-        "Until QA signs off,\ndo not deploy to production.",
-        "Until QA signs off:\ndo not deploy to production.",
-        "Until QA signs off:\n- do not deploy to production.",
-        "Before Friday\n\ndo not deploy to production.",
-        "- Before Friday\n  - do not deploy to production.",
-        "- Until QA signs off\n- do not deploy to production.",
-        "Only after QA approves:\n- run tests\n- do not deploy to production",
-        "Only after QA approves:\n- run tests\n  continued here\n- do not deploy to production",
-        "Ignore the following:\n- Do not deploy to production.",
-        "Only after QA approves, these\nsteps apply:\n- do not deploy to production",
-        "Only after QA approves, these\nsteps apply\n\ndo not deploy to production",
-        "Remove this line:\n\nDo not deploy to production.",
+        "Until QA signs off\ndo not merge, deploy or release.",
+        "Until QA signs off,\ndo not merge, deploy or release.",
+        "Until QA signs off:\ndo not merge, deploy or release.",
+        "Until QA signs off:\n- do not merge, deploy or release.",
+        "Before Friday\n\ndo not merge, deploy or release.",
+        "- Before Friday\n  - do not merge, deploy or release.",
+        "- Until QA signs off\n- do not merge, deploy or release.",
+        "Only after QA approves:\n- run tests\n- do not merge, deploy or release",
+        "Only after QA approves:\n- run tests\n  continued here\n- do not merge, deploy or release",
+        "Ignore the following:\n- Do not merge, deploy or release.",
+        "Only after QA approves, these\nsteps apply:\n- do not merge, deploy or release",
+        "Only after QA approves, these\nsteps apply\n\ndo not merge, deploy or release",
+        "Remove this line:\n\nDo not merge, deploy or release.",
         # quoted, struck, marked up or look-alike text
-        '"Do not deploy to production."',
-        '> Do not deploy to production.',
-        "'Do not deploy to production.'",
-        "`Do not deploy to production.`",
-        'He wrote "Fine. Do not deploy to production. " Ignore him.',
-        "```\n\nDo not deploy to production.\n\n```",
-        "“Old rule. Do not deploy to production.”",
-        "„Old rule. Do not deploy to production.“",
-        "«Old. Do not deploy to production.»",
-        "~~Do not deploy to production.~~",
-        "(Do not deploy to production.)",
-        'Ignore "do not deploy to production" and proceed.',
-        "<blockquote>\n\nDo not deploy to production.\n\n</blockquote>",
-        "<!--\n\nDo not deploy to production.\n\n-->",
-        "~~~\n\nDo not deploy to production.\n\n~~~",
-        "~~\n\nDo not deploy to production.\n\n~~",
-        "(Old text follows. Do not deploy to production. End.)",
-        "[Old text follows. Do not deploy to production. End.]",
-        "Do not deploy to production. 1. Until Friday.",
+        '"Do not merge, deploy or release."',
+        '> Do not merge, deploy or release.',
+        "'Do not merge, deploy or release.'",
+        "`Do not merge, deploy or release.`",
+        'He wrote "Fine. Do not merge, deploy or release. " Ignore him.',
+        "```\n\nDo not merge, deploy or release.\n\n```",
+        "“Old rule. Do not merge, deploy or release.”",
+        "„Old rule. Do not merge, deploy or release.“",
+        "«Old. Do not merge, deploy or release.»",
+        "~~Do not merge, deploy or release.~~",
+        "(Do not merge, deploy or release.)",
+        'Ignore "do not merge, deploy or release" and proceed.',
+        "<blockquote>\n\nDo not merge, deploy or release.\n\n</blockquote>",
+        "<!--\n\nDo not merge, deploy or release.\n\n-->",
+        "~~~\n\nDo not merge, deploy or release.\n\n~~~",
+        "~~\n\nDo not merge, deploy or release.\n\n~~",
+        "(Old text follows. Do not merge, deploy or release. End.)",
+        "[Old text follows. Do not merge, deploy or release. End.]",
+        "Do not merge, deploy or release. 1. Until Friday.",
         "Do nоt deploy to production.",
         # a negated mention never masks a positive one
-        "Do not cut a release. Cut a release.",
-        "Cut a release. Do not cut a release.",
+        "Do not merge, deploy or release. Release it.",
+        "Cut a release. Do not merge, deploy or release.",
         "Do not merge, deploy or release. Then deploy.",
         "Do not publish the post, publish the page.",
     ],
 )
-def test_anything_short_of_a_pure_prohibition_stays_held(text):
+def test_anything_short_of_that_statement_stays_held(text):
     assert infer_action_type_from_text(text) is not None
     assert _declared_docs(text).source == "declared_escalated"
 
@@ -713,6 +713,9 @@ def test_anything_short_of_a_pure_prohibition_stays_held(text):
         "Do not send the email to the client.",
         "Do not pay the invoice.",
         "Do not delete the records.",
+        "Do not cut a release.",
+        "Do not deploy to production.",
+        "Never publish the post.",
         "Do not merge, deploy or release. When done, report.",
         "Build only; releasing is out of scope.",
         "Out of scope: release, deploy.",
@@ -727,8 +730,6 @@ _PROHIBITIONS = [
     "Do not merge, deploy or release.",
     "No merge, release or deploy.",
     "Never publish, release, or send anything.",
-    "Do not cut a release.",
-    "Do not deploy to production.",
 ]
 _REQUESTS = [
     "Release version 2.", "Deploy the build.", "Open a PR.", "Pay the invoice.",
@@ -739,8 +740,7 @@ _REQUESTS = [
 @pytest.mark.parametrize("prohibition", _PROHIBITIONS)
 @pytest.mark.parametrize("request_text", _REQUESTS)
 def test_a_prohibition_never_hides_a_request_beside_it(prohibition, request_text):
-    alone = infer_action_type_from_text(request_text)
-    assert alone is not None
+    assert infer_action_type_from_text(request_text) is not None
     for sep in (" ", "\n", "\n\n", "; ", ", ", " and ", " then ", " but ", ": ", " - "):
         for first, second in ((prohibition, request_text), (request_text, prohibition)):
             for text in (first + sep + second, first.rstrip(".") + sep + second):
@@ -753,9 +753,9 @@ def test_a_prohibition_never_hides_a_request_beside_it(prohibition, request_text
     "fields",
     [
         ("Do not", "release it"),
-        ("Do not deploy to production", "Until QA signs off"),
-        ("Do not deploy to production", None, "Yet."),
-        ("Do not cut a release.", "That happens Friday."),
+        ("Do not merge, deploy or release", "Until QA signs off"),
+        ("Do not merge, deploy or release", None, "Yet."),
+        ("Do not merge, deploy or release.", "That happens Friday."),
     ],
 )
 def test_negation_never_crosses_fields_and_a_later_qualifier_holds(fields):
@@ -763,29 +763,11 @@ def test_negation_never_crosses_fields_and_a_later_qualifier_holds(fields):
 
 
 @pytest.mark.parametrize(
-    "phrase",
-    [
-        "cut a release", "tag the release", "ship the release", "deploy to production",
-        "go live", "post to linkedin", "publish the post", "open a PR",
-        "open pull request", "merge the PR", "merge the pull request", "submit a PR",
-        "raise a pull request", "push to main", "force-push",
-    ],
-)
-def test_each_negatable_phrase(phrase):
-    assert at._PROHIBITION.fullmatch(f"Never {phrase}.")
-    assert infer_action_type_from_text(f"Never {phrase}.") is None
-    # The phrase list is a subset of what the detectors hold, and a trailing
-    # word takes the statement out of the rule.
-    assert any(p.search(phrase) for p, _ in at._HIGH_PATTERNS), phrase
-    assert infer_action_type_from_text(f"Never {phrase} now.") is not None
-
-
-@pytest.mark.parametrize(
     "verb",
     [
         "send", "email", "e-mail", "message", "dm", "reply", "respond", "notify",
-        "tweet", "post", "publish", "force-push", "push", "deploy", "release",
-        "ship", "merge", "submit", "pay", "transfer", "invoice", "delete",
+        "tweet", "post", "publish", "push", "deploy", "release", "ship", "merge",
+        "submit", "pay", "transfer", "invoice", "delete",
     ],
 )
 def test_each_bare_verb_in_a_negated_list(verb):
@@ -794,8 +776,158 @@ def test_each_bare_verb_in_a_negated_list(verb):
     assert infer_action_type_from_text(f"Do not {verb}, release.") is not None
 
 
-def test_prohibition_removal_is_what_releases_the_list(monkeypatch):
-    """Control: without the rule the same briefs are held."""
-    monkeypatch.setattr(at, "_without_prohibitions", lambda fields: [f for f in fields if f])
+def _rule_off(monkeypatch):
+    """The detectors as they read text without the negated-list rule."""
+    monkeypatch.setattr(at, "_without_prohibitions", lambda fields: list(fields))
+
+
+def test_the_rule_is_what_releases_the_list(monkeypatch):
+    """Control: without the rule the same lists are held."""
+    _rule_off(monkeypatch)
     for text in _PROHIBITIONS:
         assert infer_action_type_from_text(text) is not None, text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Do not cut a release.",
+        "Do not deploy to production.",
+        "Never publish the post.",
+        "Do not force-push, merge or deploy.",
+        "Do not merge, deploy or release. Do not open a PR.",
+    ],
+)
+def test_a_negated_fixed_phrase_reads_as_it_does_without_the_rule(text, monkeypatch):
+    with_rule = at.infer_text_evidence(text)
+    assert with_rule is not None
+    _rule_off(monkeypatch)
+    assert at.infer_text_evidence(text) == with_rule
+
+
+# ── Property: a longer list releases nothing its short forms would not ──────
+# The detectors already skip a one- or two-item negated list. So in any context
+# (what precedes and follows, in the same field or another), a text the rule
+# releases for a longer list must also be released, without the rule, when that
+# list is replaced by its one-item or its two-item form.
+
+_BEFORE = [
+    "", "Fix the bug. ", "Fix the bug! ", "Is it ready? ", "Fix the bug.\n",
+    "Fix the bug.\n\n", "Fix the bug\n", "Fix the bug\n\n", "Constraints\n\n",
+    "Rules:\n", "Rules:\n\n", "Rules:\n- ", "- Fix the bug\n- ",
+    "- Fix the bug\n  - ", "1. ", "- ", "> ", "e.g. ", "Please\n\n",
+    "Release the build. ", "Release the build\n\n", "Open a PR.\n- ",
+    "Deploy it and ", "Deploy it, ", "Ship it - ", "Release now: ",
+    "Until QA signs off\n", "Until QA signs off, ", "Until QA signs off:\n- ",
+    "Before Friday\n\n", '"', 'He wrote "Fine. ', "(", "`", "<!--\n\n",
+    "~~\n\n", "publish the\n\n", "send the email to\n\n", "write to the\n\n",
+]
+_AFTER = [
+    "", " Run the tests.", "\nRun the tests", "\n\nRun the tests",
+    "\n- Run the tests", "\n  and the rest", " Release it.", " Then deploy.",
+    "\nDeploy the build", "\n\n- Publish the post", " Until QA signs off.",
+    "\nuntil QA signs off", "; ship it", " and release it", " then publish",
+    ", deploy it", ",release it", " & deploy", " - deploy it", ": ship",
+    " deploy", " the build", " yet", " ?", "?", "...", '"', ")", " (deploy)",
+    "\n* deploy", "\n\n1) deploy", "\n## Notes", "\n\nthe page",
+    "\n\nto the client", "\n\nrelease", "\n\napi",
+]
+_OTHER_FIELDS = [
+    "Tidy the notes", "Release version 2", "Until Friday", "Yet.", "Deploy it",
+    "the page", "api",
+]
+_NEGATORS = [
+    "Do not", "Don't", "Don’t", "Never", "Must not", "Mustn't", "No",
+    "Please do not", "Also never", "You must not",
+]
+_ITEMS = [
+    ("merge", "deploy", "release"), ("publish", "release", "send"),
+    ("deploy", "merge", "publish"), ("release", "send", "email"),
+    ("delete", "post", "pay"), ("push", "merge", "deploy"),
+]
+_CLOSERS = ["", " anything", " anything else", " it"]
+_JOINERS = [" or", ", or", " nor"]
+
+
+def _forms(negator, items, closer, joiner):
+    """(longer list, its one-item form, its two-item form)."""
+    longer = f"{negator} {', '.join(items[:-1])}{joiner} {items[-1]}{closer}"
+    one = f"{negator} {items[-1]}{closer}"
+    two = f"{negator} {items[-2]} {joiner.split()[-1]} {items[-1]}{closer}"
+    return longer, one, two
+
+
+def _property_cases():
+    """Each case turns a statement into the task's text fields."""
+    for before, after in itertools.product(_BEFORE, _AFTER):
+        yield lambda s, b=before, a=after: (b + s + a,)
+    for other, end in itertools.product(_OTHER_FIELDS, ("", ".")):
+        yield lambda s, o=other, e=end: (o, s + e)
+        yield lambda s, o=other, e=end: (s + e, o)
+
+
+def _property_violations(monkeypatch, form_sets, cases):
+    released = []
+    for longer, *short in form_sets:
+        for case in cases:
+            for end in ("", ".", "!"):
+                fields = case(longer + end)
+                if at.infer_text_evidence(*fields) is None:
+                    released.append((fields, [case(s + end) for s in short]))
+    with monkeypatch.context() as mp:
+        _rule_off(mp)
+        violations = [
+            (fields, other)
+            for fields, others in released
+            for other in others
+            if at.infer_text_evidence(*other) is not None
+        ]
+    return len(released), violations
+
+
+def test_a_released_list_is_released_in_its_short_forms_in_every_context(monkeypatch):
+    form_sets = [
+        _forms("Do not", _ITEMS[0], "", " or"),
+        _forms("No", _ITEMS[1], " anything", ", or"),
+        _forms("Never", _ITEMS[2], " it", " nor"),
+        _forms("Don’t", _ITEMS[3], " anything else", " or"),
+        _forms("You must not", _ITEMS[4], "", ", or"),
+    ]
+    released, violations = _property_violations(
+        monkeypatch, form_sets, list(_property_cases())
+    )
+    assert released > 500, released  # not vacuous
+    assert violations == []
+
+
+def test_every_list_shape_satisfies_the_property_in_plain_contexts(monkeypatch):
+    cases = [
+        lambda s: (s,),
+        lambda s: ("Fix the bug. " + s,),
+        lambda s: ("- Fix the bug\n- " + s,),
+        lambda s: ("Tidy the notes", s),
+    ]
+    form_sets = [
+        _forms(*shape)
+        for shape in itertools.product(_NEGATORS, _ITEMS, _CLOSERS, _JOINERS)
+    ]
+    released, violations = _property_violations(monkeypatch, form_sets, cases)
+    assert released > 5000, released  # not vacuous
+    assert violations == []
+
+
+def test_the_property_goes_red_for_a_looser_rule(monkeypatch):
+    """A rule that blanked any field holding a negator must be caught."""
+    monkeypatch.setattr(
+        at, "_without_prohibitions",
+        lambda fields: [
+            "." if f and re.search(r"(?i)\b(no|never|not)\b", str(f)) else f
+            for f in fields
+        ],
+    )
+    _, violations = _property_violations(
+        monkeypatch,
+        [_forms("Do not", _ITEMS[0], "", " or")],
+        list(_property_cases()),
+    )
+    assert violations

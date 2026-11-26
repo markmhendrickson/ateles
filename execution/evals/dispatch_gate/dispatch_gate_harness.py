@@ -39,7 +39,7 @@ from lib.capabilities import neotoma_http  # noqa: E402
 from lib.daemon_runtime.gating import ExecutionPolicy  # noqa: E402
 from unroutable_ledger import UnroutableLedger  # noqa: E402
 
-MUTATIONS = ("none", "no_producer", "round_before_gate", "skip_assessment", "no_content", "raw_preview", "no_session_branch", "dispatcher_counts_as_owner", "no_prohibition_rule", "any_negation_forbids")
+MUTATIONS = ("none", "no_producer", "round_before_gate", "skip_assessment", "no_content", "raw_preview", "no_session_branch", "dispatcher_counts_as_owner", "no_prohibition_rule", "any_negation_forbids", "no_fixed_phrases")
 BINDING = {"claude": {"local": "m-local", "mechanical": "m-mech", "mid": "m-mid", "top": "m-top"}}
 
 
@@ -337,6 +337,10 @@ def run_scenario(scenario: dict, base_task: dict, *, mutation: str = "none") -> 
                 )
                 else [f for f in fields if f],
             )
+
+        elif mutation == "no_fixed_phrases":
+            # Only the imperative-verb detector reads the text.
+            mp.setattr(action_type, "_HIGH_PATTERNS", [])
 
         if mutation == "no_session_branch":
             # The session-owned answer is removed: a session owner reads as it

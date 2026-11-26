@@ -42,10 +42,10 @@ Resolution order (``resolve_gate_action_type``):
    never-auto-executable prior is never replaced.
 
    Text NEVER lowers anything. There is no path from a task's prose to a
-   less-strict reading than the prior gives. A statement that does nothing but
-   forbid an outward action ("Do not merge, deploy or release.", "Do not cut a
-   release.") is not read as asking for it, so it does not escalate; every other
-   mention in the task still does (see "Pure prohibitions" below).
+   less-strict reading than the prior gives. A statement that is nothing but a
+   negated list of outward verbs ("Do not merge, deploy or release.") is not
+   read by the verb detector as asking for them; every other mention in the task
+   still is (see "Negated verb lists" below).
    A report-only statement in a task
    ("write nothing", "pure reporting") is deliberately ignored here: telling an
    affirmative report-only contract from negated, scoped, mixed or spoofed
@@ -267,8 +267,8 @@ _HSPACE = re.compile(r"[^\S\n]+")
 #     "deployed") reports finished work and is not an action;
 #   * a clause that opens with a negation ("do not push", "never send",
 #     "without deploying") is skipped whole, so "Do not push or deploy" does
-#     not hold a task that forbids it. A comma ends a clause, so this alone does
-#     not cover a negated list; "Pure prohibitions" below does, narrowly.
+#     not hold a task that forbids it. A comma ends a clause, so a longer negated
+#     list is handled separately: see "Negated verb lists" below.
 #
 # Not matched, on purpose: "post-merge cleanup" (hyphenated), "pushback", "push
 # notification handler", "deployment docs", "release notes", "send-gate tests",
@@ -472,67 +472,34 @@ def _outward_verb_hits(*fields: object) -> list[tuple[str, str]]:
     return hits
 
 
-# ── Pure prohibitions ────────────────────────────────────────────────────────
+# ── Negated verb lists ──────────────────────────────────────────────────────
 # "Do not merge, deploy or release." forbids an action, yet the clause split
-# above cuts it at the comma (leaving "deploy or release" as a request), and the
-# phrase patterns ignore negation ("Do not cut a release."). Before either
-# detector runs, a statement that does NOTHING BUT forbid is removed. The test
-# is deliberately far narrower than English negation, because a miss costs one
-# approval prompt and a wrong removal lets an outward task run unattended.
+# above cuts it at the comma, leaving "deploy or release" to read as a request.
+# The one- and two-item forms of that sentence are already skipped. Before the
+# imperative-verb detector runs, a longer list is blanked when the statement is
+# NOTHING BUT the prohibition. The fixed phrase patterns (``_HIGH_PATTERNS``)
+# are not affected: they always read the text as written.
 #
-# A statement is a whole sentence (ending ".", "!", a line break that really
-# ends it, or the end of the field) and has exactly one of two shapes, after an
-# optional "please" / "also" / "you" and an optional list marker:
+# A statement is a whole sentence, after an optional "please" / "also" / "you"
+# and an optional list marker:
 #
-#   * list:   NEGATOR VERB[, VERB...][,] or|nor VERB [anything else | anything |
-#             it | this | them]      -- bare verbs only, "or"/"nor" required;
-#   * phrase: NEGATOR [ever | directly | manually | yourself] PHRASE
-#             -- one complete release/publish/PR/push phrase, nothing after it.
+#   NEGATOR VERB[, VERB...][,] or|nor VERB [anything else | anything | it |
+#   this | them]            -- bare verbs only, "or" / "nor" required
 #
-# So nothing carries a negation across "and", "then", "but", ",", ";", ":", a
-# dash, a sentence end or an item with its own object. Even a matching statement
-# stays held when the text around it may qualify or revoke it:
-#
-#   * the next sentence, line or field opens with a condition, a time, a
-#     reversal or a back-reference ("Until QA signs off.", "Yet.", "Instead...",
-#     "Do it Friday."), or mentions "until", "unless", "yet", "anyway", an
-#     approval or a sign-off anywhere;
-#   * the line is wrapped into the one before or after it, or has an indented
-#     line under it;
-#   * a heading or list introduction above it carries a condition or negation;
-#   * it sits inside an unclosed quote, bracket or code span, or its field uses
-#     markup that can quote or strike text out (HTML comments and quote or
-#     strike tags, "~~").
-#
-# Payment, deletion, messaging and API phrases are not on the phrase list: a
-# negated one stays held.
-#
-# Known limit: only the text next to a prohibition is checked. A later sentence
-# that revokes it in other words ("Do not cut a release. Cut it Friday."), or
-# earlier prose that calls it obsolete, is not understood.
+# Nothing is carried across a joiner, other punctuation or an item with its own
+# object, and a matching statement stays held when the text around it may
+# qualify it (a condition, a wrapped or indented line, an introduction, quoting
+# or markup). The test is deliberately far narrower than English negation: a
+# miss costs one approval prompt.
 _LIST_NEGATOR = r"(?:do not|don['’]?t|never|must not|mustn['’]?t|no)"
-_PHRASE_NEGATOR = r"(?:do not|don['’]?t|never|must not|mustn['’]?t)"
 _BARE_VERB = (
-    r"(?:send|e-?mail|message|dm|reply|respond|notify|tweet|post|publish|"
-    r"force[- ]push|push|deploy|release|ship|merge|submit|pay|transfer|invoice|"
-    r"delete)"
-)
-_NEGATABLE_PHRASE = (
-    r"(?:cut (?:(?:a|the) )?release|tag (?:(?:a|the) )?release|"
-    r"ship (?:the )?release|deploy to production|go live|"
-    r"post to (?:x|twitter|linkedin|substack|bluesky)|"
-    r"publish (?:the )?(?:post|page|article|site|website)|"
-    r"open (?:(?:a|the) )?(?:pr|pull request)|"
-    r"merge (?:(?:the|a) )?pr|merge (?:the )?pull request|submit (?:(?:a|the) )?pr|"
-    r"raise (?:(?:a|the) )?pull request|push to (?:main|origin|remote)|"
-    r"force[- ]push)"
+    r"(?:send|e-?mail|message|dm|reply|respond|notify|tweet|post|publish|push|"
+    r"deploy|release|ship|merge|submit|pay|transfer|invoice|delete)"
 )
 _PROHIBITION = re.compile(
     rf"(?:(?:please|also|you) )*"
-    rf"(?:{_LIST_NEGATOR} {_BARE_VERB}(?: ?, ?{_BARE_VERB})*(?: ?, ?| )"
+    rf"{_LIST_NEGATOR} {_BARE_VERB}(?: ?, ?{_BARE_VERB})*(?: ?, ?| )"
     rf"(?:or|nor) {_BARE_VERB}(?: (?:anything else|anything|it|this|them))?"
-    rf"|{_PHRASE_NEGATOR} (?:(?:ever|directly|manually|yourself) )*"
-    rf"{_NEGATABLE_PHRASE})"
     rf"[.!]?",
     re.I,
 )
@@ -609,14 +576,19 @@ class _Line:
     body: str
     #: A blank line separates this one from the previous non-blank line.
     after_blank: bool
+    #: Position among all the lines of the field, blank ones included.
+    number: int
+
+
+def _folded_lines(value: object) -> list[str]:
+    return _FORMAT_CHARS.sub("", unicodedata.normalize("NFKC", str(value))).splitlines()
 
 
 def _split_lines(value: object) -> list[_Line]:
     """Non-blank lines, normalized like ``_normalize_lines``, keeping layout."""
-    folded = _FORMAT_CHARS.sub("", unicodedata.normalize("NFKC", str(value)))
     lines: list[_Line] = []
     blank = False
-    for raw in folded.splitlines():
+    for number, raw in enumerate(_folded_lines(value)):
         content = _HSPACE.sub(" ", raw).strip()
         if not content:
             blank = True
@@ -625,7 +597,7 @@ def _split_lines(value: object) -> list[_Line]:
         found = _LIST_MARKER.match(content)
         marker = found.group(0) if found else ""
         indent = len(expanded) - len(expanded.lstrip())
-        lines.append(_Line(indent, marker, content[len(marker) :], blank))
+        lines.append(_Line(indent, marker, content[len(marker) :], blank, number))
         blank = False
     return lines
 
@@ -659,17 +631,19 @@ def _starts_statement(line: _Line, previous: _Line | None, blocked: bool) -> boo
     return not blocked
 
 
-def _remove_prohibitions(value: object, following: str) -> str:
-    """``value`` with each pure prohibition replaced by a bare ".".
+def _remove_prohibitions(value: object, following: str) -> object:
+    """``value`` with each qualifying negated list replaced by a bare ".".
 
-    ``following`` is the first line of the next field, so a qualifier placed
-    there still holds the statement. Negation never crosses fields: a statement
-    must match within one line of one field.
+    Returns ``value`` itself when there is nothing to replace. ``following`` is
+    the first line of the next field, so a qualifier placed there still holds
+    the statement. Negation never crosses fields: a statement must match within
+    one line of one field.
     """
     lines = _split_lines(value)
     if any(_WRAPPING_MARKUP.search(line.marker + line.body) for line in lines):
-        return "\n".join(line.marker + line.body for line in lines)
-    out: list[str] = []
+        return value
+    out = [_HSPACE.sub(" ", raw).strip() for raw in _folded_lines(value)]
+    replaced = False
     quote_marks = ""  # quote characters seen so far, for parity
     previous: _Line | None = None
     # The paragraph that introduces what follows (the last unindented-from-a-list
@@ -705,7 +679,9 @@ def _remove_prohibitions(value: object, following: str) -> str:
             if _qualifies(follower):
                 continue
             kept[pos] = "."
-        out.append(line.marker + " ".join(kept))
+        if kept != sentences:
+            out[line.number] = line.marker + " ".join(kept)
+            replaced = True
         # An indented line under a list item continues it; it does not become
         # the introduction of the items that follow.
         if not line.marker and not (
@@ -723,12 +699,12 @@ def _remove_prohibitions(value: object, following: str) -> str:
                 conditional or line.body.endswith(",")
             )
         previous = line
-    return "\n".join(out)
+    return "\n".join(out) if replaced else value
 
 
-def _without_prohibitions(fields: tuple[object, ...]) -> list[str]:
+def _without_prohibitions(fields: tuple[object, ...]) -> list[object]:
     present = [f for f in fields if f]
-    result: list[str] = []
+    result: list[object] = []
     for index, value in enumerate(present):
         following = next(
             (
@@ -740,6 +716,19 @@ def _without_prohibitions(fields: tuple[object, ...]) -> list[str]:
         )
         result.append(_remove_prohibitions(value, following))
     return result
+
+
+def _verb_fields(fields: tuple[object, ...], text: str) -> list[object]:
+    """The fields the verb detector reads, with negated verb lists blanked.
+
+    ``text`` is the fields as written. If blanking would bring text together into
+    a fixed phrase that is not there as written, nothing is blanked.
+    """
+    blanked = _without_prohibitions(fields)
+    joined = _normalize_text(*blanked)
+    if any(p.search(joined) and not p.search(text) for p, _ in _HIGH_PATTERNS):
+        return list(fields)
+    return blanked
 
 
 def _normalize_text(*parts: object) -> str:
@@ -762,12 +751,12 @@ def infer_text_evidence(
     Reads the phrase patterns (``_HIGH_PATTERNS``) and the imperative-verb
     detector (``_outward_verb_hits``) over every field in full. ``label`` is a
     fixed verb name or a sanitized matched phrase, safe to show an operator.
-    Both detectors see the fields with pure prohibitions removed.
+    The phrase patterns read the fields as written; the verb detector reads them
+    with qualifying negated verb lists blanked.
     With a ``verdict``, the strictest candidate wins and ties keep the earlier
     one; without it the first phrase match (else first verb match) is returned.
     """
-    asked = _without_prohibitions(fields)
-    text = _normalize_text(*asked)
+    text = _normalize_text(*fields)
     if not text:
         return None
     candidates: list[tuple[str, str]] = []
@@ -775,7 +764,7 @@ def infer_text_evidence(
         m = pattern.search(text)
         if m:
             candidates.append((action, _sanitize_label(m.group(0))))
-    candidates.extend(_outward_verb_hits(*asked))
+    candidates.extend(_outward_verb_hits(*_verb_fields(fields, text)))
     if not candidates:
         return None
     if verdict is None:

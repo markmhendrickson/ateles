@@ -145,7 +145,6 @@ _HELD_NEAR_MISSES = [
     "negated_list_without_or_is_held",
     "conditional_prohibition_is_held",
     "condition_in_the_next_sentence_is_held",
-    "negator_away_from_the_phrase_is_held",
 ]
 
 
@@ -161,6 +160,12 @@ def test_prohibition_checks_go_red_without_the_rule(scenario_id):
 def test_near_miss_checks_go_red_if_any_negation_forbids(scenario_id):
     scenario = next(s for s in SCENARIOS if s["id"] == scenario_id)
     obs = harness.run_scenario(scenario, BASE, mutation="any_negation_forbids")
+    assert harness.check(scenario, obs)
+
+
+def test_fixed_phrase_check_goes_red_if_phrases_are_not_read():
+    scenario = next(s for s in SCENARIOS if s["id"] == "negated_fixed_phrase_stays_held")
+    obs = harness.run_scenario(scenario, BASE, mutation="no_fixed_phrases")
     assert harness.check(scenario, obs)
 
 

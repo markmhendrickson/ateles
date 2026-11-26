@@ -1125,10 +1125,10 @@
     },
     {
       "id": "forbidding_bulleted_brief_does_not_hold",
-      "why": "Bulleted constraints in both prohibition shapes, with a closer, are not requests.",
+      "why": "Bulleted negated verb lists, with and without a closer, are not requests.",
       "task": {
         "confidence": 0.99,
-        "body": "Re-sort the local notes index.\n\nConstraints\n\n- Never publish, release, or send anything.\n- Do not cut a release\n- Do not deploy to production.",
+        "body": "Re-sort the local notes index.\n\nConstraints\n\n- Never publish, release, or send anything.\n- No push, merge or deploy\n- Do not merge, deploy or release.",
         "action_type": "local_edit"
       },
       "expect": {
@@ -1165,14 +1165,14 @@
       "why": "A request next to a prohibition still holds the task.",
       "task": {
         "confidence": 0.99,
-        "body": "Do not merge, deploy or release. Open a PR.",
+        "body": "Do not merge, deploy or release. Push the branch.",
         "action_type": "local_edit"
       },
       "expect": {
         "outcome": "held",
         "scorer_called": false,
         "action": {
-          "action_type": "open_or_merge_pr",
+          "action_type": "git_push",
           "action_type_source": "declared_escalated",
           "action_blast_radius": "high"
         }
@@ -1238,14 +1238,14 @@
       "why": "A prohibition with a condition asks for the action later.",
       "task": {
         "confidence": 0.99,
-        "body": "Do not deploy to production until QA signs off.",
+        "body": "Do not merge, deploy or release until QA signs off.",
         "action_type": "local_edit"
       },
       "expect": {
         "outcome": "held",
         "scorer_called": false,
         "action": {
-          "action_type": "publish",
+          "action_type": "release",
           "action_type_source": "declared_escalated",
           "action_blast_radius": "high"
         }
@@ -1256,25 +1256,25 @@
       "why": "A condition in the following sentence still qualifies the prohibition.",
       "task": {
         "confidence": 0.99,
-        "body": "Do not cut a release. Not until QA signs off.",
+        "body": "Do not merge, deploy or release. Not until QA signs off.",
         "action_type": "local_edit"
       },
       "expect": {
         "outcome": "held",
         "scorer_called": false,
         "action": {
-          "action_type": "publish",
+          "action_type": "release",
           "action_type_source": "declared_escalated",
           "action_blast_radius": "high"
         }
       }
     },
     {
-      "id": "negator_away_from_the_phrase_is_held",
-      "why": "'Do not forget to' is a request, not a prohibition.",
+      "id": "negated_fixed_phrase_stays_held",
+      "why": "The negated-list rule does not touch fixed phrases: they read as written.",
       "task": {
         "confidence": 0.99,
-        "body": "Do not forget to deploy to production.",
+        "body": "Do not cut a release.",
         "action_type": "local_edit"
       },
       "expect": {
