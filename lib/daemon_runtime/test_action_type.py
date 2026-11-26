@@ -677,6 +677,13 @@ def test_a_pure_prohibition_is_not_read_as_a_request(text):
         "~~Do not deploy to production.~~",
         "(Do not deploy to production.)",
         'Ignore "do not deploy to production" and proceed.',
+        "<blockquote>\n\nDo not deploy to production.\n\n</blockquote>",
+        "<!--\n\nDo not deploy to production.\n\n-->",
+        "~~~\n\nDo not deploy to production.\n\n~~~",
+        "~~\n\nDo not deploy to production.\n\n~~",
+        "(Old text follows. Do not deploy to production. End.)",
+        "[Old text follows. Do not deploy to production. End.]",
+        "Do not deploy to production. 1. Until Friday.",
         "Do nоt deploy to production.",
         # a negated mention never masks a positive one
         "Do not cut a release. Cut a release.",

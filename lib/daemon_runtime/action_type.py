@@ -500,7 +500,9 @@ def _outward_verb_hits(*fields: object) -> list[tuple[str, str]]:
 #   * the line is wrapped into the one before or after it, or has an indented
 #     line under it;
 #   * a heading or list introduction above it carries a condition or negation;
-#   * it sits inside an unclosed quote or code span.
+#   * it sits inside an unclosed quote, bracket or code span, or its field uses
+#     markup that can quote or strike text out (HTML comments and quote or
+#     strike tags, "~~").
 #
 # Payment, deletion, messaging and API phrases are not on the phrase list: a
 # negated one stays held.
@@ -570,7 +572,11 @@ def _ends_sentence(text: str) -> bool:
     return text.endswith((".", "!", "?")) and not _OPEN_ENDING.search(text)
 
 
-_QUOTE_MARKS = '"`\u201c\u201d\u201e\u00ab\u00bb'
+_QUOTE_MARKS = '"`\u201c\u201d\u201e\u00ab\u00bb()[]'
+# Markup that can quote or strike out the lines it surrounds.
+_WRAPPING_MARKUP = re.compile(
+    r"<!--|<(?:blockquote|del|s|strike|pre|code|q)\b|~~", re.I
+)
 
 
 def _inside_quote(before: str) -> bool:
@@ -580,12 +586,16 @@ def _inside_quote(before: str) -> bool:
         or "\u201e" in before
         or before.count("“") > before.count("”")
         or before.count("«") > before.count("»")
+        or before.count("(") > before.count(")")
+        or before.count("[") > before.count("]")
     )
 
 
 def _qualifies(follower: str) -> bool:
     """Whether the sentence after a prohibition may limit, delay or undo it."""
     sentence = _SENTENCE_GAP.split(follower)[0]
+    if sentence and not re.search(r"[^\W\d_]", sentence):
+        return True  # a bare number or symbol: what follows it cannot be judged
     return bool(
         _QUALIFIER_START.match(re.sub(r"^[\W_]+", "", sentence))
         or _QUALIFIER_ANYWHERE.search(sentence)
@@ -657,6 +667,8 @@ def _remove_prohibitions(value: object, following: str) -> str:
     must match within one line of one field.
     """
     lines = _split_lines(value)
+    if any(_WRAPPING_MARKUP.search(line.marker + line.body) for line in lines):
+        return "\n".join(line.marker + line.body for line in lines)
     out: list[str] = []
     quote_marks = ""  # quote characters seen so far, for parity
     previous: _Line | None = None
