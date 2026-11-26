@@ -126,6 +126,8 @@ def selected_flow(storage, tmp_path, monkeypatch):
 @pytest.mark.parametrize('field', _FIELDS)
 @pytest.mark.parametrize('change', ['different', 'missing'])
 def test_strict_prior_field_mismatch_never_receipts_or_clears(selected_flow, paired, field, change):
+    if not paired and field in ta._ALREADY_STORED_TOLERATED_FIELDS:
+        pytest.skip('single-file memo: another importer may stage it elsewhere (see below)')
     state, phase, watcher, journal, audio, mic, inference, receipts, _text = selected_flow(paired)
     phase.update(mode='prior', field=field, change=change)
     with pytest.raises(RuntimeError):
@@ -208,3 +210,25 @@ def test_strict_fresh_duration_mismatch_retains_selected_hold(selected_flow, pai
     assert receipts == [] and audio in watcher._hard_failed
     assert json.loads(journal.read_text())['hard_failed']
     inference.assert_not_called()
+
+
+_TOLERATED = [f for f in _FIELDS if f in ta._ALREADY_STORED_TOLERATED_FIELDS]
+
+
+@pytest.mark.parametrize('field', _TOLERATED)
+@pytest.mark.parametrize('change', ['different', 'missing'])
+def test_memo_stored_by_other_importer_receipts_as_already_stored(selected_flow, field, change):
+    """Piculet stored the memo first from its own staged copy (2026-11-25 race).
+
+    Same bytes, size, capture method and transcript: Tyto's receipt records an
+    explicit already-stored outcome instead of ERR_PERSISTED_RESULT_MISMATCH.
+    """
+    state, phase, watcher, journal, audio, _mic, inference, receipts, text = selected_flow(False)
+    phase.update(mode='prior', field=field, change=change)
+    tyto.cli()
+    assert json.loads(journal.read_text())['hard_failed'] == []
+    assert audio not in watcher._hard_failed
+    inference.assert_not_called()
+    assert receipts[0]['outcome'] == 'already_stored'
+    assert receipts[0]['capture_method'] == 'voice_memo'
+    assert receipts[0]['transcription_text_sha256'] == hashlib.sha256(text.encode()).hexdigest()

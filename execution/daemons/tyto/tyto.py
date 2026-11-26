@@ -1617,7 +1617,10 @@ class RecordingWatcher:
                                     or receipt.get("identity") != identity
                                     or self._source_receipt_identity(remote_path, mic_path) != identity
                                     or receipt.get("capture_method") != self._capture_method
-                                    or receipt.get("exact_result_verified") is not True
+                                    or (receipt.get("exact_result_verified") is not True
+                                        # Another importer stored this memo; transcribe_audio.py
+                                        # bound the row to these bytes and capture method.
+                                        and (self._paired or receipt.get("outcome") != "already_stored"))
                                     or not isinstance(text_hash, str) or len(text_hash) != 64
                                     or any(c not in "0123456789abcdef" for c in text_hash)
                                     or receipt.get("audio_attachment_verified") is not True

@@ -395,11 +395,16 @@ def transcribe_file(
     audio_file: Path,
     language: str | None = None,
     original_source_file: str | None = None,
+    capture_method: str | None = None,
 ) -> dict:
     """Transcribe an audio file using the transcribe_audio.py script."""
     print(f"  Transcribing: {audio_file.name}...")
 
     cmd = [sys.executable, str(TRANSCRIBE_SCRIPT), str(audio_file)]
+    if capture_method:
+        # Consent basis is deliberately not passed: it is never inferred
+        # from how the audio was captured.
+        cmd.extend(["--capture-method", capture_method])
     if language:
         cmd.extend(["--language", language])
     if original_source_file:
@@ -756,9 +761,13 @@ def _import_pairs(source_file_pairs: list[tuple[Path, Path]], args) -> None:
     print(f"\nTranscribing {len(moved_files)} file(s)...")
 
     transcription_results = []
-    for _source_dir, original_name, audio_file in moved_files:
+    for source_dir, original_name, audio_file in moved_files:
+        # The same capture method Tyto stamps on the memos it imports, so the
+        # row reads the same whichever importer stored it.
+        is_voice_memo = source_dir == VOICE_MEMOS_PATH.resolve()
         result = transcribe_file(
-            audio_file, language=args.language, original_source_file=original_name
+            audio_file, language=args.language, original_source_file=original_name,
+            capture_method="voice_memo" if is_voice_memo else None,
         )
         transcription_results.append(
             {"file": audio_file, "transcription_result": result}

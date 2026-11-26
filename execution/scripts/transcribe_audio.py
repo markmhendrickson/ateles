@@ -24,7 +24,9 @@ Examples:
 """
 
 import argparse
+import contextlib
 import errno
+import fcntl
 import hashlib
 import json
 import math
@@ -3370,6 +3372,134 @@ def _verify_exact_transcription_storage(entity_id, expected, source_id, *, attac
     }
 
 
+# Fields that may legitimately differ when another importer stored the same
+# Voice Memo first: where that importer staged its copy and what it named it,
+# plus run-level metadata. Everything that identifies the recording or its
+# result (bytes, size, transcript, capture method) stays exact.
+_ALREADY_STORED_TOLERATED_FIELDS = (
+    "audio_file_path", "original_source_file", "language", "transcription_engine",
+    "transcription_model", "audio_duration_seconds", "consent_basis",
+)
+
+
+def _verify_already_stored_transcription(entity_id, expected, *, attachment_expected, compare_text):
+    """Accept a single-file transcription another importer already stored.
+
+    Tyto and Piculet both import Voice Memos. When one stores first, the other
+    reaches the same content-keyed row with a different staging path, so the
+    exact check reports ERR_PERSISTED_RESULT_MISMATCH for a memo whose
+    transcript is stored. This check binds the row to the recording instead:
+    the audio hash, file size and capture method must match, the transcript
+    must be present, and — when this run produced its own transcript
+    (``compare_text``) — it must be the same text. Any other difference fails
+    closed exactly as before. Consent basis is reported as persisted, never
+    supplied from this run.
+    """
+    result = _neotoma_cli_json(["entities", "get", entity_id]) or {}
+    record = result.get("entity", result)
+    snapshot = record.get("snapshot") or {}
+    fields = ["audio_content_sha256", "file_size_bytes", "capture_method"]
+    if compare_text:
+        fields.append("transcription_text")
+    mismatched = [field for field in fields
+                  if field not in snapshot or snapshot[field] != expected[field]]
+    if not isinstance(snapshot.get("transcription_text"), str) or not snapshot["transcription_text"].strip():
+        mismatched.append("transcription_text")
+    if mismatched:
+        raise RuntimeError("ERR_PERSISTED_RESULT_MISMATCH: persisted read-back mismatch "
+                           "(already stored) for "
+                           + ", ".join(dict.fromkeys(mismatched)))
+    if attachment_expected is None:
+        # Not required by the caller: expect the audio unless the row records
+        # why it was stored without it.
+        attachment_expected = "audio_attachment_status" not in snapshot
+    source_id = None
+    if attachment_expected:
+        names = [expected.get("audio_file_name"), snapshot.get("audio_file_name"),
+                 snapshot.get("import_source_file")]
+        for name in dict.fromkeys(n for n in names if isinstance(n, str) and n):
+            source_id = _find_audio_source(name, expected["audio_content_sha256"])
+            if source_id:
+                break
+        if not source_id:
+            raise RuntimeError("ERR_PERSISTED_RESULT_MISMATCH: required audio source missing")
+        # Same direct read the exact check makes: a listing is not the source.
+        result = _neotoma_cli_json(["sources", "get", source_id]) or {}
+        source = result.get("source", result)
+        if source.get("content_hash") != expected["audio_content_sha256"]:
+            raise RuntimeError("ERR_PERSISTED_RESULT_MISMATCH: audio source hash mismatch")
+    proof = {
+        "outcome": "already_stored",
+        "exact_result_verified": bool(compare_text),
+        "capture_method": snapshot["capture_method"],
+        "consent_basis": snapshot.get("consent_basis"),
+        "engine": snapshot.get("transcription_engine"),
+        "transcription_text_sha256": hashlib.sha256(snapshot["transcription_text"].encode()).hexdigest(),
+    }
+    return source_id, proof, snapshot
+
+
+def _find_transcription_by_content(content_hash: str) -> str | None:
+    """Entity id of a ``transcription`` stored for exactly these bytes, or None.
+
+    Content only: a legacy path-only match is not proof the same bytes were
+    transcribed, so it must not short-circuit a fresh transcription.
+    """
+    data = _neotoma_cli_json(
+        ["entities", "search", "--identifier", content_hash, "--entity-type",
+         "transcription", "--by", "audio_content_sha256", "--limit", "1"]
+    ) or {}
+    for row in data.get("entities") or []:
+        entity_id = row.get("entity_id") or row.get("id")
+        if entity_id:
+            return entity_id
+    return None
+
+
+_claim_sleep = time.sleep  # patched by tests
+
+
+def _transcription_claim_dir() -> Path:
+    raw = os.environ.get("ATELES_TRANSCRIPTION_CLAIM_DIR", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / ".local" / "state" / "ateles" / "transcription-claims"
+
+
+@contextlib.contextmanager
+def _content_claim(content_hash: str):
+    """Hold the host-wide claim on one recording's bytes while transcribing it.
+
+    Every importer (Tyto, Piculet's import script, manual runs) transcribes
+    through this script, so an exclusive ``flock`` keyed on the audio hash is
+    one claim they all share: a second importer waits, then finds the stored
+    row instead of transcribing the same memo again. The kernel drops the lock
+    when the holder exits, so a crash never strands it. A claim that cannot be
+    taken (unwritable directory, or still held at the deadline) defers rather
+    than proceeding unclaimed.
+    """
+    wait = float(os.environ.get("ATELES_TRANSCRIPTION_CLAIM_WAIT_SECS", "3300") or 3300)
+    try:
+        directory = _transcription_claim_dir()
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(directory / f"{content_hash}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        raise StoreDeferred(f"transcription claim unavailable: {type(exc).__name__}") from exc
+    try:
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise StoreDeferred("transcription claim held by another importer")
+                _claim_sleep(2)
+        yield
+    finally:
+        os.close(fd)
+
+
 def _find_existing_transcription(content_hash: str | None, resolved_audio: Path) -> str | None:
     """Entity id of a ``transcription`` already stored for these bytes, or None.
 
@@ -3570,6 +3700,7 @@ def save_transcription(
     attach_audio_file: bool = True,
     require_audio_attachment: bool = False,
     require_exact_result: bool = False,
+    tolerate_other_importer: bool = False,
     extra_entity_fields: dict | None = None,
     relate_contact_entity_ids: list[str] | None = None,
     relate_feedback_analysis_entity_id: str | None = None,
@@ -3594,6 +3725,9 @@ def save_transcription(
         relate_feedback_analysis_entity_id: Optional ``feedback_analysis`` entity id for
             a ``REFERS_TO`` edge from this ``transcription``.
         relate_verbose: Print one line per relationship attempt even on success.
+        tolerate_other_importer: With ``require_exact_result``, accept a prior
+            row for these bytes whose staging path differs (another importer
+            stored it), provided hash, size, capture method and transcript match.
 
     Returns:
         Dictionary with saved transcription metadata including ``entity_id``
@@ -3819,6 +3953,7 @@ def save_transcription(
 
     raw = (proc.stdout or "").strip()
     source_id = None
+    verified_result = None
     if landed_id:
         # A 502/503/timeout answered, but a read-back found the write.
         entity_id = landed_id
@@ -3841,11 +3976,16 @@ def save_transcription(
             entity_id = _find_existing_transcription(entity["audio_content_sha256"], resolved_audio)
             if not entity_id:
                 raise RuntimeError("ERR_PERSISTED_RESULT_MISMATCH: prior transcription cannot be resolved")
+            if tolerate_other_importer:
+                # The row may be another importer's: same bytes, its own staging path.
+                source_id, verified_result, _snapshot = _verify_already_stored_transcription(
+                    entity_id, entity, attachment_expected=attach_wav, compare_text=True,
+                )
         else:
             entity_id = _recover_prior_transcription_write(
                 entity, resolved_audio, attachment_expected=attach_wav,
             )
-        if attach_wav:
+        if attach_wav and source_id is None:
             source_id = _find_audio_source(resolved_audio.name, entity["audio_content_sha256"])
     else:
         try:
@@ -3870,8 +4010,7 @@ def save_transcription(
                 entity_id, entity, source_id if attach_wav else None,
                 declared_fields=_declared_transcription_fields(),
             )
-    verified_result = None
-    if require_exact_result:
+    if require_exact_result and verified_result is None:
         verified_result = _verify_exact_transcription_storage(
             entity_id, entity, source_id, attachment_expected=attach_wav,
         )
@@ -3909,6 +4048,65 @@ def save_transcription(
         "import_date": date.today(),
         "import_source_file": audio_path.name,
     }
+
+
+def _write_receipt(receipt_file: Path, transcription_record: dict, identity: dict) -> None:
+    """Write the private verified-storage receipt a supervising caller reads."""
+    proof = transcription_record.get("verified_result") or {}
+    if proof.get("exact_result_verified") is not True and proof.get("outcome") != "already_stored":
+        raise RuntimeError("Verified receipt requires exact persisted-result proof")
+    receipt = {
+        "version": 2, "entity_id": transcription_record["entity_id"],
+        "identity": identity, **proof,
+        "audio_attachment_verified": transcription_record.get("audio_attachment_verified") is True,
+        "audio_source_id": transcription_record.get("audio_source_id"),
+    }
+    with tempfile.NamedTemporaryFile(mode="w", dir=receipt_file.parent, delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            os.chmod(temporary, 0o600)
+            json.dump(receipt, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+            os.replace(temporary, receipt_file)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def _report_already_stored(audio_path: Path, entity_id: str, identity: dict,
+                           extra_fields: dict, args) -> None:
+    """Verify and report a memo another importer stored; no ASR, no new write."""
+    try:
+        size = int(audio_path.stat().st_size)
+    except OSError as exc:
+        raise RuntimeError("Transcription ingestion incomplete: audio file unreadable") from exc
+    expected = {
+        "audio_content_sha256": identity["audio"]["sha256"],
+        "file_size_bytes": size,
+        "capture_method": extra_fields["capture_method"],
+        "audio_file_name": audio_path.name,
+    }
+    source_id, proof, snapshot = _verify_already_stored_transcription(
+        entity_id, expected,
+        attachment_expected=True if args.require_audio_attachment else None,
+        compare_text=False,
+    )
+    if args.receipt_file:
+        if _pending_store_identity(audio_path, None) != identity:
+            raise RuntimeError("Audio changed during lookup; verified receipt refused")
+        _write_receipt(args.receipt_file, {
+            "entity_id": entity_id, "verified_result": proof,
+            "audio_attachment_verified": bool(source_id), "audio_source_id": source_id,
+        }, identity)
+    print(f"TRANSCRIPTION_ALREADY_STORED={entity_id}", flush=True)
+    print(f"NEOTOMA_TRANSCRIPTION_ENTITY_ID={entity_id}", flush=True)
+    print("\nTranscription complete:")
+    print(f"  File: {audio_path.name}")
+    print(f"  Neotoma entity ID: {entity_id}")
+    print(f"  Language: {snapshot.get('language', 'auto')}")
+    print(f"  Duration: {snapshot.get('audio_duration_seconds', 'N/A')} seconds")
+    print(f"\nTranscription text:\n{snapshot['transcription_text']}")
+    print(f"\nAlready stored in Neotoma: entity {entity_id}")
 
 
 def main():
@@ -4041,6 +4239,7 @@ def main():
         )
 
     previous_corrections = _ACTIVE_CORRECTIONS
+    claims = contextlib.ExitStack()
     try:
         _ACTIVE_CORRECTIONS = (
             _proper_nouns_from_env() + _proper_nouns_from_file() + _proper_nouns_from_neotoma()
@@ -4067,9 +4266,23 @@ def main():
             "relate_feedback": relate_fba,
         }
         identity = _pending_store_identity(audio_path, mic_path) if not args.no_store else None
+        if identity is not None:
+            # One claim per recording's bytes, shared by every importer.
+            try:
+                claims.enter_context(_content_claim(identity["audio"]["sha256"]))
+            except StoreDeferred as exc:
+                print(f"STORE_DEFERRED: {exc}", file=sys.stderr, flush=True)
+                sys.exit(neotoma_store_guard.EXIT_STORE_DEFERRED)
         transcription_result = _read_pending_store(
             audio_path, mic_path, context, required=args.store_only,
         ) if not args.no_store else None
+        if (transcription_result is None and identity is not None and mic_path is None
+                and not args.store_only):
+            existing = _find_transcription_by_content(identity["audio"]["sha256"])
+            if existing:
+                # Another importer finished this memo while we waited on the claim.
+                _report_already_stored(audio_path, existing, identity, extra_fields, args)
+                return
         # Reuse a pending result only against both unchanged tracks and context.
         if transcription_result is not None:
             print("Reusing source-bound pending transcription; ASR skipped")
@@ -4128,6 +4341,7 @@ def main():
                 extra_entity_fields=extra_fields,
                 require_audio_attachment=args.require_audio_attachment,
                 require_exact_result=bool(args.receipt_file),
+                tolerate_other_importer=mic_path is None,
             )
         except StoreDeferred as exc:
             print(f"STORE_DEFERRED: {exc}", file=sys.stderr, flush=True)
@@ -4136,25 +4350,7 @@ def main():
         if args.receipt_file:
             if _pending_store_identity(audio_path, mic_path) != identity:
                 raise RuntimeError("Audio changed during store; verified receipt refused")
-            proof = transcription_record.get("verified_result") or {}
-            if proof.get("exact_result_verified") is not True:
-                raise RuntimeError("Verified receipt requires exact persisted-result proof")
-            receipt = {
-                "version": 2, "entity_id": transcription_record["entity_id"],
-                "identity": identity, **proof,
-                "audio_attachment_verified": transcription_record.get("audio_attachment_verified") is True,
-                "audio_source_id": transcription_record.get("audio_source_id"),
-            }
-            with tempfile.NamedTemporaryFile(mode="w", dir=args.receipt_file.parent, delete=False) as handle:
-                temporary = Path(handle.name)
-                try:
-                    os.chmod(temporary, 0o600)
-                    json.dump(receipt, handle)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                    os.replace(temporary, args.receipt_file)
-                finally:
-                    temporary.unlink(missing_ok=True)
+            _write_receipt(args.receipt_file, transcription_record, identity)
 
         print("\nTranscription complete:")
         print(f"  File: {audio_path.name}")
@@ -4175,6 +4371,7 @@ def main():
         traceback.print_exc()
         sys.exit(1)
     finally:
+        claims.close()
         _ACTIVE_CORRECTIONS = previous_corrections
 
 
