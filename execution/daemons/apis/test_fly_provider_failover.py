@@ -12,16 +12,24 @@ Offline: no Fly, GitHub, token mint, or Neotoma network calls.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fly_runner
 import skill_runner
-from test_fly_runner import FakeFly, fly_env, make_executor, seam  # noqa: F401 -- fixtures
+from test_fly_runner import (  # noqa: F401 -- fixtures
+    Clock,
+    FakeFly,
+    fly_env,
+    make_executor,
+    seam,
+)
 
 FLY_BOUND = frozenset({"claude", "codex", "cursor"})
 BINARIES = {"claude": "/usr/bin/claude-test", "codex": "/usr/bin/codex", "cursor": "/usr/bin/cursor"}
@@ -216,3 +224,206 @@ def test_only_provider_with_no_fly_runner_ends_with_the_refusal(loop, no_runner_
     assert result.fly_ineligible_before_launch
     assert seen["attempts"] == [NO_RUNNER]
     assert seen["minted"] == [] and seen["spawned"] == [] and seen["cooled"] == []
+
+
+# ── A refused login claim moves an unpinned, unforced run to the next provider ─
+#
+# The dispatches here go to Fly because their action class is opted in
+# (APIS_FLY_RUNNER_CLASSES), with no runner and no pinned provider, through the
+# real ``run_skill``. Red, seen with ``fly_runner.py`` and ``skill_runner.py``
+# as they were on main: the tests that expect claude to take the run failed with
+# one codex attempt and "fly runner refused: ...".
+
+HOST_FULL = (409, "insufficient memory available to fulfill request")
+
+
+@pytest.fixture
+def unforced(loop, monkeypatch):
+    """``run_skill`` with codex first and claude second, both bound for Fly.
+    ``claim(handler)`` answers every claim update of a login machine."""
+    _, seen = loop
+    fake = seen["fake"]
+    # Codex can take this job here: what stops it is only its login machine.
+    monkeypatch.setattr(
+        fly_runner, "FLY_NEOTOMA_PROXY_PROVIDERS", frozenset({"claude", "codex"}))
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
+    # A Mac that could run anything: an unwanted local fallback would show.
+    monkeypatch.setattr(skill_runner, "_local_fallback_refusal", lambda *a, **k: None)
+    fake.machines["m-codex"] = {"id": "m-codex", "state": "stopped", "login": True,
+                                "instance_id": "v1", "config": {"mounts": []}}  # fmt: skip
+    executor = fly_runner.get_executor()
+    clock = Clock()
+    executor._clock = executor.ledger._clock = clock
+
+    async def sleep(seconds):
+        clock.now += seconds
+
+    executor._sleep = sleep
+    claims: list = []
+
+    def claim(answer):
+        def handler(request):
+            parts = request.url.path.split("/")
+            if (request.method == "POST" and parts[-2] == "machines"
+                    and json.loads(request.content)["config"].get("files")):  # fmt: skip
+                response = answer(parts[-1])
+                if response is not None:
+                    claims.append(parts[-1])
+                    fake.requests.append(request)
+                    return response
+            return fake.handler(request)
+
+        executor.client = fly_runner.FlyMachinesClient(
+            executor.config, transport=httpx.MockTransport(handler))  # fmt: skip
+
+    def run(candidates=("codex", "claude"), **kw):
+        monkeypatch.setattr(
+            skill_runner, "provider_candidates",
+            lambda binaries, preferred=None, **k:
+                [preferred] if preferred else list(candidates))  # fmt: skip
+        spawned_exec = _record_spawn(seen["spawned"])
+        with patch("asyncio.create_subprocess_exec", side_effect=spawned_exec):
+            return asyncio.run(skill_runner.run_skill(
+                "lanius", "check the gates", role="lanius",
+                action_class="carry_forward_check", repository="owner/repo",
+                github_token="t-local", **{"model": None, **kw},
+            ))  # fmt: skip
+
+    claim(lambda machine: _refuse(*HOST_FULL) if machine == "m-codex" else None)
+    return run, claim, claims, seen, executor
+
+
+def _record_spawn(spawned):
+    async def fake_exec(*cmd, **kwargs):
+        spawned.append(list(cmd))
+        raise OSError("no local run is expected")
+
+    return fake_exec
+
+
+def _refuse(status, text):
+    return httpx.Response(status, json={"error": text})
+
+
+def _revert(fake, machine_id, *, moves_version=True):
+    machine = fake.machines[machine_id]
+    machine.update({"state": "replacing", "_settle": 1})
+    if moves_version:
+        machine["instance_id"] += "r"
+    return httpx.Response(200, json={"id": machine_id, "instance_id": "v-attempted"})
+
+
+def _assert_nothing_left(seen, executor, machine="m-codex"):
+    fake = seen["fake"]
+    assert not fly_runner._has_job_config(fake.machines[machine]["config"])
+    assert machine not in fake.leases
+    assert executor.ledger.find_by_machine(machine) == {}
+
+
+@pytest.mark.parametrize("how", ["host_memory", "reverted"])
+def test_an_unforced_unpinned_run_takes_the_next_provider_after_a_refused_claim(unforced, how):
+    run, claim, claims, seen, executor = unforced
+    fake = seen["fake"]
+    if how == "reverted":
+        claim(lambda machine: _revert(fake, machine) if machine == "m-codex" else None)
+    result = run()
+    assert result.ok, result.error
+    assert result.provider == "claude"
+    assert result.attempted_providers == ("codex", "claude")
+    assert claims == ["m-codex"] * (len(fly_runner.LOGIN_CLAIM_BACKOFF_SECONDS) + 1)
+    assert not fake.calls("POST", "/m-codex/start")
+    assert len(fake.calls("POST", "/machines")) == 1  # claude's one Fly launch
+    assert seen["spawned"] == [] and seen["cooled"] == []
+    _assert_nothing_left(seen, executor)
+
+
+def _assert_codex_refusal_ends_it(result, seen):
+    assert not result.ok
+    assert result.provider == "codex"
+    assert result.attempted_providers == ("codex",)
+    assert result.cooled_until  # retry later
+    assert not seen["fake"].calls("POST", "/machines")  # claude never launched
+    assert seen["spawned"] == [] and seen["cooled"] == []
+
+
+@pytest.mark.parametrize("pin", [
+    {"provider": "codex"},
+    {"required_provider": "codex"},
+    {"preferred_provider": "codex"},
+    {"runner": "fly"},
+    {"model": "some-model"},
+], ids=["provider", "required", "preferred", "forced-fly", "model"])
+def test_a_pinned_or_forced_run_stays_with_its_refused_claim(unforced, monkeypatch, pin):
+    monkeypatch.setattr(skill_runner, "configured_providers", lambda: ("codex", "claude"))
+    run, _, _, seen, executor = unforced
+    result = run(**pin)
+    assert "reason host_memory" in result.error, result.error
+    _assert_codex_refusal_ends_it(result, seen)
+    _assert_nothing_left(seen, executor)
+
+
+@pytest.mark.parametrize("answer", ["not_applied", "version_conflict", "cleanup-unverified"])
+def test_a_claim_that_may_leave_something_or_is_not_capacity_does_not_move_on(unforced, answer):
+    run, claim, _, seen, executor = unforced
+    fake = seen["fake"]
+    if answer == "not_applied":  # Fly may still apply it
+        claim(lambda m: _revert(fake, m, moves_version=False) if m == "m-codex" else None)
+    elif answer == "version_conflict":
+        claim(lambda m: _refuse(409, "machine version changed") if m == "m-codex" else None)
+    else:
+        fake.release_fails = True
+    result = run()
+    assert "m-codex" in result.error
+    _assert_codex_refusal_ends_it(result, seen)
+    if answer == "version_conflict":
+        _assert_nothing_left(seen, executor)
+    else:  # kept for the reaper, with its lease
+        assert executor.ledger.find_by_machine("m-codex")
+        assert "m-codex" in fake.leases
+
+
+def test_with_no_other_provider_the_refusal_is_the_result(unforced):
+    run, _, _, seen, executor = unforced
+    result = run(("codex",))
+    _assert_codex_refusal_ends_it(result, seen)
+    _assert_nothing_left(seen, executor)
+
+
+@pytest.mark.parametrize("second", ["ineligible", "launch-failed"])
+def test_when_the_next_provider_cannot_run_either_the_retry_later_refusal_stands(
+        unforced, monkeypatch, second):  # fmt: skip
+    run, _, _, seen, executor = unforced
+    fake = seen["fake"]
+    if second == "ineligible":  # unforced, but after a failover: never the Mac
+        monkeypatch.setattr(
+            fly_runner, "FLY_NEOTOMA_PROXY_PROVIDERS", frozenset({"codex"}))
+    else:
+        fake.create_mode = "refused"
+    result = run()
+    assert not result.ok
+    assert result.provider == "codex" and result.cooled_until
+    assert result.attempted_providers == ("codex", "claude")
+    assert "reason host_memory" in result.error
+    assert "claude did not run on Fly either" in result.error
+    assert seen["spawned"] == [] and seen["cooled"] == []
+    _assert_nothing_left(seen, executor)
+
+
+def test_a_second_refused_claim_moves_on_again(unforced, monkeypatch):
+    # Codex and cursor both have full hosts; claude then takes the run.
+    monkeypatch.setenv("APIS_FLY_CURSOR_MACHINE_ID", "m-cursor")
+    run, claim, _, seen, executor = unforced
+    executor.config.login_machines["cursor"] = "m-cursor"
+    fake = seen["fake"]
+    fake.machines["m-cursor"] = {"id": "m-cursor", "state": "stopped", "login": True,
+                                 "instance_id": "v1", "config": {"mounts": []}}  # fmt: skip
+    monkeypatch.setattr(
+        fly_runner, "FLY_NEOTOMA_PROXY_PROVIDERS", frozenset({"claude", "codex", "cursor"}))
+    claim(lambda m: _refuse(*HOST_FULL) if m in ("m-codex", "m-cursor") else None)
+    result = run(("codex", "cursor", "claude"))
+    assert result.ok, result.error
+    assert result.provider == "claude"
+    assert result.attempted_providers == ("codex", "cursor", "claude")
+    assert seen["spawned"] == [] and seen["cooled"] == []
+    _assert_nothing_left(seen, executor)
+    _assert_nothing_left(seen, executor, "m-cursor")
