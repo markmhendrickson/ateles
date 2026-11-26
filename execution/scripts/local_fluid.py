@@ -8,12 +8,14 @@ Raw model outputs are returned for preservation alongside the readable text.
 from __future__ import annotations
 
 import hashlib
+from array import array
 import json
 import logging
 import math
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import wave
 from pathlib import Path
@@ -29,6 +31,23 @@ log = logging.getLogger("local_fluid")
 
 BACKEND_FLUID = "fluid"
 ENGINE_FLUID = "local_fluid_audio"
+
+DUAL_MONO_RATE = 16000
+DUAL_MONO_MIN_RMS = 128.0  # Below about -48 dBFS, a segment carries no speech to compare.
+# "Same speech in both channels": two microphones (or two copies) that hear the same speaker. It is
+# measured at ZERO lag, which is exactly what an unshifted downmix adds, over one-second segments sampled
+# across the whole clip. Real two-microphone voice memos correlate at 0.80 to 0.91 over the clip, and at
+# most 0.0001 of their speech energy sits in seconds below the 0.20 floor (a stray noisy second; one
+# five-second memo reached 0.063), while two different speakers on separate tracks correlate at about 0.003
+# with most of their energy in seconds below the floor. A brief independent stretch is not a reason to keep
+# two transcripts: the downmix keeps every sound from either microphone.
+DUAL_MONO_MIN_CORRELATION = 0.70
+DUAL_MONO_SEGMENT_FLOOR = 0.20  # a measured second below this holds audio the other channel does not
+DUAL_MONO_MAX_INDEPENDENT_SHARE = 0.10  # share of the measured speech energy allowed below the floor
+DUAL_MONO_SEGMENT_SAMPLES = 16000  # one second at 16 kHz
+DUAL_MONO_MAX_SEGMENTS = 300  # bounds work and memory on long clips; segments span the whole clip
+DUAL_MONO_MIN_ACTIVE_SEGMENTS = 3
+DUAL_MONO_DOWNMIX_FILTER = "pan=mono|c0=0.5*c0+0.5*c1"
 
 
 class LocalFluidUnavailable(RuntimeError):
@@ -330,6 +349,103 @@ def format_turns(turns: list[dict]) -> str:
     )
 
 
+def _wav_frames(path: Path) -> int | None:
+    """Frame count of a 16 kHz mono 16-bit WAV, or None for anything else."""
+    try:
+        with wave.open(str(path), "rb") as wav:
+            if (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) != (1, 2, DUAL_MONO_RATE):
+                return None
+            return wav.getnframes()
+    except (OSError, EOFError, wave.Error):
+        return None
+
+
+def _segment_starts(frames: int) -> list[int]:
+    """Start frames of the one-second segments measured: all of them for a short clip, evenly spread
+    across the whole clip (never just the beginning) for a long one, and always the very end."""
+    size = DUAL_MONO_SEGMENT_SAMPLES
+    if frames < size:
+        return []
+    whole = frames // size
+    if whole <= DUAL_MONO_MAX_SEGMENTS:
+        starts = [index * size for index in range(whole)]
+    else:
+        step = whole / DUAL_MONO_MAX_SEGMENTS
+        starts = [int(index * step) * size for index in range(DUAL_MONO_MAX_SEGMENTS)]
+    tail = frames - size
+    if not starts or tail > starts[-1]:
+        starts.append(tail)
+    return starts
+
+
+def _read_segments(path: Path, starts: list[int]) -> list[array] | None:
+    segments: list[array] = []
+    try:
+        with wave.open(str(path), "rb") as wav:
+            for start in starts:
+                wav.setpos(start)
+                samples = array("h")
+                samples.frombytes(wav.readframes(DUAL_MONO_SEGMENT_SAMPLES))
+                if sys.byteorder != "little":
+                    samples.byteswap()
+                if len(samples) != DUAL_MONO_SEGMENT_SAMPLES:
+                    return None
+                segments.append(samples)
+    except (OSError, EOFError, wave.Error):
+        return None
+    return segments
+
+
+def _dual_mono_similarity(left_path: Path, right_path: Path) -> tuple[float, float] | None:
+    """Return (overall correlation, independent energy share) of two aligned mono channels.
+
+    Both are measured at zero lag over the sampled one-second segments that carry speech-level audio. The
+    share is the fraction of that audio's energy lying in seconds whose correlation is below the floor
+    (including a second heard on only one channel). A missing, malformed, unequal, short or silent
+    measurement is inconclusive (None) and cannot authorise a downmix.
+    """
+    frames = _wav_frames(left_path)
+    if frames is None or frames != _wav_frames(right_path):
+        return None
+    starts = _segment_starts(frames)
+    left, right = _read_segments(left_path, starts), _read_segments(right_path, starts)
+    if not starts or left is None or right is None:
+        return None
+    count = DUAL_MONO_SEGMENT_SAMPLES
+    active = 0
+    dot_total = left_total = right_total = 0
+    peak_total = independent = 0
+    for a, b in zip(left, right):
+        dot = energy_a = energy_b = 0
+        for x, y in zip(a, b):
+            dot += x * y
+            energy_a += x * x
+            energy_b += y * y
+        peak = max(energy_a, energy_b)
+        if math.sqrt(peak / count) < DUAL_MONO_MIN_RMS:
+            continue  # silence: nothing to compare
+        active += 1
+        denominator = math.sqrt(energy_a * energy_b)
+        if (dot / denominator if denominator else 0.0) < DUAL_MONO_SEGMENT_FLOOR:
+            independent += peak
+        peak_total += peak
+        dot_total += dot
+        left_total += energy_a
+        right_total += energy_b
+    denominator = math.sqrt(left_total * right_total)
+    if active < DUAL_MONO_MIN_ACTIVE_SEGMENTS or not denominator:
+        return None
+    return dot_total / denominator, independent / peak_total
+
+
+def _is_dual_mono(similarity: tuple[float, float] | None) -> bool:
+    return bool(
+        similarity is not None
+        and similarity[0] >= DUAL_MONO_MIN_CORRELATION
+        and similarity[1] <= DUAL_MONO_MAX_INDEPENDENT_SHARE
+    )
+
+
 def transcribe_fluid(
     audio_path: Path,
     *,
@@ -344,15 +460,14 @@ def transcribe_fluid(
     all_events, raw = [], []
     with tempfile.TemporaryDirectory(prefix="local-fluid-") as temporary:
         root = Path(temporary)
-        for index in range(channel_count):
-            source = audio_path
-            channel = None
-            if channel_count > 1:
-                ffmpeg = shutil.which(os.environ.get("TRANSCRIBE_FFMPEG", "ffmpeg"))
-                if not ffmpeg:
-                    raise LocalFluidUnavailable(
-                        "ffmpeg required to preserve separate audio channels"
-                    )
+        sources = [(audio_path, None)]
+        similarity = None
+        if channel_count > 1:
+            ffmpeg = shutil.which(os.environ.get("TRANSCRIBE_FFMPEG", "ffmpeg"))
+            if not ffmpeg:
+                raise LocalFluidUnavailable("ffmpeg required to preserve separate audio channels")
+            sources = []
+            for index in range(channel_count):
                 source = root / f"channel-{index}.wav"
                 subprocess.run(
                     [
@@ -364,14 +479,44 @@ def transcribe_fluid(
                         "-af",
                         f"pan=mono|c0=c{index}",
                         "-ar",
-                        "16000",
+                        str(DUAL_MONO_RATE),
                         str(source),
                     ],
                     check=True,
                     capture_output=True,
                     timeout=300,
                 )
-                channel = f"Channel_{index}"
+                sources.append((source, f"Channel_{index}"))
+            if channel_count == 2:
+                similarity = _dual_mono_similarity(sources[0][0], sources[1][0])
+                if _is_dual_mono(similarity):
+                    # Both channels hear the same speech (zero-lag correlation, almost no independent
+                    # audio), so their sum cannot cancel; the downmix keeps every sound from either
+                    # microphone and transcribes it once. If it cannot be made, keep both channels.
+                    mix = root / "downmix.wav"
+                    try:
+                        subprocess.run(
+                            [
+                                ffmpeg,
+                                "-v",
+                                "error",
+                                "-i",
+                                str(audio_path),
+                                "-af",
+                                DUAL_MONO_DOWNMIX_FILTER,
+                                "-ar",
+                                str(DUAL_MONO_RATE),
+                                str(mix),
+                            ],
+                            check=True,
+                            capture_output=True,
+                            timeout=300,
+                        )
+                        sources = [(mix, None)]
+                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+                        similarity = None
+        collapsed = channel_count == 2 and _is_dual_mono(similarity)
+        for index, (source, channel) in enumerate(sources):
             diar = _run_json(
                 cli,
                 ["process", str(source), "--mode", "offline",
@@ -385,8 +530,22 @@ def transcribe_fluid(
             events = align_words(asr, diar, channel=channel)
             all_events.extend(events)
             raw.append({"channel": channel, "diarization": diar, "asr": asr})
+    transcript = format_events(all_events)
+    if collapsed and all_events:
+        # A silent result keeps the exact headerless silent text the result validator requires.
+        speakers = {segment["speakerId"] for segment in raw[0]["diarization"]["segments"]}
+        # Reuse the one header helper so the zero-speaker wording matches every other result.
+        header = diarization_header({
+            "status": "ok",
+            "speaker_count": len(speakers),
+            "note": (
+                f"dual-mono, collapsed; correlation={similarity[0]:.6f}; "
+                f"independent_share={similarity[1]:.6f}"
+            ),
+        })
+        transcript = f"{header}\n\n{transcript}"
     return {
-        "transcription_text": format_events(all_events),
+        "transcription_text": transcript,
         "language": language or "auto",
         "audio_duration_seconds": max(
             (x["diarization"].get("durationSeconds", 0) for x in raw), default=0
