@@ -142,6 +142,19 @@ child's temporary home are separate from that login state. The lifecycle must
 confirm the machine stopped and job material was cleared before another job
 can use it; a provider-auth failure is not permission to skip that boundary.
 
+A login claim Fly refuses (409 or 412), or accepts and then does not keep (the
+settled, stopped machine carries no job), is tried again from a fresh read
+after each of a bounded series of waits that never reach the run's deadline,
+and then refused with a retry time and a reason label (`reverted` when the
+update can no longer apply, `not_applied` when it still may). A machine that
+never settles, or that holds another run's or an unattributable job, fails the
+launch with no retry. When the claim is given up for host memory or because
+the update was not kept, and the clean-up verifies that nothing is left and the
+update can no longer apply, a run that went to Fly by its action class, with no
+pinned or preferred provider, no pinned model and no `runner="fly"`, tries the
+next provider on Fly without cooling this one. Forced runs, including every
+repository delivery, keep the refusal.
+
 A login claim whose update got no clear answer can be applied minutes later,
 so a machine that still reads clean at the old version keeps its reservation
 until the update is seen to land, the version moves, or 15 minutes pass on a

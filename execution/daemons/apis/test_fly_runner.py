@@ -5797,6 +5797,269 @@ def test_cancelled_during_claim_wait_leaves_admission_free(fly_env, claude_login
     assert not fake.calls("POST", "/start")
 
 
+# ── A claim update Fly accepts and then does not keep ───────────────────────
+#
+# Fly answers the update with a 200, the machine goes to "replacing", and the
+# revert leaves it stopped with no job. Red, seen with ``fly_runner.py`` as it
+# was on main: ``test_a_reverted_claim_is_retried_and_then_starts`` failed with
+# "Fly API HTTP 409: login machine config is not this run's after the write"
+# after one claim.
+
+
+def _accepted_then_reverted(fake, machine_id, *, moves_version=True) -> httpx.Response:
+    """Fly takes the claim update and reverts it: the machine is "replacing"
+    for a moment, then stopped with the config it had before. With
+    *moves_version* the version changes (the update can no longer apply);
+    without, it stays the one the update was conditional on."""
+    machine = fake.machines[machine_id]
+    machine.update({"state": "replacing", "_settle": 1})
+    if moves_version:
+        machine["instance_id"] += "r"
+    return httpx.Response(200, json={"id": machine_id, "instance_id": "v-attempted"})
+
+
+def _versions(claims) -> list[str]:
+    return [json.loads(r.content)["current_version"] for r in claims]
+
+
+@pytest.mark.parametrize(("moves_version", "label"),
+                         [(True, "reverted"), (False, "not_applied")])
+def test_a_reverted_claim_is_retried_and_then_starts(
+        fly_env, claude_login, caplog, moves_version, label):  # fmt: skip
+    fake = _claude_fake()
+    executor, _, slept, free, _ = _claim_backoff_executor(
+        fake, record={"exit_code": 0, "stdout": "CLAUDE OK"})
+    claims = _claim_conflicts(
+        fake, executor, "m-claude",
+        lambda n: _accepted_then_reverted(fake, "m-claude", moves_version=moves_version)
+        if n <= 2 else None,
+    )
+    job = _job()
+    rc, out, _ = asyncio.run(executor.run(job))
+    assert rc == 0 and b"CLAUDE OK" in out
+    assert _versions(claims) == (["v1", "v1r", "v1rr"] if moves_version else ["v1"] * 3)
+    assert slept == [2.0, 5.0] and free == [True, True]
+    nonces = {r.headers.get("fly-machine-lease-nonce") for r in claims}
+    assert len(nonces) == 1 and None not in nonces  # one lease, held throughout
+    assert len(fake.calls("POST", "/start")) == 1
+    assert executor.ledger.entry(job.run_id) is None and "m-claude" not in fake.leases
+    kept = [r.getMessage() for r in caplog.records
+            if "did not keep the accepted claim update" in r.getMessage()]
+    assert len(kept) == 2 and all(f"reason {label})" in m for m in kept)
+
+
+def test_a_claim_reverted_until_the_waits_are_spent_is_a_retry_later_refusal(
+        fly_env, claude_login):  # fmt: skip
+    fake = _claude_fake()
+    executor, _, slept, _, revoked = _claim_backoff_executor(fake, record={"exit_code": 0})
+    claims = _claim_conflicts(fake, executor, "m-claude",
+                              lambda n: _accepted_then_reverted(fake, "m-claude"))
+    job = _job(timeout=600)
+    with pytest.raises(fly_runner.FlyClaimRefused) as exc:
+        asyncio.run(executor.run(job))
+    assert str(exc.value).startswith(
+        "Fly accepted the claude login machine update and the machine did not keep it "
+        "(reason reverted); the task never launched")
+    _assert_names_refile(str(exc.value), job)
+    assert exc.value.cooled_until
+    assert slept == list(fly_runner.LOGIN_CLAIM_BACKOFF_SECONDS) and len(claims) == 7
+    assert not fake.calls("POST", "/start")
+    assert not fly_runner._has_job_config(fake.machines["m-claude"]["config"])
+    assert executor.ledger.entry(job.run_id) is None and "m-claude" not in fake.leases
+    assert exc.value.left_nothing is True and revoked == [MINTED]
+
+
+def test_the_deadline_bounds_the_retries_of_a_reverted_claim(fly_env, claude_login):
+    fake = _claude_fake()
+    executor, clock, slept, _, _ = _claim_backoff_executor(fake, record={"exit_code": 0})
+    job = _job()  # a 180 s deadline: the 120 s wait would reach it
+    deadline = clock.now + job.timeout + fly_runner.APIS_DEADLINE_GRACE_SECONDS
+    claims = _claim_conflicts(fake, executor, "m-claude",
+                              lambda n: _accepted_then_reverted(fake, "m-claude"))
+    _past_deadline_refusal(executor, job, fake, claims, sent=6)
+    assert slept == [2.0, 5.0, 15.0, 30.0, 60.0] and clock.now < deadline
+
+
+@pytest.mark.parametrize(("answer", "label", "refusal"), [
+    ("reverted", "reverted", "FlyClaimRefused"),
+    ("insufficient memory available", "host_memory", "FlyClaimRefused"),
+    ("machine version changed", "version_conflict", "FlyRefusal"),
+    ("something else", "other", "FlyRefusal"),
+])
+def test_a_deadline_stopped_retry_names_the_reason_of_the_last_attempt(
+        fly_env, claude_login, answer, label, refusal):  # fmt: skip
+    fake = _claude_fake()
+    executor, _, _, _, _ = _claim_backoff_executor(fake, record={"exit_code": 0})
+    _claim_conflicts(
+        fake, executor, "m-claude",
+        lambda n: _accepted_then_reverted(fake, "m-claude") if answer == "reverted"
+        else httpx.Response(409, json={"error": answer}),
+    )
+    with pytest.raises(fly_runner.FlyRefusal, match="reached the run's deadline") as exc:
+        asyncio.run(executor.run(_job()))
+    assert f"(last claim attempt: reason {label})" in str(exc.value)
+    assert type(exc.value).__name__ == refusal
+
+
+def test_a_reverted_claim_that_may_still_apply_keeps_its_reservation_and_lease(
+        fly_env, claude_login):  # fmt: skip
+    fake = _claude_fake()
+    executor, _, _, _, _ = _claim_backoff_executor(fake, record={"exit_code": 0})
+    claims = _claim_conflicts(
+        fake, executor, "m-claude",
+        lambda n: _accepted_then_reverted(fake, "m-claude", moves_version=False))
+    job = _job(timeout=600)
+    with pytest.raises(fly_runner.FlyClaimRefused, match="reason not_applied") as exc:
+        asyncio.run(executor.run(job))
+    assert len(claims) == 7 and not fake.calls("POST", "/start")
+    assert exc.value.left_nothing is False
+    entry = executor.ledger.entry(job.run_id)
+    assert entry["unconfirmed"] is True and entry["claim_write_version"] == "v1"
+    assert "m-claude" in fake.leases
+    assert asyncio.run(executor.settle_marked()) == []  # still may apply
+    assert executor.ledger.entry(job.run_id) is not None
+    # Fly applies it late: cleared and released, never started.
+    machine = fake.machines["m-claude"]
+    machine["config"] = json.loads(claims[-1].content)["config"]
+    machine["instance_id"] = "v-late"
+    assert asyncio.run(executor.settle_marked()) == [job.run_id]
+    assert not fly_runner._has_job_config(machine["config"])
+    assert "m-claude" not in fake.leases and not fake.calls("POST", "/start")
+
+
+@pytest.mark.parametrize(("status", "text", "raised"), [
+    (409, "insufficient memory available", "FlyClaimRefused"),
+    (412, "machine version changed", "FlyRefusal"),
+    (422, "invalid config", "FlyLaunchError"),  # provably not executed
+])
+def test_a_later_refused_attempt_does_not_forget_an_update_that_may_still_apply(
+        fly_env, claude_login, status, text, raised):  # fmt: skip
+    # The first update is accepted and not seen; the later ones are rejected
+    # outright. Only the later ones are known to have stored nothing.
+    fake = _claude_fake()
+    executor, clock, _, _, _ = _claim_backoff_executor(fake, record={"exit_code": 0})
+    _claim_conflicts(
+        fake, executor, "m-claude",
+        lambda n: _accepted_then_reverted(fake, "m-claude", moves_version=False) if n == 1
+        else httpx.Response(status, json={"error": text}),
+    )
+    sent_at = clock.now
+    job = _job(timeout=600)
+    with pytest.raises(getattr(fly_runner, raised)) as exc:
+        asyncio.run(executor.run(job))
+    assert getattr(exc.value, "left_nothing", False) is False
+    entry = executor.ledger.entry(job.run_id)
+    assert entry is not None and entry["unconfirmed"] is True
+    assert entry["claim_write_version"] == "v1" and entry["claim_write_at"] == sent_at
+    assert "m-claude" in fake.leases and not fake.calls("POST", "/start")
+
+
+def test_an_earlier_update_landing_during_a_wait_is_confirmed_before_the_start(
+        fly_env, claude_login):  # fmt: skip
+    fake = _claude_fake()
+    executor, _, _, _, _ = _claim_backoff_executor(
+        fake, record={"exit_code": 0, "stdout": "CLAUDE OK"})
+    claims = _claim_conflicts(
+        fake, executor, "m-claude",
+        lambda n: _accepted_then_reverted(fake, "m-claude", moves_version=False)
+        if n == 1 else None,
+    )
+    waited = executor._sleep
+
+    async def lands_during_the_wait(seconds):
+        machine = fake.machines["m-claude"]
+        machine["config"] = json.loads(claims[0].content)["config"]
+        machine["instance_id"] = "v-late"
+        await waited(seconds)
+
+    executor._sleep = lands_during_the_wait
+    job = _job()
+    rc, _, _ = asyncio.run(executor.run(job))
+    assert rc == 0 and _versions(claims) == ["v1", "v-late"]
+    # The same job both times: nothing stale could be started.
+    assert json.loads(claims[0].content)["config"] == json.loads(claims[1].content)["config"]
+    assert len(fake.calls("POST", "/start")) == 1
+    assert executor.ledger.entry(job.run_id) is None and "m-claude" not in fake.leases
+
+
+@pytest.mark.parametrize("left", [
+    {"files": [{"guest_path": "/run/job/job.json", "raw_value": "eA=="}],
+     "env": {"ATELES_RUN_ID": "other-run"}, "metadata": {"ateles_run_id": "other-run"}},
+    {"files": [{"guest_path": "/run/job/job.json", "raw_value": "eA=="}]},
+    {"env": {"SOMETHING": "set"}},
+], ids=["another-run", "unattributed-files", "unattributed-env"])
+def test_a_read_back_showing_a_job_that_is_not_ours_fails_closed_without_a_retry(
+        fly_env, claude_login, left):  # fmt: skip
+    fake = _claude_fake()
+    executor, _, slept, _, _ = _claim_backoff_executor(fake, record={"exit_code": 0})
+
+    def someone_elses_job(n):
+        answer = _accepted_then_reverted(fake, "m-claude")
+        fake.machines["m-claude"]["config"] = copy.deepcopy(left)
+        return answer
+
+    claims = _claim_conflicts(fake, executor, "m-claude", someone_elses_job)
+    with pytest.raises(fly_runner.FlyLaunchError, match="not this run's"):
+        asyncio.run(executor.run(_job()))
+    assert len(claims) == 1 and slept == [] and not fake.calls("POST", "/start")
+    assert fake.machines["m-claude"]["config"] == left  # never rewritten
+
+
+def test_another_runs_job_found_on_the_retry_of_a_reverted_claim_is_refused(
+        fly_env, claude_login):  # fmt: skip
+    fake = _claude_fake()
+    executor, _, _, _, _ = _claim_backoff_executor(fake, record={"exit_code": 0})
+    claims = _claim_conflicts(fake, executor, "m-claude",
+                              lambda n: _accepted_then_reverted(fake, "m-claude"))
+    other = _job_config("other-run")
+    waited = executor._sleep
+
+    async def another_run_takes_it(seconds):
+        fake.machines["m-claude"]["config"] = copy.deepcopy(other)
+        await waited(seconds)
+
+    executor._sleep = another_run_takes_it
+    with pytest.raises(fly_runner.FlyRefusal, match="another run") as exc:
+        asyncio.run(executor.run(_job()))
+    assert type(exc.value) is fly_runner.FlyRefusal  # never a reason to move on
+    assert len(claims) == 1 and not fake.calls("POST", "/start")
+    assert fake.machines["m-claude"]["config"] == other
+
+
+def test_a_claim_whose_machine_never_settles_is_not_retried(
+        fly_env, claude_login, fast_settle):  # fmt: skip
+    fake = _claude_fake()
+    executor, _, slept, _, _ = _claim_backoff_executor(fake, record={"exit_code": 0})
+
+    def stuck(n):
+        fake.never_settles = True
+        return _accepted_then_reverted(fake, "m-claude", moves_version=False)
+
+    claims = _claim_conflicts(fake, executor, "m-claude", stuck)
+    job = _job()
+    with pytest.raises(fly_runner.FlyLaunchError, match="did not settle"):
+        asyncio.run(executor.run(job))
+    assert len(claims) == 1 and slept == [] and not fake.calls("POST", "/start")
+    assert executor.ledger.entry(job.run_id)["unconfirmed"] is True
+    assert "m-claude" in fake.leases
+
+
+@pytest.mark.parametrize("broken", ["none", "lease"])
+def test_a_refused_claim_leaves_nothing_only_once_its_cleanup_is_verified(
+        fly_env, claude_login, fast_claim_retry, broken):  # fmt: skip
+    fake = _claude_fake()
+    fake.release_fails = broken == "lease"
+    executor, _, _ = make_executor(fake, record=None)
+    _claim_conflicts(
+        fake, executor, "m-claude",
+        lambda n: httpx.Response(409, json={"error": "insufficient memory available"}))
+    job = _job()
+    with pytest.raises(fly_runner.FlyClaimRefused, match="reason host_memory") as exc:
+        asyncio.run(executor.run(job))
+    assert exc.value.left_nothing is (broken == "none")
+    assert (executor.ledger.entry(job.run_id) is None) is (broken == "none")
+
+
 # ── A delivery whose record never arrived, settled from GitHub ──────────────
 
 _OPENER = "ateles-pr-opener[bot]"

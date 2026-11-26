@@ -2157,6 +2157,14 @@ class SkillResult:
     # provider loop tries the next provider, without cooling this one (it is
     # healthy; only where it was routed could not take this job).
     fly_local_fallback_refused: bool = False
+    # Fly refused or failed this attempt with nothing run (an eligibility,
+    # cost, queue or claim refusal, or a launch that provably did not start).
+    fly_nothing_launched: bool = False
+    # An unforced Fly run whose login claim was given up for host capacity or
+    # because the machine did not keep the update, with nothing left behind
+    # (fly_runner.FlyClaimRefused.left_nothing): the provider loop may try the
+    # next provider on Fly in the same dispatch.
+    fly_claim_failover: bool = False
     # Nothing ran: the model this attempt would have launched (named here) is
     # inside its own usage-cap cooling window and no declared same-provider
     # fallback model could replace it. The provider itself is healthy, so the
@@ -3362,6 +3370,7 @@ async def _run_skill_once(
     local_fallback_check=None,
     fly_delivery: dict | None = None,
     agent_git_env: dict[str, str] | None = None,
+    fly_only: bool = False,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
@@ -3369,6 +3378,9 @@ async def _run_skill_once(
     ``agent_git_env``: the agent's git author/committer (from
     ``agent_git_identity_env``), set on the child with signing turned off.
     ``run_skill`` supplies it only for a fix round; None leaves git untouched.
+
+    ``fly_only``: this attempt follows another provider's refused login claim
+    in the same dispatch, so it runs on Fly or not at all: no local fallback.
 
     ``runner`` / ``repository`` (ateles#1456): which executor runs the CLI.
     ``None`` (every call site that predates this) runs locally unless the
@@ -4416,7 +4428,7 @@ async def _run_skill_once(
         reason: str, provider_specific: bool = False
     ) -> SkillResult | None:
         """A refusal to return, or None to run locally (logged and counted)."""
-        fallback_ok = not _fly_forced and not _fly_disabled and (
+        fallback_ok = not _fly_forced and not fly_only and not _fly_disabled and (
             reason.startswith("not eligible")
             or fly_runner.get_executor().config.local_fallback
         )
@@ -4433,6 +4445,7 @@ async def _run_skill_once(
                 fly_provider_ineligible=(
                     provider_specific and not _fly_disabled
                     and reason.startswith("not eligible")),
+                fly_nothing_launched=True,
             )  # fmt: skip
         if local_fallback_check is not None:
             # This provider was chosen WITHOUT the Mac's usage gate because
@@ -4591,6 +4604,12 @@ async def _run_skill_once(
                     return SkillResult(
                         skill, False, None, "", "", error=msg, provider=provider,
                         cooled_until=exc.cooled_until, fly_run_id=_fly_job.run_id,
+                        fly_nothing_launched=True,
+                        # Not for a forced Fly run (a delivery is one).
+                        fly_claim_failover=(
+                            not _fly_forced
+                            and isinstance(exc, fly_runner.FlyClaimRefused)
+                            and exc.left_nothing),
                     )  # fmt: skip
                 except (fly_runner.FlyIneligible, fly_runner.FlyLaunchError) as exc:
                     reason = (
@@ -5277,6 +5296,13 @@ async def run_skill(
     Passing ``provider`` pins the invocation to one adapter, primarily for
     diagnostics and focused tests.
 
+    One Fly failure also moves on without a cooldown: a login claim given up
+    for host capacity, or because the machine did not keep the update, with
+    nothing started and nothing left behind (``fly_claim_failover``). Only a
+    run with no pinned or preferred provider, no pinned model and no
+    ``runner="fly"`` takes it, the next provider must run on Fly, and a
+    dispatch that launches nothing more ends as the retry-later refusal.
+
     ``owns_pending_gate`` (ateles#795): True when this run is seated because it
     OWNS a pending pre-impl gate (pm/arch/ux). Historically this refused the
     run outright when the role had no per-agent Neotoma credential, because
@@ -5370,7 +5396,9 @@ async def run_skill(
         # From here the router's existing hard pin: one candidate, no failover.
         provider = required_provider
 
-    async def attempt(selected: str, fallback_model: str | None = None) -> SkillResult:
+    async def attempt(
+        selected: str, fallback_model: str | None = None, fly_only: bool = False
+    ) -> SkillResult:
         # A model whose own usage cap is spent is not launched: the next model
         # the vendor_binding declares for this provider runs instead (never one
         # below the dispatch's tier, never one it does not declare), or, with
@@ -5461,6 +5489,7 @@ async def run_skill(
             runner=runner,
             repository=repository,
             fly_delivery=fly_delivery,
+            **({"fly_only": True} if fly_only else {}),
             local_fallback_check=(
                 # A task's required provider gets no pinned exemption: running
                 # on the Mac it must be enabled there, like any unpinned run.
@@ -5469,6 +5498,9 @@ async def run_skill(
                 if selected in fly_bound else None
             ),
         )
+        if model is not None:
+            # A caller-pinned model belongs to one provider: no claim failover.
+            result.fly_claim_failover = False
         if selected in fly_bound and result.remote_run_id:
             # It ran on Fly: say what the Mac's reading would have said.
             note = _mac_usage_note(selected)
@@ -5937,6 +5969,21 @@ async def _run_provider_attempts(
                 skill, role, task_entity_id, notifier, local_failure,
                 remaining=[p for p in candidates], last_result=None, attempted=[],
             )
+    # A refused login claim this dispatch moved on from. Every attempt after
+    # one is Fly-only; while nothing else has run since, a dispatch that
+    # launches nothing more ends as that refusal, with its retry time.
+    fly_only = False
+    claim_refusal: SkillResult | None = None
+
+    def end_as_claim_refusal(last: SkillResult) -> SkillResult:
+        if last is not claim_refusal:
+            claim_refusal.error += (
+                f"; {last.provider or 'the next provider'} did not run on Fly either "
+                f"({last.error})"
+            )
+        claim_refusal.attempted_providers = tuple(attempted)
+        return claim_refusal
+
     index = 0
     while index < len(pending):
         selected = pending[index]
@@ -5944,9 +5991,10 @@ async def _run_provider_attempts(
         if selected not in attempted:
             attempted.append(selected)
         pinned = (fallback_models or {}).get(selected)
-        result = await (
-            attempt(selected, fallback_model=pinned) if pinned else attempt(selected)
-        )
+        options: dict = {"fallback_model": pinned} if pinned else {}
+        if fly_only:
+            options["fly_only"] = True
+        result = await attempt(selected, **options)
         result.attempted_providers = tuple(attempted)
         # ateles#1456: a remote run whose outcome is unknown may have done its
         # work. It ends the whole dispatch here, BEFORE any classification of
@@ -5964,6 +6012,32 @@ async def _run_provider_attempts(
         # ends the dispatch here too. Never failed over to another provider.
         if result.fly_delivery_status:
             return result
+        if result.fly_claim_failover or (
+            claim_refusal is not None
+            and (result.fly_nothing_launched or result.model_cooled)
+        ):
+            # A login claim refused for host capacity or revert, with nothing
+            # started and nothing left behind: an unpinned run takes the next
+            # provider on Fly, without cooling this one. After that, only a
+            # refusal that is again about one provider moves further on.
+            others = [p for p in pending[index:] if p in fly_bound or p in fly_extra]
+            moves_on = (
+                result.fly_claim_failover
+                or result.fly_provider_ineligible
+                or bool(result.model_cooled)
+            )
+            unpinned = provider is None and not preferred_provider and not single_provider
+            if moves_on and unpinned and others:
+                claim_refusal = claim_refusal or result
+                fly_only = True
+                log.warning(
+                    f"[apis] {skill}: {selected} did not run on Fly ({result.error}); "
+                    f"trying {others[0]} on Fly"
+                )
+                pending = pending[:index] + others
+                continue
+            return result if claim_refusal is None else end_as_claim_refusal(result)
+        claim_refusal = None  # something else happened since: it ends the dispatch itself
         if result.fly_provider_ineligible:
             # Fly refused this provider before anything launched, for a reason
             # that is the provider alone. Try the next candidate that runs on

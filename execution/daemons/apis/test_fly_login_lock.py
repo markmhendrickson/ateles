@@ -119,12 +119,17 @@ def _slow_claim(monkeypatch, answer=408, record=OK_RECORD):
     executor, _, _ = make_executor(fake, clock=clock, record=record)
     slow = SlowClaim(fake, answer)
     _route(executor, slow.handler)
+
+    async def no_wait(seconds):  # a claim's backoff takes no time here
+        return None
+
+    executor._sleep = no_wait
     return fake, clock, executor, slow
 
 
-def _fail_the_claim(executor):
+def _fail_the_claim(executor, raised=fly_runner.FlyLaunchError):
     job = _codex_job()
-    with pytest.raises(fly_runner.FlyLaunchError):
+    with pytest.raises(raised):
         asyncio.run(executor.run(job))
     return job
 
@@ -136,7 +141,10 @@ def _fail_the_claim(executor):
 def test_a_claim_fly_applies_late_keeps_its_reservation_until_it_is_cleared(
         fly_env, monkeypatch, answer):  # fmt: skip
     fake, clock, executor, slow = _slow_claim(monkeypatch, answer)
-    job = _fail_the_claim(executor)
+    # An accepted update (200) that is not seen is retried like a reverted one
+    # and ends as a retry-later refusal; an unclear answer is not sent again.
+    raised = fly_runner.FlyClaimRefused if answer == 200 else fly_runner.FlyLaunchError
+    job = _fail_the_claim(executor, raised)
     entry = executor.ledger.entry(job.run_id)
     assert entry is not None and entry["unconfirmed"] is True
     assert MACHINE in fake.leases  # the machine stays this run's
