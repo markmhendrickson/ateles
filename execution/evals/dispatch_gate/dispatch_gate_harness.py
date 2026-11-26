@@ -34,12 +34,12 @@ for _p in (str(REPO_ROOT), str(APIS_DIR)):
 import apis  # noqa: E402
 import model_tiering  # noqa: E402
 import producer_confidence  # noqa: E402
-from lib.daemon_runtime import gating  # noqa: E402
+from lib.daemon_runtime import action_type, gating  # noqa: E402
 from lib.capabilities import neotoma_http  # noqa: E402
 from lib.daemon_runtime.gating import ExecutionPolicy  # noqa: E402
 from unroutable_ledger import UnroutableLedger  # noqa: E402
 
-MUTATIONS = ("none", "no_producer", "round_before_gate", "skip_assessment", "no_content", "raw_preview", "no_session_branch", "dispatcher_counts_as_owner")
+MUTATIONS = ("none", "no_producer", "round_before_gate", "skip_assessment", "no_content", "raw_preview", "no_session_branch", "dispatcher_counts_as_owner", "no_prohibition_rule", "any_negation_forbids")
 BINDING = {"claude": {"local": "m-local", "mechanical": "m-mech", "mid": "m-mid", "top": "m-top"}}
 
 
@@ -318,6 +318,25 @@ def run_scenario(scenario: dict, base_task: dict, *, mutation: str = "none") -> 
         if scorer["kind"] == "hang":
             mp.setattr(producer_confidence, "SCORER_TIMEOUT_SECONDS", 0)
             mp.setattr(producer_confidence, "TIMEOUT_GRACE_SECONDS", 0.05)
+
+        if mutation == "no_prohibition_rule":
+            # Detectors read the raw text again: a pure prohibition escalates.
+            mp.setattr(
+                action_type, "_without_prohibitions",
+                lambda fields: [f for f in fields if f],
+            )
+        elif mutation == "any_negation_forbids":
+            # The over-broad rule this change must never become: any negator
+            # anywhere in a field silences that whole field and every other.
+            mp.setattr(
+                action_type, "_without_prohibitions",
+                lambda fields: []
+                if any(
+                    w in str(f).lower() for f in fields if f
+                    for w in ("do not", "never", "no merge")
+                )
+                else [f for f in fields if f],
+            )
 
         if mutation == "no_session_branch":
             # The session-owned answer is removed: a session owner reads as it
