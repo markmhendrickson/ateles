@@ -137,6 +137,7 @@ _RELEASED_PROHIBITIONS = [
     "forbidding_list_does_not_hold",
     "forbidding_bulleted_brief_does_not_hold",
     "forbidding_list_keeps_undeclared_prior",
+    "forbidding_long_list_does_not_hold",
 ]
 _HELD_NEAR_MISSES = [
     "forbidding_never_masks_a_request_in_the_same_field",

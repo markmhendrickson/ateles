@@ -1142,6 +1142,24 @@
       }
     },
     {
+      "id": "forbidding_long_list_does_not_hold",
+      "why": "The rule is not limited to short lists: a longer negated verb list is not a request.",
+      "task": {
+        "confidence": 0.99,
+        "body": "Re-sort the local notes index. Never push, merge, deploy, release, publish or send anything.",
+        "action_type": "local_edit"
+      },
+      "expect": {
+        "outcome": "executed",
+        "scorer_called": false,
+        "action": {
+          "action_type": "local_edit",
+          "action_type_source": "declared",
+          "action_blast_radius": "low"
+        }
+      }
+    },
+    {
       "id": "forbidding_list_keeps_undeclared_prior",
       "why": "With no declared type, a prohibition leaves the agent's low prior in place.",
       "task": {

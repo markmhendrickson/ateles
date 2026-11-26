@@ -903,6 +903,60 @@ def test_a_released_list_is_released_in_its_short_forms_in_every_context(monkeyp
     assert violations == []
 
 
+_LONG_ITEMS = [
+    ("merge", "deploy", "release", "publish"),
+    ("push", "merge", "deploy", "release", "send"),
+    ("publish", "send", "email", "delete", "post", "pay", "release"),
+]
+
+
+def test_a_released_long_list_is_released_in_its_short_forms_in_every_context(
+    monkeypatch,
+):
+    form_sets = [
+        _forms("Do not", _LONG_ITEMS[0], "", " or"),
+        _forms("Never", _LONG_ITEMS[1], " anything", ", or"),
+        _forms("You must not", _LONG_ITEMS[2], " it", " nor"),
+    ]
+    released, violations = _property_violations(
+        monkeypatch, form_sets, list(_property_cases())
+    )
+    assert released > 300, released  # not vacuous
+    assert violations == []
+
+
+def test_every_long_list_shape_satisfies_the_property_in_plain_contexts(monkeypatch):
+    cases = [
+        lambda s: (s,),
+        lambda s: ("Fix the bug. " + s,),
+        lambda s: ("- Fix the bug\n- " + s,),
+        lambda s: ("Tidy the notes", s),
+    ]
+    form_sets = [
+        _forms(*shape)
+        for shape in itertools.product(_NEGATORS, _LONG_ITEMS, _CLOSERS, _JOINERS)
+    ]
+    released, violations = _property_violations(monkeypatch, form_sets, cases)
+    assert released > 2500, released  # not vacuous
+    assert violations == []
+
+
+def test_the_long_list_property_goes_red_for_a_looser_rule(monkeypatch):
+    monkeypatch.setattr(
+        at, "_without_prohibitions",
+        lambda fields: [
+            "." if f and re.search(r"(?i)\b(no|never|not)\b", str(f)) else f
+            for f in fields
+        ],
+    )
+    _, violations = _property_violations(
+        monkeypatch,
+        [_forms("Do not", _LONG_ITEMS[1], "", " or")],
+        list(_property_cases()),
+    )
+    assert violations
+
+
 def test_a_released_two_item_list_is_released_without_the_rule(monkeypatch):
     """A two-item list the rule releases is released without the rule as well,
     as written or in its one-item form, in the same context."""
