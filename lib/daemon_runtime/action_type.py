@@ -426,6 +426,9 @@ _LEADING_MARKERS = re.compile(
     r"^(?:\s|[-*\u2022>#\"'`_]|\d+[.)]|\[[ xX]\]|(?:todo|task|action|next step)s?\b)+",
     re.I,
 )
+# A spaced en or em dash opening a segment is a list marker there as well. It is
+# stripped per segment only, so a clause it opens is still read in full.
+_SEGMENT_MARKERS = re.compile(r"^(?:\s|[\u2013\u2014])+")
 _SOFTENERS = re.compile(
     r"^(?:(?:please|kindly|now|then|also|first|next|finally|just|still|finish|"
     r"complete|and|go ahead and|need(?:s)? to|have to|has to|must|should|"
@@ -462,7 +465,11 @@ def _outward_verb_hits(*fields: object) -> list[tuple[str, str]]:
             continue
         for segment in _SEGMENT_SPLIT.split(clause):
             segment = _SOFTENERS.sub(
-                "", _LEADING_MARKERS.sub("", segment or "")
+                "",
+                _LEADING_MARKERS.sub(
+                    "",
+                    _SEGMENT_MARKERS.sub("", _LEADING_MARKERS.sub("", segment or "")),
+                ),
             ).strip()
             if not segment:
                 continue
@@ -632,7 +639,10 @@ def _starts_statement(line: _Line, previous: _Line | None, blocked: bool) -> boo
 
 
 def _remove_prohibitions(value: object, following: str) -> object:
-    """``value`` with each qualifying negated list replaced by a bare ".".
+    """``value`` with each qualifying negated list replaced by its own ending.
+
+    Only the statement's words are removed; its closing "." or "!" stays, so the
+    text around it is split into clauses exactly as written.
 
     Returns ``value`` itself when there is nothing to replace. ``following`` is
     the first line of the next field, so a qualifier placed there still holds
@@ -658,6 +668,8 @@ def _remove_prohibitions(value: object, following: str) -> object:
             quote_marks += "".join(c for c in sentence if c in _QUOTE_MARKS)
             if not _PROHIBITION.fullmatch(sentence) or _inside_quote(before):
                 continue
+            if line.indent >= 4:
+                continue  # an indented block may be quoted text
             if pos:
                 if not _ends_sentence(sentences[pos - 1]):
                     continue
@@ -678,7 +690,7 @@ def _remove_prohibitions(value: object, following: str) -> object:
                 follower = following
             if _qualifies(follower):
                 continue
-            kept[pos] = "."
+            kept[pos] = sentence[-1] if sentence.endswith((".", "!")) else ""
         if kept != sentences:
             out[line.number] = line.marker + " ".join(kept)
             replaced = True

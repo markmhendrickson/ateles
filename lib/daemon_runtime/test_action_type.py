@@ -14,6 +14,7 @@ The properties that matter, in order:
 
 from __future__ import annotations
 
+import collections
 import itertools
 import re
 
@@ -831,6 +832,8 @@ _AFTER = [
     " deploy", " the build", " yet", " ?", "?", "...", '"', ")", " (deploy)",
     "\n* deploy", "\n\n1) deploy", "\n## Notes", "\n\nthe page",
     "\n\nto the client", "\n\nrelease", "\n\napi",
+    " \u2013 deploy it", " \u2014 deploy it", " \u2013deploy it", "\n\u2013 deploy it",
+    "\n\u2014 release it",
 ]
 _OTHER_FIELDS = [
     "Tidy the notes", "Release version 2", "Until Friday", "Yet.", "Deploy it",
@@ -898,6 +901,44 @@ def test_a_released_list_is_released_in_its_short_forms_in_every_context(monkeyp
     )
     assert released > 500, released  # not vacuous
     assert violations == []
+
+
+def test_a_released_two_item_list_is_released_without_the_rule(monkeypatch):
+    """A two-item list the rule releases is released without the rule as well,
+    as written or in its one-item form, in the same context."""
+    form_sets = []
+    for negator, items, closer, joiner in [
+        ("Do not", _ITEMS[0], "", " or"),
+        ("Never", _ITEMS[2], " it", " nor"),
+        ("No", _ITEMS[1], " anything", ", or"),
+    ]:
+        _, one, two = _forms(negator, items, closer, joiner)
+        form_sets.append((two, two, one))
+    released, violations = _property_violations(
+        monkeypatch, form_sets, list(_property_cases())
+    )
+    assert released > 200, released  # not vacuous
+    # A context fails only when both forms are held without the rule.
+    held = collections.Counter(fields for fields, _ in violations)
+    assert [fields for fields, count in held.items() if count > 1] == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Do not merge, deploy or release! \u2013 deploy now.",
+        "Do not merge, deploy or release! \u2014 deploy now.",
+        "Do not merge, deploy or release. \u2013 deploy now.",
+        "Do not merge or release! \u2013 deploy now.",
+        "Do not merge or release! \u2014 deploy now.",
+        "Do not merge or release. \u2014 deploy now.",
+        "Fix the bug.\n    Do not merge, deploy or release.",
+        "Fix the bug.\n\tDo not merge, deploy or release.",
+        "Do not merge, deploy or tidy.",
+    ],
+)
+def test_dash_led_and_indented_text_stays_held(text):
+    assert infer_action_type_from_text(text) is not None
 
 
 def test_every_list_shape_satisfies_the_property_in_plain_contexts(monkeypatch):
