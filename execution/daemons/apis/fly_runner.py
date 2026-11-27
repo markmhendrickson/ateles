@@ -62,6 +62,7 @@ from typing import Any, Callable
 
 import httpx
 
+import fly_pause
 import model_tiering
 
 log = logging.getLogger("apis.fly_runner")
@@ -96,6 +97,8 @@ MAX_ARGV_ELEMENT_BYTES = 100_000
 AAUTH_JWK_JOB_NAME = "NEOTOMA_AAUTH_PRIVATE_JWK"
 APIS_DEADLINE_GRACE_SECONDS = 120
 REAPER_INTERVAL_SECONDS = 600
+# While Fly is paused, how often a waiting run re-reads the pause record.
+PAUSE_POLL_SECONDS = 30
 # Binary names on the runner image (argv[0] on the Mac is a local path).
 RUNNER_BINARIES: dict[str, str] = {
     "claude": "claude",
@@ -185,6 +188,16 @@ class FlyLaunchError(Exception):
     """The Fly API refused or failed to start the machine."""
 
 
+class FlyPaused(FlyRefusal):
+    """The host-wide Fly pause (``fly_pause``) is in force: nothing was
+    launched, no token minted and nothing reserved. A refusal, never a local
+    fallback; ``cooled_until`` is the pause's end (empty when unknown)."""
+
+    def __init__(self, state: "fly_pause.PauseState"):
+        super().__init__(state.message(), state.until_text())
+        self.state = state
+
+
 _OPAQUE_RUN = re.compile(r"[A-Za-z0-9+/=_\-]{40,}")
 
 # Every Machines API lease nonce this process has held. A nonce is a secret
@@ -237,6 +250,17 @@ LOGIN_CLAIM_NOT_APPLIED = "not_applied"
 LOGIN_CLAIM_FAILOVER_REASONS = frozenset(
     {"host_memory", LOGIN_CLAIM_REVERTED, LOGIN_CLAIM_NOT_APPLIED}
 )
+
+
+class FlyPausedError(FlyApiError):
+    """Raised by ``FlyMachinesClient._call`` instead of sending a request
+    while the host-wide pause is in force. Status 0: no request was made, so
+    it proves nothing about any machine; every caller already treats a
+    ``FlyApiError`` as "state unknown" and keeps what it holds."""
+
+    def __init__(self, state: "fly_pause.PauseState"):
+        super().__init__(0, state.message())
+        self.state = state
 
 
 class FlyLeaseBusy(FlyApiError):
@@ -694,6 +718,10 @@ class FlyConfig:
                 _csv(env.get("APIS_FLY_CURSOR_LOGIN_DIRS", "")) or (".cursor", ".config/cursor")
             ),
         )
+
+    def pause_state(self) -> "fly_pause.PauseState":
+        """The host-wide Fly pause, read from beside the ledger."""
+        return fly_pause.read_pause(fly_pause.pause_path(self.ledger_path))
 
     def missing(self) -> list[str]:
         """Names of required settings that are unset (names only)."""
@@ -1526,6 +1554,11 @@ class FlyMachinesClient:
 
     async def _call(self, method: str, path: str, *, params=None, body=None,
                     parse: bool = True, nonce: str = "") -> Any:  # fmt: skip
+        # The host-wide pause: every Machines API request passes here, so no
+        # periodic step, reaper, launch, poll or clean-up reaches Fly.
+        paused = self.config.pause_state()
+        if paused.paused:
+            raise FlyPausedError(paused)
         headers = {LEASE_NONCE_HEADER: nonce} if nonce else None
         async with self._client() as client:
             resp = await client.request(method, path, params=params, json=body, headers=headers)
@@ -3189,6 +3222,9 @@ class FlyExecutor:
         whether the machine was confirmed terminated.
         """
         # Before any credential, ledger write or machine call.
+        paused = self.config.pause_state()
+        if paused.paused:
+            raise FlyPaused(paused)
         self.config.require_valid_limits()
         tokens = _TokenOwner(self._revoke)
         launch = _LaunchState()
@@ -3259,6 +3295,13 @@ class FlyExecutor:
             job.launch_requested = True
         try:
             return await coro
+        except FlyPausedError as exc:
+            # The pause began after the up-front check: no request was sent.
+            # A refusal, so the caller never replays it locally.
+            launch.requested = False
+            if job is not None:
+                job.launch_requested = False
+            raise FlyPaused(exc.state) from None
         except (FlyApiError, httpx.HTTPError) as exc:
             if _definitely_not_executed(exc):
                 launch.requested = False
@@ -4041,8 +4084,18 @@ class FlyExecutor:
                              pause: Callable[[float], Any] | None = None) -> bool:  # fmt: skip
         """``_settle_steps``; an unusable ledger keeps the reservation as it
         is (nothing is charged or released) and reports it unconfirmed.
-        *pause* is ``_settle``'s only (see ``_scrub_login_machine``)."""
+        *pause* is ``_settle``'s only (see ``_scrub_login_machine``).
+
+        While Fly is paused nothing is asked of Fly: the reservation and any
+        lease are kept, marked for the first periodic step after the pause."""
         try:
+            paused = self.config.pause_state()
+            if paused.paused:
+                if self.ledger.entry(run_id) is not None:
+                    self.ledger.mark_unconfirmed(run_id, reason="Fly paused; settle after resume")
+                log.warning(f"[fly] run={run_id}: settlement deferred, reservation kept: "
+                            f"{paused.message()}")  # fmt: skip
+                return False
             confirmed = await self._settle_steps(run_id, pause=pause)
         except FlyLedgerError as exc:
             log.error(f"[fly] run={run_id}: ledger unusable ({exc}); reservation kept")
@@ -4320,6 +4373,11 @@ class FlyExecutor:
             remaining = handle.deadline - self._clock()
             if remaining <= 0:
                 return "deadline"
+            if self.config.pause_state().paused:
+                # Fly is paused: the job keeps running untouched and nothing
+                # asks Fly about it. Wait, then poll again once the pause ends.
+                await self._sleep(min(PAUSE_POLL_SECONDS, remaining))
+                continue
             result = await self.client.wait(
                 handle.machine_id, state="stopped", instance_id=handle.instance_id,
                 timeout_s=int(min(60, max(1, remaining))),
@@ -4376,9 +4434,13 @@ class FlyExecutor:
         Holds the admission lock throughout, so no launch can reserve or
         create while it decides, and it re-reads the ledger after every
         await before acting. Login machines held by a running job are
-        skipped.
+        skipped. While Fly is paused it does nothing.
         """
         settled: list[str] = []
+        paused = self.config.pause_state()
+        if paused.paused:
+            log.warning(f"[fly] reaper skipped: {paused.message()}")
+            return settled
         async with self._admission():
             try:
                 return await self._reap_locked(settled)
@@ -4499,6 +4561,12 @@ class FlyExecutor:
         config (``_clear_orphan_login_config``). With no login machine and no
         marked reservation, nothing is done and no Fly call made."""
         settled: list[str] = []
+        paused = self.config.pause_state()
+        if paused.paused:
+            # Every reservation stays as it is, marked, for the first pass
+            # after the pause ends.
+            log.warning(f"[fly] periodic step skipped: {paused.message()}")
+            return settled
         marked = [rid for rid, e in self.ledger.snapshot()["in_flight"].items()
                   if e.get("unconfirmed") is True]  # fmt: skip
         if not marked and not self.config.login_machines:
@@ -4742,6 +4810,19 @@ def get_executor() -> FlyExecutor:
         log_limit_check(config)
         _EXECUTOR = FlyExecutor(config)
     return _EXECUTOR
+
+
+def pause_state() -> "fly_pause.PauseState":
+    """The host-wide Fly pause, for callers that hold no executor."""
+    config = _EXECUTOR.config if _EXECUTOR is not None else FlyConfig.from_env()
+    return config.pause_state()
+
+
+def refuse_if_paused() -> None:
+    """Raise ``FlyPaused`` while the host-wide pause is in force."""
+    state = pause_state()
+    if state.paused:
+        raise FlyPaused(state)
 
 
 async def settle_marked_reservations() -> list[str]:

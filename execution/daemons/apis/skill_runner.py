@@ -4377,6 +4377,9 @@ async def _run_skill_once(
     _fly_provider_specific = False
     if fly_runner.wants_fly(runner, action_class):
         try:
+            # The host-wide Fly pause: refused before any admission check,
+            # token or reservation, and never sent home to run locally.
+            fly_runner.refuse_if_paused()
             if (
                 github_read_only
                 and action_class is not None
@@ -4418,7 +4421,7 @@ async def _run_skill_once(
         except fly_runner.FlyIneligible as exc:
             _fly_reason = f"not eligible for Fly: {exc}"
             _fly_provider_specific = exc.provider_specific
-        except fly_runner.FlyConfigInvalid as exc:
+        except (fly_runner.FlyConfigInvalid, fly_runner.FlyPaused) as exc:
             _fly_reason = str(exc)
             _fly_disabled = True
         else:
