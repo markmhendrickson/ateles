@@ -9,6 +9,7 @@ Only inference and Neotoma transport are synthetic (the shared ``storage``
 fixture); the claim, lookup, verification and receipt are real.
 """
 import fcntl
+import importlib.util
 import json
 import os
 import sys
@@ -87,6 +88,37 @@ def test_second_importer_waits_then_reports_already_stored_without_asr(memo_main
     assert receipt["outcome"] == "already_stored"
     assert receipt["capture_method"] == "voice_memo"
     assert receipt["audio_attachment_verified"] is True
+
+
+def _load_piculet_watch():
+    path = Path(__file__).resolve().parents[1] / "daemons" / "piculet" / "watch.py"
+    spec = importlib.util.spec_from_file_location("piculet_watch_claim_test", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_already_stored_memo_leaves_the_sidecar_piculet_assesses(memo_main, monkeypatch):
+    """The other importer stored first: Piculet must still find a transcript to
+    judge beside its staged copy, instead of holding the memo as unmeasured."""
+    state, audio, _claims, inference, run = memo_main
+    text = "Synthetic memo."
+    state["prior"] = {"id": "ent_prior", "snapshot": {
+        "audio_content_sha256": ta._audio_content_hash(audio),
+        "file_size_bytes": audio.stat().st_size, "capture_method": "voice_memo",
+        "transcription_text": text, "audio_file_name": "staged-copy.wav"}}
+    code, _receipt = run()
+    assert code == 0
+    inference.assert_not_called()
+    sidecar = audio.with_suffix(audio.suffix + ".transcript.txt")
+    assert sidecar.read_text().strip() == text
+    assert sidecar.stat().st_mode & 0o077 == audio.stat().st_mode & 0o077
+    watch = _load_piculet_watch()
+    monkeypatch.setattr(watch, "_audio_imports_dir", lambda: audio.parent)
+    report, found = watch.assess_memo(audio)
+    assert found == sidecar
+    assert report is not None
 
 
 def test_claim_still_held_at_deadline_defers_without_asr(memo_main, monkeypatch):

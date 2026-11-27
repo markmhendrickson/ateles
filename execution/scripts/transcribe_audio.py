@@ -3482,7 +3482,8 @@ def _content_claim(content_hash: str):
     try:
         directory = _transcription_claim_dir()
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(directory / f"{content_hash}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(directory / f"{content_hash}.lock", flags, 0o600)
     except OSError as exc:
         raise StoreDeferred(f"transcription claim unavailable: {type(exc).__name__}") from exc
     try:
@@ -4098,6 +4099,11 @@ def _report_already_stored(audio_path: Path, entity_id: str, identity: dict,
             "entity_id": entity_id, "verified_result": proof,
             "audio_attachment_verified": bool(source_id), "audio_source_id": source_id,
         }, identity)
+    # The same transcript sidecar a fresh transcription leaves: Piculet's
+    # clarity gate and Tyto's restart guard read it, not stdout.
+    _write_transcript_sidecars(
+        audio_path, {"transcription_text": snapshot["transcription_text"]}, verbose=True
+    )
     print(f"TRANSCRIPTION_ALREADY_STORED={entity_id}", flush=True)
     print(f"NEOTOMA_TRANSCRIPTION_ENTITY_ID={entity_id}", flush=True)
     print("\nTranscription complete:")
