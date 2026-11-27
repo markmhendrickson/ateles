@@ -4421,7 +4421,18 @@ async def _run_skill_once(
         except fly_runner.FlyIneligible as exc:
             _fly_reason = f"not eligible for Fly: {exc}"
             _fly_provider_specific = exc.provider_specific
-        except (fly_runner.FlyConfigInvalid, fly_runner.FlyPaused) as exc:
+        except fly_runner.FlyPaused as exc:
+            # The same refusal as a pause that begins inside run(): it
+            # carries the pause's end so a panel defers and resumes. An
+            # unreadable record has no end, so it waits for attention.
+            msg = f"fly runner refused: {exc}"
+            log.warning(f"[apis] {skill} dispatch deferred — {msg}")
+            _cleanup_launch_artifacts()
+            return SkillResult(
+                skill, False, None, "", "", error=msg, provider=provider,
+                cooled_until=exc.cooled_until, fly_nothing_launched=True,
+            )
+        except fly_runner.FlyConfigInvalid as exc:
             _fly_reason = str(exc)
             _fly_disabled = True
         else:

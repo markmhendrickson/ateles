@@ -130,13 +130,156 @@ def test_expired_record_is_not_a_pause(tmp_path):
 @pytest.mark.parametrize("content", ["", "{not json", "[]", '{"until": "soon", "reason": "x"}',
                                      '{"reason": "x"}', '{"until": 9e99}',
                                      '{"until": true, "reason": "x"}',
-                                     '{"until": NaN, "reason": "x"}'])  # fmt: skip
+                                     '{"until": NaN, "reason": "x"}',
+                                     # far future, each with a valid reason:
+                                     '{"until": 1e300, "reason": "x"}',
+                                     '{"until": 1e18, "reason": "x"}',
+                                     '{"until": 9e15, "reason": "x"}',
+                                     '{"until": 1e12, "reason": "x"}',
+                                     '{"until": 1.8e12, "reason": "x"}',
+                                     '{"until": 253402300800, "reason": "x"}',
+                                     '{"until": 1' + "0" * 400 + ', "reason": "x"}',
+                                     '{"until": 1' + "0" * 5000 + ', "reason": "x"}',
+                                     '{"until": 1e400, "reason": "x"}',
+                                     '{"until": -1e400, "reason": "x"}',
+                                     '{"until": {"a": 1}, "reason": "x"}',
+                                     '{"until": [1], "reason": "x"}',
+                                     '{"until": null, "reason": "x"}',
+                                     '{"until": 2000000000, "reason": 7}',
+                                     '{"until": 2000000000, "reason": ["x"]}',
+                                     '{"until": 2000000000, "reason": ""}',
+                                     '{"until": 2000000000, "reason": "\\ud800"}',
+                                     '{"until": 2000000000, "reason": "' + "r" * 500 + '"}',
+                                     "[" * 100000 + "]" * 100000,
+                                     '"just text"', "42", "null"])  # fmt: skip
 def test_unreadable_record_fails_closed_and_says_how_to_clear(tmp_path, content):
     path = tmp_path / "p.json"
     path.write_text(content)
-    state = fly_pause.read_pause(path)
+    state = fly_pause.read_pause(path, now=1_900_000_000.0)
     assert state.paused and state.unreadable and state.until is None
     assert fly_pause.CLEAR_COMMAND in state.message()
+    assert state.until_text() == ""
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"\xff\xfe\x00garbage",
+        b'{"until": 2e9, "reason": "\xff"}',
+        b"\x00" * 10,
+        b" " * (fly_pause.MAX_RECORD_BYTES + 1),
+    ],
+)
+def test_undecodable_or_huge_bytes_fail_closed(tmp_path, raw):
+    path = tmp_path / "p.json"
+    path.write_bytes(raw)
+    state = fly_pause.read_pause(path, now=1_900_000_000.0)
+    assert state.paused and state.unreadable
+    assert fly_pause.CLEAR_COMMAND in state.message()
+
+
+def test_symlinks_fail_closed_dangling_or_not(tmp_path):
+    target = tmp_path / "real.json"
+    fly_pause.set_pause(target, reason="deploy")
+    dangling = tmp_path / "dangling.json"
+    dangling.symlink_to(tmp_path / "missing.json")
+    live = tmp_path / "live.json"
+    live.symlink_to(target)
+    loop = tmp_path / "loop.json"
+    loop.symlink_to(loop)
+    for path in (dangling, live, loop):
+        state = fly_pause.read_pause(path)
+        assert state.paused and state.unreadable, path
+        assert fly_pause.CLEAR_COMMAND in state.message()
+
+
+def test_a_fifo_fails_closed_without_blocking(tmp_path):
+    import os
+
+    path = tmp_path / "p.json"
+    os.mkfifo(path)
+    state = fly_pause.read_pause(path)
+    assert state.paused and state.unreadable
+
+
+def test_a_record_past_the_twelve_hour_cap_fails_closed(tmp_path):
+    path = tmp_path / "p.json"
+    now = 1_900_000_000.0
+    path.write_text(
+        json.dumps({"until": now + fly_pause.MAX_PAUSE_SECONDS + 3600, "reason": "x"})
+    )
+    state = fly_pause.read_pause(path, now=now)
+    assert state.paused and state.unreadable
+    path.write_text(
+        json.dumps({"until": now + fly_pause.MAX_PAUSE_SECONDS, "reason": "x"})
+    )
+    state = fly_pause.read_pause(path, now=now)
+    assert state.paused and not state.unreadable and state.until_text()
+
+
+@pytest.mark.parametrize(
+    "until", [1e300, 1e18, 9e15, 1e12, float("nan"), float("inf"), -1e300]
+)
+def test_message_never_raises_whatever_the_state_holds(until):
+    for state in (fly_pause.PauseState(True, until, "x"),
+                  fly_pause.PauseState(True, until, object()),  # type: ignore[arg-type]
+                  fly_pause.PauseState(True, until, "x", unreadable=True)):  # fmt: skip
+        assert state.message().startswith("Fly paused")
+        assert isinstance(state.until_text(), str)
+        fly_runner.FlyPaused(state)
+        fly_runner.FlyPausedError(state)
+
+
+_FAR_FUTURE = ['{"until": 1e18, "reason": "x"}', '{"until": 9e15, "reason": "x"}',
+               '{"until": 1e300, "reason": "x"}', '{"until": 1' + "0" * 400 + ', "reason": "x"}',
+               b"\xff\xfe"]  # fmt: skip
+
+
+def _write_bad(path: Path, content) -> None:
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    else:
+        path.write_text(content)
+
+
+@pytest.mark.parametrize("content", _FAR_FUTURE)
+def test_a_bad_record_is_the_clean_refusal_on_every_surface(fly_env, monkeypatch, caplog,
+                                                            capsys, tmp_path, content):  # fmt: skip
+    caplog.set_level(logging.WARNING)
+    fake = _codex_fake(monkeypatch)
+    clock = Clock()
+    executor, minted, _ = make_executor(
+        fake, record={"exit_code": 0, "stdout": "x"}, clock=clock
+    )
+    run_id = _seed_marked_login(executor, clock)
+    transport = _counted(executor, fake)
+    monkeypatch.setattr(fly_runner, "_EXECUTOR", executor)
+    _write_bad(_pause_file(executor), content)
+
+    with pytest.raises(fly_runner.FlyPausedError) as exc:  # _call
+        asyncio.run(executor.client.get("m-codex"))
+    assert fly_pause.CLEAR_COMMAND in str(exc.value)
+    with pytest.raises(fly_runner.FlyPaused):  # run()
+        asyncio.run(executor.run(_codex_job()))
+    with pytest.raises(fly_runner.FlyPaused):
+        fly_runner.refuse_if_paused()
+    assert asyncio.run(fly_runner.settle_marked_reservations()) == []
+    assert asyncio.run(executor.reap()) == []
+    assert asyncio.run(executor._settle(run_id)) is False
+    assert executor.ledger.entry(run_id)["unconfirmed"] is True
+    assert transport.seen == [] and minted == []
+    assert _cli().main(["show"]) == 1
+    assert fly_pause.CLEAR_COMMAND in capsys.readouterr().out
+    assert fly_pause.CLEAR_COMMAND in _lens_review().fly_pause_message()
+
+
+def test_clear_on_a_directory_is_refused_not_a_traceback(fly_env, capsys):
+    path = _pause_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.mkdir()
+    assert _cli().main(["clear"]) == 2
+    assert "remove it by hand" in capsys.readouterr().err
+    assert fly_pause.read_pause(path).paused
 
 
 def test_a_record_that_cannot_be_opened_fails_closed(tmp_path):
@@ -445,3 +588,234 @@ def test_lens_review_stops_before_the_next_lens_when_paused_mid_run(
     summary = json.loads((tmp_path / "out" / "summary.json").read_text())
     assert any(r["status"] == "not_run" and "Fly paused" in r["reason"]
                for r in summary["lenses"])  # fmt: skip
+
+
+# ── A pause that begins during a login-machine claim ──────────────────────────
+
+
+def _pause_after(executor, fake, match):
+    """A transport that sets the pause right after the first request *match*
+    accepts, and records every request sent once the pause is in force."""
+    transport = _counted(executor, fake)
+    after: list[httpx.Request] = []
+    state = {"on": False}
+
+    def handler(request):
+        if state["on"]:
+            after.append(request)
+        response = transport.handler(request)
+        if not state["on"] and match(request):
+            state["on"] = True
+            _pause(executor, reason="neotoma deploy")
+        return response
+
+    executor.client = fly_runner.FlyMachinesClient(
+        executor.config, transport=httpx.MockTransport(handler))  # fmt: skip
+    return after
+
+
+_CLAIM_STAGES = {
+    # after the reconcile/pre-read GET, before the lease is asked for
+    "before_lease": lambda r: (
+        r.method == "GET" and r.url.path.endswith("/machines/m-codex")
+    ),
+    # after the lease is granted, before the config write
+    "before_config_write": lambda r: (
+        r.method == "POST" and r.url.path.endswith("/lease")
+    ),
+    # after the config write, before the start
+    "before_start": lambda r: (
+        r.method == "POST" and r.url.path.endswith("/machines/m-codex")
+    ),
+}
+
+
+@pytest.mark.parametrize("stage", sorted(_CLAIM_STAGES))
+def test_a_pause_during_a_login_claim_is_the_same_refusal(fly_env, monkeypatch, stage):
+    fake = _codex_fake(monkeypatch)
+    clock = Clock()
+    executor, _, revoked = make_executor(fake, record={"exit_code": 0, "stdout": "x"},
+                                         clock=clock)  # fmt: skip
+    after = _pause_after(executor, fake, _CLAIM_STAGES[stage])
+    job = _codex_job()
+    with pytest.raises(fly_runner.FlyPaused) as exc:
+        asyncio.run(executor.run(job))
+    assert not isinstance(exc.value, fly_runner.FlyLaunchError)
+    assert str(exc.value).startswith("Fly paused until ")
+    assert exc.value.cooled_until  # the retry time travels with it
+    assert after == []  # nothing asked of Fly once the pause began
+    assert job.launch_requested is False
+    assert fake.machines["m-codex"]["state"] == "stopped"  # never started
+    entry = executor.ledger.entry(job.run_id)
+    assert revoked  # the job's token is still revoked
+    if stage == "before_lease":
+        # No lease taken and nothing written: the reservation is released
+        # locally with no Fly call (``after`` is empty), as nothing is unknown.
+        assert entry is None and "m-codex" not in fake.leases
+        return
+    # Nothing that could not be confirmed is released: the reservation and the
+    # lease the claim took are kept, marked, for after the pause.
+    assert entry is not None and entry["unconfirmed"] is True
+    assert entry.get("lease_nonce") and "m-codex" in fake.leases
+
+    fly_pause.clear_pause(_pause_file(executor))
+    assert asyncio.run(executor.settle_marked()) == [job.run_id]
+    assert executor.ledger.entry(job.run_id) is None
+
+
+def test_a_pause_during_the_lease_request_is_a_pause_refusal(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    executor, _, _ = make_executor(
+        fake, record={"exit_code": 0, "stdout": "x"}, clock=Clock()
+    )
+    transport = _counted(executor, fake)
+
+    async def acquire_lease(*a, **k):
+        _pause(executor)
+        return await fly_runner.FlyMachinesClient.acquire_lease(
+            executor.client, *a, **k
+        )
+
+    executor.client.acquire_lease = acquire_lease
+    with pytest.raises(fly_runner.FlyPaused) as exc:
+        asyncio.run(executor._acquire_lease("m-codex", _codex_job(), time.time() + 600))
+    assert "Fly paused until" in str(exc.value)
+    assert not any(r.url.path.endswith("/lease") for r in transport.seen)
+
+
+def test_a_pause_between_wait_reads_keeps_polling_not_unknown(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    clock = Clock()
+    executor, _, _ = make_executor(
+        fake, record={"exit_code": 0, "stdout": "done"}, clock=clock
+    )
+    calls = {"n": 0}
+    real_wait = executor.client.wait
+
+    async def wait(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:  # paused just after the loop's own check, then cleared
+            raise fly_runner.FlyPausedError(
+                fly_pause.PauseState(True, time.time() + 60, "x")
+            )
+        return await real_wait(*a, **k)
+
+    executor.client.wait = wait
+
+    async def no_sleep(seconds):
+        clock.now += seconds
+
+    executor._sleep = no_sleep
+    job = _codex_job()
+    rc, out, _ = asyncio.run(executor.run(job))
+    assert (rc, out) == (0, b"done") and job.outcome_unknown is False
+    assert calls["n"] >= 2
+
+
+# ── Every Fly call site in dispatch: a pause never yields a local run ─────────
+
+
+def test_dispatch_carries_the_retry_time_when_paused_up_front(
+    fly_env, seam, monkeypatch
+):
+    spawned, fake_exec = seam
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
+    state = _pause(reason="neotoma deploy")
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(action_class="carry_forward_check", model="m", repository="owner/repo",
+                       github_token="t-local")  # fmt: skip
+    assert not result.ok and spawned == []
+    assert result.error.startswith("fly runner refused: Fly paused until ")
+    assert result.cooled_until == state.until_text() != ""
+    assert result.fly_nothing_launched is True
+
+
+def test_dispatch_with_an_unreadable_pause_has_no_retry_time(
+    fly_env, seam, monkeypatch
+):
+    spawned, fake_exec = seam
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
+    path = _pause_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"until": 1e18, "reason": "x"}')
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(action_class="carry_forward_check", model="m", repository="owner/repo",
+                       github_token="t-local")  # fmt: skip
+    assert not result.ok and spawned == [] and result.cooled_until == ""
+    assert fly_pause.CLEAR_COMMAND in result.error
+
+
+@pytest.mark.parametrize("where", ["mint", "create"])
+def test_dispatch_paused_mid_launch_is_the_same_refusal(
+    fly_env, seam, monkeypatch, where
+):
+    spawned, fake_exec = seam
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
+    fake = FakeFly()
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "x"})
+    transport = _counted(executor, fake)
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    if where == "mint":
+        real_mint = executor._mint
+
+        def mint(repo, prefix):
+            token = real_mint(repo, prefix)
+            _pause(executor)
+            return token
+
+        executor._mint = mint
+    else:
+        real_create = executor.client.create
+
+        async def create(body):
+            _pause(executor)
+            return await real_create(body)
+
+        executor.client.create = create
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(action_class="carry_forward_check", model="m", repository="owner/repo",
+                       github_token="t-local")  # fmt: skip
+    assert not result.ok and spawned == []  # never run locally
+    assert result.error.startswith("fly runner refused: Fly paused until ")
+    assert result.cooled_until
+    assert transport.seen == []
+
+
+# ── Lens review: the last (or only) lens refused by a pause ───────────────────
+
+
+@pytest.mark.parametrize("lens", ["pm", "all"])
+def test_lens_review_a_lens_refused_by_a_pause_never_falls_back(
+    fly_env, tmp_path, capsys, lens
+):
+    review = _lens_review()
+    dispatched = []
+
+    def run_lens(**kw):
+        dispatched.append(kw["lens"])
+        if len(dispatched) == (1 if lens == "pm" else 5):
+            _pause(reason="neotoma deploy")  # set while the last lens ran
+            raise review.FallBack("fly runner refused: Fly paused", {"attempts": []})
+        return {
+            "lens": kw["lens"],
+            "role": "r",
+            "verdict": "APPROVE",
+            "provider": "p",
+            "duration_s": 1,
+            "verdict_file": str(tmp_path / f"{kw['lens']}.md"),
+        }
+
+    with patch.object(review, "run_lens", run_lens):
+        rc = review.main(
+            ["--repo", "owner/repo", "--pr", "1", "--lens", lens,
+             "--task-entity-id", "ent_x", "--out-dir", str(tmp_path / "out")],
+            head_resolver=lambda repo, pr: "a" * 40,
+            files_resolver=lambda repo, pr: ["execution/daemons/apis/fly_runner.py"],
+        )  # fmt: skip
+    out = capsys.readouterr().out
+    assert rc == 5
+    assert "FALL BACK TO LOCAL LENS" not in out
+    summary = json.loads((tmp_path / "out" / "summary.json").read_text())
+    last = summary["lenses"][-1]
+    assert last["lens"] == dispatched[-1] and last["status"] == "not_run"
+    assert "Fly paused" in last["reason"]

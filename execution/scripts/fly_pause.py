@@ -15,7 +15,8 @@ window without unloading Apis.
 The default duration is 60 minutes; over 12 hours is refused. The record lives
 beside the Fly runner ledger (``APIS_FLY_LEDGER_FILE``, default
 ``~/.config/ateles/fly-runner-ledger.json``); run with the same value as Apis.
-Exit codes: 0 done (``show``: not paused); 1 ``show``: paused; 2 refused.
+Exit codes: 0 done (``show``: not paused); 1 ``show``: paused; 2 refused
+(including a ``clear`` that could not remove what is at the record path).
 Standard library only. See docs/cloud_hosting.md.
 """
 
@@ -61,7 +62,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{state.message()} (record {path})")
         return 0
     if args.command == "clear":
-        removed = fly_pause.clear_pause(path)
+        try:
+            removed = fly_pause.clear_pause(path)
+        except OSError as exc:
+            print(f"refused: could not remove {path} ({type(exc).__name__}); "
+                  "remove it by hand. Fly stays paused until it is gone.",
+                  file=sys.stderr)  # fmt: skip
+            return 2
         print("Fly pause cleared" if removed else f"no Fly pause was set ({path})")
         return 0
     state = fly_pause.read_pause(path)

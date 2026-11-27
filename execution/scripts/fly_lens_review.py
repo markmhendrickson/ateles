@@ -588,10 +588,13 @@ def fly_pause_message() -> str:
     """The host-wide Fly pause message, or "" when Fly is not paused."""
     if str(APIS_DIR) not in sys.path:
         sys.path.insert(0, str(APIS_DIR))
-    import fly_pause  # noqa: PLC0415 - daemon module, stdlib only
+    try:
+        import fly_pause  # noqa: PLC0415 - daemon module, stdlib only
 
-    state = fly_pause.read_pause(fly_pause.pause_path(fly_pause.ledger_path()))
-    return state.message() if state.paused else ""
+        state = fly_pause.read_pause(fly_pause.pause_path(fly_pause.ledger_path()))
+        return state.message() if state.paused else ""
+    except Exception as exc:  # noqa: BLE001 - fail closed: an unknown pause is a pause
+        return f"Fly paused: the pause state cannot be read ({type(exc).__name__})"
 
 
 def main(argv: list[str] | None = None, *,
@@ -691,6 +694,22 @@ def main(argv: list[str] | None = None, *,
                     python=sys.executable, dispatch_script=Path(args.dispatch_script),
                     dispatch=dispatch)
             except FallBack as exc:
+                # A refusal because Fly paused while this lens (even the last
+                # or only one) was dispatching is not a fallback: the lens is
+                # not run, here or locally, and the run ends with exit 5.
+                paused = fly_pause_message()
+                if paused:
+                    summary["lenses"].append({
+                        **exc.record, "lens": lens, "role": LENS_ROLES[lens],
+                        "status": "not_run", "reason": f"stopped: {paused}"})
+                    for other in lenses[n + 1:]:
+                        summary["lenses"].append({
+                            "lens": other, "role": LENS_ROLES[other], "status": "not_run",
+                            "reason": f"stopped: {paused}"})
+                    log(f"{paused}. {lens} was refused; it and the remaining lenses are "
+                        "not to be run locally instead.")
+                    save()
+                    break
                 fallbacks += 1
                 record = {"lens": lens, "role": LENS_ROLES[lens], "reviewed_head": head,
                           "status": "fallback", "reason": str(exc), **exc.record}

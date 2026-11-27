@@ -3398,6 +3398,13 @@ class FlyExecutor:
                                                   "nonce": ""}  # fmt: skip
                     self.ledger.set_machine(job.run_id, machine_id)
                     launch.machine_id = machine_id
+            except FlyPausedError as exc:
+                # The pause began during the claim (reconcile, read, settle,
+                # lease, config write or a start retry's read): the request
+                # was never sent. The same refusal as the up-front check,
+                # never a launch failure a caller may replay locally; run()
+                # keeps whatever it cannot confirm, marked for after the pause.
+                raise FlyPaused(exc.state) from None
             except (FlyApiError, httpx.HTTPError) as exc:
                 # Before any create/start was sent: provably nothing ran.
                 raise FlyLaunchError(str(exc) or type(exc).__name__) from None
@@ -3439,6 +3446,8 @@ class FlyExecutor:
             )
         except FlyLeaseBusy:
             reason = "its lease is held by another dispatcher"
+        except FlyPausedError as exc:
+            raise FlyPaused(exc.state) from None  # no lease was asked for
         except (FlyApiError, httpx.HTTPError) as exc:
             reason = f"its lease could not be taken ({type(exc).__name__})"
         raise FlyRefusal(
@@ -4378,10 +4387,13 @@ class FlyExecutor:
                 # asks Fly about it. Wait, then poll again once the pause ends.
                 await self._sleep(min(PAUSE_POLL_SECONDS, remaining))
                 continue
-            result = await self.client.wait(
-                handle.machine_id, state="stopped", instance_id=handle.instance_id,
-                timeout_s=int(min(60, max(1, remaining))),
-            )  # fmt: skip
+            try:
+                result = await self.client.wait(
+                    handle.machine_id, state="stopped", instance_id=handle.instance_id,
+                    timeout_s=int(min(60, max(1, remaining))),
+                )  # fmt: skip
+            except FlyPausedError:
+                continue  # paused between the two reads: the check above waits it out
             if result in ("reached", "gone"):
                 return result
 
