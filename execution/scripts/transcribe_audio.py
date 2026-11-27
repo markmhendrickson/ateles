@@ -529,6 +529,63 @@ def _coerce_correction_pairs(data: object) -> list[tuple[str, str]]:
 
 _ACTIVE_CORRECTIONS: list[tuple[str, str]] | None = None
 
+# Whisper initial prompt: the operator's product names, so the model spells
+# them right in the first place instead of relying on post-hoc corrections.
+# Like the vocabulary above, nothing product-specific ships in this repo: an
+# explicit value (argument, then TRANSCRIBE_WHISPER_PROMPT; an empty value
+# disables the prompt) wins, otherwise the names come from the operator's
+# Neotoma `product_profile` entities. No entity, no access or any error means
+# no prompt and one log line; transcription proceeds unchanged.
+_ACTIVE_WHISPER_PROMPT: tuple[str | None] | None = None
+
+
+def _product_names_from_neotoma() -> list[str]:
+    """Product names from Neotoma `product_profile` entities; raises on failure."""
+    if not _neotoma_cli_available():
+        raise RuntimeError("neotoma CLI unavailable")
+    data = _neotoma_cli_json(["entities", "list", "--type", "product_profile"])
+    if not isinstance(data, dict) or data.get("error_code"):
+        raise RuntimeError("no readable product_profile listing")
+    names: list[str] = []
+    for entity in data.get("entities") or []:
+        if not isinstance(entity, dict):
+            continue
+        snapshot = entity.get("snapshot")
+        if isinstance(snapshot, dict) and isinstance(snapshot.get("snapshot"), dict):
+            snapshot = snapshot["snapshot"]
+        name = (snapshot or {}).get("name") if isinstance(snapshot, dict) else None
+        name = name or entity.get("canonical_name")
+        if isinstance(name, str) and name.strip() and name.strip() not in names:
+            names.append(name.strip())
+    return names
+
+
+def _resolve_whisper_prompt(explicit: str | None = None) -> str | None:
+    """Resolve the whisper initial prompt once; never raises."""
+    if explicit is not None:
+        return explicit.strip() or None
+    env_value = os.environ.get("TRANSCRIBE_WHISPER_PROMPT")
+    if env_value is not None:
+        return env_value.strip() or None
+    try:
+        names = _product_names_from_neotoma()
+    except Exception as exc:  # noqa: BLE001 - fail open to "no prompt"
+        print(f"Whisper prompt: product_profile unavailable ({type(exc).__name__}); "
+              "transcribing without a prompt", file=sys.stderr)
+        return None
+    if not names:
+        print("Whisper prompt: no product_profile names found; transcribing without "
+              "a prompt", file=sys.stderr)
+        return None
+    return ", ".join(names)
+
+
+def _whisper_prompt() -> str | None:
+    """The prompt resolved for this run, or a fresh resolution outside one."""
+    if _ACTIVE_WHISPER_PROMPT is not None:
+        return _ACTIVE_WHISPER_PROMPT[0]
+    return _resolve_whisper_prompt()
+
 
 def _proper_noun_corrections() -> list[tuple[str, str]]:
     """Merge the operator vocabulary from env + file + Neotoma (all optional)."""
@@ -1979,8 +2036,11 @@ def transcribe_audio_file(
             use_diarization is not False
             and os.environ.get("RECORD_MEETING_DIARIZE") != "0"
         )
+        # "" rather than None: the prompt was already resolved for this run,
+        # so local_whisper must not re-read the environment.
         local = transcribe_local(
-            audio_path, language=language, verbose=verbose, diarize=diarize
+            audio_path, language=language, verbose=verbose, diarize=diarize,
+            initial_prompt=_whisper_prompt() or "",
         )
         text = (
             _postprocess_transcript(local["transcription_text"])
@@ -2842,6 +2902,7 @@ def _processing_fingerprint() -> str:
     payload = {
         "settings": {name: os.environ.get(name) for name in names},
         "vocabulary": _proper_noun_corrections(), "labels": _channel_labels(),
+        "whisper_prompt": _whisper_prompt(),
         "gap": _utterance_gap_seconds(), "stitch": _utterance_stitch_seconds(),
         "model": model, "paired_model": paired_model, "binaries": binaries,
         "source": {name: _audio_content_hash(Path(__file__).with_name(name)) for name in (
@@ -3912,7 +3973,7 @@ def save_transcription(
 
 
 def main():
-    global _ACTIVE_CORRECTIONS
+    global _ACTIVE_CORRECTIONS, _ACTIVE_WHISPER_PROMPT
     parser = argparse.ArgumentParser(
         description="Transcribe locally with Whisper or FluidAudio speaker diarization"
     )
@@ -4006,6 +4067,11 @@ def main():
     )
 
     parser.add_argument(
+        "--prompt", default=None,
+        help="Whisper initial prompt (proper nouns). Overrides TRANSCRIBE_WHISPER_PROMPT "
+        "and the product_profile names; an empty value disables the prompt.",
+    )
+    parser.add_argument(
         "--store-only", action="store_true",
         help="Store a source-bound pending result without running transcription. "
         "Missing or changed source/context fails closed; there is no ASR fallback.",
@@ -4041,7 +4107,11 @@ def main():
         )
 
     previous_corrections = _ACTIVE_CORRECTIONS
+    previous_prompt = _ACTIVE_WHISPER_PROMPT
     try:
+        # Resolved once: the same value reaches ASR and the fingerprint, so a
+        # prompt changed before --store-only refuses the cached result.
+        _ACTIVE_WHISPER_PROMPT = (_resolve_whisper_prompt(args.prompt),)
         _ACTIVE_CORRECTIONS = (
             _proper_nouns_from_env() + _proper_nouns_from_file() + _proper_nouns_from_neotoma()
         )
@@ -4176,6 +4246,7 @@ def main():
         sys.exit(1)
     finally:
         _ACTIVE_CORRECTIONS = previous_corrections
+        _ACTIVE_WHISPER_PROMPT = previous_prompt
 
 
 if __name__ == "__main__":

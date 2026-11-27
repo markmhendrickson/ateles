@@ -1332,3 +1332,122 @@ def test_is_cloud_evicted_false_for_real_file(tmp_path):
 
     assert is_cloud_evicted(_write_audio(tmp_path / "rec.m4a")) is False
     assert is_cloud_evicted(tmp_path / "missing.m4a") is False
+
+
+# --------------------------------------------------------------------------
+# Whisper initial prompt: resolved once per run from the operator's
+# product_profile entities (mocked here; synthetic names only), passed to ASR
+# and bound into the pending-store fingerprint.
+# --------------------------------------------------------------------------
+
+
+def _mock_product_profiles(monkeypatch, names, *, fail=False):
+    """Serve synthetic product_profile entities through the Neotoma CLI seam."""
+    calls = []
+
+    def fake_cli_json(args):
+        calls.append(args)
+        if fail:
+            raise OSError("synthetic Neotoma failure")
+        return {"entities": [{"entity_type": "product_profile",
+                              "snapshot": {"name": name}} for name in names]}
+
+    monkeypatch.setattr(ta, "_neotoma_cli_available", lambda: True)
+    monkeypatch.setattr(ta, "_neotoma_cli_json", fake_cli_json)
+    return calls
+
+
+def _run_memo_cli(monkeypatch, audio, *extra, save=None, seen=None):
+    """Run the CLI's single-file local path with whisper itself faked."""
+    def fake_local(path, **kwargs):
+        if seen is not None:
+            seen.append(kwargs.get("initial_prompt"))
+        return complete_result(audio)
+
+    monkeypatch.setattr(sys, "argv", ["transcribe_audio.py", str(audio), "--backend", "local", *extra])
+    with patch.object(ta, "_merge_transcription_relate_targets", return_value=([], None)), patch.object(
+        ta, "get_audio_channel_count", return_value=1
+    ), patch.object(ta, "get_audio_duration", return_value=2.5), patch.object(ta, "transcribe_local", side_effect=fake_local) as asr, patch.object(
+        ta, "save_transcription",
+        side_effect=save or RuntimeError("capability_denied"),
+    ) as store:
+        try:
+            ta.main()
+        except SystemExit:
+            pass
+    return asr, store
+
+
+@pytest.fixture
+def _prompt_env(monkeypatch):
+    monkeypatch.delenv("TRANSCRIBE_WHISPER_PROMPT", raising=False)
+    monkeypatch.setenv("RECORD_MEETING_DIARIZE", "0")
+    monkeypatch.setenv("TRANSCRIBE_DISABLE_NEOTOMA_VOCAB", "1")
+
+
+def test_product_profile_names_become_the_whisper_prompt(tmp_path, monkeypatch, _prompt_env):
+    audio = tmp_path / "memo.wav"
+    audio.write_bytes(b"audio")
+    calls = _mock_product_profiles(monkeypatch, ["Synthoria", "Quillmark"])
+    seen = []
+    _run_memo_cli(monkeypatch, audio, seen=seen)
+    assert seen == ["Synthoria, Quillmark"]
+    assert ["entities", "list", "--type", "product_profile"] in calls
+
+
+@pytest.mark.parametrize("source", ["argument", "env"])
+def test_explicit_whisper_prompt_wins_over_product_profile(tmp_path, monkeypatch, _prompt_env, source):
+    audio = tmp_path / "memo.wav"
+    audio.write_bytes(b"audio")
+    calls = _mock_product_profiles(monkeypatch, ["Synthoria"])
+    monkeypatch.setenv("TRANSCRIBE_WHISPER_PROMPT", "Env Synthetic")
+    extra = ["--prompt", "Explicit Synthetic"] if source == "argument" else []
+    seen = []
+    _run_memo_cli(monkeypatch, audio, *extra, seen=seen)
+    assert seen == ["Explicit Synthetic" if source == "argument" else "Env Synthetic"]
+    assert calls == []
+
+
+@pytest.mark.parametrize("case", ["missing", "error", "no_cli"])
+def test_missing_or_failing_product_profile_gives_no_prompt(tmp_path, monkeypatch, capsys, _prompt_env, case):
+    audio = tmp_path / "memo.wav"
+    audio.write_bytes(b"audio")
+    _mock_product_profiles(monkeypatch, [], fail=(case == "error"))
+    if case == "no_cli":
+        monkeypatch.setattr(ta, "_neotoma_cli_available", lambda: False)
+    assert ta._resolve_whisper_prompt() is None
+    seen = []
+    _run_memo_cli(monkeypatch, audio, seen=seen)
+    # No prompt reaches whisper, and "" stops local_whisper re-reading the env.
+    assert seen == [""]
+    assert audio.with_suffix(".wav.pending-store.json").exists()
+    err = capsys.readouterr().err
+    assert err.count("Whisper prompt:") == 2  # one line per resolution
+    assert "synthetic Neotoma failure" not in err
+
+
+def test_changed_prompt_refuses_store_only_reuse(tmp_path, monkeypatch, _prompt_env):
+    audio = tmp_path / "memo.wav"
+    audio.write_bytes(b"audio")
+    _mock_product_profiles(monkeypatch, ["Synthoria"])
+    asr, _ = _run_memo_cli(monkeypatch, audio)
+    asr.assert_called_once()
+    _mock_product_profiles(monkeypatch, ["Synthoria", "Quillmark"])
+    asr, store = _run_memo_cli(monkeypatch, audio, "--store-only")
+    asr.assert_not_called()
+    store.assert_not_called()
+
+
+def test_unchanged_prompt_still_reuses_on_store_only(tmp_path, monkeypatch, _prompt_env):
+    audio = tmp_path / "memo.wav"
+    audio.write_bytes(b"audio")
+    _mock_product_profiles(monkeypatch, ["Synthoria"])
+    _run_memo_cli(monkeypatch, audio)
+    cached = json.loads(audio.with_suffix(".wav.pending-store.json").read_text())["result"]
+    asr, store = _run_memo_cli(
+        monkeypatch, audio, "--store-only",
+        save=lambda path, result, **kw: {**result, "entity_id": "ent_synthetic"},
+    )
+    asr.assert_not_called()
+    store.assert_called_once()
+    assert store.call_args.args[1] == cached
