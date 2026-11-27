@@ -42,7 +42,11 @@ Resolution order (``resolve_gate_action_type``):
    never-auto-executable prior is never replaced.
 
    Text NEVER lowers anything. There is no path from a task's prose to a
-   less-strict reading than the prior gives. A report-only statement in a task
+   less-strict reading than the prior gives. A statement that is nothing but a
+   negated list of outward verbs ("Do not merge, deploy or release.") is not
+   read by the verb detector as asking for them; every other mention in the task
+   still is (see "Negated verb lists" below).
+   A report-only statement in a task
    ("write nothing", "pure reporting") is deliberately ignored here: telling an
    affirmative report-only contract from negated, scoped, mixed or spoofed
    language needs independently labelled negative cases, and until that exists
@@ -263,7 +267,8 @@ _HSPACE = re.compile(r"[^\S\n]+")
 #     "deployed") reports finished work and is not an action;
 #   * a clause that opens with a negation ("do not push", "never send",
 #     "without deploying") is skipped whole, so "Do not push or deploy" does
-#     not hold a task that forbids it.
+#     not hold a task that forbids it. A comma ends a clause, so a longer negated
+#     list is handled separately: see "Negated verb lists" below.
 #
 # Not matched, on purpose: "post-merge cleanup" (hyphenated), "pushback", "push
 # notification handler", "deployment docs", "release notes", "send-gate tests",
@@ -421,6 +426,9 @@ _LEADING_MARKERS = re.compile(
     r"^(?:\s|[-*\u2022>#\"'`_]|\d+[.)]|\[[ xX]\]|(?:todo|task|action|next step)s?\b)+",
     re.I,
 )
+# A spaced en or em dash opening a segment is a list marker there as well. It is
+# stripped per segment only, so a clause it opens is still read in full.
+_SEGMENT_MARKERS = re.compile(r"^(?:\s|[\u2013\u2014])+")
 _SOFTENERS = re.compile(
     r"^(?:(?:please|kindly|now|then|also|first|next|finally|just|still|finish|"
     r"complete|and|go ahead and|need(?:s)? to|have to|has to|must|should|"
@@ -457,7 +465,11 @@ def _outward_verb_hits(*fields: object) -> list[tuple[str, str]]:
             continue
         for segment in _SEGMENT_SPLIT.split(clause):
             segment = _SOFTENERS.sub(
-                "", _LEADING_MARKERS.sub("", segment or "")
+                "",
+                _LEADING_MARKERS.sub(
+                    "",
+                    _SEGMENT_MARKERS.sub("", _LEADING_MARKERS.sub("", segment or "")),
+                ),
             ).strip()
             if not segment:
                 continue
@@ -465,6 +477,270 @@ def _outward_verb_hits(*fields: object) -> list[tuple[str, str]]:
                 if pattern.search(segment):
                     hits.append((action, label))
     return hits
+
+
+# ── Negated verb lists ──────────────────────────────────────────────────────
+# "Do not merge, deploy or release." forbids an action, yet the clause split
+# above cuts it at the comma, leaving "deploy or release" to read as a request.
+# The one- and two-item forms of that sentence are already skipped. Before the
+# imperative-verb detector runs, a longer list is blanked when the statement is
+# NOTHING BUT the prohibition. The fixed phrase patterns (``_HIGH_PATTERNS``)
+# are not affected: they always read the text as written.
+#
+# A statement is a whole sentence, after an optional "please" / "also" / "you"
+# and an optional list marker:
+#
+#   NEGATOR VERB[, VERB...][,] or|nor VERB [anything else | anything | it |
+#   this | them]            -- bare verbs only, "or" / "nor" required
+#
+# Nothing is carried across a joiner, other punctuation or an item with its own
+# object, and a matching statement stays held when the text around it may
+# qualify it (a condition, a wrapped or indented line, an introduction, quoting
+# or markup). The test is deliberately far narrower than English negation: a
+# miss costs one approval prompt.
+_LIST_NEGATOR = r"(?:do not|don['’]?t|never|must not|mustn['’]?t|no)"
+_BARE_VERB = (
+    r"(?:send|e-?mail|message|dm|reply|respond|notify|tweet|post|publish|push|"
+    r"deploy|release|ship|merge|submit|pay|transfer|invoice|delete)"
+)
+_PROHIBITION = re.compile(
+    rf"(?:(?:please|also|you) )*"
+    rf"{_LIST_NEGATOR} {_BARE_VERB}(?: ?, ?{_BARE_VERB})*(?: ?, ?| )"
+    rf"(?:or|nor) {_BARE_VERB}(?: (?:anything else|anything|it|this|them))?"
+    rf"[.!]?",
+    re.I,
+)
+_LIST_MARKER = re.compile(r"^(?:[-*•]|\d{1,3}[.)]) +")
+_SENTENCE_GAP = re.compile(r"(?<=[.!?]) +")
+# Openers of a following sentence that may limit, delay or undo a prohibition.
+_QUALIFIER_START = re.compile(
+    r"(?:(?:please|also) )*"
+    r"(?:until|till|unless|before|after|yet|except|excepting|if|while|whilst|"
+    r"when|whenever|once|without|only|but|however|instead|actually|though|"
+    r"although|otherwise|pending|provided|providing|assuming|during|barring|"
+    r"as (?:long|soon) as|in case|other than|apart from|aside from|save for|"
+    r"then|and|or|nor|so|just|kidding|at least|that is|"
+    r"not (?:yet|until|before|unless|without|today|now)|"
+    r"for (?:now|today|the moment|the time being)|now|today|tonight|tomorrow|"
+    r"later|first|wait|hold|do (?:it|so|that|this)|go ahead|anyway|"
+    r"it|that|this|these|those|they|exception\w*|exempt\w*|ignore|disregard|"
+    r"scratch|strike|cancel)\b",
+    re.I,
+)
+# Words that make a following sentence unsafe wherever they sit in it.
+_QUALIFIER_ANYWHERE = re.compile(
+    r"\b(?:until|unless|yet|anyway|approv\w*|sign(?:s|ed|ing)?[- ]off)\b", re.I
+)
+# Words in a heading or list introduction that make the lines under it unsafe.
+_UNSAFE_INTRO = re.compile(
+    r"\b(?:until|till|unless|before|after|once|yet|except|if|while|whilst|when|"
+    r"whenever|without|only|pending|provided|not|no|never|don['’]?t|"
+    r"mustn['’]?t|ignore|disregard|skip|remove|delete|drop|longer)\b",
+    re.I,
+)
+# A "." that does not end a sentence, or an ellipsis that leaves one open.
+_OPEN_ENDING = re.compile(r"(?:\b(?:e\.g|i\.e|vs|cf|etc|approx|incl)\.|\.\.)$", re.I)
+
+
+def _ends_sentence(text: str) -> bool:
+    return text.endswith((".", "!", "?")) and not _OPEN_ENDING.search(text)
+
+
+_QUOTE_MARKS = '"`\u201c\u201d\u201e\u00ab\u00bb()[]'
+# Markup that can quote or strike out the lines it surrounds.
+_WRAPPING_MARKUP = re.compile(
+    r"<!--|<(?:blockquote|del|s|strike|pre|code|q)\b|~~", re.I
+)
+
+
+def _inside_quote(before: str) -> bool:
+    return (
+        before.count('"') % 2 == 1
+        or before.count("`") % 2 == 1
+        or "\u201e" in before
+        or before.count("“") > before.count("”")
+        or before.count("«") > before.count("»")
+        or before.count("(") > before.count(")")
+        or before.count("[") > before.count("]")
+    )
+
+
+def _qualifies(follower: str) -> bool:
+    """Whether the sentence after a prohibition may limit, delay or undo it."""
+    sentence = _SENTENCE_GAP.split(follower)[0]
+    if sentence and not re.search(r"[^\W\d_]", sentence):
+        return True  # a bare number or symbol: what follows it cannot be judged
+    return bool(
+        _QUALIFIER_START.match(re.sub(r"^[\W_]+", "", sentence))
+        or _QUALIFIER_ANYWHERE.search(sentence)
+    )
+
+
+@dataclass(frozen=True)
+class _Line:
+    indent: int
+    marker: str
+    body: str
+    #: A blank line separates this one from the previous non-blank line.
+    after_blank: bool
+    #: Position among all the lines of the field, blank ones included.
+    number: int
+
+
+def _folded_lines(value: object) -> list[str]:
+    return _FORMAT_CHARS.sub("", unicodedata.normalize("NFKC", str(value))).splitlines()
+
+
+def _split_lines(value: object) -> list[_Line]:
+    """Non-blank lines, normalized like ``_normalize_lines``, keeping layout."""
+    lines: list[_Line] = []
+    blank = False
+    for number, raw in enumerate(_folded_lines(value)):
+        content = _HSPACE.sub(" ", raw).strip()
+        if not content:
+            blank = True
+            continue
+        expanded = raw.expandtabs(4)
+        found = _LIST_MARKER.match(content)
+        marker = found.group(0) if found else ""
+        indent = len(expanded) - len(expanded.lstrip())
+        lines.append(_Line(indent, marker, content[len(marker) :], blank, number))
+        blank = False
+    return lines
+
+
+def _safe_introduction(body: str) -> bool:
+    return not (body.endswith(",") or _UNSAFE_INTRO.search(body))
+
+
+def _starts_statement(line: _Line, previous: _Line | None, blocked: bool) -> bool:
+    """Whether the first sentence of ``line`` stands apart from what is above.
+
+    ``blocked`` says the paragraph introducing this line carries a condition or
+    a negation and was not closed as a sentence.
+    """
+    if previous is None:
+        return True
+    ended = _ends_sentence(previous.body)
+    if not line.marker:
+        if ended:
+            return True
+        # Otherwise only a blank line separates it from a heading; a bare line
+        # break is a wrapped sentence.
+        return line.after_blank and _safe_introduction(previous.body) and not blocked
+    if previous.marker:
+        if previous.body.endswith((",", ":")):
+            return False
+        if not ended and _qualifies(previous.body):
+            return False
+        if previous.indent < line.indent and not _safe_introduction(previous.body):
+            return False
+    return not blocked
+
+
+def _remove_prohibitions(value: object, following: str) -> object:
+    """``value`` with each qualifying negated list replaced by its own ending.
+
+    Only the statement's words are removed; its closing "." or "!" stays, so the
+    text around it is split into clauses exactly as written.
+
+    Returns ``value`` itself when there is nothing to replace. ``following`` is
+    the first line of the next field, so a qualifier placed there still holds
+    the statement. Negation never crosses fields: a statement must match within
+    one line of one field.
+    """
+    lines = _split_lines(value)
+    if any(_WRAPPING_MARKUP.search(line.marker + line.body) for line in lines):
+        return value
+    out = [_HSPACE.sub(" ", raw).strip() for raw in _folded_lines(value)]
+    replaced = False
+    quote_marks = ""  # quote characters seen so far, for parity
+    previous: _Line | None = None
+    # The paragraph that introduces what follows (the last unindented-from-a-list
+    # run of non-list lines).
+    conditional = False  # it mentions a condition or a negation
+    blocked = False  # ... and was left open, so it governs the lines below
+    for index, line in enumerate(lines):
+        sentences = _SENTENCE_GAP.split(line.body)
+        kept = list(sentences)
+        for pos, sentence in enumerate(sentences):
+            before = quote_marks
+            quote_marks += "".join(c for c in sentence if c in _QUOTE_MARKS)
+            if not _PROHIBITION.fullmatch(sentence) or _inside_quote(before):
+                continue
+            if line.indent >= 4:
+                continue  # an indented block may be quoted text
+            if pos:
+                if not _ends_sentence(sentences[pos - 1]):
+                    continue
+            elif not _starts_statement(line, previous, blocked):
+                continue
+            if pos + 1 < len(sentences):
+                follower = sentences[pos + 1]
+            elif index + 1 < len(lines):
+                below = lines[index + 1]
+                if below.indent > line.indent:
+                    continue
+                if not (
+                    sentence.endswith((".", "!")) or below.after_blank or below.marker
+                ):
+                    continue
+                follower = below.body
+            else:
+                follower = following
+            if _qualifies(follower):
+                continue
+            kept[pos] = sentence[-1] if sentence.endswith((".", "!")) else ""
+        if kept != sentences:
+            out[line.number] = line.marker + " ".join(kept)
+            replaced = True
+        # An indented line under a list item continues it; it does not become
+        # the introduction of the items that follow.
+        if not line.marker and not (
+            previous and previous.marker and line.indent > previous.indent
+        ):
+            if (
+                previous is None
+                or line.after_blank
+                or previous.marker
+                or _ends_sentence(previous.body)
+            ):
+                conditional = False
+            conditional = conditional or bool(_UNSAFE_INTRO.search(line.body))
+            blocked = not _ends_sentence(line.body) and (
+                conditional or line.body.endswith(",")
+            )
+        previous = line
+    return "\n".join(out) if replaced else value
+
+
+def _without_prohibitions(fields: tuple[object, ...]) -> list[object]:
+    present = [f for f in fields if f]
+    result: list[object] = []
+    for index, value in enumerate(present):
+        following = next(
+            (
+                lines[0].body
+                for lines in map(_split_lines, present[index + 1 :])
+                if lines
+            ),
+            "",
+        )
+        result.append(_remove_prohibitions(value, following))
+    return result
+
+
+def _verb_fields(fields: tuple[object, ...], text: str) -> list[object]:
+    """The fields the verb detector reads, with negated verb lists blanked.
+
+    ``text`` is the fields as written. If blanking would bring text together into
+    a fixed phrase that is not there as written, nothing is blanked.
+    """
+    blanked = _without_prohibitions(fields)
+    joined = _normalize_text(*blanked)
+    if any(p.search(joined) and not p.search(text) for p, _ in _HIGH_PATTERNS):
+        return list(fields)
+    return blanked
 
 
 def _normalize_text(*parts: object) -> str:
@@ -487,6 +763,8 @@ def infer_text_evidence(
     Reads the phrase patterns (``_HIGH_PATTERNS``) and the imperative-verb
     detector (``_outward_verb_hits``) over every field in full. ``label`` is a
     fixed verb name or a sanitized matched phrase, safe to show an operator.
+    The phrase patterns read the fields as written; the verb detector reads them
+    with qualifying negated verb lists blanked.
     With a ``verdict``, the strictest candidate wins and ties keep the earlier
     one; without it the first phrase match (else first verb match) is returned.
     """
@@ -498,7 +776,7 @@ def infer_text_evidence(
         m = pattern.search(text)
         if m:
             candidates.append((action, _sanitize_label(m.group(0))))
-    candidates.extend(_outward_verb_hits(*fields))
+    candidates.extend(_outward_verb_hits(*_verb_fields(fields, text)))
     if not candidates:
         return None
     if verdict is None:

@@ -85,6 +85,11 @@ PARITY_CASES = [
         None, "apis", "open_or_merge_pr", "content", "high",
     ),
     (
+        "declared_low_with_a_pure_prohibition_stays_low",
+        "implement the local cleanup. Do not merge, deploy or release.",
+        "local_edit", "cicada", "local_edit", "declared", "low",
+    ),
+    (
         "declared_low_with_outward_text_is_escalated",
         "implement the local cleanup, then push it",
         "local_edit", "cicada", "git_push", "declared_escalated", "high",

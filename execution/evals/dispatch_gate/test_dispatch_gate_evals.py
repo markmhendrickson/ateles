@@ -133,6 +133,43 @@ def test_same_raw_policy_through_actual_dispatch_and_mcp(raw_policy, declared):
     }
 
 
+_RELEASED_PROHIBITIONS = [
+    "forbidding_list_does_not_hold",
+    "forbidding_bulleted_brief_does_not_hold",
+    "forbidding_list_keeps_undeclared_prior",
+    "forbidding_long_list_does_not_hold",
+]
+_HELD_NEAR_MISSES = [
+    "forbidding_never_masks_a_request_in_the_same_field",
+    "forbidding_never_masks_a_request_in_another_field",
+    "negation_is_not_carried_past_a_semicolon",
+    "negated_list_without_or_is_held",
+    "conditional_prohibition_is_held",
+    "condition_in_the_next_sentence_is_held",
+]
+
+
+@pytest.mark.parametrize("scenario_id", _RELEASED_PROHIBITIONS)
+def test_prohibition_checks_go_red_without_the_rule(scenario_id):
+    scenario = next(s for s in SCENARIOS if s["id"] == scenario_id)
+    obs = harness.run_scenario(scenario, BASE, mutation="no_prohibition_rule")
+    assert harness.check(scenario, obs)
+    assert obs["spawns"] == []
+
+
+@pytest.mark.parametrize("scenario_id", _HELD_NEAR_MISSES)
+def test_near_miss_checks_go_red_if_any_negation_forbids(scenario_id):
+    scenario = next(s for s in SCENARIOS if s["id"] == scenario_id)
+    obs = harness.run_scenario(scenario, BASE, mutation="any_negation_forbids")
+    assert harness.check(scenario, obs)
+
+
+def test_fixed_phrase_check_goes_red_if_phrases_are_not_read():
+    scenario = next(s for s in SCENARIOS if s["id"] == "negated_fixed_phrase_stays_held")
+    obs = harness.run_scenario(scenario, BASE, mutation="no_fixed_phrases")
+    assert harness.check(scenario, obs)
+
+
 SESSION_SCENARIOS = [s for s in SCENARIOS if s["id"].startswith(("session_", "approved_session_"))]
 
 

@@ -1,5 +1,5 @@
 {
-  "_comment": "Public-safe synthetic scenarios for the Apis execution gate's pre-gate producer score. Each drives the real apis.dispatch_task; Neotoma reads and writes, the agent spawn and the model call are stubbed at their external boundaries. The base task is a routable, low-blast, unscored task. Includes content escalation, effective-policy parity and checkpoint-driver scenarios (ateles#682).",
+  "_comment": "Public-safe synthetic scenarios for the Apis execution gate's pre-gate producer score. Each drives the real apis.dispatch_task; Neotoma reads and writes, the agent spawn and the model call are stubbed at their external boundaries. The base task is a routable, low-blast, unscored task. Includes content escalation, effective-policy parity and checkpoint-driver scenarios (ateles#682), and statements that only forbid an outward action next to the near misses that stay held.",
   "base_task": {
     "title": "Tidy the notes index",
     "body": "Re-sort the local notes index alphabetically. Local file only.",
@@ -1103,6 +1103,206 @@
         "outcome": "left_as_filed",
         "notifications": 0,
         "scorer_called": false
+      }
+    },
+    {
+      "id": "forbidding_list_does_not_hold",
+      "why": "A brief that only forbids merging, deploying and releasing is not held for them.",
+      "task": {
+        "confidence": 0.99,
+        "body": "Re-sort the local notes index. Do not merge, deploy or release.",
+        "action_type": "local_edit"
+      },
+      "expect": {
+        "outcome": "executed",
+        "scorer_called": false,
+        "action": {
+          "action_type": "local_edit",
+          "action_type_source": "declared",
+          "action_blast_radius": "low"
+        }
+      }
+    },
+    {
+      "id": "forbidding_bulleted_brief_does_not_hold",
+      "why": "Bulleted negated verb lists, with and without a closer, are not requests.",
+      "task": {
+        "confidence": 0.99,
+        "body": "Re-sort the local notes index.\n\nConstraints\n\n- Never publish, release, or send anything.\n- No push, merge or deploy\n- Do not merge, deploy or release.",
+        "action_type": "local_edit"
+      },
+      "expect": {
+        "outcome": "executed",
+        "scorer_called": false,
+        "action": {
+          "action_type": "local_edit",
+          "action_type_source": "declared",
+          "action_blast_radius": "low"
+        }
+      }
+    },
+    {
+      "id": "forbidding_long_list_does_not_hold",
+      "why": "The rule is not limited to short lists: a longer negated verb list is not a request.",
+      "task": {
+        "confidence": 0.99,
+        "body": "Re-sort the local notes index. Never push, merge, deploy, release, publish or send anything.",
+        "action_type": "local_edit"
+      },
+      "expect": {
+        "outcome": "executed",
+        "scorer_called": false,
+        "action": {
+          "action_type": "local_edit",
+          "action_type_source": "declared",
+          "action_blast_radius": "low"
+        }
+      }
+    },
+    {
+      "id": "forbidding_list_keeps_undeclared_prior",
+      "why": "With no declared type, a prohibition leaves the agent's low prior in place.",
+      "task": {
+        "confidence": 0.99,
+        "action_type": null,
+        "assigned_to": "fringilla",
+        "body": "No merge, release or deploy."
+      },
+      "expect": {
+        "outcome": "executed",
+        "scorer_called": false,
+        "action": {
+          "action_type": "compute_only_analysis",
+          "action_type_source": "agent_prior",
+          "action_blast_radius": "low"
+        }
+      }
+    },
+    {
+      "id": "forbidding_never_masks_a_request_in_the_same_field",
+      "why": "A request next to a prohibition still holds the task.",
+      "task": {
+        "confidence": 0.99,
+        "body": "Do not merge, deploy or release. Push the branch.",
+        "action_type": "local_edit"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "git_push",
+          "action_type_source": "declared_escalated",
+          "action_blast_radius": "high"
+        }
+      }
+    },
+    {
+      "id": "forbidding_never_masks_a_request_in_another_field",
+      "why": "A prohibition in the body cannot cover a request in the title.",
+      "task": {
+        "confidence": 0.99,
+        "title": "Release version 2.",
+        "body": "Do not merge, deploy or release.",
+        "action_type": "local_edit"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "release",
+          "action_type_source": "declared_escalated",
+          "action_blast_radius": "high"
+        }
+      }
+    },
+    {
+      "id": "negation_is_not_carried_past_a_semicolon",
+      "why": "Only the first statement is forbidden; the second asks for the release.",
+      "task": {
+        "confidence": 0.99,
+        "body": "Do not merge; release the build.",
+        "action_type": "local_edit"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "release",
+          "action_type_source": "declared_escalated",
+          "action_blast_radius": "high"
+        }
+      }
+    },
+    {
+      "id": "negated_list_without_or_is_held",
+      "why": "Without 'or' the second item may be a request.",
+      "task": {
+        "confidence": 0.99,
+        "body": "Do not merge, release.",
+        "action_type": "local_edit"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "release",
+          "action_type_source": "declared_escalated",
+          "action_blast_radius": "high"
+        }
+      }
+    },
+    {
+      "id": "conditional_prohibition_is_held",
+      "why": "A prohibition with a condition asks for the action later.",
+      "task": {
+        "confidence": 0.99,
+        "body": "Do not merge, deploy or release until QA signs off.",
+        "action_type": "local_edit"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "release",
+          "action_type_source": "declared_escalated",
+          "action_blast_radius": "high"
+        }
+      }
+    },
+    {
+      "id": "condition_in_the_next_sentence_is_held",
+      "why": "A condition in the following sentence still qualifies the prohibition.",
+      "task": {
+        "confidence": 0.99,
+        "body": "Do not merge, deploy or release. Not until QA signs off.",
+        "action_type": "local_edit"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "release",
+          "action_type_source": "declared_escalated",
+          "action_blast_radius": "high"
+        }
+      }
+    },
+    {
+      "id": "negated_fixed_phrase_stays_held",
+      "why": "The negated-list rule does not touch fixed phrases: they read as written.",
+      "task": {
+        "confidence": 0.99,
+        "body": "Do not cut a release.",
+        "action_type": "local_edit"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "publish",
+          "action_type_source": "declared_escalated",
+          "action_blast_radius": "high"
+        }
       }
     }
   ]
