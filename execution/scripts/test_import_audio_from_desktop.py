@@ -290,7 +290,9 @@ def _wire_main(monkeypatch, tmp_path: Path, status, reason: str | None = "timeou
     monkeypatch.setattr(iad, "import_status", fake_status)
     transcribed: list[Path] = []
 
-    def fake_transcribe(audio_file, language=None, original_source_file=None):
+    def fake_transcribe(
+        audio_file, language=None, original_source_file=None, capture_method=None
+    ):
         transcribed.append(audio_file)
         return {"success": True, "output": ""}
 
