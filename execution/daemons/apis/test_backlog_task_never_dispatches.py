@@ -367,3 +367,86 @@ def test_deferral_rollback_classifies_backlog_as_parked(monkeypatch):
                         lambda c: {f: "x" for f in apis._DEFERRAL_FIELDS})
     state = apis._classify_deferral_state("ent_defer_1", claim)
     assert state["verdict"] == "moved" and state["kind"] == "terminal"
+
+
+# ── Checkpoint approvals and replacements ────────────────────────────────────
+
+
+_PARKED = "ent_0000000000000000000000aa"
+_CKPT = "ent_0000000000000000000000bb"
+
+
+def _checkpoint_world(monkeypatch, task_status: str):
+    """An approved checkpoint whose task is in `task_status`; record each effect."""
+    effects: list = []
+    brief = {
+        "entity_id": _CKPT,
+        "entity_version": "v1",
+        "snapshot": {"status": "approved", "task_entity_id": _PARKED},
+    }
+    task = {"entity_id": _PARKED, "snapshot": _stale(task_status)}
+
+    def _record(name, result=None):
+        return lambda *a, **k: effects.append(name) or result
+
+    monkeypatch.setattr(apis, "fetch_checkpoint_record", lambda _id: dict(brief))
+    monkeypatch.setattr(apis, "fetch_task_record", lambda _id: dict(task))
+    monkeypatch.setattr(apis, "_checkpoint_denial_persisted", lambda _id: False)
+    monkeypatch.setattr(
+        apis, "_original_checkpoint_scope_with_reason",
+        lambda *a, **k: effects.append("scope") or ("restricted", "synthetic"),
+    )
+    monkeypatch.setattr(
+        apis, "checkpoint_scope_permits_ordinary_effects", lambda _scope: False
+    )
+    monkeypatch.setattr(apis, "_notify_held_checkpoint", _record("held-notice"))
+    monkeypatch.setattr(apis, "_deny_checkpoint_release", _record("denial"))
+    monkeypatch.setattr(apis, "write_checkpoint_brief", _record("brief", "ent_0000000000000000000000cc"))
+    monkeypatch.setattr(apis, "stamp_checkpoint_dispatched", _record("stamp", True))
+    return effects
+
+
+@pytest.mark.parametrize("status", ["backlog", " Backlog "])
+def test_approval_of_a_backlog_task_takes_no_effect(status, monkeypatch):
+    effects = _checkpoint_world(monkeypatch, status)
+    notifier = _Notifier()
+    for _ in range(3):  # redeliveries
+        released = asyncio.run(
+            apis.handle_checkpoint_brief(_CKPT, {}, notifier)
+        )
+        assert released is False
+    assert effects == [] and notifier.sent == []
+
+
+def test_approval_of_a_held_task_keeps_todays_handling(monkeypatch):
+    effects = _checkpoint_world(monkeypatch, "awaiting_approval")
+    asyncio.run(apis.handle_checkpoint_brief(_CKPT, {}, _Notifier()))
+    assert effects == ["scope", "held-notice"]
+
+
+def test_no_replacement_checkpoint_for_a_backlog_task(monkeypatch):
+    effects = _checkpoint_world(monkeypatch, "backlog")
+    monkeypatch.setattr(
+        apis, "_checkpoint_may_take_ordinary_effects",
+        lambda *a, **k: effects.append("scope") or True,
+    )
+    monkeypatch.setattr(
+        apis, "require_fresh_checkpoint_approval",
+        lambda *a, **k: effects.append("retire") or True,
+    )
+    notifier = _Notifier()
+    assert (
+        apis._require_fresh_release_authority(
+            _CKPT, task_id=_PARKED, task_snapshot=_stale("backlog"),
+            notifier=notifier, reason="synthetic",
+        )
+        is None
+    )
+    assert (
+        apis._file_fresh_checkpoint(
+            prior_checkpoint_id=_CKPT, task_id=_PARKED,
+            task_snapshot=_stale("backlog"), notifier=notifier,
+        )
+        is None
+    )
+    assert effects == [] and notifier.sent == []

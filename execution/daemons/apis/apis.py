@@ -4982,8 +4982,10 @@ def _file_fresh_checkpoint(
     """Create a replacement checkpoint under the current live policy.
 
     ``notifier=None`` files it silently (the bulk re-issue path sends one
-    summary instead of one page per task).
+    summary instead of one page per task). A backlog task gets no checkpoint.
     """
+    if is_backlog(task_snapshot.get("status")):
+        return None
     skill, action_type, policy, decision = _task_gate_context(task_snapshot)
     if decision.action == GateAction.AUTO_EXECUTE:
         decision = GateDecision(
@@ -5043,7 +5045,16 @@ def _require_fresh_release_authority(
     notifier: Notifier,
     reason: str,
 ) -> str | None:
-    """Create replacement authority before retiring the stale approval."""
+    """Create replacement authority before retiring the stale approval.
+
+    A backlog task gets none: nothing is filed, retired or announced for it.
+    """
+    if is_backlog(task_snapshot.get("status")):
+        log.info(
+            f"[{DAEMON_NAME}] task {task_id} is in the backlog — no replacement "
+            f"for checkpoint {checkpoint_id}"
+        )
+        return None
     if not _checkpoint_may_take_ordinary_effects(
         checkpoint_id,
         effect="ordinary replacement and retirement",
@@ -6127,6 +6138,23 @@ async def handle_checkpoint_brief(
                 "task_entity_id — cannot act"
             )
             return False
+
+        # A task parked in the backlog takes no effect from an approval: no
+        # replacement checkpoint, denial, held notice, stamp or release. The
+        # live task is read before any of them; a redelivery stays a no-op, and
+        # a later move to `pending` is judged afresh. An unreadable task keeps
+        # the handling below. A rejection is the operator's own decision and is
+        # handled as before.
+        # Only a well-formed id is read: a malformed one must not reach a fetch
+        # or its log line before the scope check.
+        if resolution == "approved" and _safe_entity_id(task_id) == task_id:
+            parked = _record_snapshot(fetch_task_record(task_id))
+            if parked is not None and is_backlog(parked.get("status")):
+                log.info(
+                    f"[{DAEMON_NAME}] checkpoint {entity_id} approved for task "
+                    f"{task_id}, which is in the backlog — no action"
+                )
+                return False
 
         # The checkpoint's ORIGINAL authenticated scope decides whether any
         # ordinary consuming effect (decline, close, replace, retire, stamp,
