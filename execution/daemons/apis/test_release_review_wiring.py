@@ -351,7 +351,7 @@ def test_full_evaluation_leaves_root_logging_and_environment_unchanged(wired):
 
 
 def test_release_records_are_read_without_importing_publish(wired):
-    world, dispatcher, _ = wired
+    _, dispatcher, _ = wired
     before = set(sys.modules)
     gate = rra.build_for_dispatcher(dispatcher, swarm_dispatch)
     rows, complete = asyncio.run(gate.deps.release_results())

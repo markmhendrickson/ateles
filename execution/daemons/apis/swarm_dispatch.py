@@ -12352,7 +12352,7 @@ class SwarmDispatcher:
             return ""
         try:
             return await gate.merge_refusal(repo, pr_number)
-        except Exception as exc:  # noqa: BLE001 — unreadable holds the merge
+        except Exception as exc:  # unreadable holds the merge (logged below)
             log.exception(
                 f"[{DAEMON_NAME}] release merge check on {repo}#{pr_number} "
                 f"stopped on an unexpected error ({exc.__class__.__name__})"

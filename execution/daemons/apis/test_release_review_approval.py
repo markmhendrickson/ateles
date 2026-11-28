@@ -1261,3 +1261,94 @@ def test_tree_check_stop_after_merge_says_merge_landed_and_nothing_published(wor
     assert version == VERSION
     assert "already merged into main" in detail
     assert "nothing was tagged or published" in detail
+
+
+# ── an unexpected error refuses and is reported ─────────────────────────────
+
+
+def test_unexpected_error_in_review_refuses_and_is_reported(world, monkeypatch, caplog):
+    fake, gate = world
+
+    async def boom(*_a, **_k):
+        raise KeyError("unexpected")
+
+    monkeypatch.setattr(gate, "_evaluate", boom)
+    with caplog.at_level("ERROR", logger="apis.release_review_approval"):
+        assert _run(gate) is True
+    assert fake.publishes == []
+    assert fake.alerts and "KeyError" in fake.alerts[-1][1]
+    assert len(fake.posted) == 1 and "unexpected error (KeyError)" in fake.posted[0]
+    assert "operator has commented" not in fake.posted[0]
+    assert any("KeyError" in r.getMessage() for r in caplog.records)
+
+
+def test_unexpected_error_in_merge_hold_holds_and_is_reported(world, monkeypatch):
+    fake, gate = world
+
+    def boom(*_a, **_k):
+        raise ValueError("unexpected")
+
+    monkeypatch.setattr(gate, "_release_version", boom)
+    reason = asyncio.run(gate.merge_refusal(REPO, PR))
+    assert reason.startswith("merge held") and "ValueError" in reason
+    assert fake.alerts and len(fake.posted) == 1
+
+
+def test_unexpected_error_in_other_entrance_closes_it_and_is_reported(world, monkeypatch):
+    fake, gate = world
+
+    def boom(*_a, **_k):
+        raise ValueError("unexpected")
+
+    monkeypatch.setattr(gate, "_release_version", boom)
+    assert asyncio.run(gate.guard_other_entrance(_trigger(), "approve comment")) is True
+    assert fake.alerts and len(fake.posted) == 1
+
+
+def test_dispatcher_merge_check_error_holds_and_alerts(monkeypatch):
+    monkeypatch.setenv(rra.FLAG_ENV, "1")
+    monkeypatch.setattr(swarm_dispatch, "PHOENICURUS_RELEASE_REPO", REPO)
+
+    class Broken:
+        async def merge_refusal(self, *_a):
+            raise RuntimeError("down")
+
+    monkeypatch.setattr(rra, "build_for_dispatcher", lambda *a: Broken())
+    d = _dispatcher()
+    reason = asyncio.run(d._release_merge_refusal(REPO, PR))
+    assert reason.startswith("merge held")
+    assert d.notifier.sent and d.notifier.sent[-1].startswith("🔴 Release")
+
+
+# ── an operator item on page 2 of any list refuses ──────────────────────────
+
+
+@pytest.mark.parametrize("which", ["reviews", "comments", "inline"])
+def test_operator_item_on_page_two_refuses(world, which):
+    fake, gate = world
+    others = [
+        {"id": 5000 + i, "user": {"login": f"other-{i}", "type": "User"},
+         "state": "COMMENTED", "body": "x"}
+        for i in range(rra._PER_PAGE)
+    ]
+    if which == "reviews":
+        operator_item = _review(id=7000, state="COMMENTED", body="note")
+        page1 = [_app_review(), _review(), *others[: rra._PER_PAGE - 2]]
+    else:
+        operator_item = _comment("note")
+        page1 = others
+    pages = {1: page1, 2: [operator_item]}
+    real = fake.github_get
+    suffix = {"reviews": f"/pulls/{PR}/reviews", "comments": f"/issues/{PR}/comments",
+              "inline": f"/pulls/{PR}/comments"}[which]
+
+    async def paged(path, params):
+        if path.endswith(suffix):
+            fake.calls.append(path)
+            return 200, pages.get(params.get("page"), []), {}
+        return await real(path, params)
+
+    fake.github_get = paged
+    gate.deps.github_get = paged
+    _run(gate)
+    _assert_refused(fake, rra.OPERATOR_ACTIVITY.rstrip(": "))

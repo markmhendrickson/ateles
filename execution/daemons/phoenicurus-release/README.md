@@ -257,12 +257,19 @@ When it is on, Apis (`execution/daemons/apis/release_review_approval.py`):
 
 Any condition that fails or cannot be read publishes nothing; Apis logs the
 reason, sends a notice, and posts one pull request comment as the App naming
-the condition. Both say plainly that this release pull request cannot be
-published by review once the operator has commented on it (or submitted any
-review other than an empty approval), and that the release then needs the
-operator's go relayed to the session running it; otherwise, once the condition
-is met, a new approving review on the current head with an empty comment box
-publishes it. A failed
+the condition. When the refusal is caused by the operator's own activity, both
+say plainly that this release pull request cannot be published by review once
+the operator has commented on it (or submitted any review other than an empty
+approval), and that the release then needs the operator's go relayed to the
+session running it. Any other refusal names its own next step: once the
+condition is met, a new approving review on the current head with an empty
+comment box publishes it. An unexpected error during the check, or during the
+merge hold, refuses the same way and also raises a red alert. Apis reads
+reviews, conversation comments and inline review comments only; it does not
+read commit comments, reactions, labels, title or description edits, or the
+draft state. The release records are read through Apis's own Neotoma client;
+publish.py is never imported inside Apis, only started as its own process.
+A failed
 or timed-out publish raises a red alert through the
 dispatcher's alert path.
 

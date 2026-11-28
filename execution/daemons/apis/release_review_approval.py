@@ -54,8 +54,11 @@ or published, and the alert says so. Anything the operator posts after
 publish.py has started is not re-read: from then on only stopping publish.py
 itself halts the release.
 Every refusal publishes nothing, is logged, and is reported through the
-notifier and one pull request comment posted with the App identity. A failed
-notice never leads to a publish. While the flag is on, the dispatcher's merge
+notifier and one pull request comment posted with the App identity; an
+unexpected error refuses the same way and also raises a red alert. A failed
+notice never leads to a publish. The release records are read through the
+dispatcher's own Neotoma client; publish.py is never imported here, only
+started as its own process. While the flag is on, the dispatcher's merge
 call also refuses a release pull request (``merge_refusal``), so no other
 caller merges one.
 
