@@ -731,6 +731,90 @@ def test_email_approval_dry_run_does_not_flip_status(monkeypatch):
     assert flips == []  # dry-run makes no state change
 
 
+# ── --from-github-review ────────────────────────────────────────────────────
+#
+# The GitHub-review path flips pending_approval -> approved ONLY from
+# pending_approval (approved included refuses, unlike the email path) and never
+# combines with --force.
+
+
+def test_github_review_publishes_from_pending_approval(monkeypatch):
+    _stub_publish_steps(monkeypatch)
+    flips = []
+    monkeypatch.setattr(publish, "set_release_status",
+                        lambda v, s, extra=None, entity_id=None: flips.append((v, s)))
+    publish.publish_release(_release("pending_approval"), "v0.20.0",
+                            dry_run=False, force=False, github_review_id=77)
+    assert flips[0] == ("v0.20.0", "approved")
+    assert ("v0.20.0", "publishing") in flips
+    publish.merge_rc_pr.assert_called_once()
+
+
+@pytest.mark.parametrize("status", ["approved", "publishing", "published", "failed", ""])
+def test_github_review_refuses_other_states(monkeypatch, status):
+    _stub_publish_steps(monkeypatch)
+    with pytest.raises(publish.StepError, match="not 'pending_approval'"):
+        publish.publish_release(_release(status), "v0.20.0",
+                                dry_run=False, force=False, github_review_id=77)
+    publish.merge_rc_pr.assert_not_called()
+
+
+def test_github_review_refuses_force(monkeypatch):
+    _stub_publish_steps(monkeypatch)
+    with pytest.raises(publish.StepError, match="--force"):
+        publish.publish_release(_release("pending_approval"), "v0.20.0",
+                                dry_run=False, force=True, github_review_id=77)
+    publish.merge_rc_pr.assert_not_called()
+
+
+def test_github_review_dry_run_does_not_flip_status(monkeypatch):
+    _stub_publish_steps(monkeypatch)
+    flips = []
+    monkeypatch.setattr(publish, "set_release_status",
+                        lambda v, s, extra=None, entity_id=None: flips.append((v, s)))
+    publish.publish_release(_release("pending_approval"), "v0.20.0",
+                            dry_run=True, force=False, github_review_id=77)
+    assert flips == []
+
+
+_GR = ["--version", "v0.20.0", "--entity-id", "ent_x", "--from-github-review"]
+
+
+@pytest.mark.parametrize("argv", [
+    [*_GR, "77", "--force"],
+    [*_GR, "77", "--from-email-approval"],
+    [*_GR, "77", "--resume-from", "tag_and_push"],
+    [*_GR, "0"],
+    ["--version", "v0.20.0", "--from-github-review", "77"],
+    ["--entity-id", "ent_x", "--from-github-review", "77"],
+])
+def test_github_review_cli_refuses_bad_combinations(monkeypatch, argv):
+    found = MagicMock()
+    runner = MagicMock()
+    monkeypatch.setattr(publish, "find_release", found)
+    monkeypatch.setattr(publish, "publish_release", runner)
+    monkeypatch.setattr(sys, "argv", ["publish.py", *argv])
+    assert publish.main() == 2
+    found.assert_not_called()
+    runner.assert_not_called()
+
+
+def test_github_review_cli_passes_review_id(monkeypatch):
+    monkeypatch.setattr(publish, "find_release",
+                        lambda v, e: {"entity_id": e, **_release("pending_approval")})
+    seen = {}
+
+    def fake_publish(release, version, dry_run, force, resume_from=None,
+                     email_approval=False, github_review_id=None):
+        seen.update(version=version, force=force, review=github_review_id,
+                    email=email_approval)
+
+    monkeypatch.setattr(publish, "publish_release", fake_publish)
+    monkeypatch.setattr(sys, "argv", [*["publish.py"], *_GR, "77"])
+    assert publish.main() == 0
+    assert seen == {"version": "v0.20.0", "force": False, "review": 77, "email": False}
+
+
 # ── RC field-name reconciliation (release_url/branch vs rc_pr_url/rc_branch) ──
 #
 # prepare.py's agent historically stored `release_url` + `branch`; publish.py

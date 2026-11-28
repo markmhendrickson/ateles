@@ -45,9 +45,10 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 log = logging.getLogger("apis.release_review_approval")
 
@@ -127,9 +128,12 @@ def _parse_time(value: object) -> datetime:
     if not isinstance(value, str) or not value:
         raise Refusal(f"a timestamp could not be read ({value!r})")
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError as exc:
         raise Refusal(f"a timestamp could not be read ({value!r})") from exc
+    if parsed.tzinfo is None:
+        raise Refusal(f"a timestamp carries no time zone ({value!r})")
+    return parsed
 
 
 def _starts_with_hold(body: object) -> bool:
@@ -160,7 +164,7 @@ class ReleaseReviewApproval:
     async def _get(self, path: str, what: str, params: dict | None = None) -> Any:
         try:
             status, data, _ = await self.deps.github_get(path, params or {})
-        except Exception as exc:  # noqa: BLE001 — unreadable refuses
+        except Exception as exc:
             raise Refusal(f"{what} could not be read ({exc.__class__.__name__})") from exc
         if status != 200 or data is None:
             raise Refusal(f"{what} could not be read (HTTP {status})")
@@ -343,7 +347,7 @@ class ReleaseReviewApproval:
         # Exactly one matching release record, pending approval, on this head.
         try:
             rows, complete = await d.release_results()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise Refusal(f"the release records could not be read ({exc.__class__.__name__})") from exc
         if not complete:
             raise Refusal("the release record list may be incomplete")
@@ -375,7 +379,7 @@ class ReleaseReviewApproval:
         # The panel gate approve_pr_as_app.py evaluates, on this head.
         try:
             passed, reason = await d.panel_gate(repo, pr, head_sha)
-        except BaseException as exc:  # noqa: BLE001 — its rate-limit signal is a BaseException
+        except BaseException as exc:
             if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
                 raise
             raise Refusal(f"the review panel gate could not be evaluated ({exc.__class__.__name__})") from exc
@@ -424,7 +428,7 @@ class ReleaseReviewApproval:
             log.info(f"operator GitHub review approved release {version} on {repo}#{pr} — publishing")
             try:
                 rc, last = await d.run_publish(argv)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 log.error(f"publish {version} timed out")
                 self._safe_notify(
                     f"🔴 Release {version} publish TIMED OUT after a GitHub review "
@@ -530,7 +534,7 @@ async def _panel_gate_real(repo: str, pr: int, head_sha: str) -> tuple[bool, str
     )
     if scripts not in sys.path:
         sys.path.insert(0, scripts)
-    import approve_pr_as_app  # noqa: PLC0415 — imported late: it imports the dispatcher
+    import approve_pr_as_app
 
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
@@ -623,8 +627,8 @@ def build_for_dispatcher(dispatcher: Any, sd: Any) -> ReleaseReviewApproval:
 __all__ = [
     "FLAG_ENV",
     "Deps",
-    "ReleaseReviewApproval",
     "Refusal",
+    "ReleaseReviewApproval",
     "build_for_dispatcher",
     "enabled",
     "is_release_repo",

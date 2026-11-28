@@ -10,7 +10,6 @@ import asyncio
 
 import httpx
 import pytest
-
 import release_review_approval as rra
 import swarm_dispatch
 from github_gateway import SwarmTrigger
@@ -156,7 +155,7 @@ class Fake:
     async def run_publish(self, argv):
         self.publishes.append(argv)
         if self.publish_result == "timeout":
-            raise asyncio.TimeoutError()
+            raise TimeoutError()
         return self.publish_result
 
     def deps(self, script):
@@ -186,7 +185,7 @@ def world(tmp_path):
 
 
 def _trigger(review_id=REVIEW_ID, **over):
-    base = dict(
+    base = dict(  # noqa: C408 — keyword form mirrors SwarmTrigger's fields
         kind="pr_review",
         repository=REPO,
         number=PR,

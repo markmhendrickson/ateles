@@ -29,6 +29,8 @@ Usage:
   python3 publish.py --version v0.16.0 --dry-run # plan only, no irreversible actions
   python3 publish.py --entity-id ent_xxx         # publish by release entity id
   python3 publish.py --version v0.16.0 --force    # publish even if status != approved
+  python3 publish.py --version v0.16.0 --entity-id ent_xxx --from-github-review 123
+                                                 # operator approved the release PR in GitHub
 
 Exit codes:
   0  success (or dry-run completed)
@@ -1003,6 +1005,7 @@ def publish_release(
     force: bool,
     resume_from: str | None = None,
     email_approval: bool = False,
+    github_review_id: int | None = None,
 ) -> None:
     f = _entity_fields(release)
     # The exact entity find_release resolved; every status write targets it.
@@ -1026,6 +1029,30 @@ def publish_release(
     # starting state (already publishing/published, or never prepared) so a
     # duplicate or stale email reply can't re-publish or publish an un-prepared
     # version. This runs before the approved-gate below, which then passes.
+    # GitHub-review path (Apis release_review_approval): the operator approved
+    # the release pull request in GitHub and every condition was read live. It
+    # moves pending_approval -> approved ONLY from pending_approval; any other
+    # state (approved included) refuses, so a replayed delivery cannot start a
+    # second publish. It never combines with --force.
+    if github_review_id is not None:
+        if force:
+            raise StepError(
+                f"github-review approval for {version} refused: it never "
+                "combines with --force."
+            )
+        if status != "pending_approval":
+            raise StepError(
+                f"github-review approval for {version} refused: release status "
+                f"is {status!r}, not 'pending_approval'. A release can only be "
+                "approved by GitHub review from pending_approval."
+            )
+        if not dry_run:
+            set_release_status(version, "approved", entity_id=entity_id)
+        status = "approved"
+        log.info(
+            f"{version} approved via GitHub review {github_review_id} -> publishing"
+        )
+
     if email_approval and not force:
         if status == "approved":
             log.info(f"{version} already approved — proceeding to publish")
@@ -1127,7 +1154,31 @@ def main() -> int:
         "release from pending_approval to approved, then publish. Refuses any "
         "other starting state.",
     )
+    ap.add_argument(
+        "--from-github-review",
+        type=int,
+        default=None,
+        metavar="REVIEW_ID",
+        help="the operator approved the release pull request in GitHub (review "
+        "id): flip the release from pending_approval to approved, then publish. "
+        "Requires --version and --entity-id; refuses any other starting state "
+        "and never combines with --force or --from-email-approval.",
+    )
     args = ap.parse_args()
+
+    if args.from_github_review is not None:
+        if args.from_github_review <= 0:
+            log.error("--from-github-review needs a positive review id")
+            return 2
+        if not args.version or not args.entity_id:
+            log.error("--from-github-review requires --version and --entity-id")
+            return 2
+        if args.force or args.from_email_approval or args.resume_from:
+            log.error(
+                "--from-github-review does not combine with --force, "
+                "--from-email-approval or --resume-from"
+            )
+            return 2
 
     if not args.version and not args.entity_id:
         log.error("must supply --version or --entity-id")
@@ -1168,6 +1219,7 @@ def main() -> int:
             release, version, args.dry_run, args.force,
             resume_from=args.resume_from,
             email_approval=args.from_email_approval,
+            github_review_id=args.from_github_review,
         )
         return 0
     except StatusWriteError as exc:
