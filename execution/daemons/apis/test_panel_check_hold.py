@@ -571,7 +571,7 @@ class _ChecksClient:
         if url.endswith("/status"):
             if self.status_error:
                 return _Resp({}, 500)
-            return _Resp({"state": "pending", "total_count": 0})
+            return _Resp({"state": "pending", "total_count": 0, "statuses": []})
         if url.endswith("/check-runs"):
             return _Resp({"check_runs": self.runs, "total_count": len(self.runs)})
         return _Resp({}, 404)  # branch protection unreadable: every check required

@@ -271,6 +271,10 @@ from swarm_dispatch import (  # noqa: E402
     SwarmDispatcher,
     _mint_reviewer_app_installation_token,
     _normalise_full_sha,
+    _CHECK_RUNS_PAGE_CAP,
+    CHECK_RUNS_PER_PAGE,
+    _legacy_status_state,
+    read_check_run_pages,
     _normalise_github_review_id,
     _reviewer_app_private_key_pem,
     body_has_blocking_findings,
@@ -1604,7 +1608,6 @@ async def _unscheduled_non_required_reason(
 # A re-run's start time may not be later than "now" by more than this: a clock
 # error or a forged timestamp must not let a run outrank real ones.
 CHECK_RUN_FUTURE_SKEW = timedelta(minutes=5)
-_CHECK_RUNS_PAGE_CAP = 50
 _ACTIONS_RUNS_PAGE_CAP = 20
 
 
@@ -1647,32 +1650,27 @@ async def _read_check_runs(
 ) -> tuple[list[dict], str]:
     """(every check-run on the head, "") or (what was read, why it is incomplete).
 
-    Paginated at 100 per page. A page that cannot be read, a list shorter than
-    the API's own `total_count`, or a list too long to read is incomplete, and an
-    incomplete list is never green.
+    Paged and validated by the shared `swarm_dispatch.read_check_run_pages`,
+    the same reader the dispatcher's merge gate uses: a page that cannot be
+    read, a malformed page, a count that is missing, changes or disagrees with
+    the rows, or a list too long to read is incomplete, and an incomplete list
+    is never green.
     """
-    runs: list[dict] = []
-    total: object = None
-    for page in range(1, _CHECK_RUNS_PAGE_CAP + 1):
+
+    async def fetch_page(page: int) -> tuple[object, str]:
         resp = await client.get(
             f"{GITHUB_API}/repos/{repo}/commits/{head_sha}/check-runs",
             headers={**_github_headers(repo), "Accept": "application/vnd.github+json"},
-            params={"per_page": 100, "page": page},
+            params={"per_page": CHECK_RUNS_PER_PAGE, "page": page},
         )
         if resp.status_code >= 400:
-            return runs, f"check-runs page {page} could not be read (HTTP {resp.status_code})"
-        payload = resp.json() or {}
-        rows = payload.get("check_runs", []) or []
-        runs.extend(rows)
-        total = payload.get("total_count", total)
-        if isinstance(total, int) and not isinstance(total, bool):
-            if len(runs) >= total:
-                return runs, ""
-            if not rows:
-                return runs, f"read {len(runs)} of {total} check-runs"
-        elif len(rows) < 100:
-            return runs, ""
-    return runs, f"more than {_CHECK_RUNS_PAGE_CAP * 100} check-runs; the list cannot be fully read"
+            return None, f"check-runs page {page} could not be read (HTTP {resp.status_code})"
+        try:
+            return resp.json(), ""
+        except ValueError:
+            return None, f"check-runs page {page}: response is not JSON"
+
+    return await read_check_run_pages(fetch_page, _CHECK_RUNS_PAGE_CAP)
 
 
 async def _workflow_runs_by_suite(
@@ -1743,10 +1741,15 @@ async def evaluate_checks(
     every PR in a Checks-API-only repo regardless of how green its check-runs
     are — confirmed against PR #1255, whose commits/.../status returns
     state=pending, total_count=0 while every check-run is completed+success.
-    So `total_count==0` is read as "no legacy statuses to consider", and the
-    check-runs alone decide `all_green`. Still fails closed: zero check-runs
-    AND zero legacy statuses (`total_count==0`) is treated as NOT green, since
-    that means nothing has run yet, not that nothing needs to.
+    So `total_count==0` with `state="pending"` is read as "no legacy statuses
+    to consider" (absent), and the check-runs alone decide `all_green`. The
+    status response is validated by `swarm_dispatch._legacy_status_state`,
+    the same validator the dispatcher uses: a missing or malformed count,
+    state or entry, or a reported state the entries do not support (a
+    "success" over a failing or pending entry), is unreadable and NOT green,
+    and is listed as a `legacy-statuses` row. Only a consistent "success" or
+    "absent" is green. Zero check-runs AND absent legacy statuses is also NOT
+    green, since that means nothing has run yet, not that nothing needs to.
 
     Operator ruling 2026-09-25: a check-run that is still queued, is not
     required by branch protection on *base_ref*, and that no online runner
@@ -1769,9 +1772,7 @@ async def evaluate_checks(
         headers=_github_headers(repo),
     )
     status_resp.raise_for_status()
-    status_payload = status_resp.json() or {}
-    combined_state = status_payload.get("state", "")
-    legacy_status_count = status_payload.get("total_count", 0) or 0
+    legacy_state = _legacy_status_state(status_resp.json())
 
     runs, list_problem = await _read_check_runs(client, repo, head_sha)
     # Only a repeated (name, App) pair can need a workflow lookup; a head with no
@@ -1785,8 +1786,17 @@ async def evaluate_checks(
     clock = now or datetime.now(timezone.utc)
 
     outcomes: list[CheckOutcome] = []
-    legacy_statuses_green = legacy_status_count == 0 or combined_state in ("success", "")
-    all_green = legacy_statuses_green
+    all_green = legacy_state in ("success", "absent")
+    if legacy_state == "unknown":
+        outcomes.append(
+            CheckOutcome(
+                "legacy-statuses",
+                "unreadable (incomplete or inconsistent commit status response)",
+                False,
+            )
+        )
+    elif legacy_state in ("pending", "failing"):
+        outcomes.append(CheckOutcome("legacy-statuses", legacy_state, False))
     sched = _SchedulingContext(client, repo=repo, base_ref=base_ref)
 
     # A head can carry several runs of the same check (closed and reopened, or CI
@@ -1853,7 +1863,7 @@ async def evaluate_checks(
         all_green = False
 
     ran = [o for o in outcomes if not o.not_run and not o.superseded]
-    if not ran and legacy_status_count == 0:
+    if not ran and legacy_state == "absent":
         # No signal of any kind — nothing has run yet (or every check-run is
         # "not run"). Fail closed rather than approving a head CI has not
         # touched.
