@@ -698,3 +698,12 @@ def test_refuses_timestamp_without_zone(world):
     fake.review = _review(submitted_at="2026-01-01T10:00:00")
     _run(gate)
     _assert_refused(fake, "no time zone")
+
+
+def test_after_timeout_a_second_delivery_does_not_publish_again(world):
+    fake, gate = world
+    fake.publish_result = "timeout"
+    _run(gate)
+    _run(gate, _trigger(review_id=REVIEW_ID))
+    assert len(fake.publishes) == 1
+    assert "may still be running" in fake.notices[0]

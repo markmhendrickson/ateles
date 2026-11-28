@@ -432,8 +432,9 @@ class ReleaseReviewApproval:
                 log.error(f"publish {version} timed out")
                 self._safe_notify(
                     f"🔴 Release {version} publish TIMED OUT after a GitHub review "
-                    "approval — it may be partially done; check the release log "
-                    "and the registry before retrying."
+                    "approval — the publish process may still be running and may "
+                    "be partially done; check the release log and the registry "
+                    "before retrying."
                 )
                 return
             except Exception as exc:  # noqa: BLE001
@@ -602,6 +603,10 @@ def build_for_dispatcher(dispatcher: Any, sd: Any) -> ReleaseReviewApproval:
         proc = await asyncio.create_subprocess_exec(
             *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
         )
+        # On timeout the child is left running, as on the email path: stopping
+        # a publish mid-step is worse than finishing it. A second start is
+        # still refused (the version is marked started here, and the record
+        # has left pending_approval).
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=sd.PHOENICURUS_PUBLISH_TIMEOUT_S)
         tail = (out or b"").decode(errors="replace").strip().splitlines()
         rc = proc.returncode if proc.returncode is not None else -1
