@@ -1,0 +1,1272 @@
+"""Tests for the release-review publish gate (release_review_approval.py).
+
+All GitHub, Neotoma, panel, notifier and publish calls are fakes: no network
+and no real publish. Each refusal condition has its own test.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import httpx
+import pytest
+import release_review_approval as rra
+import swarm_dispatch
+from github_gateway import SwarmTrigger
+from swarm_dispatch import DispatchConfig, SwarmDispatcher
+
+REPO = "example-org/example-product"
+OPERATOR = "example-operator"
+APP = "example-swarm[bot]"
+HEAD = "a" * 40
+OTHER = "b" * 40
+PR = 42
+PR_URL = f"https://github.com/{REPO}/pull/{PR}"
+REVIEW_ID = 1000
+VERSION = "v1.2.3"
+
+
+def _pr(**over):
+    data = {
+        "number": PR,
+        "state": "open",
+        "merged": False,
+        "html_url": PR_URL,
+        "head": {"ref": f"release/{VERSION}", "sha": HEAD, "repo": {"full_name": REPO}},
+        "base": {"ref": "main", "repo": {"full_name": REPO}},
+    }
+    data.update(over)
+    return data
+
+
+def _review(**over):
+    data = {
+        "id": REVIEW_ID,
+        "user": {"login": OPERATOR, "type": "User"},
+        "state": "APPROVED",
+        "commit_id": HEAD,
+        "body": "",
+        "submitted_at": "2026-01-01T10:00:00Z",
+    }
+    data.update(over)
+    return data
+
+
+def _app_review(**over):
+    data = {
+        "id": 900,
+        "user": {"login": APP, "type": "Bot"},
+        "state": "APPROVED",
+        "commit_id": HEAD,
+        "body": "panel approval",
+        "submitted_at": "2026-01-01T09:00:00Z",
+    }
+    data.update(over)
+    return data
+
+
+def _record(**over):
+    snap = {
+        "version": VERSION,
+        "status": "pending_approval",
+        "rc_pr_url": PR_URL,
+        "rc_head_sha": HEAD,
+    }
+    snap.update(over)
+    return {"entity_id": "ent_example", "snapshot": snap}
+
+
+class Fake:
+    """Holds the fake world; builds Deps over it."""
+
+    def __init__(self):
+        self.pr = _pr()
+        self.pr_after = None  # what a second PR read returns, when set
+        self.review = _review()
+        self.reviews = [_app_review(), _review()]
+        self.comments: list[dict] = []
+        self.inline: list[dict] = []
+        self.behind = 0
+        self.records = [_record()]
+        self.complete = True
+        self.panel = (True, "")
+        self.app_login = APP
+        self.fail: set[str] = set()
+        self.calls: list[str] = []
+        self.publishes: list[list[str]] = []
+        self.notices: list[str] = []
+        self.alerts: list[tuple[str, str]] = []
+        self.posted: list[str] = []
+        self.publish_result = (0, "published")
+        self.pr_reads = 0
+        self.notify_raises = False
+        self.comment_raises = False
+        self.reviews_by_id: dict[int, dict] = {}
+        self.during_panel = None  # called while the fake panel gate runs
+        self.panel_calls = 0
+
+    async def github_get(self, path, params):
+        self.calls.append(path)
+        if path.endswith(f"/pulls/{PR}"):
+            self.pr_reads += 1
+            if "pr" in self.fail:
+                return 500, None, {}
+            if self.pr_reads > 1 and self.pr_after is not None:
+                return 200, self.pr_after, {}
+            return 200, self.pr, {}
+        if "/reviews/" in path:
+            if "review" in self.fail:
+                return 404, None, {}
+            rid = int(path.rsplit("/", 1)[1])
+            if rid == REVIEW_ID:
+                return 200, self.review, {}
+            if rid in self.reviews_by_id:
+                return 200, self.reviews_by_id[rid], {}
+            return 404, None, {}
+        if path.endswith("/reviews"):
+            if "reviews" in self.fail:
+                return 200, {"not": "a list"}, {}
+            return 200, self.reviews if params.get("page") == 1 else [], {}
+        if path.endswith("/issues/42/comments"):
+            return 200, self.comments if params.get("page") == 1 else [], {}
+        if path.endswith("/pulls/42/comments"):
+            return 200, self.inline if params.get("page") == 1 else [], {}
+        if "/compare/" in path:
+            if "compare" in self.fail:
+                return 200, {}, {}
+            return 200, {"behind_by": self.behind}, {}
+        raise AssertionError(f"unexpected path {path}")
+
+    async def release_results(self):
+        if "records" in self.fail:
+            raise RuntimeError("down")
+        return self.records, self.complete
+
+    async def panel_gate(self, repo, pr, head):
+        self.panel_calls += 1
+        if "panel" in self.fail:
+            raise RuntimeError("panel down")
+        if self.during_panel is not None:
+            self.during_panel(self)
+        await asyncio.sleep(0)
+        return self.panel
+
+    async def app_bot_login(self):
+        return self.app_login
+
+    def notify(self, text):
+        self.notices.append(text)
+        if self.notify_raises:
+            raise RuntimeError("notifier down")
+
+    def alert(self, version, detail):
+        self.alerts.append((version, detail))
+
+    async def post_comment(self, repo, pr, body):
+        self.posted.append(body)
+        if self.comment_raises:
+            raise RuntimeError("comment down")
+        return True
+
+    async def run_publish(self, argv):
+        self.publishes.append(argv)
+        if self.publish_result == "timeout":
+            raise TimeoutError()
+        return self.publish_result
+
+    def deps(self, script):
+        return rra.Deps(
+            github_get=self.github_get,
+            release_results=self.release_results,
+            panel_gate=self.panel_gate,
+            app_bot_login=self.app_bot_login,
+            notify=self.notify,
+            post_comment=self.post_comment,
+            run_publish=self.run_publish,
+            operator_login=OPERATOR,
+            release_repo=REPO,
+            alert=self.alert,
+            release_branch="main",
+            publish_script=script,
+            python="python3",
+        )
+
+
+@pytest.fixture
+def world(tmp_path):
+    script = tmp_path / "publish.py"
+    script.write_text("# fake\n")
+    fake = Fake()
+    gate = rra.ReleaseReviewApproval(fake.deps(str(script)))
+    return fake, gate
+
+
+def _trigger(review_id=REVIEW_ID, **over):
+    base = dict(  # noqa: C408 — keyword form mirrors SwarmTrigger's fields
+        kind="pr_review",
+        repository=REPO,
+        number=PR,
+        title="Release",
+        body="",
+        author="example-author",
+        html_url=PR_URL,
+        delivery_id="d-1",
+        action="submitted",
+        head_ref=f"release/{VERSION}",
+        base_ref="main",
+        head_sha=HEAD,
+        review_state="approved",
+        review_author=OPERATOR,
+        raw={"review": {"id": review_id}},
+    )
+    base.update(over)
+    return SwarmTrigger(**base)
+
+
+def _run(gate, trigger=None):
+    return asyncio.run(gate.handle_review(trigger or _trigger()))
+
+
+def _assert_refused(fake, words):
+    assert fake.publishes == [], "a refusal must never start publish"
+    assert fake.notices and words in fake.notices[-1], fake.notices
+    assert len(fake.posted) == 1 and words in fake.posted[0], fake.posted
+
+
+# ── flag ─────────────────────────────────────────────────────────────────────
+
+
+def test_flag_only_exact_one_enables():
+    assert rra.enabled({rra.FLAG_ENV: "1"})
+    for value in ("", "0", "true", "yes", " 1", "1 ", "01"):
+        assert not rra.enabled({rra.FLAG_ENV: value}), value
+    assert not rra.enabled({})
+
+
+# ── passing case and replay ─────────────────────────────────────────────────
+
+
+def test_pass_starts_publish_once_without_force(world):
+    fake, gate = world
+    assert _run(gate) is True
+    assert len(fake.publishes) == 1
+    argv = fake.publishes[0]
+    assert "--force" not in argv
+    assert argv[2:] == [
+        "--version", VERSION, "--entity-id", "ent_example",
+        "--from-github-review", str(REVIEW_ID),
+        "--approved-head", HEAD,
+    ]
+    assert fake.posted == []
+
+
+def test_repeated_delivery_publishes_once(world):
+    fake, gate = world
+    _run(gate)
+    _run(gate)
+    assert len(fake.publishes) == 1
+    assert "already handled" in fake.posted[-1]
+
+
+def test_concurrent_deliveries_publish_once(world):
+    fake, gate = world
+
+    async def both():
+        await asyncio.gather(gate.handle_review(_trigger()), gate.handle_review(_trigger()))
+
+    asyncio.run(both())
+    assert len(fake.publishes) == 1
+
+
+def test_publish_failure_and_timeout_are_reported(world, tmp_path):
+    fake, gate = world
+    fake.publish_result = (1, "step failed")
+    _run(gate)
+    assert fake.alerts[-1][0] == VERSION and "FAILED" in fake.alerts[-1][1]
+    fake2 = Fake()
+    fake2.publish_result = "timeout"
+    gate2 = rra.ReleaseReviewApproval(fake2.deps(gate.deps.publish_script))
+    _run(gate2)
+    assert "TIMED OUT" in fake2.alerts[-1][1]
+
+
+def test_not_release_branch_returns_to_normal_path(world):
+    fake, gate = world
+    fake.pr = _pr(head={"ref": "feature/x", "sha": HEAD, "repo": {"full_name": REPO}})
+    assert _run(gate) is False
+    assert fake.publishes == [] and fake.posted == []
+
+
+# ── one test per refusal condition ──────────────────────────────────────────
+
+
+def test_refuses_unreadable_pr(world):
+    fake, gate = world
+    fake.fail.add("pr")
+    assert _run(gate) is True
+    _assert_refused(fake, "pull request could not be read")
+
+
+def test_refuses_missing_review_id(world):
+    fake, gate = world
+    _run(gate, _trigger(raw={}))
+    _assert_refused(fake, "review id")
+
+
+def test_refuses_unreadable_review(world):
+    fake, gate = world
+    fake.fail.add("review")
+    _run(gate)
+    _assert_refused(fake, "the review could not be read")
+
+
+def test_refuses_non_operator_reviewer(world):
+    fake, gate = world
+    fake.review = _review(user={"login": "someone-else", "type": "User"})
+    _run(gate)
+    _assert_refused(fake, "not by the operator")
+
+
+def test_refuses_bot_reviewer(world):
+    fake, gate = world
+    fake.review = _review(user={"login": OPERATOR, "type": "Bot"})
+    _run(gate)
+    _assert_refused(fake, "not by a person")
+
+
+def test_payload_author_is_not_trusted(world):
+    # The event says the operator approved; the live review says otherwise.
+    fake, gate = world
+    fake.review = _review(user={"login": "someone-else", "type": "User"})
+    _run(gate, _trigger(review_author=OPERATOR))
+    _assert_refused(fake, "not by the operator")
+
+
+def test_refuses_review_not_approved(world):
+    fake, gate = world
+    fake.review = _review(state="COMMENTED")
+    _run(gate)
+    _assert_refused(fake, "not an approval")
+
+
+def test_refuses_review_on_old_head(world):
+    fake, gate = world
+    fake.review = _review(commit_id=OTHER)
+    _run(gate)
+    _assert_refused(fake, "current head")
+
+
+def test_refuses_later_changes_requested(world):
+    fake, gate = world
+    fake.reviews.append(_review(id=REVIEW_ID + 1, state="CHANGES_REQUESTED",
+                                submitted_at="2026-01-01T11:00:00Z"))
+    _run(gate)
+    _assert_refused(fake, "requested changes or dismissed")
+
+
+def test_refuses_later_dismissed(world):
+    fake, gate = world
+    fake.reviews.append(_review(id=REVIEW_ID + 1, state="DISMISSED",
+                                submitted_at="2026-01-01T11:00:00Z"))
+    _run(gate)
+    _assert_refused(fake, "requested changes or dismissed")
+
+
+def _comment(body, created="2026-01-01T11:00:00Z", updated=None, login=OPERATOR, **over):
+    data = {"user": {"login": login, "type": "User"}, "body": body,
+            "created_at": created, "updated_at": updated or created}
+    data.update(over)
+    return data
+
+
+def test_earlier_comment_not_edited_since_does_not_refuse(world):
+    fake, gate = world
+    fake.comments.append(_comment("hold", created="2026-01-01T08:00:00Z",
+                                  updated="2026-01-01T08:30:00Z"))
+    fake.inline.append(_comment("stop", created="2026-01-01T08:00:00Z"))
+    _run(gate)
+    assert len(fake.publishes) == 1
+
+
+def test_refuses_malformed_comment_timestamp(world):
+    fake, gate = world
+    fake.comments.append(_comment("fine", created=None, updated="2026-01-01T08:00:00Z"))
+    _run(gate)
+    _assert_refused(fake, "timestamp could not be read")
+
+
+def test_refuses_missing_comment_edit_time(world):
+    fake, gate = world
+    c = _comment("fine", created="2026-01-01T08:00:00Z")
+    del c["updated_at"]
+    fake.comments.append(c)
+    _run(gate)
+    _assert_refused(fake, "timestamp could not be read")
+
+
+def test_refuses_unreadable_review_list(world):
+    fake, gate = world
+    fake.fail.add("reviews")
+    _run(gate)
+    _assert_refused(fake, "unexpected shape")
+
+
+def test_refuses_too_many_pages(world):
+    fake, gate = world
+    full = [{"user": {"login": "x"}, "body": "", "created_at": "2026-01-01T08:00:00Z"}] * 100
+
+    async def endless(path, params):
+        if path.endswith("/issues/42/comments"):
+            return 200, full, {}
+        return await Fake.github_get(fake, path, params)
+
+    gate.deps.github_get = endless
+    _run(gate)
+    _assert_refused(fake, "more pages")
+
+
+def test_refuses_closed_pr(world):
+    fake, gate = world
+    fake.pr = _pr(state="closed")
+    _run(gate)
+    _assert_refused(fake, "not open")
+
+
+def test_refuses_wrong_base(world):
+    fake, gate = world
+    fake.pr = _pr(base={"ref": "develop", "repo": {"full_name": REPO}})
+    _run(gate)
+    _assert_refused(fake, "not based on main")
+
+
+def test_refuses_fork_head(world):
+    fake, gate = world
+    fake.pr = _pr(head={"ref": f"release/{VERSION}", "sha": HEAD,
+                        "repo": {"full_name": "someone/fork"}})
+    _run(gate)
+    _assert_refused(fake, "not in the release repository")
+
+
+def test_refuses_behind_base(world):
+    fake, gate = world
+    fake.behind = 2
+    _run(gate)
+    _assert_refused(fake, "behind main")
+
+
+def test_refuses_unreadable_compare(world):
+    fake, gate = world
+    fake.fail.add("compare")
+    _run(gate)
+    _assert_refused(fake, "behind could not be read")
+
+
+def test_refuses_no_record(world):
+    fake, gate = world
+    fake.records = []
+    _run(gate)
+    _assert_refused(fake, "0 release records")
+
+
+def test_refuses_two_records(world):
+    fake, gate = world
+    fake.records = [_record(), {**_record(), "entity_id": "ent_other"}]
+    _run(gate)
+    _assert_refused(fake, "2 release records")
+
+
+def test_matches_release_url_field(world):
+    fake, gate = world
+    fake.records = [_record(rc_pr_url="", release_url=PR_URL)]
+    _run(gate)
+    assert len(fake.publishes) == 1
+
+
+def test_refuses_incomplete_record_list(world):
+    fake, gate = world
+    fake.complete = False
+    _run(gate)
+    _assert_refused(fake, "may be incomplete")
+
+
+def test_refuses_unreadable_records(world):
+    fake, gate = world
+    fake.fail.add("records")
+    _run(gate)
+    _assert_refused(fake, "release records could not be read")
+
+
+@pytest.mark.parametrize("status", ["approved", "publishing", "published", "failed", ""])
+def test_refuses_record_not_pending(world, status):
+    fake, gate = world
+    fake.records = [_record(status=status)]
+    _run(gate)
+    _assert_refused(fake, "not pending_approval")
+
+
+def test_refuses_record_other_head(world):
+    fake, gate = world
+    fake.records = [_record(rc_head_sha=OTHER)]
+    _run(gate)
+    _assert_refused(fake, "different head")
+
+
+def test_refuses_panel_gate_fail(world):
+    fake, gate = world
+    fake.panel = (False, "lenses: FAIL")
+    _run(gate)
+    _assert_refused(fake, "panel gate did not pass")
+
+
+def test_refuses_panel_gate_error(world):
+    fake, gate = world
+    fake.fail.add("panel")
+    _run(gate)
+    _assert_refused(fake, "could not be evaluated")
+
+
+def test_refuses_panel_gate_base_exception(world):
+    fake, gate = world
+
+    class Limited(BaseException):
+        pass
+
+    async def limited(*_a):
+        raise Limited()
+
+    gate.deps.panel_gate = limited
+    _run(gate)
+    _assert_refused(fake, "could not be evaluated")
+
+
+def test_refuses_missing_app_approval(world):
+    fake, gate = world
+    fake.reviews = [_review()]
+    _run(gate)
+    _assert_refused(fake, "panel approval is not on this head")
+
+
+def test_refuses_app_approval_on_old_head(world):
+    fake, gate = world
+    fake.reviews = [_app_review(commit_id=OTHER), _review()]
+    _run(gate)
+    _assert_refused(fake, "panel approval is not on this head")
+
+
+def test_refuses_unreadable_app_login(world):
+    fake, gate = world
+    fake.app_login = ""
+    _run(gate)
+    _assert_refused(fake, "App's login could not be read")
+
+
+def test_refuses_head_changed_before_publish(world):
+    fake, gate = world
+    fake.pr_after = _pr(head={"ref": f"release/{VERSION}", "sha": OTHER,
+                              "repo": {"full_name": REPO}})
+    _run(gate)
+    _assert_refused(fake, "current head")
+
+
+def test_refuses_missing_publish_script(world):
+    fake, gate = world
+    gate.deps.publish_script = "/nonexistent/publish.py"
+    _run(gate)
+    _assert_refused(fake, "publish script is missing")
+
+
+def test_notice_failures_never_publish(world):
+    fake, gate = world
+    fake.review = _review(state="COMMENTED")
+    fake.notify_raises = True
+    fake.comment_raises = True
+    assert _run(gate) is True
+    assert fake.publishes == []
+
+
+def test_other_entrance_closed_for_release_pr(world):
+    fake, gate = world
+    assert asyncio.run(gate.guard_other_entrance(_trigger(kind="issue_comment"), "approve comment"))
+    _assert_refused(fake, "approve comment was not acted on")
+
+
+def test_other_entrance_open_for_non_release_pr(world):
+    fake, gate = world
+    fake.pr = _pr(head={"ref": "feature/x", "sha": HEAD, "repo": {"full_name": REPO}})
+    assert not asyncio.run(gate.guard_other_entrance(_trigger(), "approve comment"))
+    assert fake.posted == []
+
+
+# ── dispatcher wiring ───────────────────────────────────────────────────────
+
+
+def _dispatcher():
+    class Notifier:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, message, **_kw):
+            self.sent.append(message)
+
+    return SwarmDispatcher(Notifier(), DispatchConfig(neotoma_token="", github_token=""))
+
+
+def _wire(monkeypatch, d):
+    merged = []
+
+    async def fake_merge(self, trigger, source):
+        merged.append(source)
+
+    monkeypatch.setattr(SwarmDispatcher, "_approve_and_maybe_merge", fake_merge)
+    monkeypatch.setattr(swarm_dispatch, "PHOENICURUS_RELEASE_REPO", REPO)
+    monkeypatch.setattr(swarm_dispatch, "_OPERATOR_LOGIN", OPERATOR)
+    return merged
+
+
+def test_flag_off_unchanged_and_no_network(monkeypatch):
+    monkeypatch.delenv(rra.FLAG_ENV, raising=False)
+    d = _dispatcher()
+    merged = _wire(monkeypatch, d)
+
+    def no_network(**_kw):
+        raise AssertionError("flag off must make no new network call")
+
+    monkeypatch.setattr(httpx, "AsyncClient", no_network)
+    monkeypatch.setattr(rra, "build_for_dispatcher",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("gate built")))
+    asyncio.run(d._handle_pr_review(_trigger()))
+    asyncio.run(d._handle_email_approve(_trigger(kind="email_approve")))
+    asyncio.run(d._handle_approve(_trigger(kind="issue_comment")))
+    assert merged == ["GitHub review", "email reply", "approve comment"]
+
+
+@pytest.mark.parametrize("value", ["0", "true", "", "yes"])
+def test_flag_other_values_unchanged(monkeypatch, value):
+    monkeypatch.setenv(rra.FLAG_ENV, value)
+    d = _dispatcher()
+    merged = _wire(monkeypatch, d)
+    monkeypatch.setattr(rra, "build_for_dispatcher",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("gate built")))
+    asyncio.run(d._handle_pr_review(_trigger()))
+    assert merged == ["GitHub review"]
+
+
+def test_flag_on_release_pr_never_reaches_merge_path(monkeypatch, tmp_path):
+    """With the flag on, a release PR review is handled by the gate, not merged."""
+    monkeypatch.setenv(rra.FLAG_ENV, "1")
+    d = _dispatcher()
+    merged = _wire(monkeypatch, d)
+    script = tmp_path / "publish.py"
+    script.write_text("# fake\n")
+    fake = Fake()
+    monkeypatch.setattr(rra, "build_for_dispatcher",
+                        lambda *a: rra.ReleaseReviewApproval(fake.deps(str(script))))
+    asyncio.run(d._handle_pr_review(_trigger()))
+    assert merged == [], "a release PR review must never reach the merge path"
+    assert len(fake.publishes) == 1
+    # A refused review does not fall back to merge either.
+    fake2 = Fake()
+    fake2.review = _review(state="COMMENTED")
+    monkeypatch.setattr(rra, "build_for_dispatcher",
+                        lambda *a: rra.ReleaseReviewApproval(fake2.deps(str(script))))
+    d2 = _dispatcher()
+    asyncio.run(d2._handle_pr_review(_trigger()))
+    assert merged == []
+    assert fake2.publishes == []
+
+
+def test_flag_on_comment_and_email_closed_for_release_pr(monkeypatch, tmp_path):
+    monkeypatch.setenv(rra.FLAG_ENV, "1")
+    d = _dispatcher()
+    merged = _wire(monkeypatch, d)
+    fake = Fake()
+    monkeypatch.setattr(rra, "build_for_dispatcher",
+                        lambda *a: rra.ReleaseReviewApproval(fake.deps(str(tmp_path / "p.py"))))
+    asyncio.run(d._handle_email_approve(_trigger(kind="email_approve")))
+    asyncio.run(d._handle_approve(_trigger(kind="issue_comment")))
+    assert merged == []
+    assert fake.publishes == []
+    assert len(fake.posted) == 2
+
+
+def test_flag_on_other_repo_unchanged(monkeypatch):
+    monkeypatch.setenv(rra.FLAG_ENV, "1")
+    d = _dispatcher()
+    merged = _wire(monkeypatch, d)
+    monkeypatch.setattr(rra, "build_for_dispatcher",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("gate built")))
+    asyncio.run(d._handle_pr_review(_trigger(repository="example-org/other")))
+    assert merged == ["GitHub review"]
+
+
+def test_flag_on_non_release_pr_in_release_repo_merges_as_before(monkeypatch, tmp_path):
+    monkeypatch.setenv(rra.FLAG_ENV, "1")
+    d = _dispatcher()
+    merged = _wire(monkeypatch, d)
+    fake = Fake()
+    fake.pr = _pr(head={"ref": "feature/x", "sha": HEAD, "repo": {"full_name": REPO}})
+    monkeypatch.setattr(rra, "build_for_dispatcher",
+                        lambda *a: rra.ReleaseReviewApproval(fake.deps(str(tmp_path / "p.py"))))
+    asyncio.run(d._handle_pr_review(_trigger()))
+    assert merged == ["GitHub review"]
+
+
+def test_refuses_timestamp_without_zone(world):
+    fake, gate = world
+    fake.review = _review(submitted_at="2026-01-01T10:00:00")
+    _run(gate)
+    _assert_refused(fake, "no time zone")
+
+
+def test_after_timeout_a_second_delivery_does_not_publish_again(world):
+    fake, gate = world
+    fake.publish_result = "timeout"
+    _run(gate)
+    _run(gate, _trigger(review_id=REVIEW_ID))
+    assert len(fake.publishes) == 1
+    assert "may still be running" in fake.alerts[0][1]
+
+
+# ── red alerts go through the dispatcher's alert path ───────────────────────
+
+
+def test_publish_failure_alert_is_raised_by_the_dispatcher(monkeypatch):
+    d = _dispatcher()
+    d._release_red_alert(VERSION, "approved by GitHub review but publish FAILED (rc=1): x.")
+    sent = d.notifier.sent[-1]
+    import red_conditions
+
+    assert sent.startswith(red_conditions.RED_MARKER)
+    assert red_conditions.classify(sent) == ("release-failed", VERSION)
+
+
+def test_built_gate_routes_alerts_to_the_dispatcher(monkeypatch):
+    d = _dispatcher()
+    monkeypatch.setattr(swarm_dispatch, "PHOENICURUS_RELEASE_REPO", REPO)
+    gate = rra.build_for_dispatcher(d, swarm_dispatch)
+    gate.deps.alert(VERSION, "publish TIMED OUT after a GitHub review approval.")
+    assert d.notifier.sent[-1].startswith("🔴 Release v1.2.3 publish TIMED OUT")
+
+
+# ── no dispatcher merge of a release pull request while the flag is on ──────
+
+
+def _merge_world(monkeypatch, tmp_path, pr_data=None, fail=False):
+    monkeypatch.setenv(rra.FLAG_ENV, "1")
+    monkeypatch.setattr(swarm_dispatch, "PHOENICURUS_RELEASE_REPO", REPO)
+    fake = Fake()
+    if pr_data is not None:
+        fake.pr = pr_data
+    if fail:
+        fake.fail.add("pr")
+    monkeypatch.setattr(rra, "build_for_dispatcher",
+                        lambda *a: rra.ReleaseReviewApproval(fake.deps(str(tmp_path / "p.py"))))
+    d = _dispatcher()
+    reached = []
+
+    async def credential(self, *_a, **_k):
+        reached.append("credential")
+        return False
+
+    monkeypatch.setattr(SwarmDispatcher, "_require_github_write_credential", credential)
+    return d, reached
+
+
+@pytest.mark.parametrize("kwargs", [
+    {},
+    {"expected_head": HEAD},
+    {"expected_head": HEAD, "require_default_base": True},
+])
+def test_merge_pr_refuses_release_pr_for_every_caller_shape(monkeypatch, tmp_path, kwargs):
+    d, reached = _merge_world(monkeypatch, tmp_path)
+    merged, detail = asyncio.run(d._merge_pr(REPO, PR, "squash", **kwargs))
+    assert merged is False
+    assert "release pull request" in detail
+    assert reached == [], "the merge must stop before any write path"
+
+
+def test_merge_pr_refuses_when_pr_unreadable(monkeypatch, tmp_path):
+    d, reached = _merge_world(monkeypatch, tmp_path, fail=True)
+    merged, detail = asyncio.run(d._merge_pr(REPO, PR, "squash"))
+    assert merged is False and "unknown" in detail
+    assert reached == []
+
+
+def test_merge_pr_non_release_pr_continues_as_before(monkeypatch, tmp_path):
+    d, reached = _merge_world(
+        monkeypatch, tmp_path,
+        pr_data=_pr(head={"ref": "feature/x", "sha": HEAD, "repo": {"full_name": REPO}}),
+    )
+    merged, detail = asyncio.run(d._merge_pr(REPO, PR, "squash"))
+    assert merged is False and "credential" in detail
+    assert reached == ["credential"]
+
+
+def test_merge_pr_flag_off_makes_no_release_read(monkeypatch):
+    monkeypatch.delenv(rra.FLAG_ENV, raising=False)
+    monkeypatch.setattr(swarm_dispatch, "PHOENICURUS_RELEASE_REPO", REPO)
+    monkeypatch.setattr(rra, "build_for_dispatcher",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("gate built")))
+    d = _dispatcher()
+
+    async def credential(self, *_a, **_k):
+        return False
+
+    monkeypatch.setattr(SwarmDispatcher, "_require_github_write_credential", credential)
+    merged, detail = asyncio.run(d._merge_pr(REPO, PR, "squash"))
+    assert merged is False and "credential" in detail
+
+
+# ── publish runs in its own session ─────────────────────────────────────────
+
+
+class _Proc:
+    returncode = 0
+
+    async def communicate(self):
+        return b"done\n", b""
+
+
+def test_github_review_publish_starts_in_a_new_session(monkeypatch):
+    seen = {}
+
+    async def fake_exec(*argv, **kw):
+        seen.update(kw)
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    d = _dispatcher()
+    monkeypatch.setattr(swarm_dispatch, "PHOENICURUS_RELEASE_REPO", REPO)
+    gate = rra.build_for_dispatcher(d, swarm_dispatch)
+    rc, last = asyncio.run(gate.deps.run_publish(["python3", "publish.py"]))
+    assert (rc, last) == (0, "done")
+    assert seen.get("start_new_session") is True
+
+
+def test_email_approval_publish_starts_in_a_new_session(monkeypatch):
+    seen = {}
+
+    async def fake_exec(*argv, **kw):
+        seen.update(kw)
+        seen["argv"] = argv
+        return _Proc()
+
+    monkeypatch.delenv(rra.FLAG_ENV, raising=False)
+    monkeypatch.setattr(swarm_dispatch.asyncio, "create_subprocess_exec", fake_exec)
+    d = _dispatcher()
+    asyncio.run(d._handle_release_approve(_trigger(kind="release_approve", release_version=VERSION)))
+    assert "--from-email-approval" in seen["argv"]
+    assert seen.get("start_new_session") is True
+
+
+# ── the panel gate runs as its own process with a JSON result ───────────────
+
+
+def test_panel_gate_runs_tool_as_process_and_reads_json(monkeypatch):
+    import json as _json
+    import sys as _sys
+
+    seen = {}
+
+    class P:
+        returncode = 0
+
+        async def communicate(self):
+            return (_json.dumps({"exit_code": 0, "head_sha": HEAD, "overall_pass": True,
+                                 "refusing": "", "report": ""}).encode() + b"\n", None)
+
+    async def fake_exec(*argv, **kw):
+        seen["argv"] = argv
+        return P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    before = _sys.stdout
+    assert asyncio.run(rra._panel_gate_real(REPO, PR, HEAD)) == (True, "")
+    assert _sys.stdout is before, "nothing process-wide is redirected"
+    assert seen["argv"][1].endswith("approve_pr_as_app.py")
+    assert "--json" in seen["argv"] and "--apply" not in seen["argv"]
+
+
+@pytest.mark.parametrize("rc,out,words", [
+    (0, b'{"exit_code": 0, "head_sha": "' + b"b" * 40 + b'", "overall_pass": true}', "different head"),
+    (1, b'{"exit_code": 1, "head_sha": "' + b"a" * 40 + b'", "overall_pass": false, "refusing": "refusing: x"}', "refusing: x"),
+    (0, b"not json", "could not be read"),
+    (0, b"", "could not be read"),
+    (0, b'{"exit_code": 0, "head_sha": "' + b"a" * 40 + b'", "overall_pass": false}', "overall FAIL"),
+])
+def test_panel_result_refuses_unless_clear_pass_on_head(rc, out, words):
+    passed, reason = rra._parse_panel_result(rc, out, HEAD)
+    assert passed is False and words in reason
+
+
+def test_concurrent_panel_gates_keep_their_own_results(monkeypatch):
+    import json as _json
+
+    async def fake_exec(*argv, **kw):
+        pr = int(argv[argv.index("--pr") + 1])
+        head = ("a" if pr == 1 else "b") * 40
+
+        class P:
+            returncode = 0
+
+            async def communicate(self):
+                await asyncio.sleep(0.01 if pr == 1 else 0)
+                return (_json.dumps({"exit_code": 0, "head_sha": head,
+                                     "overall_pass": True}).encode(), None)
+
+        return P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    async def both():
+        return await asyncio.gather(
+            rra._panel_gate_real(REPO, 1, "a" * 40),
+            rra._panel_gate_real(REPO, 2, "b" * 40),
+        )
+
+    assert asyncio.run(both()) == [(True, ""), (True, "")]
+
+
+# ── with the flag on, no other route starts publish.py ──────────────────────
+
+
+def test_flag_on_email_release_approve_starts_nothing_and_says_why(monkeypatch):
+    monkeypatch.setenv(rra.FLAG_ENV, "1")
+
+    async def no_exec(*argv, **kw):
+        raise AssertionError(f"publish.py must not start: {argv}")
+
+    monkeypatch.setattr(swarm_dispatch.asyncio, "create_subprocess_exec", no_exec)
+    d = _dispatcher()
+    asyncio.run(d._handle_release_approve(_trigger(kind="release_approve", release_version=VERSION)))
+    assert len(d.notifier.sent) == 1
+    notice = d.notifier.sent[0]
+    assert VERSION in notice and "nothing was published" in notice
+    assert rra.FLAG_ENV in notice and "approving review" in notice
+
+
+def test_flag_on_release_approve_trigger_from_the_dispatch_loop_starts_nothing(monkeypatch):
+    """The gateway's approve-release route yields this trigger kind."""
+    monkeypatch.setenv(rra.FLAG_ENV, "1")
+    started = []
+
+    async def no_exec(*argv, **kw):
+        started.append(argv)
+        return _Proc()
+
+    monkeypatch.setattr(swarm_dispatch.asyncio, "create_subprocess_exec", no_exec)
+    d = _dispatcher()
+    asyncio.run(d._handle_release_approve(_trigger(kind="release_approve", release_version="bad")))
+    assert started == []
+    assert d.notifier.sent and "nothing was published" in d.notifier.sent[0]
+
+
+@pytest.mark.parametrize("value", ["0", "", "true"])
+def test_flag_not_one_email_release_approve_publishes_as_before(monkeypatch, value):
+    monkeypatch.setenv(rra.FLAG_ENV, value)
+    seen = {}
+
+    async def fake_exec(*argv, **kw):
+        seen["argv"] = argv
+        return _Proc()
+
+    monkeypatch.setattr(swarm_dispatch.asyncio, "create_subprocess_exec", fake_exec)
+    d = _dispatcher()
+    asyncio.run(d._handle_release_approve(_trigger(kind="release_approve", release_version=VERSION)))
+    assert "--from-email-approval" in seen["argv"] and VERSION in seen["argv"]
+
+
+# ── a withdrawal or change made while the panel gate runs is seen ───────────
+
+_LATER = "2026-01-01T11:00:00Z"
+
+
+def _withdraw_approval(f):
+    f.review = _review(state="DISMISSED")
+
+
+def _later_changes_requested(f):
+    f.reviews.append(_review(id=REVIEW_ID + 5, state="CHANGES_REQUESTED", submitted_at=_LATER))
+
+
+def _later_hold_review(f):
+    f.reviews.append(_review(id=REVIEW_ID + 5, state="COMMENTED", body="hold", submitted_at=_LATER))
+
+
+def _approving_body_edited_to_hold(f):
+    f.review = _review(body="**Hold** for now")
+
+
+def _later_hold_comment(f):
+    f.comments.append(_comment("hold"))
+
+
+def _comment_edited_to_hold(f):
+    f.comments.append(_comment("> stop", created="2026-01-01T08:00:00Z", updated=_LATER))
+
+
+def _later_inline_hold(f):
+    f.inline.append(_comment("do not publish"))
+
+
+def _app_approval_removed(f):
+    f.reviews = [r for r in f.reviews if r["user"]["login"] != APP]
+
+
+def _pr_closed(f):
+    f.pr = _pr(state="closed")
+
+
+def _head_moved(f):
+    f.pr = _pr(head={"ref": f"release/{VERSION}", "sha": OTHER, "repo": {"full_name": REPO}})
+
+
+def _base_changed(f):
+    f.pr = _pr(base={"ref": "develop", "repo": {"full_name": REPO}})
+
+
+def _now_behind(f):
+    f.behind = 2
+
+
+def _record_left_pending(f):
+    f.records = [_record(status="approved")]
+
+
+def _record_other_head(f):
+    f.records = [_record(rc_head_sha=OTHER)]
+
+
+def _second_record(f):
+    f.records = [_record(), _record()]
+
+
+@pytest.mark.parametrize("change", [
+    _withdraw_approval, _later_changes_requested, _later_hold_review,
+    _approving_body_edited_to_hold, _later_hold_comment, _comment_edited_to_hold,
+    _later_inline_hold, _app_approval_removed, _pr_closed, _head_moved,
+    _base_changed, _now_behind, _record_left_pending, _record_other_head,
+    _second_record,
+], ids=lambda fn: fn.__name__.lstrip("_"))
+def test_change_during_panel_gate_publishes_nothing(world, change):
+    fake, gate = world
+    fake.during_panel = change
+    assert _run(gate) is True
+    assert fake.panel_calls == 1
+    assert fake.publishes == [], "a change made while the gate ran must stop the publish"
+    assert len(fake.posted) == 1 and fake.notices
+
+
+def test_live_conditions_are_read_after_the_panel_gate(world):
+    fake, gate = world
+    order = []
+    real_get = fake.github_get
+
+    async def tracking_get(path, params):
+        order.append(path)
+        return await real_get(path, params)
+
+    async def tracking_panel(repo, pr, head):
+        order.append("PANEL")
+        return True, ""
+
+    gate.deps.github_get = tracking_get
+    gate.deps.panel_gate = tracking_panel
+    _run(gate)
+    assert len(fake.publishes) == 1
+    after = order[order.index("PANEL") + 1:]
+    for needle in (f"/pulls/{PR}", f"/reviews/{REVIEW_ID}", "/reviews", "/issues/42/comments",
+                   "/pulls/42/comments", "/compare/"):
+        assert any(p.endswith(needle) or needle in p for p in after), needle
+
+
+# ── any operator activity after the approval refuses, whatever it says ─────
+
+# Each of these was a stop the operator might type that word matching missed,
+# plus an ordinary sentence: none of them is read for meaning any more.
+ACTIVITY_BODIES = [
+    "/hold", "/reject", "Don't publish", "1. hold", "(hold)", "hold",
+    "**Do not publish**", "Looks good, thanks for preparing this.",
+]
+
+
+@pytest.mark.parametrize("body", ACTIVITY_BODIES)
+def test_refuses_any_later_conversation_comment(world, body):
+    fake, gate = world
+    fake.comments.append(_comment(body))
+    _run(gate)
+    _assert_refused(fake, "commented or edited a comment after approving")
+
+
+@pytest.mark.parametrize("body", ACTIVITY_BODIES)
+def test_refuses_any_later_inline_comment(world, body):
+    fake, gate = world
+    fake.inline.append(_comment(body))
+    _run(gate)
+    _assert_refused(fake, "commented or edited a comment after approving")
+
+
+@pytest.mark.parametrize("state", ["COMMENTED", "APPROVED"])
+@pytest.mark.parametrize("body", ACTIVITY_BODIES)
+def test_refuses_any_later_review_with_a_body(world, body, state):
+    fake, gate = world
+    fake.reviews.append(_review(id=REVIEW_ID + 1, state=state, body=body, submitted_at=_LATER))
+    _run(gate)
+    _assert_refused(fake, "submitted another review after approving")
+
+
+@pytest.mark.parametrize("body", ACTIVITY_BODIES + ["   \n x"])
+def test_refuses_approving_review_with_a_body(world, body):
+    fake, gate = world
+    fake.review = _review(body=body)
+    _run(gate)
+    _assert_refused(fake, "approving review has a comment")
+
+
+@pytest.mark.parametrize("body", ["", "   ", "\n\t ", None])
+def test_approving_review_with_empty_or_whitespace_body_publishes(world, body):
+    fake, gate = world
+    fake.review = _review(body=body)
+    _run(gate)
+    assert len(fake.publishes) == 1
+
+
+def test_refuses_comment_at_the_same_second_as_the_approval(world):
+    fake, gate = world
+    fake.comments.append(_comment("ok", created="2026-01-01T10:00:00Z"))
+    _run(gate)
+    _assert_refused(fake, "commented or edited a comment after approving")
+
+
+@pytest.mark.parametrize("path", ["comments", "inline"])
+def test_refuses_earlier_comment_edited_after_approval(world, path):
+    fake, gate = world
+    getattr(fake, path).append(_comment("fine", created="2026-01-01T08:00:00Z", updated=_LATER))
+    _run(gate)
+    _assert_refused(fake, "commented or edited a comment after approving")
+
+
+def test_refuses_unreadable_comment_edit_time(world):
+    fake, gate = world
+    fake.comments.append(_comment("fine", created="2026-01-01T08:00:00Z", updated="soon"))
+    _run(gate)
+    _assert_refused(fake, "timestamp could not be read")
+
+
+def test_refuses_later_review_on_other_head_even_if_empty_approval(world):
+    fake, gate = world
+    fake.reviews.append(_review(id=REVIEW_ID + 1, commit_id=OTHER, submitted_at=_LATER))
+    _run(gate)
+    _assert_refused(fake, "submitted another review after approving")
+
+
+def test_refuses_later_review_without_readable_time(world):
+    fake, gate = world
+    fake.reviews.append(_review(id=REVIEW_ID + 1, state="COMMENTED", submitted_at=None))
+    _run(gate)
+    _assert_refused(fake, "timestamp could not be read")
+
+
+def test_later_empty_approval_on_same_head_does_not_refuse(world):
+    fake, gate = world
+    fake.reviews.append(_review(id=REVIEW_ID + 1, submitted_at=_LATER))
+    _run(gate)
+    assert len(fake.publishes) == 1
+
+
+@pytest.mark.parametrize("login,kind", [(APP, "Bot"), ("someone-else", "User"),
+                                         ("helper[bot]", "Bot")])
+def test_comments_by_app_bots_and_others_are_ignored(world, login, kind):
+    fake, gate = world
+    fake.comments.append(_comment("/hold", login=login, user={"login": login, "type": kind}))
+    fake.inline.append(_comment("(hold)", login=login, user={"login": login, "type": kind}))
+    _run(gate)
+    assert len(fake.publishes) == 1
+
+
+def test_clean_case_publishes(world):
+    fake, gate = world
+    _run(gate)
+    assert len(fake.publishes) == 1
+    assert fake.posted == []
+
+
+def test_refusal_says_how_to_approve_again(world):
+    fake, gate = world
+    fake.comments.append(_comment("/hold"))
+    _run(gate)
+    for text in (fake.posted[0], fake.notices[0]):
+        assert "new approving review on the current head with an empty comment box" in text
+        assert "add no comment after it" in text
+
+
+def test_change_during_panel_gate_seen_only_by_comparison_refuses(world):
+    """Only the record id changes between the two evaluations.
+
+    Every condition in the second evaluation still passes on its own, so
+    only the comparison of the two results stops the publish.
+    """
+    fake, gate = world
+
+    def swap_id(f):
+        f.records = [dict(_record(), entity_id="ent_other")]
+
+    fake.during_panel = swap_id
+    _run(gate)
+    _assert_refused(fake, "changed before publishing")
+
+
+# ── a second approving review (different id) for the same version ──────────
+
+SECOND_ID = REVIEW_ID + 1
+
+
+def _add_second_approval(fake):
+    second = _review(id=SECOND_ID, submitted_at=_LATER)
+    fake.reviews_by_id[SECOND_ID] = second
+    fake.reviews.append(second)
+
+
+def test_second_approval_sequential_publishes_once(world):
+    fake, gate = world
+    _run(gate)
+    _add_second_approval(fake)
+    _run(gate, _trigger(review_id=SECOND_ID))
+    assert len(fake.publishes) == 1
+    assert "already started once" in fake.posted[-1]
+
+
+def test_second_approval_concurrent_publishes_once(world):
+    fake, gate = world
+    _add_second_approval(fake)
+
+    async def both():
+        await asyncio.gather(gate.handle_review(_trigger()),
+                             gate.handle_review(_trigger(review_id=SECOND_ID)))
+
+    asyncio.run(both())
+    assert len(fake.publishes) == 1
+
+
+def test_second_approval_after_timed_out_publish_publishes_nothing(world):
+    fake, gate = world
+    fake.publish_result = "timeout"
+    _run(gate)
+    _add_second_approval(fake)
+    fake.publish_result = (0, "published")
+    _run(gate, _trigger(review_id=SECOND_ID))
+    assert len(fake.publishes) == 1
+    assert "already started once" in fake.posted[-1]
+
+
+# ── the tree check stopping after the merge is reported as such ─────────────
+
+
+def test_tree_check_stop_after_merge_says_merge_landed_and_nothing_published(world):
+    fake, gate = world
+    fake.publish_result = (1, "publish failed: tree check FAILED: the merged tree differs")
+    _run(gate)
+    version, detail = fake.alerts[-1]
+    assert version == VERSION
+    assert "already merged into main" in detail
+    assert "nothing was tagged or published" in detail
