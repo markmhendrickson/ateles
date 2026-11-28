@@ -299,7 +299,7 @@ def test_governance_correct_without_a_key_is_refused_sync(tmp_path, http, mode):
 def test_governance_write_refused_by_server_is_not_retried_with_bearer(
     tmp_path, http, mode, status
 ):
-    rec = http(lambda r: httpx.Response(status, json={"error_code": "AAUTH_REQUIRED"}))
+    rec = http(lambda r: httpx.Response(status, json={"error": {"error_code": "AAUTH_REQUIRED"}}))
     w = _writer(tmp_path, mode=mode)
     with pytest.raises(ns.SignedWriteError):
         asyncio.run(w.apost("store", _policy_store_body()))
