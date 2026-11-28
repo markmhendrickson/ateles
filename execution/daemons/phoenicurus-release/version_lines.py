@@ -13,6 +13,9 @@ prose lines that its unit suite checks against package.json
   OpenAPI spec.`
 - docs/known_limitations.md: ``Applies to `neotoma@<x>`.``
 
+SECURITY.md's supported-versions table (the `X.Y.x` "Yes" row and the `< X.Y`
+row) must move with each release too; no product test reads it.
+
 Release candidates that bumped package.json alone failed the product
 repository's main check (neotoma#2945, neotoma#2947). The product repository
 has no script that writes these lines, so this step writes them
@@ -42,6 +45,7 @@ import sys
 from pathlib import Path
 
 _SEMVER = r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?"
+_MINOR = r"\d+\.\d+"
 
 # (path relative to the product repo, pattern with the version in group 2).
 # Each pattern must match exactly once; a missing or repeated line is a stop,
@@ -59,7 +63,24 @@ PROSE_VERSION_LINES: tuple[tuple[str, re.Pattern[str]], ...] = (
         "docs/known_limitations.md",
         re.compile(rf"^(Applies to `neotoma@)({_SEMVER})(`\.)", re.M),
     ),
+    # SECURITY.md's supported-versions table names the newest minor line twice.
+    # No product test reads it, so only this step keeps it current.
+    (
+        "SECURITY.md",
+        re.compile(rf"^(\| `)({_MINOR})(\.x`[ \t]*\| Yes[ \t]*\|)", re.M),
+    ),
+    (
+        "SECURITY.md",
+        re.compile(rf"^(\| `< )({_MINOR})(`)", re.M),
+    ),
 )
+
+# Files whose line states the minor line (X.Y), not the full version.
+_MINOR_FILES = frozenset({"SECURITY.md"})
+
+
+def _wanted(rel: str, full: str) -> str:
+    return ".".join(full.split(".")[:2]) if rel in _MINOR_FILES else full
 
 PRODUCT_CHECK_TEST = "tests/unit/llms_txt_claims.test.ts"
 PRODUCT_CHECK_TIMEOUT_S = 300
@@ -99,14 +120,19 @@ def write_prose_lines(repo: Path, version: str) -> list[str]:
     the tree untouched.
     """
     want = _bare(version)
-    located = [(rel, *_find_one(repo, rel, pat)) for rel, pat in PROSE_VERSION_LINES]
+    for rel, pat in PROSE_VERSION_LINES:
+        _find_one(repo, rel, pat)
     changed: list[str] = []
-    for rel, text, m in located:
-        if m.group(2) == want:
+    for rel, pat in PROSE_VERSION_LINES:
+        # Re-read per line: one file may carry more than one version line.
+        text, m = _find_one(repo, rel, pat)
+        value = _wanted(rel, want)
+        if m.group(2) == value:
             continue
-        new = text[: m.start(2)] + want + text[m.end(2) :]
+        new = text[: m.start(2)] + value + text[m.end(2) :]
         (repo / rel).write_text(new, encoding="utf-8")
-        changed.append(rel)
+        if rel not in changed:
+            changed.append(rel)
     return changed
 
 
@@ -140,8 +166,9 @@ def verify(repo: Path, version: str) -> list[str]:
         except VersionLineError as exc:
             problems.append(str(exc))
             continue
-        if m.group(2) != want:
-            problems.append(f"{rel}: states {m.group(2)!r}, want {want!r}")
+        value = _wanted(rel, want)
+        if m.group(2) != value:
+            problems.append(f"{rel}: states {m.group(2)!r}, want {value!r}")
     return problems
 
 

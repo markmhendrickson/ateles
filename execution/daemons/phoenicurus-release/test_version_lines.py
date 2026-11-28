@@ -27,7 +27,17 @@ README = (
 LIMITS = "# Known limitations\n\nApplies to `neotoma@0.31.0`. Every entry has a tracking issue.\n"
 
 
-def _repo(tmp_path: Path, *, npm_version: str = "0.32.0", readme=README, limits=LIMITS) -> Path:
+SECURITY = (
+    "# Security Policy\n\n## Supported Versions\n\n"
+    "| Version  | Supported |\n|----------|-----------|\n"
+    "| `0.31.x` | Yes       |\n"
+    "| `< 0.31` | No (critical fixes only, as described below) |\n"
+)
+
+
+def _repo(
+    tmp_path: Path, *, npm_version: str = "0.32.0", readme=README, limits=LIMITS, security=SECURITY
+) -> Path:
     """A product checkout as the old preparation left it: npm bumped, prose not."""
     (tmp_path / "docs").mkdir()
     (tmp_path / "package.json").write_text(json.dumps({"name": "neotoma", "version": npm_version}))
@@ -38,6 +48,8 @@ def _repo(tmp_path: Path, *, npm_version: str = "0.32.0", readme=README, limits=
         (tmp_path / "README.md").write_text(readme)
     if limits is not None:
         (tmp_path / "docs" / "known_limitations.md").write_text(limits)
+    if security is not None:
+        (tmp_path / "SECURITY.md").write_text(security)
     return tmp_path
 
 
@@ -92,3 +104,27 @@ def test_product_check_without_node_modules_fails_closed(tmp_path, capsys):
 def test_rejects_non_semver(tmp_path):
     with pytest.raises(version_lines.VersionLineError):
         version_lines.write_prose_lines(_repo(tmp_path), "latest")
+
+
+def test_security_table_moves_with_the_release(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    assert version_lines.main(["--repo", str(repo), "--version", "v0.32.0", "--check"]) == 1
+    assert "SECURITY.md: states '0.31', want '0.32'" in capsys.readouterr().err
+    assert version_lines.main(["--repo", str(repo), "--version", "v0.32.0"]) == 0
+    text = (repo / "SECURITY.md").read_text()
+    assert "| `0.32.x` | Yes       |" in text and "| `< 0.32` | No (critical fixes only" in text
+    assert "0.31" not in text
+
+
+def test_patch_release_leaves_the_security_table(tmp_path):
+    repo = _repo(tmp_path, npm_version="0.31.1")
+    changed = version_lines.write_prose_lines(repo, "v0.31.1")
+    assert "SECURITY.md" not in changed
+    assert version_lines.verify(repo, "v0.31.1") == []
+
+
+def test_missing_security_row_stops_without_writing_anything(tmp_path, capsys):
+    repo = _repo(tmp_path, security="# Security Policy\n")
+    assert version_lines.main(["--repo", str(repo), "--version", "v0.32.0"]) == 1
+    assert "SECURITY.md: expected exactly one version line" in capsys.readouterr().err
+    assert "v0.31.0 provides" in (repo / "README.md").read_text()

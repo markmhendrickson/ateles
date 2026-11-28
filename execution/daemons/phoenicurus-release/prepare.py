@@ -995,13 +995,14 @@ release-candidate PR, then HALT:
    `npm version <TAG-without-v-prefix> --no-git-tag-version`
    then write and verify EVERY version line the product check requires
    (package.json and package-lock.json from npm, plus the README.md surface
-   line and the docs/known_limitations.md "Applies to" line) by running
+   line, the docs/known_limitations.md "Applies to" line and SECURITY.md's
+   supported-versions table) by running
    exactly, from the worktree root:
    `python3 {Path(__file__).parent}/version_lines.py --repo "$PWD" --version <TAG> --product-check`
    If it exits non-zero, STOP: open NO candidate PR, record nothing, and send a
    Telegram (and email, if configured) naming what it printed as missing. Do
    not edit the product check to make it pass.
-   Then commit package.json + package-lock.json + README.md +
+   Then commit package.json + package-lock.json + README.md + SECURITY.md +
    docs/known_limitations.md together with the supplement,
    using exactly this commit message format (matching precedent commit
    01344fec9): `chore(release): bump version to <TAG> + supplement`.
