@@ -691,3 +691,10 @@ def test_flag_on_non_release_pr_in_release_repo_merges_as_before(monkeypatch, tm
                         lambda *a: rra.ReleaseReviewApproval(fake.deps(str(tmp_path / "p.py"))))
     asyncio.run(d._handle_pr_review(_trigger()))
     assert merged == ["GitHub review"]
+
+
+def test_refuses_timestamp_without_zone(world):
+    fake, gate = world
+    fake.review = _review(submitted_at="2026-01-01T10:00:00")
+    _run(gate)
+    _assert_refused(fake, "no time zone")

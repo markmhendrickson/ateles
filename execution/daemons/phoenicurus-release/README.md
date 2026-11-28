@@ -190,6 +190,41 @@ Safety properties (match the PR-approve flow + one extra):
 Config: set `APIS_APPROVE_EMAIL_SECRET` (shared, Turdus + Apis) and
 `APIS_APPROVE_RELEASE_URL` (default `http://127.0.0.1:8742/approve-release`).
 
+### Publishing on the operator's GitHub review (off by default)
+
+`ATELES_PUBLISH_ON_OPERATOR_REVIEW` lets the operator's approving review on a
+release pull request (head branch `release/<version>` in
+`PHOENICURUS_RELEASE_REPO`) publish that release. Only the exact value `1`
+turns it on; unset or any other value leaves Apis exactly as it is without the
+flag.
+
+It is **off by default**, and it is set nowhere in this repository (no plist,
+env file or workflow). It is enabled only after a separate prerequisite change
+has been verified in place. Until then, a release needs the operator's go
+relayed to the session running it.
+
+When it is on, Apis (`execution/daemons/apis/release_review_approval.py`):
+
+- never sends a release pull request review to the merge path; the comment and
+  email approval commands are refused for a release pull request too;
+- publishes only when every condition holds, each read live at decision time:
+  the review is the operator's (not a bot), is APPROVED on the current head, and
+  is not followed by a changes-requested or dismissed review or by a comment or
+  review that starts with hold, skip, stop or do not publish; the pull request is
+  open, based on the release branch, from the same repository and not behind it;
+  exactly one `release_result` matches the version and pull request URL, with
+  status `pending_approval` and `rc_head_sha` equal to the head; the panel gate
+  of `execution/scripts/approve_pr_as_app.py` passes on the head; and the swarm
+  App's approval review is on the head;
+- then runs `publish.py --version <v> --entity-id <id> --from-github-review
+  <review id>` once, under a per-version lock, after re-reading the head.
+  `--from-github-review` moves `pending_approval` to `approved` only from
+  `pending_approval` and never combines with `--force`.
+
+Any condition that fails or cannot be read publishes nothing; Apis logs the
+reason, sends a notice, and posts one pull request comment as the App naming
+the condition.
+
 Turdus also keeps a local consumed-reply state file, `.turdus_state.json`, and
 an `.initialized` marker beside it. An unreadable or malformed state, or a
 missing state after initialization, holds all email approval routing and sends
