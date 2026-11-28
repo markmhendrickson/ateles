@@ -931,7 +931,7 @@ def _build_agent_prompt(last_tag: str, commit_count: int) -> str:
     )
     from_flag = f' --from "{SWARM_EMAIL}"' if SWARM_EMAIL else ""
     email_note = (
-        f"""12. ALSO email the operator the SAME notification (release goes to the
+        f"""12. Only if step 10 exited 0: ALSO email the operator the SAME notification (release goes to the
     inbox, not just Telegram — and the operator can approve BY EMAIL REPLY).
 
     SEND AS HTML, not raw markdown. The release notes are markdown; if sent as a
@@ -993,7 +993,17 @@ release-candidate PR, then HALT:
    v0.18.8 incident: the RC PR merged without it and publish.py would have
    tagged/published the wrong version). Run exactly:
    `npm version <TAG-without-v-prefix> --no-git-tag-version`
-   then commit package.json + package-lock.json together with the supplement,
+   then write and verify EVERY version line the product check requires
+   (package.json and package-lock.json from npm, plus the README.md surface
+   line, the docs/known_limitations.md "Applies to" line and SECURITY.md's
+   supported-versions table) by running
+   exactly, from the worktree root:
+   `python3 {Path(__file__).parent}/version_lines.py --repo "$PWD" --version <TAG> --product-check`
+   If it exits non-zero, STOP: open NO candidate PR, record nothing, and send a
+   Telegram (and email, if configured) naming what it printed as missing. Do
+   not edit the product check to make it pass.
+   Then commit package.json + package-lock.json + README.md + SECURITY.md +
+   docs/known_limitations.md together with the supplement,
    using exactly this commit message format (matching precedent commit
    01344fec9): `chore(release): bump version to <TAG> + supplement`.
 8. Open the release-candidate PR (release/<TAG> -> main) with the supplement as
@@ -1008,16 +1018,24 @@ Then record + notify:
 
       python3 {Path(__file__).parent}/store_release_result.py \\
         --version <TAG> --status pending_approval \\
-        --rc-branch release/<TAG> --rc-pr-url <RC_PR_URL>
+        --rc-branch release/<TAG> --rc-pr-url <RC_PR_URL> \\
+        --rc-head "$(git rev-parse HEAD)"
+
+    (`--rc-head` is the full SHA of the pushed release branch head; it binds the
+    record to THIS candidate, so a later candidate of the same version is
+    recorded and a retry of the same candidate deduplicates.)
 
     It signs the write with phoenicurus's AAuth key. A plain POST /store is
     denied: `release_result` has no configured access policy, so it defaults to
     `closed` (no guest access), and a bearer-token request resolves as a guest.
     That denial is why v0.21.4 prepared with no durable record (ateles#402).
     The script sets both the `rc_*` and plain field names, and the idempotency
-    key, so re-running it is safe. If it exits non-zero, say so in your Telegram
-    and email — do NOT report the release as recorded.
-11. Send a Telegram notification with: the version, the FULL rendered release
+    key, so re-running it is safe. It exits 0 only after reading the record
+    back. If it exits non-zero, the release is NOT recorded: send NO approval
+    request (no "Reply approve" line, no approval email, no `release-approve:`
+    token); instead send one Telegram saying the record failed, with the
+    script's error and the RC PR URL, and stop.
+11. Only if step 10 exited 0: send a Telegram notification with: the version, the FULL rendered release
     notes, the RC PR URL, and any advisory flags (security sensitive=true,
     /review findings, CI status). End with: "Reply `approve <TAG>` to publish, or
     `skip <TAG>` to discard." {topic_note}

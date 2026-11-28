@@ -29,10 +29,29 @@ anything holding a bearer token write that record.
       --version v0.21.5 \
       --status pending_approval \
       --rc-branch release/v0.21.5 \
+      --rc-head <full SHA of the release branch head> \
       --rc-pr-url https://github.com/owner/repo/pull/123
 
-Exits 0 on success, 1 on failure. Prints the entity id on success so the caller
-has a resolvable locator rather than an inferred one.
+Exits 0 only when the write landed AND a read-back of the entity shows what was
+just written: version, status, and (when passed) the release branch, the
+candidate head and the RC PR URL; 1 otherwise. Prints the entity id on success
+so the caller has a resolvable locator rather than an inferred one. A caller
+must not send the approval request unless this exits 0.
+
+`rc_head_sha` must be a declared field on the `release_result` schema (1.2 or
+later). An undeclared field is accepted and routed to raw_fragments, so it is
+absent from the snapshot and the read-back fails: nothing is approved until the
+field is declared.
+
+## Idempotency
+
+The key is bound to the candidate (`--rc-head`), not the calendar day: a
+second preparation of the same version with different content is a new write
+and is recorded, while a true retry of the same candidate deduplicates. The
+old `version-status-date` key made the second same-day candidate fail
+ERR_IDEMPOTENCY_MISMATCH, so it was never recorded as pending approval.
+`--rc-head` is required for `pending_approval`; other statuses without it keep
+the date-bound key.
 """
 
 from __future__ import annotations
@@ -40,6 +59,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -65,6 +85,16 @@ if _ENV_FILE.exists():
             os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
 
 
+_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def idempotency_key(version: str, status: str, rc_head: str) -> str:
+    """Bind the key to the candidate head; fall back to the day without one."""
+    if rc_head:
+        return f"release-{version}-{status}-{rc_head}"
+    return f"release-{version}-{status}-{date.today().isoformat()}"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Store a signed release_result entity")
     ap.add_argument("--version", required=True, help="release tag, e.g. v0.21.5")
@@ -74,6 +104,11 @@ def main() -> int:
         help="prepared|pending_approval|approved|publishing|published|failed",
     )
     ap.add_argument("--rc-branch", default="", help="release branch name")
+    ap.add_argument(
+        "--rc-head",
+        default="",
+        help="full commit SHA of the release branch head (required for pending_approval)",
+    )
     ap.add_argument("--rc-pr-url", default="", help="RC pull-request URL")
     ap.add_argument("--notes", default="", help="free-text notes")
     ap.add_argument("--base-url", default=os.environ.get("NEOTOMA_BASE_URL", ""))
@@ -81,6 +116,19 @@ def main() -> int:
                     help="seconds; generous by default because the hosted instance "
                          "can take 30s+ per DB-backed request (neotoma#2141)")
     args = ap.parse_args()
+
+    rc_head = args.rc_head.strip().lower()
+    if rc_head and not _SHA_RE.fullmatch(rc_head):
+        print(f"--rc-head must be a full 40-character commit SHA, got {args.rc_head!r}",
+              file=sys.stderr)
+        return 1
+    if args.status == "pending_approval" and not rc_head:
+        print(
+            "--rc-head is required for pending_approval: the record must be bound "
+            "to the candidate it asks the operator to approve",
+            file=sys.stderr,
+        )
+        return 1
 
     base = (args.base_url or "").rstrip("/")
     if not base:
@@ -118,6 +166,8 @@ def main() -> int:
     if args.rc_branch:
         entity["rc_branch"] = args.rc_branch
         entity["branch"] = args.rc_branch
+    if rc_head:
+        entity["rc_head_sha"] = rc_head
     if args.rc_pr_url:
         entity["rc_pr_url"] = args.rc_pr_url
         entity["release_url"] = args.rc_pr_url
@@ -126,7 +176,7 @@ def main() -> int:
 
     body = {
         "entities": [entity],
-        "idempotency_key": f"release-{args.version}-{args.status}-{date.today().isoformat()}",
+        "idempotency_key": idempotency_key(args.version, args.status, rc_head),
     }
 
     headers = {
@@ -167,8 +217,69 @@ def main() -> int:
         print(f"store returned no entities: {json.dumps(out)[:300]}", file=sys.stderr)
         return 1
     first = ents[0]
-    print(f"{first.get('entity_id')} ({first.get('action')}) as {signer.sub}")
+    entity_id = str(first.get("entity_id") or "")
+    if not entity_id:
+        print(f"store returned no entity id: {json.dumps(first)[:300]}", file=sys.stderr)
+        return 1
+
+    problem = _read_back(base, entity_id, args, rc_head, bearer, signer)
+    if problem:
+        print(
+            f"store of {entity_id} not confirmed by read-back: {problem}\n"
+            "Do NOT send the approval request: the release is not recorded.",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"{entity_id} ({first.get('action')}) as {signer.sub}")
     return 0
+
+
+def _read_back(
+    base: str, entity_id: str, args, rc_head: str, bearer: str, signer
+) -> str | None:
+    """Fetch the stored entity; return a problem string, or None if it matches.
+
+    Version, status and branch are shared by every candidate of one version, so
+    the head (and the PR URL) are what prove the record is for this candidate.
+    """
+    headers = {"User-Agent": USER_AGENT}
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
+    path = f"/entities/{entity_id}"
+    headers.update(signer.headers("GET", path))
+    req = urllib.request.Request(f"{base}{path}", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=args.timeout) as resp:
+            got = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        return f"HTTP {exc.code} {exc.read()[:200].decode(errors='replace')}"
+    except Exception as exc:  # noqa: BLE001
+        return f"{type(exc).__name__}: {exc}"
+    if not isinstance(got, dict):
+        return f"unexpected response {json.dumps(got)[:200]}"
+    fields = got.get("snapshot") or got.get("fields") or got
+    for key, want in (("version", args.version), ("status", args.status)):
+        if str(fields.get(key) or "") != want:
+            return f"{key} is {fields.get(key)!r}, want {want!r}"
+    # Same field precedence as publish.py: the rc_* name, else the plain one.
+    for names, want in (
+        (("rc_branch", "branch"), args.rc_branch),
+        (("rc_pr_url", "release_url"), args.rc_pr_url),
+    ):
+        if want:
+            have = str(fields.get(names[0]) or fields.get(names[1]) or "")
+            if have != want:
+                return f"{names[0]} is {have!r}, want {want!r}"
+    if rc_head:
+        have = str(fields.get("rc_head_sha") or "")
+        if have.lower() != rc_head:
+            hint = (
+                ""
+                if have
+                else " (is rc_head_sha declared on the release_result schema?)"
+            )
+            return f"rc_head_sha is {have!r}, want {rc_head!r}{hint}"
+    return None
 
 
 if __name__ == "__main__":

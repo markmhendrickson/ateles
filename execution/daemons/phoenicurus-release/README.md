@@ -57,6 +57,11 @@ prepared → pending_approval → approved → publishing → published
 
 `publish.py` refuses to act unless `status == approved` (override with `--force`).
 
+A `pending_approval` record carries the candidate head in `rc_head_sha`, which
+must be a declared string field on the `release_result` schema (1.2 or later).
+`store_release_result.py` reads it back and exits non-zero if it is missing or
+differs, so no approval is requested for a candidate that was not recorded.
+
 ## publish.py
 
 ```bash
