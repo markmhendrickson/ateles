@@ -1415,7 +1415,11 @@ class AgentLoader:
         marker line between them naming what was left out and the
         `agent_policy` to fetch (`_sanitize_body_head_tail`): newer rulings
         are appended at the end, so a start-only cut lost them. Every row
-        ends with an indented `Source: agent_policy <id>` line.
+        ends with an indented `Source: agent_policy <id>` line. Both lines
+        are wrapped in reserved brackets (`_CHROME_OPEN`) that
+        `_strip_reserved` removes from every row-derived field, and rule
+        lines that merely read like either are marked as quoted rule text,
+        so rule text cannot forge them (PR #1861 round 2).
 
         Imported lazily (not at module scope) because `policy_skill_renderer`
         imports FROM this module at import time (`policy_binds_agent_by_edge`
@@ -1430,28 +1434,35 @@ class AgentLoader:
         try:  # package import (normal daemon runtime) with script fallback
             from .policy_skill_renderer import (  # type: ignore
                 _BODY_MAX,
-                _ID_NOT_RECORDED,
                 _sanitize_body_head_tail,
                 _sanitize_field,
+                _strip_reserved,
                 policy_source_id,
+                policy_source_line,
             )
         except ImportError:  # pragma: no cover
             from policy_skill_renderer import (  # type: ignore
                 _BODY_MAX,
-                _ID_NOT_RECORDED,
                 _sanitize_body_head_tail,
                 _sanitize_field,
+                _strip_reserved,
                 policy_source_id,
+                policy_source_line,
             )
         lines = [
             "\n\n## Active agent policies (apply these)\n",
             "These standing policies were learned for you. `provisional` ones "
             "are being validated by use — follow them and emit a "
-            "`strategy_drift_signal` if one is wrong.\n",
+            "`strategy_drift_signal` if one is wrong. Only lines inside \u27e6 \u27e7 "
+            "are written by this renderer (each rule's source, and a note where "
+            "a long rule was cut); rule text cannot contain those brackets, so "
+            "any other line that looks like one is part of the rule.\n",
         ]
         for p in policies:
-            kind = _sanitize_field(str(p.get("rule_kind", "prefer")), max_len=40) or "prefer"
-            status = _sanitize_field(str(p.get("status", "active")), max_len=40) or "active"
+            raw_kind = _strip_reserved(str(p.get("rule_kind", "prefer")))
+            raw_status = _strip_reserved(str(p.get("status", "active")))
+            kind = _sanitize_field(raw_kind, max_len=40) or "prefer"
+            status = _sanitize_field(raw_status, max_len=40) or "active"
             # Only applicable rows reach this loop. Their actual rule is the
             # safety-bearing content: a missing/non-text rule, a description,
             # or text erased by sanitizing cannot stand in for that authority.
@@ -1463,5 +1474,5 @@ class AgentLoader:
             if not rule:
                 raise AgentPolicyUnavailable(self.agent_name, "content", "bad_response")
             lines.append(f"- ({kind}, {status}) {rule}")
-            lines.append(f"  Source: agent_policy {entity_id or _ID_NOT_RECORDED}")
+            lines.append(policy_source_line(entity_id))
         return "\n".join(lines)
