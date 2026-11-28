@@ -1210,9 +1210,12 @@ class FlyLedger:
         write may come after the file was replaced: the outcome is uncertain.
 
         Called only for a settled existing-PR correction that the new
-        correction was declared against (``build_delivery``'s
-        ``_supersede_settled_correction`` decides that); it is the one path
-        that replaces a receipt without the operator's clear."""
+        correction was declared against, or the settled first delivery that
+        opened the PR a first correction targets (``build_delivery``'s
+        ``_supersede_settled_correction`` and
+        ``_supersede_settled_first_delivery`` decide that), and to put such a
+        receipt back when nothing launched (``_restore_superseded``); it is
+        the one path that replaces a receipt without the operator's clear."""
         if not isinstance(entry.get("status"), str):
             raise FlyLedgerError("delivery receipt has no status")
         import build_delivery
