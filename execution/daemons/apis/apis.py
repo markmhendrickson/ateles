@@ -306,6 +306,7 @@ from lib.daemon_runtime.gating import (  # noqa: E402
 from lib.daemon_runtime.task_lifecycle import (  # noqa: E402
     TaskStatus,
     complete_task_with_result,
+    is_backlog,
     is_terminal,
     normalize as normalize_status,
     set_task_field_if_version,
@@ -2998,6 +2999,21 @@ async def _dispatch_task(
             f"[{DAEMON_NAME}] task {entity_id!r} is already terminal "
             f"(status={normalize_status(current_status)!r}, trigger={trigger}) "
             "— not dispatching; finished work is not re-opened"
+        )
+        return
+
+    # ── Backlog guard: kept, not dispatchable until moved back to pending ────
+    #
+    # Planning returns stale tasks to `backlog`. Neotoma redelivers
+    # `task.created` after that correction, and without this guard the reset
+    # re-entered routing and ended as an escalation or a checkpoint. Above every
+    # write, notice and gate; `gate_override` does not pass either, since an old
+    # approval is not a decision to take the task out of the backlog. Only an
+    # explicit move to `pending` makes it dispatchable again.
+    if is_backlog(current_status):
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} is in the backlog "
+            f"(trigger={trigger}) — not dispatching until it is moved to pending"
         )
         return
 
@@ -6488,6 +6504,17 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
     # test is the one dispatch_task uses (`_fly_defer_holder`).
     if (action == "created" and _fly_defer_holder(snapshot, entity_id) is None
             and _fly_run_refuses_dispatch(snapshot, entity_id, "task.created")):
+        return
+
+    # A backlog task is kept but not to be dispatched: no "Task created" or
+    # "due today" notice and no dispatch. Checked before the created dedupe is
+    # claimed, so a later move back to `pending` is not mistaken for a
+    # duplicate of this delivery.
+    if action in ("created", "due_today") and is_backlog(status):
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id} is in the backlog — "
+            f"ignoring task.{action}"
+        )
         return
 
     if action == "created":

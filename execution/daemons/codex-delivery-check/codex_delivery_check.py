@@ -713,10 +713,11 @@ def open_task_statuses() -> list[str]:
     Plus the spellings agents write that the enum lacks. Terminal synonyms
     (``completed``) are rejected by ``is_terminal``, so they cannot appear.
     """
-    from lib.daemon_runtime.task_lifecycle import TaskStatus, is_terminal
+    from lib.daemon_runtime.task_lifecycle import TaskStatus, is_backlog, is_terminal
 
+    # Backlog tasks are kept on purpose and alert nobody.
     names = {s.value for s in TaskStatus} | set(EXTRA_OPEN_STATUSES)
-    return sorted(n for n in names if not is_terminal(n))
+    return sorted(n for n in names if not is_terminal(n) and not is_backlog(n))
 
 
 def undated_session_task_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -724,13 +725,14 @@ def undated_session_task_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]
 
     Ownership is decided by the shared rule, never re-implemented here.
     """
-    from lib.daemon_runtime.task_lifecycle import is_terminal
+    from lib.daemon_runtime.task_lifecycle import is_backlog, is_terminal
     from lib.daemon_runtime.task_ownership import session_owned
 
     kept = []
     for ent in rows:
         snap = _snapshot(ent)
-        if is_terminal(str(snap.get("status") or "")):
+        status = str(snap.get("status") or "")
+        if is_terminal(status) or is_backlog(status):
             continue
         if str(snap.get("due_date") or "").strip():
             continue
