@@ -115,7 +115,6 @@ import logging
 import os
 import re
 import sys
-import unicodedata
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -272,7 +271,9 @@ _TIER_MARKER_PATTERN = re.compile(r"tier\s*:\s*[A-Za-z]", re.IGNORECASE)
 # paragraph structure, so this only needs to catch the control/separator
 # characters that can occur WITHIN one line (NEL, U+2028/U+2029, C0 minus
 # \t\r\n, C1, DEL).
-_INLINE_CONTROL_CHARS = re.compile("[\u0085\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]")
+_INLINE_CONTROL_CHARS = re.compile(
+    "[\u2028\u2029\u0085\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]"
+)
 
 
 def _sanitize_pass(text: str) -> str:
@@ -570,98 +571,49 @@ def policy_source_id(snap: dict) -> str:
     return _ENTITY_ID_DISALLOWED.sub("", raw)[:64]
 
 
-# Placeholder printed where a row has no printable id, so the source line and
-# the cut marker still read as complete sentences.
 _ID_NOT_RECORDED = "(id not recorded)"
 
-# The two lines `render_policy_prompt` writes itself under a row (its source
-# line and, for a cut rule, the omission marker) open with this delimiter and
-# close with `_CHROME_CLOSE`. `_strip_reserved` removes both brackets, every
-# character whose NFKC form contains one, and their look-alikes from ALL
-# row-derived text, so no rule can produce a line in this form; the block's
-# preamble tells the worker that only lines in this form are the renderer's.
-_CHROME_OPEN = "\u27e6"   # ⟦ MATHEMATICAL LEFT WHITE SQUARE BRACKET
-_CHROME_CLOSE = "\u27e7"  # ⟧
-# Brackets that render like the reserved pair but do not NFKC to it.
-_CHROME_LOOKALIKES = frozenset("\u301a\u301b\u27e6\u27e7")
+# The renderer's own lines under a row (its source line and, for a cut rule,
+# the omission marker) start at column 0. Rule text cannot reach column 0:
+# the bullet `- (kind, status) ` sits before a rule's first line, and
+# `_indent_rule_lines` indents every later rule line, splitting with
+# `str.splitlines` so every character Python treats as a line break counts.
+# So no wording, script, look-alike bracket or invisible character in a rule
+# can produce a flush-left line; the guarantee is the indent, not a match on
+# what the line says.
 
 
-def _is_reserved_char(ch: str) -> bool:
-    if ch in _CHROME_LOOKALIKES:
-        return True
-    if ch.isascii():
-        return False
-    folded = unicodedata.normalize("NFKC", ch)
-    return _CHROME_OPEN in folded or _CHROME_CLOSE in folded
-
-
-def _strip_reserved(text: str) -> str:
-    """`text` with every reserved chrome bracket, and every character that
-    normalises to or looks like one, removed. After this, neither `text` nor
-    its NFKC form contains `_CHROME_OPEN` or `_CHROME_CLOSE`."""
-    return "".join(ch for ch in text if not _is_reserved_char(ch))
-
-
-def policy_source_line(entity_id: str) -> str:
-    """The renderer's source line under a row, in the reserved chrome form."""
-    return (
-        f"{_LIST_ITEM_CONTINUATION_INDENT}{_CHROME_OPEN}Source: agent_policy "
-        f"{entity_id or _ID_NOT_RECORDED}{_CHROME_CLOSE}"
-    )
-
-
-# Fold the Cyrillic and Greek letters that look like the Latin letters of
-# "source agent policy ... characters left out" onto those Latin letters, so
-# a rule line spelled with them is still recognised by `_looks_like_chrome`.
-_HOMOGLYPHS = str.maketrans({
-    "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p",
-    "\u0441": "c", "\u0443": "y", "\u0445": "x", "\u0456": "i",
-    "\u0455": "s", "\u0458": "j", "\u04bb": "h", "\u0501": "d",
-    "\u03bf": "o", "\u03b1": "a", "\u03c1": "p", "\u03b9": "i",
-    "\u03ba": "k", "\u03bd": "v", "\u03c4": "t", "\u0261": "g",
-    "\u0131": "i", "\u0269": "i", "\u217c": "l", "\u04cf": "l",
-})
-_LOOKS_LIKE_SOURCE = re.compile(r"^\W*source\W*agent\W*policy\b")
-_LOOKS_LIKE_MARKER = re.compile(
-    r"characters\W+of\W+this\W+rule|left\W+out\W+here|fetch\W+agent\W*policy"
-)
-# Prefix put on a rule line that reads like a renderer line, so the worker
-# sees it as quoted rule text rather than the renderer's own.
-_CHROME_LOOKALIKE_PREFIX = "(quoted in the rule) "
-
-
-def _looks_like_chrome(line: str) -> bool:
-    """Whether a rule-text line reads like a source line or an omission
-    marker once NFKC-normalised, case-folded and with Cyrillic/Greek
-    look-alike letters folded to Latin; `_` counts as a separator."""
-    folded = unicodedata.normalize("NFKC", line).casefold().translate(_HOMOGLYPHS)
-    folded = folded.replace("_", " ")
-    return bool(_LOOKS_LIKE_SOURCE.search(folded) or _LOOKS_LIKE_MARKER.search(folded))
-
-
-def _neutralise_chrome_lookalikes(text: str) -> str:
-    """Prefix every line of already-sanitised `text` that reads like a
-    renderer line with `_CHROME_LOOKALIKE_PREFIX`, keeping its indent."""
+def _indent_rule_lines(text: str, *, first_on_bullet: bool) -> str:
+    """`text` split with `str.splitlines` (every line-break character:
+    \\r, \\n, \\r\\n, \\x0b, \\x0c, \\x1c-\\x1e, \\x85, U+2028, U+2029) and
+    rejoined with `\\n`, with every non-empty line indented by
+    `_LIST_ITEM_CONTINUATION_INDENT` unless it already starts with it.
+    With `first_on_bullet`, line 0 is left as is: the caller puts it after
+    the row's bullet. Sanitized rule text already has this shape, so on it
+    this changes nothing; it is what makes the shape hold for any text."""
+    indent = _LIST_ITEM_CONTINUATION_INDENT
     out = []
-    for line in text.split("\n"):
-        if _looks_like_chrome(line):
-            body = line.lstrip(" ")
-            line = line[: len(line) - len(body)] + _CHROME_LOOKALIKE_PREFIX + body
+    for i, line in enumerate(text.splitlines()):
+        if line and not (i == 0 and first_on_bullet) and not line.startswith(indent):
+            line = indent + line
         out.append(line)
     return "\n".join(out)
 
 
+def policy_source_line(entity_id: str) -> str:
+    """The renderer's source line under a row, flush-left."""
+    return f"Source: agent_policy {entity_id or _ID_NOT_RECORDED}"
+
+
 def _cut_marker_line(omitted: int, entity_id: str) -> str:
     """The one line `_sanitize_body_head_tail` puts between the kept start and
-    the kept end, in the reserved chrome form. Indented like every other
-    continuation line, and built only from a number and a charset-cut id, so
-    it cannot open a heading, a bullet or a tier marker."""
+    the kept end, flush-left. Built only from a number and a charset-cut id,
+    so it cannot open a heading, a bullet or a tier marker."""
     return (
-        f"{_LIST_ITEM_CONTINUATION_INDENT}{_CHROME_OPEN}{omitted} characters of "
-        f"this rule left out here. Fetch agent_policy {entity_id or _ID_NOT_RECORDED} "
-        "and read the full rule before acting on it; if you cannot fetch it, treat "
-        "this rule as incomplete and say so wherever it bears on your answer."
-        f"{_CHROME_CLOSE}"
+        f"{omitted} characters of this rule left out here. Fetch agent_policy "
+        f"{entity_id or _ID_NOT_RECORDED} and read the full rule before acting on "
+        "it; if you cannot fetch it, treat this rule as incomplete and say so "
+        "wherever it bears on your answer."
     )
 
 
@@ -703,41 +655,36 @@ def _sanitize_body_head_tail(raw: str, max_len: int, entity_id: str) -> str:
     stays clean. The tail can start mid-line, where a suffix of a clean line
     can open with `-`, `#` or `>`; its first line is therefore sanitized
     again on its own and indented, and every later tail line already carries
-    the continuation indent. The marker is indented the same way.
+    the continuation indent.
 
     Size: head + newline + tail is at most `max_len`; the marker and its
     newline are the only addition. A rule at or under `max_len` is returned
     exactly as `_sanitize_body` would return it.
 
-    Neither the renderer's chrome brackets nor anything resembling them
-    survives (`_strip_reserved`, before sanitising), and any line that reads
-    like a source line or an omission marker, in a short rule, the kept head
-    or the kept tail, is prefixed as quoted rule text
-    (`_neutralise_chrome_lookalikes`)."""
-    full = _sanitize_body(
-        _strip_reserved(raw), max_len=3 * len(raw) + 2, list_item_safe=True
-    )
-    full = _neutralise_chrome_lookalikes(full)
+    The marker is flush-left, like the source line `render_policy_prompt`
+    adds; every rule line except the one on the bullet is indented
+    (`_indent_rule_lines`, applied to the head and the tail), so rule text
+    cannot produce a line that reads as the renderer's."""
+    full = _sanitize_body(raw, max_len=3 * len(raw) + 2, list_item_safe=True)
     if len(full) <= max_len:
-        return full
+        return _indent_rule_lines(full, first_on_bullet=True)
     indent = _LIST_ITEM_CONTINUATION_INDENT
     head = _head_cut(full, max_len // 2)
     # One newline joins head to tail; the tail's first line may gain the
     # indent after its re-sanitize, so reserve room for it too.
-    # It may also gain the look-alike prefix after the re-check below.
-    tail_budget = max_len - len(head) - 1 - len(indent) - len(_CHROME_LOOKALIKE_PREFIX)
+    tail_budget = max_len - len(head) - 1 - len(indent)
     tail_raw = _tail_cut(full, tail_budget)
     omitted = len(full) - len(head) - len(tail_raw)
     first, sep, rest = tail_raw.lstrip("\n").partition("\n")
     first = _run_body_pass_to_fixed_point(first.strip()).replace("\n", " ")
-    # A suffix of a line can read like a renderer line where the whole line
-    # did not ("... see Source: agent_policy x"), so check it again.
-    first = _neutralise_chrome_lookalikes(first)
     lines = ([indent + first] if first else []) + (rest.split("\n") if sep else [])
     while lines and not lines[0].strip():
         lines.pop(0)
-    tail = "\n".join(lines).rstrip()
-    parts = [head, _cut_marker_line(omitted, entity_id)]
+    tail = _indent_rule_lines("\n".join(lines).rstrip(), first_on_bullet=False)
+    parts = [
+        _indent_rule_lines(head, first_on_bullet=True),
+        _cut_marker_line(omitted, entity_id),
+    ]
     if tail:
         parts.append(tail)
     return "\n".join(parts)
