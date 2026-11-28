@@ -107,6 +107,7 @@ import lens_authors
 import lens_receipts
 import model_tiering
 import panel_check_gate
+import release_review_approval
 import review_carry
 import review_rounds
 import review_delta
@@ -12293,11 +12294,43 @@ class SwarmDispatcher:
             )
             return
 
+        if await self._release_review_handled(trigger):
+            return
         log.info(
             f"[{DAEMON_NAME}] operator GitHub review APPROVED on {ref} — "
             "routing to shared approval path"
         )
         await self._approve_and_maybe_merge(trigger, source="GitHub review")
+
+    def _release_review_gate(self, trigger: SwarmTrigger):
+        """The release-review publish gate, or None when it does not apply.
+
+        None (no network call) unless ATELES_PUBLISH_ON_OPERATOR_REVIEW is
+        exactly "1" and the trigger is on the release repository.
+        """
+        if not release_review_approval.enabled():
+            return None
+        if not release_review_approval.is_release_repo(
+            trigger.repository, PHOENICURUS_RELEASE_REPO
+        ):
+            return None
+        gate = self.__dict__.get("_release_review")
+        if gate is None:
+            gate = release_review_approval.build_for_dispatcher(
+                self, sys.modules[__name__]
+            )
+            self.__dict__["_release_review"] = gate
+        return gate
+
+    async def _release_review_handled(self, trigger: SwarmTrigger) -> bool:
+        """True when a release PR review was published or refused by the gate."""
+        gate = self._release_review_gate(trigger)
+        return gate is not None and await gate.handle_review(trigger)
+
+    async def _release_entrance_closed(self, trigger: SwarmTrigger, source: str) -> bool:
+        """True when a comment/email approval on a release PR must stop here."""
+        gate = self._release_review_gate(trigger)
+        return gate is not None and await gate.guard_other_entrance(trigger, source)
 
     async def _handle_email_approve(self, trigger: SwarmTrigger) -> None:
         """Handle an operator email-reply approval (approval loop).
@@ -12314,6 +12347,8 @@ class SwarmDispatcher:
             f"[{DAEMON_NAME}] operator email APPROVE on {ref} — "
             "routing to shared approval path"
         )
+        if await self._release_entrance_closed(trigger, "email approval"):
+            return
         await self._approve_and_maybe_merge(trigger, source="email reply")
 
     async def _handle_ci_status(self, trigger: SwarmTrigger) -> None:
@@ -13779,6 +13814,8 @@ class SwarmDispatcher:
         # NB: the source label is echoed into the GitHub confirmation comment, so
         # it must NOT contain a command token (e.g. "/approve") — a comment body
         # carrying the token would re-trigger this handler (neotoma#1686).
+        if await self._release_entrance_closed(trigger, "approve comment"):
+            return
         await self._approve_and_maybe_merge(trigger, source="approve comment")
 
     async def _approve_and_maybe_merge(
