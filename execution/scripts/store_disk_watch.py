@@ -192,9 +192,10 @@ class Metrics:
             )
         ):
             raise Unknown("metrics_endpoint_invalid")
-        self.token = environ.get(TOKEN_ENV, "").strip()
+        token = environ.get(TOKEN_ENV, "")
+        self.token = token.strip()
         # Require the operator-created credential; never use an ambient Fly token.
-        if not self.token.startswith("FlyV1 ") or any(c in self.token for c in "\r\n"):
+        if not self.token.startswith("FlyV1 ") or any(c in token for c in "\r\n"):
             raise Unknown("metrics_token_missing_or_invalid")
 
     def sample(self, query, labels, now):
@@ -908,6 +909,7 @@ def main(argv=None):
         "--confirm-instances", nargs="+", metavar="APP_MOUNT_INSTANCES"
     )
     args = parser.parse_args(argv)
+    selection = args.retire_instance or args.confirm_instances
     try:
         runtime_paths(args.state)
         notifications = Notifications()
@@ -915,19 +917,32 @@ def main(argv=None):
             args.state.with_suffix(".lock"), blocking=False, fail_open=False
         ) as locked:
             if not locked:
+                if selection:
+                    print(json.dumps({"failure": "state_lock_unavailable"}))
+                    return 2
                 raise Unknown("state_lock_unavailable")
             import httpx
 
-            if args.retire_instance or args.confirm_instances:
-                selection = args.retire_instance or args.confirm_instances
-                if len(selection) < 3:
-                    raise Unknown("inventory_action_invalid")
-                state = change_inventory(
-                    args.state,
-                    "retire" if args.retire_instance else "confirm",
-                    selection,
-                    time.time(),
-                )
+            if selection:
+                try:
+                    if len(selection) < 3:
+                        raise Unknown("inventory_action_invalid")
+                    state = change_inventory(
+                        args.state,
+                        "retire" if args.retire_instance else "confirm",
+                        selection,
+                        time.time(),
+                    )
+                except Unknown as error:
+                    if str(error) not in {
+                        "inventory_target_unknown",
+                        "inventory_instance_unknown",
+                        "inventory_already_known",
+                        "inventory_action_invalid",
+                    }:
+                        raise
+                    print(json.dumps({"failure": str(error)}))
+                    return 2
                 drain(
                     state,
                     lambda: held_view.atomic_write(
@@ -936,16 +951,17 @@ def main(argv=None):
                     request_json,
                     notifications,
                 )
+                event = state["events"][-1]
                 print(
                     json.dumps(
                         {
                             "status": "unknown",
                             "inventory": "updated",
-                            "event": state["events"][-1],
+                            "event": event,
                         }
                     )
                 )
-                return 1
+                return int(not event["recorded"] or event["delivery"] != "delivered")
 
             with httpx.Client(trust_env=False) as client:
 

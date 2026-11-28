@@ -4,6 +4,8 @@ import copy
 import importlib.util
 import json
 import sys
+import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -322,30 +324,191 @@ def test_metrics_endpoint_rejects_unapproved_host_or_shape(url):
         )
 
 
-def test_main_metrics_client_ignores_proxy_environment(rig, monkeypatch, capsys):
+@pytest.mark.parametrize(
+    "token",
+    [
+        None,
+        "",
+        "   ",
+        "synthetic",
+        "Bearer synthetic",
+        "FlyV1 ",
+        "FlyV1 synthetic\nother",
+        "FlyV1 synthetic\n",
+        "\nFlyV1 synthetic",
+        "FlyV1 synthetic\r",
+    ],
+)
+def test_invalid_dedicated_metrics_token_never_uses_ambient_credentials(
+    rig, monkeypatch, token
+):
+    env = {
+        **ENV,
+        "STORE_WATCH_METRICS_URL": "https://api.fly.io/prometheus/synthetic/api/v1/query",
+        **dict.fromkeys(
+            (
+                "FLY_API_TOKEN",
+                "FLY_ACCESS_TOKEN",
+                "FLY_TOKEN",
+                "GH_TOKEN",
+                "GITHUB_TOKEN",
+            ),
+            "FlyV1 synthetic-ambient",
+        ),
+    }
+    if token is not None:
+        env[watch.TOKEN_ENV] = token
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    if token is None:
+        monkeypatch.delenv(watch.TOKEN_ENV, raising=False)
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json=metric_reply(request.url.params["query"]))
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(watch.Unknown, match="^metrics_token_missing_or_invalid$"):
+            watch.Metrics(env, client)
+
+        def read_usage(target, now):
+            return watch.Metrics(env, client).read(target, now)
+
+        result = rig.poll(read=read_usage, environ=env)["volumes"][0]
+    assert result["failure"] == "metrics_token_missing_or_invalid"
+    assert result["status"] == "unknown" and not result["complete"]
+    assert calls == []
+
+
+@pytest.mark.parametrize("problem", ["auth", "transport", "redirect"])
+@pytest.mark.parametrize("state_write_fails", [False, True])
+def test_metrics_canary_never_escapes_to_state_effects_journal_or_stdout(
+    rig, monkeypatch, capsys, problem, state_write_fails
+):
+    from lib.notify import Notifier
+
+    rig.poll(40)
+    canary = "FlyV1 synthetic-canary-" + uuid.uuid4().hex
+    for name, value in {
+        **ENV,
+        "STORE_WATCH_METRICS_URL": "https://api.fly.io/prometheus/synthetic/api/v1/query",
+        watch.TOKEN_ENV: canary,
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(watch, "request_json", rig.records)
+    monkeypatch.setattr(watch.time, "time", lambda: NOW + 3600)
+    monkeypatch.setattr(
+        Notifier,
+        "_deliver",
+        lambda self, message, **kwargs: rig.sent.append(message) or True,
+    )
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        assert request.headers["Authorization"] == canary
+        if problem == "transport":
+            raise httpx.RequestError(canary, request=request)
+        return httpx.Response(
+            401 if problem == "auth" else 307,
+            text=canary,
+            headers={"Location": "/unapproved"},
+        )
+
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
+    )
+    atomic_write = watch.held_view.atomic_write
+
+    def save(path, text):
+        if state_write_fails and path == rig.path:
+            raise OSError(canary)
+        return atomic_write(path, text)
+
+    monkeypatch.setattr(watch.held_view, "atomic_write", save)
+    assert watch.main(["--state", str(rig.path)]) == 1
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert len(calls) == 6
+    assert rig.sent and rig.records.tasks
+    assert any(path == "/store" for _, path, _ in rig.records.calls)
+    assert any(path == "/correct" for _, path, _ in rig.records.calls)
+    journal = watch.held_view.journal_path().read_text()
+    if state_write_fails:
+        assert report["failure"] == "state_or_job_failure"
+        assert json.loads(journal)[watch.FAILURE_RECEIPT]["watch_event"]["recorded"]
+    else:
+        category = {
+            "auth": "metrics_auth_failure",
+            "transport": "metrics_request_failure",
+            "redirect": "metrics_http_failure",
+        }[problem]
+        assert report["volumes"][0]["failure"] == category
+        assert any("failure=" + category in message for message in rig.sent)
+    for surface in (
+        rig.path.read_text(),
+        json.dumps(rig.records.calls),
+        json.dumps(rig.records.tasks),
+        json.dumps(rig.sent),
+        journal,
+        captured.out,
+        captured.err,
+    ):
+        assert canary not in surface
+
+
+@pytest.mark.parametrize(
+    "destination",
+    ["https://redirect.invalid/metrics", "https://api.fly.io/unapproved"],
+)
+def test_main_metrics_client_ignores_environment_and_refuses_redirects(
+    rig, monkeypatch, capsys, destination
+):
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid")
     monkeypatch.setenv("ALL_PROXY", "http://proxy.invalid")
+    monkeypatch.setenv("SSL_CERT_FILE", str(rig.path.parent / "absent-cert"))
+    monkeypatch.setenv(
+        "STORE_WATCH_METRICS_URL",
+        "https://api.fly.io/prometheus/synthetic/api/v1/query",
+    )
+    monkeypatch.setenv(watch.TOKEN_ENV, "FlyV1 synthetic")
     monkeypatch.setenv("STORE_WATCH_CONFIG_IDS", ENV["STORE_WATCH_CONFIG_IDS"])
     monkeypatch.setattr(watch, "request_json", rig.records)
     monkeypatch.setattr(watch, "Notifications", lambda: lambda e: True)
     monkeypatch.setattr(watch.time, "time", lambda: NOW)
     real = httpx.Client
-    seen = []
+    clients, requests = [], []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(307, headers={"Location": destination})
 
     def client(**kwargs):
-        seen.append(kwargs)
-        return real(
-            transport=httpx.MockTransport(lambda r: pytest.fail("unexpected request")),
-            **kwargs,
+        client = real(
+            transport=httpx.MockTransport(handler), follow_redirects=True, **kwargs
         )
+        clients.append(client)
+        return client
 
     monkeypatch.setattr(httpx, "Client", client)
-    monkeypatch.setattr(
-        watch, "Metrics", lambda *a: SimpleNamespace(read=lambda *a: reading(40, NOW))
+    assert watch.main(["--state", str(rig.path)]) == 1
+    assert len(clients) == 1 and clients[0].trust_env is False
+    assert clients[0].follow_redirects is True
+    assert len(requests) == 6
+    assert all(
+        str(request.url.copy_with(query=None))
+        == "https://api.fly.io/prometheus/synthetic/api/v1/query"
+        and request.headers["Authorization"] == "FlyV1 synthetic"
+        for request in requests
     )
-    assert watch.main(["--state", str(rig.path)]) == 0
-    assert seen == [{"trust_env": False}]
-    capsys.readouterr()
+    assert (
+        json.loads(capsys.readouterr().out)["volumes"][0]["failure"]
+        == "metrics_http_failure"
+    )
 
 
 @pytest.mark.parametrize(
@@ -658,7 +821,7 @@ def test_explicit_retirement_checkpoints_notice_without_recovering(
                 "synthetic-a",
             ]
         )
-        == 1
+        == 0
     )
     assert json.loads(capsys.readouterr().out)["status"] == "unknown"
     value = watch.read_state(rig.path, NOW + 60)["volumes"][watch.target_key(TARGET)]
@@ -673,6 +836,178 @@ def test_explicit_retirement_checkpoints_notice_without_recovering(
         == "healthy"
     )
     assert "healthy" in rig.sent[-1]["message"]
+
+
+@pytest.mark.parametrize(
+    "option,selection,category",
+    [
+        (
+            "--retire-instance",
+            ["absent", "/data", "synthetic-a"],
+            "inventory_target_unknown",
+        ),
+        (
+            "--confirm-instances",
+            ["absent", "/data", "synthetic-a"],
+            "inventory_target_unknown",
+        ),
+        (
+            "--retire-instance",
+            ["synthetic", "/data", "absent"],
+            "inventory_instance_unknown",
+        ),
+        (
+            "--confirm-instances",
+            ["synthetic", "/data", "synthetic-a"],
+            "inventory_already_known",
+        ),
+        ("--confirm-instances", ["synthetic", "/data"], "inventory_action_invalid"),
+        (
+            "--confirm-instances",
+            ["synthetic", "/data", "a", "a"],
+            "inventory_action_invalid",
+        ),
+        (
+            "--retire-instance",
+            ["synthetic", "/data", "a\n"],
+            "inventory_action_invalid",
+        ),
+        (
+            "--retire-instance",
+            ["synthetic", "/data", "synthetic-a"],
+            "state_lock_unavailable",
+        ),
+        (
+            "--confirm-instances",
+            ["synthetic", "/data", "synthetic-a"],
+            "state_lock_unavailable",
+        ),
+    ],
+)
+def test_manual_input_or_busy_lock_is_local_error_without_failure_episode(
+    rig, monkeypatch, capsys, option, selection, category
+):
+    rig.poll(40)
+    before = rig.path.read_bytes()
+    rig.records.calls.clear()
+    monkeypatch.setattr(watch, "request_json", rig.records)
+    monkeypatch.setattr(watch.time, "time", lambda: NOW + 60)
+    monkeypatch.setattr(
+        watch,
+        "Notifications",
+        lambda: lambda e: rig.sent.append(copy.deepcopy(e)) or True,
+    )
+    monkeypatch.setattr(
+        watch, "Metrics", lambda *a: pytest.fail("manual command must not poll")
+    )
+    lock = (
+        watch.held_view.file_lock(rig.path.with_suffix(".lock"), fail_open=False)
+        if category == "state_lock_unavailable"
+        else nullcontext(True)
+    )
+    with lock as locked:
+        assert locked
+        assert watch.main(["--state", str(rig.path), option, *selection]) == 2
+    assert json.loads(capsys.readouterr().out) == {"failure": category}
+    assert rig.path.read_bytes() == before
+    assert rig.records.calls == [] and rig.records.tasks == {} and rig.sent == []
+    assert not watch.held_view.journal_path().exists()
+
+
+@pytest.mark.parametrize("option", ["--retire-instance", "--confirm-instances"])
+@pytest.mark.parametrize("pending", ["none", "recording", "delivery", "both"])
+@pytest.mark.parametrize("older_pending", [False, True])
+def test_manual_action_exit_code_tracks_recording_and_delivery(
+    rig, monkeypatch, capsys, option, pending, older_pending
+):
+    rig.poll(40)
+    state = watch.read_state(rig.path, NOW)
+    if option == "--confirm-instances":
+        state["volumes"][watch.target_key(TARGET)]["seen_instances"] = None
+    old_id = "store-watch:synthetic-pending"
+    if older_pending:
+        watch.add_event(state, "Synthetic older pending event", "warning", old_id)
+    if option == "--confirm-instances" or older_pending:
+        rig.path.write_text(json.dumps(state))
+    rig.records.fail_store = pending in ("recording", "both")
+
+    def request(method, path, body=None):
+        if body and body.get("idempotency_key", "").startswith(old_id):
+            raise OSError("synthetic older recording failure")
+        return rig.records(method, path, body)
+
+    def send(event):
+        rig.sent.append(copy.deepcopy(event))
+        return event["id"] != old_id and pending not in ("delivery", "both")
+
+    monkeypatch.setattr(watch, "request_json", request)
+    monkeypatch.setattr(watch.time, "time", lambda: NOW + 60)
+    monkeypatch.setattr(watch, "Notifications", lambda: send)
+    assert watch.main(
+        ["--state", str(rig.path), option, "synthetic", "/data", "synthetic-a"]
+    ) == (0 if pending == "none" else 1)
+    report = json.loads(capsys.readouterr().out)
+    assert report["inventory"] == "updated" and report["status"] == "unknown"
+    state = watch.read_state(rig.path, NOW + 60)
+    value = state["volumes"][watch.target_key(TARGET)]
+    assert value["last_success"] == NOW
+    assert value["seen_instances"] == (
+        [] if option == "--retire-instance" else ["synthetic-a"]
+    )
+    event = state["events"][-1]
+    assert report["event"] == event
+    assert event["recorded"] == (pending not in ("recording", "both"))
+    assert event["delivery"] == (
+        "undelivered" if pending in ("delivery", "both") else "delivered"
+    )
+    assert len(rig.sent) == (2 if older_pending else 1)
+    assert rig.sent[-1]["severity"] == "warning"
+    if older_pending:
+        assert state["events"][0]["recorded"] is False
+        assert state["events"][0]["delivery"] == "undelivered"
+    assert not watch.held_view.journal_path().exists()
+
+
+@pytest.mark.parametrize("option", ["--retire-instance", "--confirm-instances"])
+@pytest.mark.parametrize("damage", ["unreadable", "write_failure"])
+def test_manual_state_damage_keeps_existing_critical_failure_path(
+    rig, monkeypatch, capsys, option, damage
+):
+    rig.poll(40)
+    if damage == "unreadable":
+        rig.path.write_text("damaged")
+    elif option == "--confirm-instances":
+        state = watch.read_state(rig.path, NOW)
+        state["volumes"][watch.target_key(TARGET)]["seen_instances"] = None
+        rig.path.write_text(json.dumps(state))
+    before = rig.path.read_bytes()
+    atomic_write = watch.held_view.atomic_write
+
+    def save(path, text):
+        if damage == "write_failure" and path == rig.path:
+            raise OSError("synthetic write failure")
+        return atomic_write(path, text)
+
+    monkeypatch.setattr(watch.held_view, "atomic_write", save)
+    monkeypatch.setattr(watch, "request_json", rig.records)
+    monkeypatch.setattr(watch.time, "time", lambda: NOW + 60)
+    monkeypatch.setattr(
+        watch,
+        "Notifications",
+        lambda: lambda e: rig.sent.append(copy.deepcopy(e)) or True,
+    )
+    assert (
+        watch.main(
+            ["--state", str(rig.path), option, "synthetic", "/data", "synthetic-a"]
+        )
+        == 1
+    )
+    assert json.loads(capsys.readouterr().out)["failure"] == "state_or_job_failure"
+    assert rig.path.read_bytes() == before
+    assert len(rig.sent) == len(rig.records.tasks) == 1
+    assert rig.sent[0]["severity"] == "critical"
+    assert "state is UNKNOWN" in rig.sent[0]["message"]
+    assert json.loads(watch.held_view.journal_path().read_text())[watch.FAILURE_RECEIPT]
 
 
 def test_retirement_write_failure_precedes_external_effects(rig, monkeypatch):
@@ -731,7 +1066,7 @@ def test_legacy_migration_requires_explicit_baseline_and_preserves_alarm(
                 "synthetic-a",
             ]
         )
-        == 1
+        == 0
     )
     assert json.loads(capsys.readouterr().out)["status"] == "unknown"
     value = watch.read_state(rig.path, NOW + 120)["volumes"][watch.target_key(TARGET)]

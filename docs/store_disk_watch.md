@@ -25,6 +25,12 @@ health checks. It never resizes a volume or deploys anything.
   Require `configuration=ok`, `complete=true` for every target, an `instance` id
   in each target's `instances`, and a percentage matching `df` on that same
   instance/mount. The synthetic tests do not satisfy this check.
+- Confirm that `timestamp()` returns each gauge's source-sample time rather than
+  query evaluation time. Exercise one authorized `--retire-instance` command and
+  read its inventory change, warning task and delivery back before activation.
+- Watched apps' machines must not auto-stop. Each stop removes metrics and
+  raises the one-hour no-read alarm until the instance returns or is explicitly
+  retired; a stopped machine is not automatically retired.
 - Check host time synchronization. A source/evaluation timestamp more than
   30 seconds ahead of the host is `metrics_clock_skew`; a host clock more than
   30 seconds ahead can make source samples stale. Resolve clock skew before
@@ -201,7 +207,7 @@ point to this section for the next step.
 
 After a person confirms a machine was deliberately retired/replaced, run this
 explicit action with the app, literal mount label and exact persisted instance
-id (synthetic example):
+id of the old machine, not its replacement (synthetic example):
 
 ```bash
 python3 execution/scripts/store_disk_watch.py --state /data/store-watch/state.json --retire-instance synthetic /data synthetic-a
@@ -209,11 +215,12 @@ python3 execution/scripts/store_disk_watch.py --state /data/store-watch/state.js
 
 This removes only that instance from the expected set and checkpoints a warning
 event/task before sending. It does not poll metrics, clear the stored level or
-stale alarm, or advance `last_success`. Its JSON status remains UNKNOWN and its
-exit is 1; only the next complete read can report recovery. If the instance
-reappears, it is observed again. A failed checkpoint creates no retirement
-effects; a crash after the checkpoint replays the same pending event on the
-next poll. Assess the task before retrying an action that may already have
+stale alarm, or advance `last_success`. Its JSON status remains UNKNOWN even
+when the action succeeds with exit 0; only the next complete read can report
+recovery. The replacement joins the inventory when its series is observed.
+If the retired instance reappears, it is observed again. A failed checkpoint
+creates no retirement effects; a crash after the checkpoint replays the same
+pending event on the next poll. Assess the task before retrying an action that may already have
 committed; re-retiring an absent id is refused.
 
 State version 1 lacked an inventory. Migration to version 2 preserves all
@@ -234,6 +241,16 @@ instances, since no metrics-only poll can discover a machine never observed.
 Target removal is separate: an explicit edit of the selected configuration
 removes an app/mount and records a warning task, rather than a healthy event.
 Do not remove a target to hide an unreadable configuration or vanished machine.
+
+Both manual commands exit 2 for bad input or a busy state lock and print the
+fixed cause: `inventory_target_unknown`, `inventory_instance_unknown`,
+`inventory_already_known`, `inventory_action_invalid`, or
+`state_lock_unavailable`. These errors change no watch state and create no
+failure episode, task or notice. Check the app/mount and persisted instance ids,
+use confirmation only for an unknown legacy inventory, or retry after the
+running poll releases the lock. An action checkpointed locally but still
+unrecorded or undelivered exits 1; its pending event is retried by the next poll.
+Unreadable state or a write failure still takes the critical failure path below.
 
 The job reuses the notifier's private atomic-file writer and file locks. It
 checkpoints new events before any task write or send. Crashing before that
@@ -267,8 +284,12 @@ the remaining evidence; no person delivery is claimed. A process that is never
 invoked cannot self-alert: schedule liveness must be checked by the existing
 host supervision, separately from this per-target one-hour test.
 
-Exit 0 means valid configuration, fresh healthy filesystems, and no unrecorded or
-undelivered events. Any warning, critical, UNKNOWN or pending effect exits 1.
+For a poll, exit 0 means valid configuration, fresh healthy filesystems, and no
+unrecorded or undelivered events. Any warning, critical, UNKNOWN or pending
+effect exits 1. For either manual inventory command, exit 0 means its action
+is recorded and delivered, while usage remains UNKNOWN; exit 1 means a pending
+action effect or real job/state failure; exit 2 means bad input
+or a busy lock (including argparse usage errors).
 
 ## Verification
 
