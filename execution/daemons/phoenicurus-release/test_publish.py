@@ -29,6 +29,8 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
 
 import publish  # noqa: E402
 
+_REAL_VERIFY_TREE = publish.verify_tree_matches_approved_head
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -674,14 +676,20 @@ def test_npm_publish_local_mode_publishes_from_host():
 # steps are stubbed so no irreversible action runs.
 
 
-def _release(status: str, version: str = "v0.20.0") -> dict:
+_HEAD = "c" * 40
+_OTHER_HEAD = "d" * 40
+
+
+def _release(status: str, version: str = "v0.20.0", rc_head_sha: str = _HEAD) -> dict:
     return {"snapshot": {"version": version, "status": status,
-                         "rc_branch": f"release/{version}"}}
+                         "rc_branch": f"release/{version}",
+                         "rc_head_sha": rc_head_sha}}
 
 
 def _stub_publish_steps(mp):
     # neutralize every irreversible step + the status writer so we test only the gate
-    for name in ("preflight", "merge_rc_pr", "preflight_post_merge", "tag_and_push",
+    for name in ("preflight", "merge_rc_pr", "verify_tree_matches_approved_head",
+                 "preflight_post_merge", "tag_and_push",
                  "npm_publish", "github_release", "deploy_sandbox",
                  "publish_github_release_draft", "post_release", "set_release_status",
                  "telegram_send"):
@@ -729,6 +737,222 @@ def test_email_approval_dry_run_does_not_flip_status(monkeypatch):
     publish.publish_release(_release("pending_approval"), "v0.20.0",
                             dry_run=True, force=False, email_approval=True)
     assert flips == []  # dry-run makes no state change
+
+
+# ── --from-github-review ────────────────────────────────────────────────────
+#
+# The GitHub-review path flips pending_approval -> approved ONLY from
+# pending_approval (approved included refuses, unlike the email path) and never
+# combines with --force.
+
+
+def test_github_review_publishes_from_pending_approval(monkeypatch):
+    _stub_publish_steps(monkeypatch)
+    flips = []
+    monkeypatch.setattr(publish, "set_release_status",
+                        lambda v, s, extra=None, entity_id=None: flips.append((v, s)))
+    publish.publish_release(_release("pending_approval"), "v0.20.0",
+                            dry_run=False, force=False, github_review_id=77,
+                            approved_head=_HEAD)
+    assert flips[0] == ("v0.20.0", "approved")
+    assert ("v0.20.0", "publishing") in flips
+    publish.merge_rc_pr.assert_called_once()
+
+
+@pytest.mark.parametrize("status", ["approved", "publishing", "published", "failed", ""])
+def test_github_review_refuses_other_states(monkeypatch, status):
+    _stub_publish_steps(monkeypatch)
+    with pytest.raises(publish.StepError, match="not 'pending_approval'"):
+        publish.publish_release(_release(status), "v0.20.0",
+                                dry_run=False, force=False, github_review_id=77,
+                            approved_head=_HEAD)
+    publish.merge_rc_pr.assert_not_called()
+
+
+def test_github_review_refuses_force(monkeypatch):
+    _stub_publish_steps(monkeypatch)
+    with pytest.raises(publish.StepError, match="--force"):
+        publish.publish_release(_release("pending_approval"), "v0.20.0",
+                                dry_run=False, force=True, github_review_id=77,
+                                approved_head=_HEAD)
+    publish.merge_rc_pr.assert_not_called()
+
+
+def test_github_review_dry_run_does_not_flip_status(monkeypatch):
+    _stub_publish_steps(monkeypatch)
+    flips = []
+    monkeypatch.setattr(publish, "set_release_status",
+                        lambda v, s, extra=None, entity_id=None: flips.append((v, s)))
+    publish.publish_release(_release("pending_approval"), "v0.20.0",
+                            dry_run=True, force=False, github_review_id=77,
+                            approved_head=_HEAD)
+    assert flips == []
+
+
+_GR = ["--version", "v0.20.0", "--entity-id", "ent_x", "--approved-head", _HEAD,
+       "--from-github-review"]
+
+
+@pytest.mark.parametrize("argv", [
+    [*_GR, "77", "--force"],
+    [*_GR, "77", "--from-email-approval"],
+    [*_GR, "77", "--resume-from", "tag_and_push"],
+    [*_GR, "0"],
+    ["--version", "v0.20.0", "--from-github-review", "77"],
+    ["--entity-id", "ent_x", "--from-github-review", "77"],
+    # The approved head is required with --from-github-review, in full.
+    ["--version", "v0.20.0", "--entity-id", "ent_x", "--from-github-review", "77"],
+    ["--version", "v0.20.0", "--entity-id", "ent_x", "--from-github-review", "77",
+     "--approved-head", "c" * 12],
+    # ... and is never accepted on another path.
+    ["--version", "v0.20.0", "--approved-head", "c" * 40],
+])
+def test_github_review_cli_refuses_bad_combinations(monkeypatch, argv):
+    found = MagicMock()
+    runner = MagicMock()
+    monkeypatch.setattr(publish, "find_release", found)
+    monkeypatch.setattr(publish, "publish_release", runner)
+    monkeypatch.setattr(sys, "argv", ["publish.py", *argv])
+    assert publish.main() == 2
+    found.assert_not_called()
+    runner.assert_not_called()
+
+
+def test_github_review_cli_passes_review_id(monkeypatch):
+    monkeypatch.setattr(publish, "find_release",
+                        lambda v, e: {"entity_id": e, **_release("pending_approval")})
+    seen = {}
+
+    def fake_publish(release, version, dry_run, force, resume_from=None,
+                     email_approval=False, github_review_id=None, approved_head=""):
+        seen.update(version=version, force=force, review=github_review_id,
+                    email=email_approval, head=approved_head)
+
+    monkeypatch.setattr(publish, "publish_release", fake_publish)
+    monkeypatch.setattr(sys, "argv", [*["publish.py"], *_GR, "77"])
+    assert publish.main() == 0
+    assert seen == {"version": "v0.20.0", "force": False, "review": 77, "email": False,
+                    "head": _HEAD}
+
+
+def test_github_review_refuses_record_for_another_head(monkeypatch):
+    # The approval covers one head; a record prepared for another refuses
+    # before any merge.
+    _stub_publish_steps(monkeypatch)
+    with pytest.raises(publish.StepError, match="different head"):
+        publish.publish_release(_release("pending_approval", rc_head_sha=_OTHER_HEAD),
+                                "v0.20.0", dry_run=False, force=False,
+                                github_review_id=77, approved_head=_HEAD)
+    publish.merge_rc_pr.assert_not_called()
+
+
+def test_github_review_refuses_missing_approved_head(monkeypatch):
+    _stub_publish_steps(monkeypatch)
+    with pytest.raises(publish.StepError, match="approved head"):
+        publish.publish_release(_release("pending_approval"), "v0.20.0",
+                                dry_run=False, force=False, github_review_id=77)
+    publish.merge_rc_pr.assert_not_called()
+
+
+def test_github_review_merge_is_pinned_and_tree_checked_before_tag(monkeypatch):
+    _stub_publish_steps(monkeypatch)
+    order = []
+    monkeypatch.setattr(publish, "merge_rc_pr",
+                        lambda *a, **k: order.append(("merge", k.get("match_head"))))
+    monkeypatch.setattr(publish, "verify_tree_matches_approved_head",
+                        lambda head, dry: order.append(("tree", head)))
+    monkeypatch.setattr(publish, "tag_and_push", lambda *a: order.append(("tag",)))
+    publish.publish_release(_release("pending_approval"), "v0.20.0",
+                            dry_run=False, force=False, github_review_id=77,
+                            approved_head=_HEAD)
+    assert order == [("merge", _HEAD), ("tree", _HEAD), ("tag",)]
+
+
+def test_github_review_tree_mismatch_publishes_nothing(monkeypatch):
+    _stub_publish_steps(monkeypatch)
+    monkeypatch.setattr(publish, "verify_tree_matches_approved_head",
+                        _REAL_VERIFY_TREE)
+
+    def fake_run(cmd, **_kw):
+        if cmd == ["git", "rev-parse", "HEAD^{tree}"]:
+            return _proc(stdout="1" * 40 + "\n")
+        if cmd == ["git", "rev-parse", f"{_HEAD}^{{tree}}"]:
+            return _proc(stdout="2" * 40 + "\n")
+        raise AssertionError(f"unexpected {cmd}")
+
+    monkeypatch.setattr(publish, "run", fake_run)
+    with pytest.raises(publish.StepError, match="already landed; nothing was tagged or published"):
+        publish.publish_release(_release("pending_approval"), "v0.20.0",
+                                dry_run=False, force=False, github_review_id=77,
+                                approved_head=_HEAD)
+    publish.tag_and_push.assert_not_called()
+    publish.npm_publish.assert_not_called()
+
+
+@pytest.mark.parametrize("head_rc,approved_rc", [(1, 0), (0, 128)])
+def test_tree_check_unreadable_refuses(monkeypatch, head_rc, approved_rc):
+    def fake_run(cmd, **_kw):
+        if cmd[-1] == "HEAD^{tree}":
+            return _proc(returncode=head_rc, stdout="1" * 40)
+        return _proc(returncode=approved_rc, stdout="1" * 40)
+
+    monkeypatch.setattr(publish, "run", fake_run)
+    with pytest.raises(publish.StepError, match="could not be read"):
+        publish.verify_tree_matches_approved_head(_HEAD, dry_run=False)
+
+
+def test_tree_check_refusal_says_merge_landed_and_nothing_published(monkeypatch):
+    def fake_run(cmd, **_kw):
+        if cmd[-1] == "HEAD^{tree}":
+            return _proc(stdout="1" * 40)
+        return _proc(stdout="2" * 40)
+
+    monkeypatch.setattr(publish, "run", fake_run)
+    with pytest.raises(publish.StepError) as info:
+        publish.verify_tree_matches_approved_head(_HEAD, dry_run=False)
+    text = str(info.value)
+    assert text.startswith("tree check FAILED")
+    assert "already landed" in text and "nothing was tagged or published" in text
+
+
+def test_step_error_is_the_last_output_line(monkeypatch, capsys):
+    monkeypatch.setattr(publish, "find_release", lambda *_a: _release("pending_approval"))
+    monkeypatch.setattr(publish, "telegram_send", lambda _t: None)
+    monkeypatch.setattr(publish, "set_release_status", lambda *_a, **_k: None)
+
+    def boom(*_a, **_k):
+        raise publish.StepError("tree check FAILED: example")
+
+    monkeypatch.setattr(publish, "publish_release", boom)
+    monkeypatch.setattr(sys, "argv", ["publish.py", "--version", "v0.20.0"])
+    assert publish.main() == 1
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert lines[-1] == "publish failed: tree check FAILED: example"
+
+
+def test_tree_check_passes_on_equal_trees(monkeypatch):
+    monkeypatch.setattr(publish, "run", lambda cmd, **_kw: _proc(stdout="1" * 40))
+    publish.verify_tree_matches_approved_head(_HEAD, dry_run=False)
+
+
+def test_merge_rc_pr_pins_head_and_never_treats_failure_as_merged(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **_kw):
+        calls.append(cmd)
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            return _proc(returncode=1, stderr="Head branch was modified")
+        if cmd[:3] == ["gh", "pr", "view"]:
+            return _proc(stdout="MERGED")
+        return _proc()
+
+    monkeypatch.setattr(publish, "run", fake_run)
+    with pytest.raises(publish.StepError, match="pinned to the approved head"):
+        publish.merge_rc_pr("https://github.com/x/y/pull/9", "release/v0.20.0",
+                            dry_run=False, version="v0.20.0", match_head=_HEAD)
+    assert calls[0] == ["gh", "pr", "merge", "https://github.com/x/y/pull/9",
+                        "--merge", "--match-head-commit", _HEAD]
+    assert not any(c[:2] == ["git", "fetch"] for c in calls)
 
 
 # ── RC field-name reconciliation (release_url/branch vs rc_pr_url/rc_branch) ──

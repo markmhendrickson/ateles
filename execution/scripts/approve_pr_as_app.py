@@ -243,6 +243,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import io
+import json
 import os
 import re
 import sys
@@ -3040,15 +3043,69 @@ def main() -> int:
             "as each lens's own App where it has one, else as the swarm App"
         ),
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "dry run only: print one JSON object (exit_code, head_sha, "
+            "overall_pass, refusing, report) instead of the text report, for a "
+            "caller that runs this tool as its own process. Refuses --apply."
+        ),
+    )
     args = parser.parse_args()
 
     extra_lenses = [x.strip() for x in args.lenses.split(",") if x.strip()]
+
+    if args.json:
+        if args.apply:
+            print(json.dumps({"exit_code": 2, "head_sha": "", "overall_pass": False,
+                              "refusing": "--json is a dry run and does not combine with --apply",
+                              "report": ""}))
+            return 2
+        result = evaluate_cli(args, extra_lenses)
+        print(json.dumps(result))
+        return int(result["exit_code"])
 
     try:
         return _run_cli(args, extra_lenses)
     except GitHubRateLimited as exc:
         print(exc.report())
         return EXIT_RATE_LIMITED_AFTER_SUBMIT if exc.submitted else EXIT_RATE_LIMITED
+
+
+def gate_result(exit_code: int, report: str) -> dict:
+    """The structured dry-run result built from the run's exit code and report."""
+    lines = [ln.strip() for ln in report.splitlines() if ln.strip()]
+    heads = [ln.split("=", 1)[1] for ln in lines if ln.startswith("head_sha=")]
+    refusing = next(
+        (ln for ln in lines if ln.startswith(("refusing", "approvers: UNUSABLE"))), ""
+    )
+    return {
+        "exit_code": exit_code,
+        "head_sha": heads[-1] if len(heads) == 1 else "",
+        "overall_pass": exit_code == 0 and "overall: PASS" in lines,
+        "refusing": refusing,
+        "report": report,
+    }
+
+
+def evaluate_cli(args: argparse.Namespace, extra_lenses: list[str]) -> dict:
+    """Run the dry-run gate and return its structured result.
+
+    Used by ``--json``, which runs as its own process: capturing this
+    process's stdout here touches no other caller.
+    """
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        try:
+            code = _run_cli(args, extra_lenses)
+        except GitHubRateLimited as exc:
+            print(exc.report())
+            code = EXIT_RATE_LIMITED_AFTER_SUBMIT if exc.submitted else EXIT_RATE_LIMITED
+        except Exception as exc:  # noqa: BLE001 — reported as a refusal
+            print(f"refusing: the gate raised {exc.__class__.__name__}")
+            code = 1
+    return gate_result(code, buf.getvalue())
 
 
 def _run_cli(args: argparse.Namespace, extra_lenses: list[str]) -> int:
