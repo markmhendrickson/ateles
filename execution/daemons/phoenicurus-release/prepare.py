@@ -976,7 +976,10 @@ CRITICAL CONSTRAINTS — read carefully:
   main checkout or any unrelated uncommitted changes.
 
 Your job — run the /release skill's PREPARE phase up to (and including) the
-release-candidate PR, then HALT:
+release-candidate PR, then HALT. Carry nothing over from an earlier attempt at
+this version: cut the release branch from the current origin/main, and re-run
+every check in steps 4-6 against that head, rewriting any review document left
+behind. If a leftover worktree or branch prevents that, STOP and report it.
 1. Preflight: confirm commits since {last_tag}, clean compare range.
 2. Choose the next version (semver: minor for features, patch for fixes only).
 3. Draft the release supplement (the human-readable notes), walking the commit
@@ -1046,6 +1049,10 @@ Be precise and terse in the Telegram/email messages. No motivational filler.
 """
 
 
+# Local-store selectors the prepare agent must not inherit.
+AGENT_ENV_DROP = ("NEOTOMA_DATA_DIR", "NEOTOMA_ENV")
+
+
 def _agent_env() -> dict:
     """Environment for the headless `claude --print` prepare agent.
 
@@ -1059,6 +1066,11 @@ def _agent_env() -> dict:
     account. If only the API key is present, we leave it untouched.
     """
     env = dict(os.environ)
+    # The env file selects a local store for this host's services. Commands the
+    # agent runs in a release worktree, the product's tests among them, must
+    # resolve their own test store instead.
+    for name in AGENT_ENV_DROP:
+        env.pop(name, None)
     if env.get("CLAUDE_CODE_OAUTH_TOKEN") and env.get("ANTHROPIC_API_KEY"):
         env.pop("ANTHROPIC_API_KEY", None)
         log.info(

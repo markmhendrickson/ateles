@@ -15,6 +15,8 @@ Run: pytest execution/daemons/phoenicurus-release/test_prepare.py -v
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 import prepare
@@ -381,3 +383,20 @@ def test_agent_env_does_not_mutate_daemon_env(monkeypatch):
     assert _os.environ.get("ANTHROPIC_API_KEY") == "sk-ant-xxx", (
         "the daemon's own env must be untouched — only the child copy is trimmed"
     )
+
+
+def test_agent_env_withholds_local_store_selectors(monkeypatch):
+    monkeypatch.setenv("NEOTOMA_DATA_DIR", "/srv/live-store")
+    monkeypatch.setenv("NEOTOMA_ENV", "production")
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
+    env = prepare._agent_env()
+    assert "NEOTOMA_DATA_DIR" not in env and "NEOTOMA_ENV" not in env
+    # Remote settings the record step relies on are untouched, as is the daemon.
+    assert env["NEOTOMA_BASE_URL"] == "https://neotoma.example.test"
+    assert os.environ["NEOTOMA_DATA_DIR"] == "/srv/live-store"
+
+
+def test_prompt_forbids_carrying_over_an_earlier_attempt():
+    text = prepare._build_agent_prompt("v0.31.0", 3)
+    assert "Carry nothing over from an earlier attempt" in text
+    assert "re-run\nevery check in steps 4-6" in text
