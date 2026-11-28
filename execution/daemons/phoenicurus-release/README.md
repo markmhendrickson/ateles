@@ -211,12 +211,15 @@ When it is on, Apis (`execution/daemons/apis/release_review_approval.py`):
   starts no publish at all: it sends a notice naming why instead;
 - publishes only when every condition holds, each read live at decision time:
   the review is the operator's (not a bot), is APPROVED on the current head, and
-  is not followed by a changes-requested or dismissed review or by a comment or
-  review that starts with hold, skip, stop or do not publish (leading Markdown
-  such as `**`, `>`, `#`, `-` or quote marks is ignored; a comment edited after
-  the approval counts from its edit time; the approving review's own body is
-  checked too; GitHub gives a review summary no edit time, so an older review
-  summary edited later is not seen, while a new hold comment is); the pull request is
+  its own comment box is empty (whitespace counts as empty); the operator has
+  done nothing else since approving, and no comment is read for its meaning:
+  any conversation comment or inline review comment by the operator login
+  created or edited at or after the approval's submission time refuses,
+  whatever it says; any other review by that login submitted at or after it
+  refuses, except one that is APPROVED on the same head with an empty body (a
+  changes-requested or dismissed review always refuses); comments by the swarm
+  App, bots and other logins are ignored; a missing, malformed or
+  time-zone-less timestamp on any of these refuses; the pull request is
   open, based on the release branch, from the same repository and not behind it;
   exactly one `release_result` matches the version and pull request URL, with
   status `pending_approval` and `rc_head_sha` equal to the head; the panel gate
@@ -236,7 +239,9 @@ When it is on, Apis (`execution/daemons/apis/release_review_approval.py`):
   pinned to it, and, after the merge and before any tag or publish step,
   checks that the tree it will tag equals the approved head's tree; a
   different tree (the base branch moved) stops the run and publishes nothing
-  (see "Tree check stopped a publish after the merge" below);
+  (see "Tree check stopped a publish after the merge" below). Anything the
+  operator posts after publish.py has started is not re-read: from then on
+  only stopping publish.py itself halts the release;
 - starts publish.py in its own session (`start_new_session=True`), as the email
   approval path also does, so a restart of Apis does not stop a publish
   mid-step;
@@ -249,7 +254,9 @@ When it is on, Apis (`execution/daemons/apis/release_review_approval.py`):
 
 Any condition that fails or cannot be read publishes nothing; Apis logs the
 reason, sends a notice, and posts one pull request comment as the App naming
-the condition. A failed or timed-out publish raises a red alert through the
+the condition, and both say what to do: submit a new approving review on the
+current head with an empty comment box, and add no comment after it. A failed
+or timed-out publish raises a red alert through the
 dispatcher's alert path.
 
 Turdus also keeps a local consumed-reply state file, `.turdus_state.json`, and
