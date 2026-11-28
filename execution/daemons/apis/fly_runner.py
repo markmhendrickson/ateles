@@ -194,7 +194,9 @@ class FlyPaused(FlyRefusal):
     fallback; ``cooled_until`` is the pause's end (empty when unknown)."""
 
     def __init__(self, state: "fly_pause.PauseState"):
-        super().__init__(state.message(), state.until_text())
+        # The summary, never the operator's free-text reason: this text
+        # reaches SkillResult.error and every failure classifier after it.
+        super().__init__(state.summary(), state.until_text())
         self.state = state
 
 
@@ -259,7 +261,7 @@ class FlyPausedError(FlyApiError):
     ``FlyApiError`` as "state unknown" and keeps what it holds."""
 
     def __init__(self, state: "fly_pause.PauseState"):
-        super().__init__(0, state.message())
+        super().__init__(0, state.summary())
         self.state = state
 
 
@@ -720,8 +722,9 @@ class FlyConfig:
         )
 
     def pause_state(self) -> "fly_pause.PauseState":
-        """The host-wide Fly pause, read from beside the ledger."""
-        return fly_pause.read_pause(fly_pause.pause_path(self.ledger_path))
+        """The host-wide Fly pause, read from its one fixed path
+        (``fly_pause.pause_file``), whatever the ledger setting."""
+        return fly_pause.read_pause(fly_pause.pause_file())
 
     def missing(self) -> list[str]:
         """Names of required settings that are unset (names only)."""
@@ -3220,7 +3223,33 @@ class FlyExecutor:
         ``asyncio.TimeoutError`` at the Apis deadline. Otherwise returns
         ``(returncode, stdout, stderr)``; ``job.remote_state`` then says
         whether the machine was confirmed terminated.
+
+        The pause boundary: any exception that escapes while the host-wide
+        pause is in force, or that a pause caused (a ``FlyPausedError``
+        anywhere in its chain), leaves as ``FlyPaused`` whenever nothing ran:
+        nothing was requested, or the failure is itself a "nothing ran"
+        refusal or launch failure. A pause that begins at any moment of the
+        launch is therefore never a launch failure a caller may replay
+        locally. An exception after a create/start was sent keeps its own
+        shape (an unknown outcome is never replayed either). Whatever cannot
+        be confirmed stays reserved, marked, by the settlement below.
         """
+        try:
+            return await self._run_unguarded(job)
+        except FlyPaused:
+            raise
+        except Exception as exc:
+            state = _pause_behind(exc, self.config)
+            if state is None or isinstance(exc, FlyUncertainLaunch) or (
+                job.launch_requested and not isinstance(exc, _NOTHING_RAN)
+            ):
+                raise
+            log.warning(f"[fly] run={job.run_id}: refused, Fly paused "
+                        f"({type(exc).__name__}): {state.message()}")  # fmt: skip
+            raise FlyPaused(state) from None
+
+    async def _run_unguarded(self, job: FlyJob) -> tuple[int, bytes, bytes]:
+        """``run`` without its pause boundary."""
         # Before any credential, ledger write or machine call.
         paused = self.config.pause_state()
         if paused.paused:
@@ -3398,15 +3427,10 @@ class FlyExecutor:
                                                   "nonce": ""}  # fmt: skip
                     self.ledger.set_machine(job.run_id, machine_id)
                     launch.machine_id = machine_id
-            except FlyPausedError as exc:
-                # The pause began during the claim (reconcile, read, settle,
-                # lease, config write or a start retry's read): the request
-                # was never sent. The same refusal as the up-front check,
-                # never a launch failure a caller may replay locally; run()
-                # keeps whatever it cannot confirm, marked for after the pause.
-                raise FlyPaused(exc.state) from None
             except (FlyApiError, httpx.HTTPError) as exc:
-                # Before any create/start was sent: provably nothing ran.
+                # Before any create/start was sent: provably nothing ran. A
+                # pause behind it (here, or in _reconcile_login's deferred
+                # settle) becomes FlyPaused at run()'s boundary.
                 raise FlyLaunchError(str(exc) or type(exc).__name__) from None
         job.machine_id = machine_id
         log.info(
@@ -4824,10 +4848,30 @@ def get_executor() -> FlyExecutor:
     return _EXECUTOR
 
 
+# Failures that mean nothing ran on Fly; while paused they leave run() as
+# FlyPaused even when a create/start had been attempted.
+_NOTHING_RAN = (FlyRefusal, FlyIneligible, FlyLaunchError)
+
+
+def _pause_behind(exc: BaseException, config: FlyConfig) -> "fly_pause.PauseState | None":
+    """The pause that caused *exc* (a ``FlyPausedError`` in its cause or
+    context chain, even one ``raise ... from None`` hid), else the pause in
+    force now, else None."""
+    seen: set[int] = set()
+    link: BaseException | None = exc
+    while link is not None and id(link) not in seen:
+        seen.add(id(link))
+        if isinstance(link, FlyPausedError):
+            return link.state
+        link = link.__cause__ or link.__context__
+    state = config.pause_state()
+    return state if state.paused else None
+
+
 def pause_state() -> "fly_pause.PauseState":
-    """The host-wide Fly pause, for callers that hold no executor."""
-    config = _EXECUTOR.config if _EXECUTOR is not None else FlyConfig.from_env()
-    return config.pause_state()
+    """The host-wide Fly pause, for callers that hold no executor. Its path
+    is fixed, so no configuration is read (an invalid one cannot hide it)."""
+    return fly_pause.read_pause(fly_pause.pause_file())
 
 
 def refuse_if_paused() -> None:

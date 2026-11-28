@@ -1,8 +1,11 @@
 """One host-wide switch that pauses every Fly Machines API call from this host.
 
-The pause record is a small JSON file next to the Fly runner ledger
-(``fly-runner-pause.json`` beside ``APIS_FLY_LEDGER_FILE``). It holds an
-expiry time and a short reason. While it is in force:
+The pause record is a small JSON file at ONE fixed path,
+``~/.config/ateles/fly-runner-pause.json`` under the account's home directory
+(``PAUSE_FILE``). It depends on no ledger, environment or dotenv setting, so
+``execution/scripts/fly_pause.py`` and the daemon always mean the same file;
+only a test replaces ``PAUSE_FILE``, in-process. It holds an expiry time and a
+short reason. While it is in force:
 
 * ``FlyMachinesClient._call`` (the one place every Machines API request
   goes through) refuses before any request is built, so Apis's periodic
@@ -20,6 +23,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import pwd
 import stat
 import time
 from dataclasses import dataclass
@@ -38,18 +42,23 @@ UNTIL_SLACK_SECONDS = 300
 UNKNOWN_TIME = "an unknown time"
 
 
-def ledger_path(env: dict | None = None) -> Path:
-    """The Fly runner ledger path, resolved exactly as ``FlyConfig.from_env``."""
-    env = os.environ if env is None else env
-    override = env.get("APIS_FLY_LEDGER_FILE", "").strip()
-    if override:
-        return Path(override).expanduser()
-    return Path.home() / ".config" / "ateles" / "fly-runner-ledger.json"
+def _account_home() -> Path:
+    """The account's home directory from the password database, not ``HOME``,
+    so a command and a daemon run as the same user resolve the same path."""
+    try:
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except (KeyError, OSError):
+        return Path.home()
 
 
-def pause_path(ledger_path: Path) -> Path:
-    """The pause record for the ledger at *ledger_path*."""
-    return Path(ledger_path).with_name(PAUSE_FILE_NAME)
+# The one pause record on this host. Never read from the environment; a test
+# replaces it in-process (monkeypatch) to keep off the account's real file.
+PAUSE_FILE = _account_home() / ".config" / "ateles" / PAUSE_FILE_NAME
+
+
+def pause_file() -> Path:
+    """The path every reader and writer of the pause uses."""
+    return Path(PAUSE_FILE)
 
 
 def _render(ts: float) -> str:
@@ -87,6 +96,19 @@ class PauseState:
                 "Fly paused: the pause record cannot be read; treated as paused "
                 f"until it is cleared with `{CLEAR_COMMAND}`"
             )
+
+    def summary(self) -> str:
+        """The refusal text WITHOUT the operator's free-text reason, for every
+        exception and result a caller may classify (a reason such as "usage
+        limit window" must never read as a provider failure). The reason is
+        in the record (``fly_pause.py show``) and the log. Never raises."""
+        until = self.until_text()
+        if until:
+            return f"Fly paused until {until} (reason: `fly_pause.py show`)"
+        return (
+            "Fly paused: the pause record cannot be read; treated as paused "
+            f"until it is cleared with `{CLEAR_COMMAND}`"
+        )
 
     def until_text(self) -> str:
         """The pause's end as UTC text; "" when unknown. Never raises."""

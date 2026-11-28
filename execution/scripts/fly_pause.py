@@ -4,8 +4,9 @@
 While paused, no code on this host that goes through the Fly runner makes a
 Fly Machines API call: Apis's periodic settlement and reaper skip, running
 jobs are left alone, and new launches (Apis dispatch, ``dispatch_role.py
---runner fly``, ``fly_lens_review.py``) refuse with "Fly paused until <time>:
-<reason>" and do not run locally instead. Use it to hold a production deploy
+--runner fly``, ``fly_lens_review.py``) refuse with "Fly paused until <time>"
+(the reason is shown by ``show`` and the logs, never in a refusal) and do not
+run locally instead. Use it to hold a production deploy
 window without unloading Apis.
 
     python3 execution/scripts/fly_pause.py set --reason "neotoma deploy" [--minutes 60]
@@ -13,8 +14,10 @@ window without unloading Apis.
     python3 execution/scripts/fly_pause.py clear
 
 The default duration is 60 minutes; over 12 hours is refused. The record lives
-beside the Fly runner ledger (``APIS_FLY_LEDGER_FILE``, default
-``~/.config/ateles/fly-runner-ledger.json``); run with the same value as Apis.
+at one fixed path, ``~/.config/ateles/fly-runner-pause.json`` in the account's
+home directory, which no environment or ledger setting moves: the path this
+command writes is the path Apis, ``dispatch_role.py`` and ``fly_lens_review.py``
+read, and ``set`` prints it.
 Exit codes: 0 done (``show``: not paused); 1 ``show``: paused; 2 refused
 (including a ``clear`` that could not remove what is at the record path).
 Standard library only. See docs/cloud_hosting.md.
@@ -33,7 +36,9 @@ if str(APIS_DIR) not in sys.path:
 import fly_pause  # noqa: E402 - daemon module, stdlib only
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, pause_file: Path | None = None) -> int:
+    """*pause_file* is for tests only; the command never takes it from the
+    environment."""
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="command", required=True)
     set_p = sub.add_parser("set", help="pause Fly calls from this host")
@@ -50,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("show", help="print the pause in force, if any")
     args = p.parse_args(argv)
 
-    path = fly_pause.pause_path(fly_pause.ledger_path())
+    path = Path(pause_file) if pause_file is not None else fly_pause.pause_file()
     if args.command == "set":
         try:
             state = fly_pause.set_pause(

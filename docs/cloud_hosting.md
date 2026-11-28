@@ -251,10 +251,13 @@ python3 execution/scripts/fly_pause.py clear
 ```
 
 The default is 60 minutes, and a pause over 12 hours is refused. The record
-is a small file, `fly-runner-pause.json`, next to the Fly runner ledger
-(`APIS_FLY_LEDGER_FILE`, default `~/.config/ateles/fly-runner-ledger.json`).
-Run the command with the same `APIS_FLY_LEDGER_FILE` as Apis. It holds the
-expiry time and the reason. Once the expiry passes, the pause is over, and
+is a small file at one fixed path, `~/.config/ateles/fly-runner-pause.json` in
+the account's home directory. No environment, dotenv or ledger setting
+(including `APIS_FLY_LEDGER_FILE`) moves it, so the file the command writes is
+the file Apis, `dispatch_role.py` and `fly_lens_review.py` read; `set` prints
+the path. It holds the expiry time and the reason. The reason is shown by
+`show` and in the logs only: refusals carry the expiry, never the reason, so
+no reason text can read as a provider failure. Once the expiry passes, the pause is over, and
 nobody needs to clear it.
 
 While the pause is in force:
@@ -264,7 +267,7 @@ While the pause is in force:
   request is built. That covers the create, get, update, start, stop, lease,
   destroy, list and wait calls, so it covers launches, polls, clean-up, the
   reaper, Apis's periodic settlement and `fly_machine_status.py`.
-- **New launches refuse up front** with `Fly paused until <time>: <reason>`.
+- **New launches refuse up front** with `Fly paused until <time>`.
   This covers Apis dispatch, `dispatch_role.py --runner fly` and
   `fly_lens_review.py`. Nothing is minted, reserved or admitted, and the work
   never runs locally instead. For a task Apis dispatches, the result reads

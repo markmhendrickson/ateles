@@ -591,7 +591,7 @@ def fly_pause_message() -> str:
     try:
         import fly_pause  # noqa: PLC0415 - daemon module, stdlib only
 
-        state = fly_pause.read_pause(fly_pause.pause_path(fly_pause.ledger_path()))
+        state = fly_pause.read_pause(fly_pause.pause_file())
         return state.message() if state.paused else ""
     except Exception as exc:  # noqa: BLE001 - fail closed: an unknown pause is a pause
         return f"Fly paused: the pause state cannot be read ({type(exc).__name__})"

@@ -53,8 +53,8 @@ _SCRIPTS = _REPO_ROOT / "execution" / "scripts"
 
 
 def _pause_file(executor=None) -> Path:
-    ledger = executor.config.ledger_path if executor else fly_pause.ledger_path()
-    return fly_pause.pause_path(ledger)
+    # One fixed path, whatever the executor's ledger (conftest isolates it).
+    return fly_pause.pause_file()
 
 
 def _pause(executor=None, reason="neotoma deploy", seconds=600) -> fly_pause.PauseState:
@@ -84,8 +84,36 @@ def _counted(executor, fake) -> _Transport:
 # ── The record ────────────────────────────────────────────────────────────────
 
 
-def test_ledger_path_matches_the_runner_config(fly_env):
-    assert fly_pause.ledger_path() == fly_runner.FlyConfig.from_env().ledger_path
+def test_the_pause_path_is_fixed_whatever_the_ledger_setting(
+    fly_env, monkeypatch, tmp_path, capsys
+):
+    """Class 3: the command and the daemon always mean the same file. RED on
+    the round-2 head: the record lived beside ``APIS_FLY_LEDGER_FILE``, so a
+    command run without the daemon's override paused nothing."""
+    monkeypatch.undo()  # the real fixed path, not the conftest replacement
+    real = fly_pause.pause_file()
+    assert (
+        real
+        == fly_pause._account_home() / ".config" / "ateles" / "fly-runner-pause.json"
+    )
+    monkeypatch.setenv(
+        "APIS_FLY_LEDGER_FILE", str(tmp_path / "elsewhere" / "ledger.json")
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "other-home"))
+    assert fly_pause.pause_file() == real  # neither setting moves it
+    # Back to an isolated record; the daemon's config points its ledger away.
+    monkeypatch.setattr(fly_pause, "PAUSE_FILE", tmp_path / "fixed" / "p.json")
+    config = fly_runner.FlyConfig.from_env()
+    assert config.ledger_path == tmp_path / "elsewhere" / "ledger.json"
+    monkeypatch.delenv("APIS_FLY_LEDGER_FILE")  # the command runs without it
+    assert _cli().main(["set", "--reason", "neotoma deploy"]) == 0
+    out = capsys.readouterr().out
+    assert str(tmp_path / "fixed" / "p.json") in out  # set names the path read
+    assert config.pause_state().paused  # the daemon, ledger elsewhere, sees it
+    assert fly_runner.pause_state().paused
+    assert _lens_review().fly_pause_message()
+    assert _cli().main(["clear"]) == 0
+    assert not config.pause_state().paused
 
 
 def test_absent_record_is_not_a_pause(tmp_path):
@@ -185,7 +213,7 @@ def test_symlinks_fail_closed_dangling_or_not(tmp_path):
     dangling.symlink_to(tmp_path / "missing.json")
     live = tmp_path / "live.json"
     live.symlink_to(target)
-    loop = tmp_path / "loop.json"
+    loop = tmp_path / "loop.json"  # noqa: F811
     loop.symlink_to(loop)
     for path in (dangling, live, loop):
         state = fly_pause.read_pause(path)
@@ -364,7 +392,8 @@ def test_a_launch_is_refused_up_front_with_nothing_minted_or_reserved(fly_env):
     with pytest.raises(fly_runner.FlyPaused) as exc:
         asyncio.run(executor.run(_job()))
     assert str(exc.value).startswith("Fly paused until ")
-    assert str(exc.value).endswith(": neotoma deploy")
+    assert "neotoma deploy" not in str(exc.value)  # the reason stays in the record
+    assert exc.value.state.reason == "neotoma deploy"
     assert exc.value.cooled_until  # when to try again
     assert isinstance(exc.value, fly_runner.FlyRefusal)  # never a local fallback
     assert transport.seen == [] and minted == [] and revoked == []
@@ -422,7 +451,7 @@ def test_dispatch_refuses_and_never_runs_locally(fly_env, seam, monkeypatch):
         result = _once(runner="fly", repository="owner/repo", github_token="")
     assert not result.ok
     assert result.error.startswith("fly runner refused: Fly paused until ")
-    assert result.error.endswith(": neotoma deploy")
+    assert "neotoma deploy" not in result.error and result.fly_paused
     assert spawned == [] and transport.seen == [] and minted == []
     assert test_fly_runner._session(fly_env).requests == []  # no admission check either
 
@@ -819,3 +848,220 @@ def test_lens_review_a_lens_refused_by_a_pause_never_falls_back(
     last = summary["lenses"][-1]
     assert last["lens"] == dispatched[-1] and last["status"] == "not_run"
     assert "Fly paused" in last["reason"]
+
+
+# ── Round 3: one boundary per class ───────────────────────────────────────────
+
+
+_REAL_CALL = fly_runner.FlyMachinesClient._call
+
+
+def _paused_at_call(executor, n):
+    """Make the *n*th Machines API call (0-based) set the pause just before
+    it is attempted; returns the calls that actually reached the transport
+    (a call refused by the pause is not one)."""
+    sent: list[tuple[str, str]] = []
+    attempts = [0]
+
+    async def call(client, method, path, **kw):
+        if attempts[0] == n:
+            _pause(executor, reason="neotoma deploy")
+        attempts[0] += 1
+        try:
+            return await _REAL_CALL(client, method, path, **kw)
+        except fly_runner.FlyPausedError:
+            raise  # refused before the transport: not sent
+        finally:
+            if not client.config.pause_state().paused:
+                sent.append((method, path))
+
+    return sent, call
+
+
+def _launch_calls(make, job_factory, monkeypatch):
+    """The Machines API calls of an unpaused launch, up to and including the
+    create or start: the indexes the sweep raises the pause at."""
+    executor, fake = make()
+    calls, call = _paused_at_call(executor, 10**6)
+    monkeypatch.setattr(fly_runner.FlyMachinesClient, "_call", call)
+    asyncio.run(executor.run(job_factory()))
+    monkeypatch.setattr(fly_runner.FlyMachinesClient, "_call", _REAL_CALL)
+    ends = [
+        i
+        for i, (m, p) in enumerate(calls)
+        if m == "POST" and (p.endswith("/start") or p.rstrip("/").endswith("/machines"))
+    ]
+    assert ends, calls
+    return ends[0] + 1
+
+
+def _fresh_ledger(tmp_path) -> Path:
+    n = len(list(tmp_path.glob("sweep-*")))
+    path = tmp_path / f"sweep-{n}"
+    path.mkdir()
+    return path / "fly-runner-ledger.json"
+
+
+def _codex_with_dead_reservation(monkeypatch, tmp_path):
+    def make():
+        fake = _codex_fake(monkeypatch)
+        clock = Clock()
+        executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "x"},
+                                       clock=clock, ledger_path=_fresh_ledger(tmp_path))  # fmt: skip
+        # A reservation from a previous job that _reconcile_login must settle.
+        run_id = _seed_marked_login(executor, clock)
+        fake.machines["m-codex"]["config"] = _job_config(run_id)
+        return executor, fake
+
+    return make
+
+
+def test_sweep_a_pause_at_every_launch_call_is_the_pause_refusal(
+    fly_env, monkeypatch, tmp_path
+):
+    """Class 1, executor boundary: whichever Machines API call the pause
+    lands on (reconcile of a previous reservation, read, settle, lease,
+    config write, start), run() ends as FlyPaused, never FlyLaunchError.
+    RED on the round-2 head at the _reconcile_login indexes (FlyLaunchError)."""
+    make = _codex_with_dead_reservation(monkeypatch, tmp_path)
+    total = _launch_calls(make, _codex_job, monkeypatch)
+    assert total >= 4  # reconcile + claim + start are all swept
+    for n in range(total):
+        monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
+        executor, fake = make()
+        calls, call = _paused_at_call(executor, n)
+        monkeypatch.setattr(fly_runner.FlyMachinesClient, "_call", call)
+        job = _codex_job()
+        with pytest.raises(fly_runner.FlyPaused) as exc:
+            asyncio.run(executor.run(job))
+        assert not isinstance(exc.value, fly_runner.FlyLaunchError), n
+        assert str(exc.value).startswith("Fly paused until "), n
+        assert len(calls) == n, (n, calls)  # nothing sent once paused
+        assert fake.machines["m-codex"]["state"] == "stopped", n  # never started
+        fly_pause.clear_pause(_pause_file(executor))
+
+
+def test_sweep_dispatch_paused_at_each_call_never_runs_locally(
+    fly_env, seam, monkeypatch, tmp_path
+):
+    """Class 1, dispatch boundary, with local fallback on: a pause landing on
+    any Machines API call of a launch, up to its create, is the pause
+    refusal, never a local run and never "Fly launch failed"."""
+    spawned, fake_exec = seam
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
+    monkeypatch.setenv("APIS_FLY_LOCAL_FALLBACK", "1")
+
+    def make():
+        fake = FakeFly()
+        executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "x"},
+                                       ledger_path=_fresh_ledger(tmp_path))  # fmt: skip
+        return executor, fake
+
+    total = _launch_calls(make, _job, monkeypatch)
+    for n in range(total):
+        executor, _ = make()
+        monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+        calls, call = _paused_at_call(executor, n)
+        monkeypatch.setattr(fly_runner.FlyMachinesClient, "_call", call)
+        with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+            result = _once(action_class="carry_forward_check", model="m",
+                           repository="owner/repo", github_token="t-local")  # fmt: skip
+        assert spawned == [], n  # never run locally
+        assert not result.ok and result.fly_paused is True, (n, result.error)
+        assert "launch failed" not in result.error, n
+        assert result.error.startswith("fly runner refused: Fly paused until "), n
+        assert len(calls) == n, (n, calls)  # nothing sent once paused
+        fly_pause.clear_pause(_pause_file(executor))
+
+
+@pytest.mark.parametrize("exc_type", ["launch", "ineligible", "other_refusal"])
+def test_the_local_fallback_branch_refuses_whenever_paused(
+    fly_env, seam, monkeypatch, exc_type
+):
+    """Class 1, the one local-fallback branch: whatever the failure, while a
+    pause is in force nothing runs locally. RED on the round-2 head for a
+    FlyLaunchError raised with the pause in force (it ran locally)."""
+    spawned, fake_exec = seam
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
+    monkeypatch.setenv("APIS_FLY_LOCAL_FALLBACK", "1")
+    executor, _, _ = make_executor(FakeFly(), record={"exit_code": 0, "stdout": "x"})
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    errors = {
+        "launch": fly_runner.FlyLaunchError("machine refused (409)"),
+        "ineligible": fly_runner.FlyIneligible("image unknown"),
+        "other_refusal": fly_runner.FlyLaunchError("network down"),
+    }
+
+    async def run(job):
+        _pause(executor, reason="neotoma deploy")
+        raise errors[exc_type]
+
+    monkeypatch.setattr(executor, "run", run)
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(action_class="carry_forward_check", model="m", repository="owner/repo",
+                       github_token="t-local")  # fmt: skip
+    assert spawned == []
+    assert result.fly_paused is True and result.fly_nothing_launched is True
+    assert result.error.startswith("fly runner refused: Fly paused until ")
+
+
+_ALARMING_REASON = (
+    "usage limit window: quota exceeded, rate limit 429, capacity, overloaded, "
+    "session limit, login required, unauthorized 401, auth expired"
+)
+
+
+def test_the_pause_reason_never_reaches_a_failure_classifier(
+    fly_env, seam, monkeypatch
+):
+    """Class 2: a reason full of capacity, quota, rate-limit and auth words
+    never enters SkillResult.error, and the provider loop ends on the
+    structured flag with no cooldown or failover. RED on the round-2 head:
+    the reason was in error and classified as capacity."""
+    spawned, fake_exec = seam
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
+    state = _pause(reason=_ALARMING_REASON)
+    assert state.reason == _ALARMING_REASON  # the record keeps it
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(action_class="carry_forward_check", model="m", repository="owner/repo",
+                       github_token="t-local")  # fmt: skip
+    assert spawned == [] and result.fly_paused is True
+    for word in (
+        "usage",
+        "quota",
+        "rate",
+        "capacity",
+        "login",
+        "unauthorized",
+        "401",
+        "429",
+    ):
+        assert word not in result.error.lower(), word
+    import skill_runner
+
+    assert (
+        skill_runner._provider_failure_kind(result.error, result.stderr, result.stdout)
+        is None
+    )
+    # Mid-run refusal text too (FlyPaused, FlyPausedError): no reason.
+    assert _ALARMING_REASON not in str(fly_runner.FlyPaused(state))
+    assert _ALARMING_REASON not in str(fly_runner.FlyPausedError(state))
+
+
+from test_fly_provider_failover import loop  # noqa: E402,F401 - fixture, used by name
+
+
+def test_the_provider_loop_ends_on_a_pause_without_cooling(loop):  # noqa: F811
+    """Class 2, the provider loop: a pause whose reason reads as capacity and
+    auth failures ends the dispatch on its structured flag, before any
+    classifier: one attempt, no provider cooled, no failover, no local run.
+    RED on the round-2 head: the reason classified as capacity, the provider
+    was cooled and the next one tried."""
+    run, seen = loop
+    _pause(reason=_ALARMING_REASON)
+    result = run(["claude", "codex", "cursor"])
+    assert result.fly_paused is True and not result.ok
+    assert seen["attempts"] == ["claude"]  # no failover
+    assert seen["cooled"] == []  # no cooldown
+    assert seen["spawned"] == []  # no local run
+    assert _ALARMING_REASON not in result.error
