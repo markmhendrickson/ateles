@@ -196,7 +196,9 @@ Config: set `APIS_APPROVE_EMAIL_SECRET` (shared, Turdus + Apis) and
 release pull request (head branch `release/<version>` in
 `PHOENICURUS_RELEASE_REPO`) publish that release. Only the exact value `1`
 turns it on; unset or any other value leaves Apis exactly as it is without the
-flag.
+flag. The flag governs the dispatcher's routes only: what Apis does with a
+review, comment or email approval on a release pull request. It changes nothing
+in publish.py's own command line.
 
 It is **off by default**, and it is set nowhere in this repository (no plist,
 env file or workflow). It is enabled only after a separate prerequisite change
@@ -211,15 +213,16 @@ When it is on, Apis (`execution/daemons/apis/release_review_approval.py`):
   starts no publish at all: it sends a notice naming why instead;
 - publishes only when every condition holds, each read live at decision time:
   the review is the operator's (not a bot), is APPROVED on the current head, and
-  its own comment box is empty (whitespace counts as empty); the operator has
-  done nothing else since approving, and no comment is read for its meaning:
-  any conversation comment or inline review comment by the operator login
-  created or edited at or after the approval's submission time refuses,
-  whatever it says; any other review by that login submitted at or after it
-  refuses, except one that is APPROVED on the same head with an empty body (a
-  changes-requested or dismissed review always refuses); comments by the swarm
-  App, bots and other logins are ignored; a missing, malformed or
-  time-zone-less timestamp on any of these refuses; the pull request is
+  its own comment box is empty (whitespace counts as empty); and the approval
+  is bare. No word, time or edit is compared: the publish refuses if the
+  operator login has, at any time before or after the approval, (a) any
+  conversation comment on the pull request, (b) any inline review comment,
+  including one that belongs to the approving review itself, or (c) any
+  review, of any state or age, that is not APPROVED with an empty body. An
+  earlier empty approval is allowed. Comments and reviews by the swarm App,
+  bots and other logins are ignored. Every list is read to its last page or
+  the publish refuses, and a row whose author, id or state cannot be read
+  refuses. The pull request is
   open, based on the release branch, from the same repository and not behind it;
   exactly one `release_result` matches the version and pull request URL, with
   status `pending_approval` and `rc_head_sha` equal to the head; the panel gate
@@ -229,7 +232,7 @@ When it is on, Apis (`execution/daemons/apis/release_review_approval.py`):
   <review id> --approved-head <sha>` once, under a per-version lock. The panel
   gate is slow, so it runs after a first pass over the other conditions; then,
   under the lock and immediately before the start, every other condition is
-  read again (the review by id, later reviews and comments, the App approval,
+  read again (the review by id, every review and comment, the App approval,
   the pull request state, head, base and behind count, and the release record)
   and must give the same result, so a withdrawal made while the gate ran stops
   the publish. `--from-github-review` requires `--approved-head`, moves
@@ -254,8 +257,12 @@ When it is on, Apis (`execution/daemons/apis/release_review_approval.py`):
 
 Any condition that fails or cannot be read publishes nothing; Apis logs the
 reason, sends a notice, and posts one pull request comment as the App naming
-the condition, and both say what to do: submit a new approving review on the
-current head with an empty comment box, and add no comment after it. A failed
+the condition. Both say plainly that this release pull request cannot be
+published by review once the operator has commented on it (or submitted any
+review other than an empty approval), and that the release then needs the
+operator's go relayed to the session running it; otherwise, once the condition
+is met, a new approving review on the current head with an empty comment box
+publishes it. A failed
 or timed-out publish raises a red alert through the
 dispatcher's alert path.
 
