@@ -13,15 +13,20 @@ import pytest
 from execution.scripts import store_disk_watch as watch
 
 NOW = 1_800_000_000
-TARGET = {"app": "synthetic", "volume": "synthetic", "mount": "/data"}
+TARGET = {"app": "synthetic", "mount": "/data"}
 ENV = {"STORE_WATCH_CONFIG_IDS": '["ent_synthetic"]'}
-NAMES = {
-    "used": "synthetic_used",
-    "size": "synthetic_size",
-    "app_label": "app",
-    "volume_label": "volume",
-    "mount_label": "mount",
+GAUGES = {
+    "fly_instance_filesystem_blocks": 110,
+    "fly_instance_filesystem_blocks_free": 20,
+    "fly_instance_filesystem_blocks_avail": 10,
 }
+
+
+def reading(percent, stamp):
+    return {
+        "complete": True,
+        "instances": [{"instance": "synthetic-a", "percent": percent, "stamp": stamp}],
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -41,10 +46,7 @@ class Records:
             "entity_type": "deployment_configuration",
             "snapshot": {
                 "fly_app": TARGET["app"],
-                "gotchas": [
-                    watch.CONFIG_PREFIX
-                    + json.dumps([{k: TARGET[k] for k in ("volume", "mount")}])
-                ],
+                "gotchas": [watch.CONFIG_PREFIX + json.dumps([TARGET["mount"]])],
             },
         }
         self.tasks = {}
@@ -81,7 +83,9 @@ class Records:
             ]
             return {"entities": rows, "total": len(rows)}
         if path == "/correct":
-            self.tasks[body["entity_id"]][body["field"]] = body["value"]
+            if body["idempotency_key"] not in self.replays:
+                self.tasks[body["entity_id"]][body["field"]] = body["value"]
+                self.replays.add(body["idempotency_key"])
             return {"success": True}
         if method == "GET":
             return {"snapshot": copy.deepcopy(self.tasks[path.rsplit("/", 1)[1]])}
@@ -102,7 +106,7 @@ def rig(tmp_path):
         return watch.run_once(
             path,
             records,
-            read or (lambda target, clock: (percent, clock)),
+            read or (lambda target, clock: reading(percent, clock)),
             notify or send,
             ENV if environ is None else environ,
             now,
@@ -128,7 +132,12 @@ def test_threshold_effect_creates_human_task_and_notice(rig, percent, expected):
     assert len(rig.sent) == len(rig.records.tasks) == (expected != "healthy")
     for task in rig.records.tasks.values():
         assert task["status"] == "blocked" and task["assigned_to"] == "operator"
-        assert json.loads(task["notes"])["delivery"] == "delivered"
+        assert (
+            json.loads(
+                task["notes"].split("store-watch-delivery: ")[1].splitlines()[0]
+            )["delivery"]
+            == "delivered"
+        )
 
 
 def test_dedup_escalation_recovery_and_restart(rig):
@@ -180,10 +189,20 @@ def test_unconfirmed_send_is_undelivered_and_retried_as_same_task(rig):
     report = rig.poll(90, notify=lambda event: False)
     assert report["undelivered"] == 1
     task = next(iter(rig.records.tasks.values()))
-    assert json.loads(task["notes"])["delivery"] == "undelivered"
+    assert (
+        json.loads(task["notes"].split("store-watch-delivery: ")[1].splitlines()[0])[
+            "delivery"
+        ]
+        == "undelivered"
+    )
     rig.poll(90, NOW + 60)
     assert len(rig.sent) == 1 and len(rig.records.tasks) == 1
-    assert json.loads(task["notes"])["delivery"] == "delivered"
+    assert (
+        json.loads(task["notes"].split("store-watch-delivery: ")[1].splitlines()[0])[
+            "delivery"
+        ]
+        == "delivered"
+    )
 
 
 def test_truthy_uncertain_send_result_never_means_delivered(rig):
@@ -303,50 +322,125 @@ def test_unreadable_state_read_itself_fails_closed(rig, monkeypatch):
     assert not rig.sent
 
 
-def metric_reply(query, value="80", timestamp=NOW, labels=None):
-    if query.startswith("timestamp("):
-        value = str(timestamp)
-    return {
-        "status": "success",
-        "data": {
-            "resultType": "vector",
-            "result": [{"metric": labels or TARGET, "value": [NOW, value]}],
-        },
-    }
+def metric_reply(query, values=None, timestamps=None):
+    source_time = query.startswith("timestamp(")
+    name = query.removeprefix("timestamp(").split("{")[0]
+    values = values or {"synthetic-a": GAUGES}
+    rows = []
+    for instance, gauges in values.items():
+        if name not in gauges:
+            continue
+        labels = {**TARGET, "region": "synthetic", "host": "abcd", "instance": instance}
+        # timestamp() drops __name__; raw gauges include it.
+        if not source_time:
+            labels["__name__"] = name
+        value = (
+            (timestamps or {}).get((instance, name), NOW)
+            if source_time
+            else gauges[name]
+        )
+        rows.append({"metric": labels, "value": [NOW, str(value)]})
+    return {"status": "success", "data": {"resultType": "vector", "result": rows}}
 
 
 def metrics(handler):
     env = {
         "STORE_WATCH_METRICS_URL": "https://metrics.invalid/api/v1/query",
         watch.TOKEN_ENV: "FlyV1 synthetic",
-        "STORE_WATCH_METRICS": json.dumps(NAMES),
     }
     return watch.Metrics(env, httpx.Client(transport=httpx.MockTransport(handler)))
 
 
-def test_metrics_get_uses_named_token_exact_selectors_and_source_freshness():
+def test_filesystem_df_ratio_and_valid_promql_selectors_without_mapping():
     seen = []
 
     def handler(request):
         seen.append(request)
-        query = request.url.params["query"]
-        return httpx.Response(
-            200,
-            json=metric_reply(
-                query, "100" if query.startswith("synthetic_size") else "85"
-            ),
-        )
+        return httpx.Response(200, json=metric_reply(request.url.params["query"]))
 
-    percent, stamp = metrics(handler).read(TARGET, NOW)
-    assert percent == 85 and stamp == NOW and len(seen) == 4
+    result = metrics(handler).read(TARGET, NOW)
+    assert result == reading(90, NOW)  # 90 / (90 + 10), not 90 / 110
+    assert len(seen) == 6
+    expected = {name + '{app="synthetic",mount="/data"}' for name in GAUGES}
+    assert {r.url.params["query"] for r in seen} == expected | {
+        "timestamp(" + query + ")" for query in expected
+    }
     assert all(
         r.method == "GET" and r.headers["Authorization"] == "FlyV1 synthetic"
         for r in seen
     )
-    assert (
-        'app="synthetic",mount="/data",volume="synthetic"'
-        in seen[0].url.params["query"]
+
+
+@pytest.mark.parametrize(
+    "damage", ["stale", "nan", "missing", "duplicate", "negative", "zero", "bad_sample"]
+)
+@pytest.mark.parametrize("bad_first", [False, True])
+def test_valid_critical_sibling_alerts_but_partial_read_never_refreshes_success(
+    rig, damage, bad_first
+):
+    rig.poll()
+    values = {"synthetic-a": dict(GAUGES), "synthetic-b": dict(GAUGES)}
+    timestamps = {}
+    if damage == "stale":
+        timestamps[("synthetic-b", "fly_instance_filesystem_blocks_avail")] = NOW - 301
+    elif damage == "nan":
+        values["synthetic-b"]["fly_instance_filesystem_blocks_free"] = "NaN"
+    elif damage == "missing":
+        del values["synthetic-b"]["fly_instance_filesystem_blocks_avail"]
+    elif damage == "negative":
+        values["synthetic-b"]["fly_instance_filesystem_blocks_avail"] = -1
+    elif damage == "zero":
+        values["synthetic-b"] = dict.fromkeys(GAUGES, 0)
+    if bad_first:
+        values = dict(reversed(list(values.items())))
+
+    def handler(request):
+        payload = metric_reply(request.url.params["query"], values, timestamps)
+        rows = payload["data"]["result"]
+        bad = next((r for r in rows if r["metric"]["instance"] == "synthetic-b"), None)
+        if bad and damage == "duplicate":
+            rows.append(copy.deepcopy(bad))
+        if bad and damage == "bad_sample":
+            bad["value"] = []
+        return httpx.Response(200, json=payload)
+
+    result = rig.poll(now=NOW + 60, read=metrics(handler).read)
+    target = result["volumes"][0]
+    assert target["status"] == "critical" and target["complete"] is False
+    assert len(rig.sent) == 1 and "synthetic-a" in rig.sent[0]["message"]
+    state = watch.read_state(rig.path, NOW + 60)
+    assert next(iter(state["volumes"].values()))["last_success"] == NOW
+    rig.poll(now=NOW + 3600, read=metrics(handler).read)
+    assert any("one hour" in e["message"] for e in rig.sent)
+
+
+def test_all_instances_valid_uses_worst_level(rig):
+    values = {
+        "synthetic-a": dict(GAUGES),
+        "synthetic-b": {
+            "fly_instance_filesystem_blocks": 100,
+            "fly_instance_filesystem_blocks_free": 50,
+            "fly_instance_filesystem_blocks_avail": 50,
+        },
+    }
+    source = metrics(
+        lambda r: httpx.Response(200, json=metric_reply(r.url.params["query"], values))
     )
+    report = rig.poll(read=source.read)
+    assert report["volumes"][0]["percent"] == 90
+    assert report["volumes"][0]["complete"] is True
+    assert "synthetic-a" in rig.sent[0]["message"]
+
+
+def test_partial_healthy_read_cannot_clear_critical_or_stale_alarm(rig):
+    rig.poll(90)
+    rig.poll(now=NOW + 3600, read=no_read)
+    partial = reading(20, NOW + 3660)
+    partial["complete"] = False
+    rig.poll(now=NOW + 3660, read=lambda *args: partial)
+    state = next(iter(watch.read_state(rig.path, NOW + 3660)["volumes"].values()))
+    assert state["level"] == "critical" and state["stale"] is True
+    assert len(rig.sent) == 2
 
 
 @pytest.mark.parametrize(
@@ -358,8 +452,8 @@ def test_metrics_get_uses_named_token_exact_selectors_and_source_freshness():
         lambda p: p["data"].update(isPartial=True),
         lambda p: p["data"].update(result=[]),
         lambda p: p["data"].update(resultType="matrix"),
-        lambda p: p["data"]["result"].append(copy.deepcopy(p["data"]["result"][0])),
-        lambda p: p["data"]["result"][0]["metric"].update(volume="wrong"),
+        lambda p: p["data"]["result"][0]["metric"].update(mount="wrong"),
+        lambda p: p["data"]["result"][0]["metric"].pop("instance"),
         lambda p: p["data"]["result"][0].update(value=[NOW - 301, "80"]),
         lambda p: p["data"]["result"][0].update(value=[NOW + 31, "80"]),
         lambda p: p["data"]["result"][0].update(value=[NOW, "NaN"]),
@@ -373,43 +467,38 @@ def test_empty_partial_wrong_and_unparsable_metrics_are_unknown(change):
         change(payload)
         return httpx.Response(200, json=payload)
 
-    with pytest.raises(watch.Unknown):
-        metrics(handler).read(TARGET, NOW)
+    assert metrics(handler).read(TARGET, NOW) == {"instances": [], "complete": False}
 
 
-def test_fresh_query_timestamp_does_not_hide_old_source_sample():
-    with pytest.raises(watch.Unknown, match="metrics_stale"):
-        metrics(
-            lambda request: httpx.Response(
-                200,
-                json=metric_reply(request.url.params["query"], timestamp=NOW - 3600),
-            )
-        ).read(TARGET, NOW)
-
-
-@pytest.mark.parametrize("used,size", [(101, 100), (-1, 100), (0, 0)])
-def test_invalid_capacity_is_unknown(used, size):
-    def handler(request):
-        query = request.url.params["query"]
-        return httpx.Response(
+@pytest.mark.parametrize("name", list(GAUGES))
+def test_source_freshness_checked_for_every_gauge(name):
+    source = metrics(
+        lambda r: httpx.Response(
             200,
             json=metric_reply(
-                query, str(size if query.startswith("synthetic_size") else used)
+                r.url.params["query"], timestamps={("synthetic-a", name): NOW - 3600}
             ),
         )
+    )
+    assert source.read(TARGET, NOW) == {"instances": [], "complete": False}
 
-    with pytest.raises(watch.Unknown):
-        metrics(handler).read(TARGET, NOW)
+
+def test_no_application_space_is_100_percent():
+    values = {"synthetic-a": {**GAUGES, "fly_instance_filesystem_blocks_avail": 0}}
+    source = metrics(
+        lambda r: httpx.Response(200, json=metric_reply(r.url.params["query"], values))
+    )
+    assert source.read(TARGET, NOW) == reading(100, NOW)
 
 
 @pytest.mark.parametrize("status", [302, 401, 403, 429, 500])
 def test_http_failures_and_redirects_are_unknown(status):
-    with pytest.raises(watch.Unknown):
-        metrics(
-            lambda request: httpx.Response(
-                status, headers={"Location": "https://other.invalid/"}
-            )
-        ).read(TARGET, NOW)
+    source = metrics(
+        lambda request: httpx.Response(
+            status, headers={"Location": "https://other.invalid/"}
+        )
+    )
+    assert source.read(TARGET, NOW) == {"instances": [], "complete": False}
 
 
 def test_real_notifier_receipt_survives_crash_without_resending(tmp_path, monkeypatch):
@@ -489,10 +578,15 @@ def test_lost_task_create_response_is_reconciled_without_duplicate(rig):
         return result
 
     watch.run_once(
-        rig.path, request, lambda *args: (90, NOW), lambda event: True, ENV, NOW
+        rig.path, request, lambda *args: reading(90, NOW), lambda event: True, ENV, NOW
     )
     report = watch.run_once(
-        rig.path, request, lambda *args: (90, NOW), lambda event: True, ENV, NOW + 60
+        rig.path,
+        request,
+        lambda *args: reading(90, NOW),
+        lambda event: True,
+        ENV,
+        NOW + 60,
     )
     assert report["unrecorded"] == 0 and len(rig.records.tasks) == 1
 
@@ -501,8 +595,15 @@ def test_delivery_notes_do_not_reopen_a_human_closed_task(rig):
     rig.poll(90, notify=lambda event: False)
     task = next(iter(rig.records.tasks.values()))
     task["status"] = "done"
+    task["notes"] += (
+        "\nHuman assessment: capacity review in progress.\nKeep this second line.\n"
+    )
     rig.poll(90, NOW + 60)
     assert task["status"] == "done"
+    assert task["notes"].endswith(
+        "Human assessment: capacity review in progress.\nKeep this second line.\n"
+    )
+    assert task["notes"].count("store-watch-delivery: ") == 1
 
 
 def test_ignored_delivery_note_correction_remains_unrecorded(rig):
@@ -514,7 +615,7 @@ def test_ignored_delivery_note_correction_remains_unrecorded(rig):
         return original(method, path, body)
 
     result = watch.run_once(
-        rig.path, request, lambda *args: (90, NOW), lambda event: True, ENV, NOW
+        rig.path, request, lambda *args: reading(90, NOW), lambda event: True, ENV, NOW
     )
     assert result["unrecorded"] == 1
 
@@ -542,9 +643,7 @@ def test_main_exercises_configuration_metrics_task_and_notice_path(
         query = request.url.params["query"]
         return httpx.Response(
             200,
-            json=metric_reply(
-                query, "100" if query.startswith("synthetic_size") else "90"
-            ),
+            json=metric_reply(query),
         )
 
     monkeypatch.setattr(
@@ -561,7 +660,6 @@ def test_main_exercises_configuration_metrics_task_and_notice_path(
         **ENV,
         "STORE_WATCH_METRICS_URL": "https://metrics.invalid/api/v1/query",
         watch.TOKEN_ENV: "FlyV1 synthetic",
-        "STORE_WATCH_METRICS": json.dumps(NAMES),
     }.items():
         monkeypatch.setenv(name, value)
     assert watch.main(["--state", str(rig.path)]) == 1
@@ -624,11 +722,23 @@ def test_separate_state_failures_rearm_existing_notification_receipt(
     monkeypatch.setenv("STORE_WATCH_CONFIG_IDS", "[]")
     rig.path.write_text("damaged")
     assert watch.main(["--state", str(rig.path)]) == 1
+    first_task = next(iter(rig.records.tasks.values()))
+    first_task["status"] = "done"
+    first_task["notes"] += "\nHuman handled first failure."
     rig.path.write_text(json.dumps(watch.new_state()))
     assert watch.main(["--state", str(rig.path)]) == 1
     rig.path.write_text("damaged again")
     assert watch.main(["--state", str(rig.path)]) == 1
+    assert watch.main(["--state", str(rig.path)]) == 1
     assert sum("state is UNKNOWN" in message for message in calls) == 2
+    failures = [
+        t for t in rig.records.tasks.values() if "state is UNKNOWN" in t["description"]
+    ]
+    assert len(failures) == 2
+    assert first_task["status"] == "done"
+    assert first_task["notes"].endswith("Human handled first failure.")
+    assert failures[0]["title"] != failures[1]["title"]
+    assert all("state is UNKNOWN" in t["title"] for t in failures)
     capsys.readouterr()
 
 
@@ -659,3 +769,192 @@ def test_malformed_delivery_journal_is_not_treated_as_sent(tmp_path, monkeypatch
         )
         is False
     )
+
+
+def test_task_title_is_readable_and_stable_for_event(rig):
+    rig.poll(90, notify=lambda event: False)
+    task = next(iter(rig.records.tasks.values()))
+    title = task["title"]
+    assert "critical" in title and "synthetic" in title and "/data" in title
+    rig.poll(90, NOW + 60)
+    assert task["title"] == title
+
+
+@pytest.mark.parametrize("mounts", [["/data"], ["data"], ["/", "/data"]])
+def test_mount_list_uses_observed_label_without_volume_identity(mounts):
+    records = Records()
+    records.config["snapshot"]["gotchas"] = "Other gotcha\nstore-watch:" + json.dumps(
+        mounts
+    )
+    assert watch.load_targets(records, ENV) == [
+        {"app": "synthetic", "mount": m} for m in mounts
+    ]
+
+
+@pytest.mark.parametrize(
+    "mounts",
+    [["/data", "/data"], [""], [None], [{"volume": "synthetic", "mount": "/data"}]],
+)
+def test_duplicate_or_obsolete_mount_shape_fails_closed(mounts):
+    records = Records()
+    records.config["snapshot"]["gotchas"] = ["store-watch:" + json.dumps(mounts)]
+    with pytest.raises(watch.Unknown):
+        watch.load_targets(records, ENV)
+
+
+def test_retry_merges_notes_again_after_lost_correction_response(rig):
+    rig.poll(90, notify=lambda event: False)
+    task = next(iter(rig.records.tasks.values()))
+    original = rig.records.__call__
+    lost = [False]
+
+    def request(method, path, body=None):
+        result = original(method, path, body)
+        if path == "/correct" and not lost[0]:
+            lost[0] = True
+            task["notes"] += "\nHuman added after correction reached server."
+            task["status"] = "done"
+            raise OSError("synthetic lost response")
+        return result
+
+    for now in (NOW + 60, NOW + 120):
+        watch.run_once(
+            rig.path, request, lambda *args: reading(90, now), lambda e: True, ENV, now
+        )
+    assert task["notes"].endswith("Human added after correction reached server.")
+    assert task["status"] == "done"
+    line = next(
+        line
+        for line in task["notes"].splitlines()
+        if line.startswith(watch.DELIVERY_PREFIX)
+    )
+    assert json.loads(line[len(watch.DELIVERY_PREFIX) :])["delivery"] == "delivered"
+
+
+def test_lost_create_response_preserves_human_changed_status_and_notes(rig):
+    original = rig.records.__call__
+    lost = [False]
+
+    def request(method, path, body=None):
+        result = original(method, path, body)
+        if path == "/store" and not lost[0]:
+            lost[0] = True
+            task = next(iter(rig.records.tasks.values()))
+            task["status"] = "done"
+            task["notes"] += "\nHuman acted before replay."
+            raise OSError("synthetic lost response")
+        return result
+
+    report = watch.run_once(
+        rig.path, request, lambda *args: reading(90, NOW), lambda e: True, ENV, NOW
+    )
+    assert report["unrecorded"] == 0 and len(rig.records.tasks) == 1
+    task = next(iter(rig.records.tasks.values()))
+    assert task["status"] == "done" and task["notes"].endswith(
+        "Human acted before replay."
+    )
+
+
+def test_failure_episode_checkpoint_failure_precedes_all_external_effects(
+    rig, monkeypatch
+):
+    monkeypatch.setattr(
+        watch.held_view, "atomic_write", lambda *args: (_ for _ in ()).throw(OSError())
+    )
+    with pytest.raises(OSError):
+        watch.failure_episode(rig.records, lambda e: rig.sent.append(e))
+    assert not rig.sent and not rig.records.tasks
+
+
+@pytest.mark.parametrize("payload", ["damaged", "{}", '{"state":"pending"}'])
+def test_unreadable_failure_metadata_cannot_send_or_create_task(rig, payload):
+    journal = watch.held_view.journal_path()
+    journal.write_text(
+        payload
+        if payload == "damaged"
+        else json.dumps({watch.FAILURE_RECEIPT: json.loads(payload)})
+    )
+    before = journal.read_text()
+    with pytest.raises((watch.Unknown, ValueError)):
+        watch.failure_episode(rig.records, lambda e: rig.sent.append(e))
+    assert not rig.sent and not rig.records.tasks and journal.read_text() == before
+
+
+def test_failure_journal_read_itself_fails_closed(rig, monkeypatch):
+    monkeypatch.setattr(
+        watch.held_view,
+        "read_text_nofollow",
+        lambda *args: (_ for _ in ()).throw(PermissionError()),
+    )
+    with pytest.raises(PermissionError):
+        watch.failure_episode(rig.records, lambda e: rig.sent.append(e))
+    assert not rig.sent and not rig.records.tasks
+
+
+def test_interrupted_failure_after_checkpoint_reuses_episode(rig, monkeypatch):
+    original = watch.drain
+    monkeypatch.setattr(
+        watch, "drain", lambda *args: (_ for _ in ()).throw(KeyboardInterrupt())
+    )
+    with pytest.raises(KeyboardInterrupt):
+        watch.failure_episode(rig.records, lambda e: True)
+    episode_id = json.loads(watch.held_view.journal_path().read_text())[
+        watch.FAILURE_RECEIPT
+    ]["watch_event"]["id"]
+    monkeypatch.setattr(watch, "drain", original)
+    for _ in range(2):
+        event = watch.failure_episode(
+            rig.records, lambda e: rig.sent.append(copy.deepcopy(e)) or True
+        )
+        assert event["id"] == episode_id and event["recorded"] is True
+    assert len(rig.records.tasks) == len(rig.sent) == 1
+
+
+def test_recovery_keeps_unrecorded_episode_for_retry(rig):
+    rig.records.fail_store = True
+    event = watch.failure_episode(rig.records, lambda e: True)
+    assert event["recorded"] is False
+    recovered = watch.failure_episode(rig.records, lambda e: True, recovered=True)
+    assert recovered["id"] == event["id"]
+    assert watch.FAILURE_RECEIPT in json.loads(
+        watch.held_view.journal_path().read_text()
+    )
+    rig.records.fail_store = False
+    watch.failure_episode(rig.records, lambda e: True, recovered=True)
+    assert watch.FAILURE_RECEIPT not in json.loads(
+        watch.held_view.journal_path().read_text()
+    )
+    next_event = watch.failure_episode(rig.records, lambda e: True)
+    assert next_event["id"] != event["id"] and len(rig.records.tasks) == 2
+
+
+def test_malformed_sibling_receipt_makes_whole_journal_unknown(rig):
+    watch.failure_episode(rig.records, lambda e: True)
+    path = watch.held_view.journal_path()
+    journal = json.loads(path.read_text())
+    journal["synthetic-malformed"] = {}
+    path.write_text(json.dumps(journal))
+    with pytest.raises(watch.Unknown):
+        watch.failure_episode(rig.records, lambda e: rig.sent.append(e))
+    assert not rig.sent and len(rig.records.tasks) == 1
+
+
+def test_main_keeps_pending_failure_effect_visible_after_state_recovers(
+    rig, monkeypatch, capsys
+):
+    rig.records.fail_store = True
+    watch.failure_episode(rig.records, lambda e: True)
+    monkeypatch.setattr(watch, "request_json", rig.records)
+    monkeypatch.setattr(
+        watch,
+        "run_once",
+        lambda *args: {
+            "configuration": "ok",
+            "volumes": [{"status": "healthy", "complete": True}],
+            "undelivered": 0,
+            "unrecorded": 0,
+        },
+    )
+    monkeypatch.setattr(watch, "Notifications", lambda: lambda e: True)
+    assert watch.main(["--state", str(rig.path)]) == 1
+    assert json.loads(capsys.readouterr().out)["unrecorded"] == 1

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One bounded volume-usage poll; no model calls or scheduling side effects.
+"""One bounded filesystem-usage poll; no model calls or scheduling side effects.
 
 Runtime contract and activation checks: docs/store_disk_watch.md.
 """
@@ -15,6 +15,8 @@ import re
 import sys
 import time
 import uuid
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -32,6 +34,16 @@ SAMPLE_MAX_AGE = 300
 CONFIG_PREFIX = "store-watch:"
 LEVELS = ("healthy", "warning", "critical")
 MAX_TARGETS = 100
+# Provider contract: https://docs.fly.io/monitoring/metrics (Instance Filesystem).
+# Block size cancels out of the df ratio, so only these three gauges are read.
+FILESYSTEM_METRICS = (
+    "fly_instance_filesystem_blocks",
+    "fly_instance_filesystem_blocks_free",
+    "fly_instance_filesystem_blocks_avail",
+)
+APP_LABEL, MOUNT_LABEL, INSTANCE_LABEL = "app", "mount", "instance"
+FAILURE_RECEIPT = "store-watch:state-failure"
+DELIVERY_PREFIX = "store-watch-delivery: "
 
 
 class Unknown(RuntimeError):
@@ -97,21 +109,17 @@ def load_targets(request, environ):
             raise Unknown("configuration_mounts_invalid")
         for mount in mounts:
             if (
-                not isinstance(mount, dict)
-                or set(mount) != {"volume", "mount"}
-                or any(
-                    not isinstance(v, str)
-                    or not v
-                    or len(v) > 200
-                    or any(ord(c) < 32 for c in v)
-                    for v in mount.values()
-                )
-                or not mount["mount"].startswith("/")
+                not isinstance(mount, str)
+                or not mount
+                or len(mount) > 200
+                or any(ord(c) < 32 for c in mount)
             ):
                 raise Unknown("configuration_mounts_invalid")
-            target = {"app": snap["fly_app"], **mount}
+            # Use the observed label literally: Fly describes a destination
+            # name, which must be confirmed before activation, not normalized.
+            target = {"app": snap["fly_app"], "mount": mount}
             if target in targets:
-                raise Unknown("configuration_duplicate_volume")
+                raise Unknown("configuration_duplicate_mount")
             targets.append(target)
     if len(targets) > MAX_TARGETS:
         raise Unknown("configuration_too_large")
@@ -119,7 +127,7 @@ def load_targets(request, environ):
 
 
 class Metrics:
-    """All provider metric/label assumptions are supplied in one mapping."""
+    """Read every matching filesystem, retaining valid siblings of bad series."""
 
     def __init__(self, environ, client):
         self.client = client
@@ -139,31 +147,6 @@ class Metrics:
         # Require the operator-created credential; never use an ambient Fly token.
         if not self.token.startswith("FlyV1 ") or any(c in self.token for c in "\r\n"):
             raise Unknown("metrics_token_missing_or_invalid")
-        self.names = json.loads(environ.get("STORE_WATCH_METRICS", "null"))
-        if not isinstance(self.names, dict) or set(self.names) != {
-            "used",
-            "size",
-            "app_label",
-            "volume_label",
-            "mount_label",
-        }:
-            raise Unknown("metrics_mapping_missing")
-        for key, value in self.names.items():
-            pattern = (
-                r"[a-zA-Z_:][a-zA-Z0-9_:]*"
-                if key in ("used", "size")
-                else r"[a-zA-Z_][a-zA-Z0-9_]*"
-            )
-            if not isinstance(value, str) or not re.fullmatch(pattern, value):
-                raise Unknown("metrics_mapping_invalid")
-        if (
-            self.names["used"] == self.names["size"]
-            or len(
-                {self.names[k] for k in ("app_label", "volume_label", "mount_label")}
-            )
-            != 3
-        ):
-            raise Unknown("metrics_mapping_ambiguous")
 
     def sample(self, query, labels, now):
         response = self.client.get(
@@ -192,43 +175,77 @@ class Metrics:
         ):
             raise Unknown("metrics_not_vector")
         rows = body.get("result")
-        if (
-            not isinstance(rows, list)
-            or len(rows) != 1
-            or not isinstance(rows[0], dict)
-        ):
-            raise Unknown("metrics_empty_or_ambiguous")
-        row = rows[0]
-        if not isinstance(row.get("metric"), dict) or any(
-            row["metric"].get(k) != v for k, v in labels.items()
-        ):
-            raise Unknown("metrics_wrong_volume")
-        pair = row.get("value")
-        if not isinstance(pair, list) or len(pair) != 2:
-            raise Unknown("metrics_invalid_sample")
-        stamp, value = map(finite, pair)
-        if not -30 <= now - stamp <= SAMPLE_MAX_AGE:
-            raise Unknown("metrics_stale")
-        return value
+        if not isinstance(rows, list) or not rows:
+            raise Unknown("metrics_empty_or_invalid")
+        samples, complete = {}, True
+        for row in rows:
+            metric = row.get("metric") if isinstance(row, dict) else None
+            if (
+                not isinstance(metric, dict)
+                or any(metric.get(k) != v for k, v in labels.items())
+                or not isinstance(metric.get(INSTANCE_LABEL), str)
+                or not metric[INSTANCE_LABEL]
+                or any(not isinstance(v, str) for v in metric.values())
+            ):
+                complete = False
+                continue
+            # timestamp() removes the metric name; all other labels must match
+            # exactly across gauges to avoid mixing two different filesystems.
+            key = tuple(sorted((k, v) for k, v in metric.items() if k != "__name__"))
+            if key in samples:
+                samples[key], complete = None, False
+                continue
+            try:
+                pair = row.get("value")
+                if not isinstance(pair, list) or len(pair) != 2:
+                    raise Unknown("metrics_invalid_sample")
+                stamp, value = map(finite, pair)
+                if not -30 <= now - stamp <= SAMPLE_MAX_AGE:
+                    raise Unknown("metrics_stale")
+                samples[key] = value
+            except Unknown:
+                samples[key], complete = None, False
+        return samples, complete
 
     def read(self, target, now):
-        labels = {
-            self.names[k + "_label"]: target[k] for k in ("app", "volume", "mount")
-        }
+        labels = {APP_LABEL: target["app"], MOUNT_LABEL: target["mount"]}
         selector = ",".join(k + "=" + json.dumps(v) for k, v in sorted(labels.items()))
-        values, stamps = {}, []
-        for kind in ("used", "size"):
-            query = self.names[kind] + "{" + selector + "}"
-            values[kind] = self.sample(query, labels, now)
-            # Instant-query timestamps can be evaluation time. Check the source
-            # sample's timestamp explicitly, rather than renewing stale gauges.
-            stamp = self.sample(f"timestamp({query})", labels, now)
-            if not -30 <= now - stamp <= SAMPLE_MAX_AGE:
-                raise Unknown("metrics_stale")
-            stamps.append(stamp)
-        if not 0 <= values["used"] <= values["size"] or values["size"] <= 0:
-            raise Unknown("metrics_invalid_capacity")
-        return 100 * values["used"] / values["size"], min(stamps)
+        vectors, complete = [], True
+        for name in FILESYSTEM_METRICS:
+            query = name + "{" + selector + "}"
+            # Both arguments are plain instant-vector selectors, valid inputs
+            # to timestamp(v instant-vector); no aggregation/range selectors.
+            for expression in (query, f"timestamp({query})"):
+                try:
+                    samples, valid = self.sample(expression, labels, now)
+                except Exception:
+                    samples, valid = {}, False
+                vectors.append(samples)
+                complete = complete and valid
+        instances = []
+        for key in sorted(set().union(*(v.keys() for v in vectors))):
+            try:
+                blocks, t_blocks, free, t_free, avail, t_avail = (
+                    finite(v.get(key)) for v in vectors
+                )
+                stamps = (t_blocks, t_free, t_avail)
+                if not all(-30 <= now - stamp <= SAMPLE_MAX_AGE for stamp in stamps):
+                    raise Unknown("metrics_stale")
+                used = blocks - free
+                if not (
+                    blocks > 0 and 0 <= avail <= free <= blocks and used + avail > 0
+                ):
+                    raise Unknown("metrics_invalid_capacity")
+                instances.append(
+                    {
+                        "instance": dict(key)[INSTANCE_LABEL],
+                        "percent": 100 * (used / (used + avail)),
+                        "stamp": min(stamps),
+                    }
+                )
+            except Unknown:
+                complete = False
+        return {"instances": instances, "complete": complete and bool(instances)}
 
 
 class Notifications:
@@ -238,10 +255,6 @@ class Notifications:
         from lib.notify import Notifier
 
         self.notifier = Notifier()
-
-    def clear_failure(self):
-        """Re-arm the existing receipt after state access has recovered."""
-        self.notifier.clear_dedupe("store-watch:state-failure")
 
     def __call__(self, event):
         from lib.notify import Priority
@@ -313,7 +326,7 @@ def read_state(path, now):
         )
         for key, value in state["volumes"].items():
             require(key == target_key(value["target"]))
-            require(set(value["target"]) == {"app", "volume", "mount"})
+            require(set(value["target"]) == {"app", "mount"})
             require(all(isinstance(v, str) and v for v in value["target"].values()))
             require(value["level"] in LEVELS and type(value["stale"]) is bool)
             for name in ("first_seen", "last_success"):
@@ -356,22 +369,23 @@ def add_event(state, message, severity="critical", identifier=None):
 
 
 def record_event(event, request):
-    """Read back every field; a 2xx or a silently dropped field is not success."""
-    notes = json.dumps(
+    """Verify task identity/routing, then merge and read back delivery notes."""
+    line = DELIVERY_PREFIX + json.dumps(
         {"delivery": event["delivery"], "event": event["id"]}, sort_keys=True
     )
     if not event["task_id"]:
         # The create payload is immutable, including across a lost response.
         # Delivery is updated separately, without resetting human-owned status.
         wanted = {
-            "title": "Store disk watch " + event["id"],
+            "title": event["message"].split(". ", 1)[0] + " [" + event["id"] + "]",
             "description": event["message"],
             "status": "blocked",
             "assigned_to": "operator",
             "blocked_reason": "Human assessment required; observation only, no automatic repair.",
             "priority": "p0" if event["severity"] == "critical" else "p1",
             "tags": ["store-watch"],
-            "notes": json.dumps(
+            "notes": DELIVERY_PREFIX
+            + json.dumps(
                 {"delivery": "undelivered", "event": event["id"]}, sort_keys=True
             ),
         }
@@ -409,11 +423,51 @@ def record_event(event, request):
         actual = unwrap_snapshot(
             request("GET", "/entities/" + quote(identifier, safe=""))
         )
-        if not actual or any(
-            actual.get(k) != v for k, v in wanted.items() if k != "notes"
+        if (
+            not actual
+            or not all(k in actual for k in wanted)
+            or any(
+                actual.get(k) != wanted[k]
+                for k in ("title", "description", "assigned_to")
+            )
         ):
             raise Unknown("task_readback_mismatch")
         event["task_id"] = identifier
+    actual = unwrap_snapshot(
+        request("GET", "/entities/" + quote(event["task_id"], safe=""))
+    )
+    if not actual or not isinstance(actual.get("notes"), str):
+        raise Unknown("task_notes_unreadable")
+    # Replace only this event's machine-owned line, preserving human text and
+    # other events verbatim, including line endings and human-owned status.
+    previous = actual["notes"]
+    lines, replaced = [], False
+    for existing in previous.splitlines(keepends=True):
+        owned = False
+        if existing.startswith(DELIVERY_PREFIX):
+            try:
+                owned = (
+                    json.loads(existing[len(DELIVERY_PREFIX) :]).get("event")
+                    == event["id"]
+                )
+            except (ValueError, AttributeError):
+                pass
+        if owned:
+            if not replaced:
+                ending = (
+                    "\r\n"
+                    if existing.endswith("\r\n")
+                    else "\n"
+                    if existing.endswith("\n")
+                    else ""
+                )
+                lines.append(line + ending)
+                replaced = True
+        else:
+            lines.append(existing)
+    notes = "".join(lines)
+    if not replaced:
+        notes += ("\n" if notes and not notes.endswith("\n") else "") + line
     result = request(
         "POST",
         "/correct",
@@ -422,7 +476,9 @@ def record_event(event, request):
             "entity_type": "task",
             "field": "notes",
             "value": notes,
-            "idempotency_key": event["id"] + ":" + event["delivery"],
+            "idempotency_key": event["id"]
+            + ":notes:"
+            + hashlib.sha256(notes.encode()).hexdigest(),
         },
     )
     if result.get("success") is False:
@@ -509,30 +565,58 @@ def run_once(path, request, read_usage, notify, environ=None, now=None):
         try:
             if not configured:
                 raise Unknown("configuration_unknown")
-            percent, stamp = read_usage(target, now)
-            percent, stamp = finite(percent), finite(stamp)
-            if not 0 <= percent <= 100 or not -30 <= now - stamp <= SAMPLE_MAX_AGE:
-                raise Unknown("usage_unknown")
-        except Exception:
-            results.append({"target": target, "status": "unknown"})
-        else:
-            value["last_success"] = max(value["last_success"] or 0, stamp)
-            current = level(percent)
-            if value["stale"]:
-                add_event(
-                    state, "Store disk watch reads recovered: " + label, "warning"
+            reading = read_usage(target, now)
+            complete = reading["complete"]
+            require(type(complete) is bool)
+            instances = reading["instances"]
+            require(isinstance(instances, list) and bool(instances))
+            for sample in instances:
+                percent, stamp = finite(sample["percent"]), finite(sample["stamp"])
+                require(0 <= percent <= 100 and -30 <= now - stamp <= SAMPLE_MAX_AGE)
+                require(
+                    isinstance(sample["instance"], str) and bool(sample["instance"])
                 )
-                value["stale"] = False
-            if current != value["level"]:
+            worst = max(instances, key=lambda sample: sample["percent"])
+            percent = finite(worst["percent"])
+        except Exception:
+            results.append({"target": target, "status": "unknown", "complete": False})
+        else:
+            current = level(percent)
+            if complete:
+                stamp = min(finite(sample["stamp"]) for sample in instances)
+                value["last_success"] = max(value["last_success"] or 0, stamp)
+                if value["stale"]:
+                    add_event(
+                        state, "Store disk watch reads recovered: " + label, "warning"
+                    )
+                    value["stale"] = False
+            # Partial reads can escalate, but never clear a known worse level.
+            if current != value["level"] and (
+                complete or LEVELS.index(current) > LEVELS.index(value["level"])
+            ):
                 add_event(
                     state,
-                    f"Volume {current}: {percent:.1f}% used. "
-                    + label
-                    + ". Assess capacity; this job changes no volume.",
+                    f"Filesystem {current}: {target['app']} {target['mount']} "
+                    f"instance {worst['instance']}: {percent:.1f}% used. "
+                    + (
+                        "All returned series valid. "
+                        if complete
+                        else "Some series UNKNOWN. "
+                    )
+                    + "Assess capacity; this job changes no volume.",
                     "critical" if current == "critical" else "warning",
                 )
                 value["level"] = current
-            results.append({"target": target, "status": current, "percent": percent})
+            results.append(
+                {
+                    "target": target,
+                    "status": current
+                    if complete or current != "healthy"
+                    else "unknown",
+                    "percent": percent,
+                    "complete": complete,
+                }
+            )
         since = (
             value["last_success"]
             if value["last_success"] is not None
@@ -541,7 +625,7 @@ def run_once(path, request, read_usage, notify, environ=None, now=None):
         if now - since >= STALE_SECONDS and not value["stale"]:
             add_event(
                 state,
-                "Store disk watch critical: no successful volume read for one hour; usage UNKNOWN. "
+                "Store disk watch critical: no successful filesystem read for one hour; usage UNKNOWN. "
                 + label,
             )
             value["stale"] = True
@@ -561,6 +645,92 @@ def run_once(path, request, read_usage, notify, environ=None, now=None):
         "undelivered": sum(e["delivery"] != "delivered" for e in pending),
         "unrecorded": sum(not e["recorded"] for e in pending),
     }
+
+
+@contextmanager
+def failure_journal():
+    path = held_view.journal_path()
+    with held_view.file_lock(
+        path.with_name(path.name + ".lock"), fail_open=False
+    ) as locked:
+        require(locked)
+        try:
+            journal = json.loads(held_view.read_text_nofollow(path))
+        except FileNotFoundError:
+            journal = {}
+        require(isinstance(journal, dict))
+        require(
+            not any(
+                held_view.receipt_problem(v)
+                for k, v in journal.items()
+                if k != held_view.RECOVERED_AT
+            )
+        )
+        yield journal
+        held_view.atomic_write(
+            path, json.dumps(journal, sort_keys=True, allow_nan=False)
+        )
+
+
+def failure_episode(request, notify, recovered=False):
+    """Reuse a receipt's optional event until recovery and effects are confirmed."""
+    with failure_journal() as journal:
+        receipt = journal.get(FAILURE_RECEIPT)
+        if receipt is None:
+            if recovered:
+                return None
+            emergency = new_state()
+            add_event(
+                emergency,
+                "Store disk watch state is UNKNOWN; monitoring failed. Preserve the state and inspect the job before trusting any healthy result.",
+            )
+            receipt = {
+                "state": "pending",
+                "pending_at": datetime.now(timezone.utc).isoformat(),
+                "handler": "store-watch",
+                "watch_event": emergency["events"][0],
+            }
+            journal[FAILURE_RECEIPT] = receipt
+        event = receipt.get("watch_event")
+        require(
+            isinstance(event, dict)
+            and set(event)
+            == {"id", "message", "severity", "delivery", "task_id", "recorded"}
+        )
+        # Optional receipt metadata is also fail-closed, never discarded.
+        require(
+            isinstance(event.get("id"), str) and event["id"].startswith("store-watch:")
+        )
+        require(event.get("delivery") in ("delivered", "undelivered"))
+        require(type(event.get("recorded")) is bool)
+        require(isinstance(event.get("message"), str) and bool(event["message"]))
+        require(event.get("severity") in ("critical", "warning"))
+        require(
+            event.get("task_id") is None
+            or isinstance(event["task_id"], str)
+            and bool(event["task_id"])
+        )
+        require(not event["recorded"] or event["task_id"] is not None)
+
+    def save():
+        with failure_journal() as journal:
+            require(
+                journal.get(FAILURE_RECEIPT, {}).get("watch_event", {}).get("id")
+                == event["id"]
+            )
+            journal[FAILURE_RECEIPT]["watch_event"] = event
+
+    # The existing state lock excludes concurrent episode owners. A failed
+    # state lock is a competing poll, not permission to mutate this episode.
+    drain({"events": [event]}, save, request, notify)
+    if recovered and event["recorded"] and event["delivery"] == "delivered":
+        with failure_journal() as journal:
+            require(
+                journal.get(FAILURE_RECEIPT, {}).get("watch_event", {}).get("id")
+                == event["id"]
+            )
+            del journal[FAILURE_RECEIPT]
+    return event
 
 
 def main(argv=None):
@@ -587,33 +757,37 @@ def main(argv=None):
                     return Metrics(os.environ, client).read(target, now)
 
                 report = run_once(args.state, request_json, read_usage, notifications)
-                clear_failure = getattr(notifications, "clear_failure", None)
-                if clear_failure:
-                    clear_failure()
+                episode = failure_episode(request_json, notifications, recovered=True)
+                if episode:
+                    report["undelivered"] += episode["delivery"] != "delivered"
+                    report["unrecorded"] += not episode["recorded"]
         print(json.dumps(report, sort_keys=True))
         return int(
             report["configuration"] != "ok"
-            or any(v["status"] != "healthy" for v in report["volumes"])
+            or any(
+                v["status"] != "healthy" or not v["complete"] for v in report["volumes"]
+            )
             or report["undelivered"] > 0
             or report["unrecorded"] > 0
         )
     except Exception:
-        # Preserve damaged state. The existing notification receipt owns dedupe
-        # for this emergency; never replace an unreadable file with empty state.
-        emergency = new_state()
-        add_event(
-            emergency,
-            "Store disk watch state is UNKNOWN; monitoring failed. Preserve the state and inspect the job before trusting any healthy result.",
-            identifier="store-watch:state-failure",
-        )
-        drain(emergency, lambda: None, request_json, notifications)
+        # Never replace damaged watch state. Persist episode identity before
+        # external effects in the existing receipt journal, or report locally.
+        try:
+            with held_view.file_lock(
+                args.state.with_suffix(".lock"), blocking=False, fail_open=False
+            ) as locked:
+                require(locked)
+                event = failure_episode(request_json, notifications)
+        except Exception:
+            event = {"delivery": "unknown", "recorded": False}
         print(
             json.dumps(
                 {
                     "status": "unknown",
                     "failure": "state_or_job_failure",
-                    "delivery": emergency["events"][0]["delivery"],
-                    "recorded": emergency["events"][0]["recorded"],
+                    "delivery": event["delivery"],
+                    "recorded": event["recorded"],
                 }
             )
         )
