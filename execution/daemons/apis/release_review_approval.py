@@ -176,13 +176,36 @@ def _fields(row: dict) -> dict:
     return row.get("snapshot") or row.get("fields") or row
 
 
-_HOW_TO_PUBLISH = (
+# The next step a refusal names, by kind of refusal.
+_AFTER_OPERATOR_ACTIVITY = (
     "This release pull request cannot be published by review once the operator "
     "has commented on it or submitted any review other than an empty approval; "
-    "the release then needs the operator's go relayed to the session running it. "
-    "Otherwise, to publish once the condition is met, submit a new approving "
-    "review on the current head with an empty comment box."
+    "the release then needs the operator's go relayed to the session running it."
 )
+_AFTER_CONDITION = (
+    "To publish once the condition is met, submit a new approving review on the "
+    "current head with an empty comment box."
+)
+_AFTER_OTHER_ENTRANCE = (
+    "To publish, submit an approving review on the current head in GitHub with "
+    "an empty comment box."
+)
+_AFTER_ERROR = (
+    "The check stopped on an unexpected error, named in the dispatcher log; "
+    "once it is resolved, submit a new approving review on the current head "
+    "with an empty comment box."
+)
+
+
+def _next_step(reason: str, kind: str = "condition") -> str:
+    """The sentence that tells the reader what to do after this refusal."""
+    if reason.startswith(OPERATOR_ACTIVITY) or OPERATOR_ACTIVITY in reason:
+        return _AFTER_OPERATOR_ACTIVITY
+    if kind == "entrance":
+        return _AFTER_OTHER_ENTRANCE
+    if kind == "error":
+        return _AFTER_ERROR
+    return _AFTER_CONDITION
 
 
 class ReleaseReviewApproval:
@@ -240,18 +263,21 @@ class ReleaseReviewApproval:
         module handled it: published, or refused and reported.
         """
         repo, pr = trigger.repository, int(trigger.number or 0)
+        version = ""
+        started_before = set(self._started_versions)
         try:
             pr_data = await self._fetch_pr(repo, pr)
             try:
-                self._release_version(repo, pr_data)
+                version = self._release_version(repo, pr_data)
             except NotReleasePR:
                 return False
             decision = await self._evaluate(trigger, pr_data)
             await self._panel_gate(repo, pr, decision.head_sha)
+            await self._publish(trigger, decision)
         except Refusal as exc:
             await self._refuse(repo, pr, str(exc))
-            return True
-        await self._publish(trigger, decision)
+        except Exception as exc:  # noqa: BLE001 — an unexpected error refuses, reported
+            await self._report_error(repo, pr, version, exc, started_before)
         return True
 
     async def guard_other_entrance(self, trigger: Any, source: str) -> bool:
@@ -267,13 +293,17 @@ class ReleaseReviewApproval:
         except NotReleasePR:
             return False
         except Refusal as exc:
-            await self._refuse(repo, pr, f"the {source} was not acted on: {exc}")
+            await self._refuse(repo, pr, f"the {source} was not acted on: {exc}", kind="entrance")
+            return True
+        except Exception as exc:  # noqa: BLE001 — unknown counts as a release PR
+            await self._report_error(repo, pr, "", exc, None, what=f"the {source} was not acted on")
             return True
         await self._refuse(
             repo,
             pr,
             f"the {source} was not acted on: a release pull request is "
             "published only from the operator's approving review in GitHub",
+            kind="entrance",
         )
         return True
 
@@ -290,6 +320,9 @@ class ReleaseReviewApproval:
             return ""
         except Refusal as exc:
             return f"merge held: whether this is a release pull request is unknown ({exc})"
+        except Exception as exc:  # noqa: BLE001 — an unexpected error holds, reported
+            await self._report_error(repo, pr, "", exc, None, what="a merge was held")
+            return f"merge held: the release check stopped on an unexpected error ({exc.__class__.__name__})"
         return (
             "merge held: a release pull request is merged only by the release "
             "publish step after the operator's approving review"
@@ -544,11 +577,51 @@ class ReleaseReviewApproval:
         except Exception as exc:  # noqa: BLE001 — a notice never changes the outcome
             log.warning(f"release review notice could not be sent: {exc}")
 
-    async def _refuse(self, repo: str, pr: int, reason: str) -> None:
+    async def _report_error(
+        self,
+        repo: str,
+        pr: int,
+        version: str,
+        exc: BaseException,
+        started_before: set[str] | None,
+        what: str = "",
+    ) -> None:
+        """Report an unexpected error: log it, raise a red alert, and comment.
+
+        When the error came after this delivery started publish.py, the outcome
+        is unknown and the alert says so; otherwise nothing was published.
+        """
+        name = exc.__class__.__name__
+        log.exception(f"release review on {repo}#{pr}: unexpected error ({name})")
+        started = (
+            started_before is not None
+            and bool(version)
+            and version in self._started_versions
+            and version not in started_before
+        )
+        if started:
+            self._safe_alert(
+                version,
+                f"publish outcome is unknown: an unexpected error ({name}) "
+                "came after publish started; check the release log and the "
+                "registry before retrying.",
+            )
+            return
+        reason = f"an unexpected error ({name}) stopped the check"
+        if what:
+            reason = f"{what}: {reason}"
+        self._safe_alert(
+            version or f"check on {repo}#{pr}",
+            f"not published: {reason}. Nothing was released.",
+        )
+        await self._refuse(repo, pr, reason, kind="error")
+
+    async def _refuse(self, repo: str, pr: int, reason: str, kind: str = "condition") -> None:
         """Publish nothing; log, notify and comment once. Failures are logged only."""
+        step = _next_step(reason, kind)
         log.warning(f"release review on {repo}#{pr}: not publishing — {reason}")
-        self._safe_notify(f"Release pull request {repo}#{pr} was not published: {reason}. {_HOW_TO_PUBLISH}")
-        body = f"{NOTICE_MARKER}\nNot published: {reason}.\n\nNothing was released. {_HOW_TO_PUBLISH}"
+        self._safe_notify(f"Release pull request {repo}#{pr} was not published: {reason}. {step}")
+        body = f"{NOTICE_MARKER}\nNot published: {reason}.\n\nNothing was released. {step}"
         try:
             ok = await self.deps.post_comment(repo, pr, body)
             if not ok:
@@ -568,42 +641,25 @@ def _publish_script_path() -> str:
     )
 
 
-def _load_publish_module():
-    import importlib.util
-
-    path = _publish_script_path()
-    spec = importlib.util.spec_from_file_location("_phoenicurus_publish", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("publish module could not be loaded")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+RELEASE_RESULT_LIMIT = 1000
 
 
-def _release_results_blocking(limit: int = 1000) -> tuple[list[dict], bool]:
-    """All release_result rows, and whether the server says the list is complete."""
-    import json
-    import urllib.request
+def _parse_release_results(data: object, limit: int = RELEASE_RESULT_LIMIT) -> tuple[list[dict], bool]:
+    """Rows of an ``entities/query`` answer, and whether the list is complete.
 
-    pub = _load_publish_module()
-    body = json.dumps(
-        {"entity_type": "release_result", "limit": limit, "include_snapshots": True}
-    ).encode()
-    req = urllib.request.Request(
-        f"{pub._neotoma_base()}/entities/query",
-        data=body,
-        headers=pub._neotoma_headers(),
-        method="POST",
-    )
-    req.add_header("User-Agent", pub.NEOTOMA_USER_AGENT)
-    data = pub._neotoma_request_json(req, "query release_result")
+    Complete only when the server says so (``has_more`` is False, or ``total``
+    equals the row count) and the row count is below the limit asked for. No
+    answer, an error, or an unexpected shape is incomplete.
+    """
     if not isinstance(data, dict):
         return [], False
     rows = data.get("entities")
     if not isinstance(rows, list):
         return [], False
     total = data.get("total")
-    complete = data.get("has_more") is False or (isinstance(total, int) and total == len(rows))
+    complete = data.get("has_more") is False or (
+        isinstance(total, int) and not isinstance(total, bool) and total == len(rows)
+    )
     return rows, bool(complete) and len(rows) < limit
 
 
@@ -671,6 +727,10 @@ def build_for_dispatcher(dispatcher: Any, sd: Any) -> ReleaseReviewApproval:
     async def github_get(path: str, params: dict) -> tuple[int, Any, dict]:
         url = f"https://api.github.com{path}"
         repo = "/".join(path.split("/")[2:4])
+        # Mint (or refresh) the App token off the event loop first: the sync
+        # header helper only serves a cached token and would otherwise send the
+        # first read without the App identity.
+        await sd._ensure_app_write_token(repo)
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(url, params=params, headers=dispatcher._github_headers(repo))
             try:
@@ -680,7 +740,20 @@ def build_for_dispatcher(dispatcher: Any, sd: Any) -> ReleaseReviewApproval:
             return resp.status_code, data, dict(resp.headers)
 
     async def release_results() -> tuple[list[dict], bool]:
-        return await asyncio.to_thread(_release_results_blocking)
+        # The dispatcher's own Neotoma client and configuration: publish.py is
+        # never imported or run inside the dispatcher.
+        store = sd.IssueSpecStore(
+            dispatcher.config.neotoma_base_url, dispatcher.config.neotoma_token
+        )
+        data = await store._post(
+            "entities/query",
+            {
+                "entity_type": "release_result",
+                "limit": RELEASE_RESULT_LIMIT,
+                "include_snapshots": True,
+            },
+        )
+        return _parse_release_results(data)
 
     async def app_bot_login() -> str:
         return await asyncio.to_thread(sd._app_bot_login_blocking)

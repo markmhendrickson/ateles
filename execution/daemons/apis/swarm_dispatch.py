@@ -12353,6 +12353,15 @@ class SwarmDispatcher:
         try:
             return await gate.merge_refusal(repo, pr_number)
         except Exception as exc:  # noqa: BLE001 — unreadable holds the merge
+            log.exception(
+                f"[{DAEMON_NAME}] release merge check on {repo}#{pr_number} "
+                f"stopped on an unexpected error ({exc.__class__.__name__})"
+            )
+            self._release_red_alert(
+                f"check on {repo}#{pr_number}",
+                "merge held: the release check stopped on an unexpected error "
+                f"({exc.__class__.__name__}).",
+            )
             return f"merge held: the release check could not run ({exc.__class__.__name__})"
 
     async def _release_review_handled(self, trigger: SwarmTrigger) -> bool:

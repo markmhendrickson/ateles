@@ -1170,7 +1170,25 @@ def test_refusal_says_review_cannot_publish_after_operator_comment(world):
         assert ("cannot be published by review once the operator has commented on it"
                 in text), text
         assert "needs the operator's go relayed to the session running it" in text
+        # No later review can publish, so no such step is offered.
+        assert "new approving review" not in text
+
+
+def test_other_refusals_name_a_fitting_next_step_not_the_operator_sentence(world):
+    fake, gate = world
+    fake.behind = 3
+    _run(gate)
+    for text in (fake.posted[0], fake.notices[0]):
+        assert "operator has commented" not in text, text
+        assert "relayed to the session" not in text, text
         assert "new approving review on the current head with an empty comment box" in text
+
+
+def test_other_entrance_refusal_names_the_review_route(world):
+    fake, gate = world
+    asyncio.run(gate.guard_other_entrance(_trigger(), "approve comment"))
+    assert "operator has commented" not in fake.posted[0]
+    assert "submit an approving review on the current head in GitHub" in fake.posted[0]
 
 
 def test_change_during_panel_gate_seen_only_by_comparison_refuses(world):
