@@ -19,12 +19,15 @@ from the webhook payload except the review id, which is only a key to re-read:
 
   - the review with that id is by the operator login (not a bot), is APPROVED,
     and its commit is the pull request's current head;
-  - no later review by that login is CHANGES_REQUESTED or DISMISSED, and no
-    later comment or review body by that login, nor the approving review's
-    own body, starts with hold, skip, stop or do not publish (leading Markdown
-    or quote marks are ignored). A comment counts as later when it was created
-    or edited after the approval; GitHub gives a review summary no edit time,
-    so a review counts from when it was submitted;
+  - the approving review's own body is empty (whitespace counts as empty);
+  - the operator has done nothing else since approving. No word in a comment
+    is interpreted: any conversation comment or inline review comment by the
+    operator login created or edited at or after the approval's submission
+    time refuses, whatever it says; any other review by that login submitted
+    at or after it, or with a higher id, refuses, except one that is APPROVED
+    on the same head with an empty body. Comments by the swarm App, bots and
+    other logins are ignored. A missing, malformed or time-zone-less timestamp
+    on any of these refuses;
   - the pull request is open, based on the release branch, its head branch is
     ``release/<version>`` in the same repository, and it is not behind the base;
   - exactly one release_result matches the version and the pull request URL,
@@ -46,7 +49,9 @@ a timed-out publish, starts nothing), in its own session so a restart of Apis
 does not stop it mid-step. publish.py merges with the head pinned to that sha
 and checks that the tree it tags is the approved head's tree before tagging;
 when that check refuses, the merge has already landed and nothing was tagged
-or published, and the alert says so.
+or published, and the alert says so. Anything the operator posts after
+publish.py has started is not re-read: from then on only stopping publish.py
+itself halts the release.
 Every refusal publishes nothing, is logged, and is reported through the
 notifier and one pull request comment posted with the App identity. A failed
 notice never leads to a publish. While the flag is on, the dispatcher's merge
@@ -73,7 +78,6 @@ log = logging.getLogger("apis.release_review_approval")
 
 FLAG_ENV = "ATELES_PUBLISH_ON_OPERATOR_REVIEW"
 RELEASE_HEAD_RE = re.compile(r"^release/(v[0-9][0-9A-Za-z.\-+]*)$")
-HOLD_PREFIXES = ("hold", "skip", "stop", "do not publish")
 # Marker on this module's own notices. It carries no command token, so a
 # notice can never re-trigger a comment command.
 NOTICE_MARKER = "<!-- release-review-approval -->"
@@ -160,23 +164,17 @@ def _parse_time(value: object) -> datetime:
     return parsed
 
 
-# Leading Markdown and quoting a person might type before a word: emphasis,
-# block quotes, headings, list markers, code ticks and quote marks.
-_LEADING_MARKUP_RE = re.compile(r"^[\s>*_#~`\-+=\"'\u201c\u201d\u2018\u2019\u00ab\u00bb]+")
+def _is_empty(body: object) -> bool:
+    return body is None or (isinstance(body, str) and not body.strip())
 
 
-def _starts_with_hold(body: object) -> bool:
-    text = str(body or "").strip().casefold()
-    text = _LEADING_MARKUP_RE.sub("", text)
-    return any(text.startswith(p) for p in HOLD_PREFIXES)
-
-
-def _changed_after(row: dict, created_key: str, cutoff: datetime) -> bool:
-    """True when the row was created, or (where it says so) edited, after cutoff."""
-    if _parse_time(row.get(created_key)) > cutoff:
-        return True
-    updated = row.get("updated_at")
-    return updated is not None and _parse_time(updated) > cutoff
+def _at_or_after(row: dict, cutoff: datetime, *keys: str) -> bool:
+    """True when any of ``keys`` is at or after cutoff; every key must be readable."""
+    hit = False
+    for key in keys:
+        if _parse_time(row.get(key)) >= cutoff:
+            hit = True
+    return hit
 
 
 def _norm_version(value: object) -> str:
@@ -348,8 +346,8 @@ class ReleaseReviewApproval:
             raise Refusal("the review is not an approval")
         if str(review.get("commit_id") or "") != head_sha:
             raise Refusal("the approval is not on the pull request's current head")
-        if _starts_with_hold(review.get("body")):
-            raise Refusal("the approving review asks to hold")
+        if not _is_empty(review.get("body")):
+            raise Refusal("the approving review has a comment; an approval used to publish must have none")
         approved_at = _parse_time(review.get("submitted_at"))
 
         # Later reviews by the operator; and the App's own approval on this head.
@@ -369,11 +367,15 @@ class ReleaseReviewApproval:
             if r_login == operator and rid != review_id:
                 if r_state == "PENDING":
                     continue
-                later = rid > review_id or _changed_after(r, "submitted_at", approved_at)
+                later = _at_or_after(r, approved_at, "submitted_at") or rid > review_id
                 if later and r_state in ("CHANGES_REQUESTED", "DISMISSED"):
                     raise Refusal("the operator later requested changes or dismissed a review")
-                if later and _starts_with_hold(r.get("body")):
-                    raise Refusal("a later review by the operator asks to hold")
+                if later and not (
+                    r_state == "APPROVED"
+                    and str(r.get("commit_id") or "") == head_sha
+                    and _is_empty(r.get("body"))
+                ):
+                    raise Refusal("the operator submitted another review after approving")
             if (
                 app_login
                 and r_login == app_login
@@ -394,8 +396,8 @@ class ReleaseReviewApproval:
             for c in await self._get_all(path, what):
                 if str((c.get("user") or {}).get("login") or "").casefold() != operator:
                     continue
-                if _changed_after(c, "created_at", approved_at) and _starts_with_hold(c.get("body")):
-                    raise Refusal("a later comment by the operator asks to hold")
+                if _at_or_after(c, approved_at, "created_at", "updated_at"):
+                    raise Refusal("the operator commented or edited a comment after approving")
 
         # Not behind the base branch.
         compare = await self._get(
@@ -556,12 +558,17 @@ class ReleaseReviewApproval:
     async def _refuse(self, repo: str, pr: int, reason: str) -> None:
         """Publish nothing; log, notify and comment once. Failures are logged only."""
         log.warning(f"release review on {repo}#{pr}: not publishing — {reason}")
-        self._safe_notify(f"Release pull request {repo}#{pr} was not published: {reason}.")
+        self._safe_notify(
+            f"Release pull request {repo}#{pr} was not published: {reason}. To publish, "
+            "submit a new approving review on the current head with an empty comment "
+            "box, and add no comment after it."
+        )
         body = (
             f"{NOTICE_MARKER}\n"
             f"Not published: {reason}.\n\n"
-            "Nothing was released. Once the condition is met, a new approving "
-            "review on the current head is needed."
+            "Nothing was released. To publish once the condition is met, submit a "
+            "new approving review on the current head with an empty comment box, "
+            "and add no comment after it."
         )
         try:
             ok = await self.deps.post_comment(repo, pr, body)
