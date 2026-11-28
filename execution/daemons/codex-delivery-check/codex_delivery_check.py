@@ -609,6 +609,7 @@ def check_tasks(
     """``fetch_page(offset) -> (rows, more)``; reads are sequential and bounded."""
     # Function-level, like the other `lib` imports here: `main` puts the repo
     # root on sys.path before any check runs.
+    from lib.daemon_runtime.task_lifecycle import is_backlog
     from lib.daemon_runtime.task_ownership import session_owned
 
     findings: list[Finding] = []
@@ -624,7 +625,9 @@ def check_tasks(
         for ent in rows:
             snap = _snapshot(ent)
             status = str(snap.get("status") or "").strip().lower()
-            if status in TERMINAL_TASK_STATUSES:
+            # Backlog tasks are kept on purpose and alert nobody, even with a
+            # past due date or a leftover blocked_reason.
+            if status in TERMINAL_TASK_STATUSES or is_backlog(status):
                 continue
             due = _parse_date(snap.get("due_date"))
             if due is None:

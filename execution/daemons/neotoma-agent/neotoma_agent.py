@@ -70,6 +70,7 @@ from lib.daemon_runtime import (  # noqa: E402
 )
 from lib.daemon_runtime import label_gate  # noqa: E402
 from lib.daemon_runtime.neotoma_correct import correct_field  # noqa: E402
+from lib.daemon_runtime.task_lifecycle import is_backlog  # noqa: E402
 from lib.notify import Notifier, Priority  # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -506,6 +507,14 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChe
                     f"[{DAEMON_NAME}] task {entity_id} snapshot could not be read "
                     "— skipping due-date hygiene rather than defaulting over "
                     "unknown fields"
+                )
+            elif is_backlog(snapshot.get("status")):
+                # Parked by planning: a default due date would turn a kept
+                # task into due/overdue alerts, and inferred tags would decide
+                # its route when it is moved back to pending.
+                log.info(
+                    f"[{DAEMON_NAME}] task {entity_id} is in the backlog "
+                    "— skipping due-date hygiene"
                 )
             else:
                 await apply_due_date_hygiene(entity_id, snapshot)

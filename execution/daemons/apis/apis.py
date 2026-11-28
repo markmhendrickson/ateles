@@ -1839,7 +1839,7 @@ class DeferralOutcome(str, Enum):
 #
 #   routed, executing, in_progress, verified   active    MOVED_ON       check it is running
 #   failed                                     failed    MOVED_ON       watchdog may retry; check
-#   done, declined, superseded                 terminal  MOVED_ON       "no action needed" only if
+#   done, declined, superseded, backlog        terminal  MOVED_ON       "no action needed" only if
 #                                                                       no marker remains AND
 #                                                                       nothing is queued for it
 #   awaiting_approval, awaiting_input, blocked gate      MOVED_TO_GATE  may need the operator
@@ -1857,6 +1857,8 @@ _STATUS_KINDS: dict[str, tuple[str, "DeferralOutcome"]] = {
     "awaiting_approval": ("gate", DeferralOutcome.MOVED_TO_GATE),
     "awaiting_input": ("gate", DeferralOutcome.MOVED_TO_GATE),
     "blocked": ("gate", DeferralOutcome.MOVED_TO_GATE),
+    # Parked by planning: nothing automatic acts on it, like a closed task.
+    "backlog": ("terminal", DeferralOutcome.MOVED_ON),
 }
 
 
@@ -3015,6 +3017,11 @@ async def _dispatch_task(
             f"[{DAEMON_NAME}] task {entity_id!r} is in the backlog "
             f"(trigger={trigger}) — not dispatching until it is moved to pending"
         )
+        # A read that shows backlog is a readable read: end any unreadable
+        # streak and drop any unroutable entry, or a parked task is later
+        # paged as "could NOT be read" or re-reported as unowned.
+        if snapshot_hydrated is not False:
+            _forget_parked(entity_id)
         return
 
     # VERIFIED means the executor already returned successfully and only the
@@ -6461,6 +6468,35 @@ async def handle_checkpoint_brief(
 # ── Event handler ─────────────────────────────────────────────────────────────
 
 
+def _forget_parked(entity_id: str) -> None:
+    """A readable read showed `backlog`: no unreadable streak, no unroutable entry."""
+    _unroutable.clear_unreadable(entity_id)
+    _unroutable.forget(entity_id)
+
+
+def _status_may_be_stale(event: NeotomaEvent) -> bool:
+    """True when the event's status is not a fresh read of the live record.
+
+    Unhydrated: the read failed and the snapshot is unknown. Embedded: the
+    stream carried the snapshot, which can predate a correction made since.
+    A snapshot `hydrate_snapshot` fetched itself is the live record.
+    """
+    if not event.hydrated:
+        return True
+    embedded = (event.raw or {}).get("snapshot")
+    return isinstance(embedded, dict) and bool(embedded)
+
+
+async def _live_task_snapshot(entity_id: str) -> dict | None:
+    """The live task snapshot, or None when it cannot be read."""
+    try:
+        live = await asyncio.to_thread(fetch_task_snapshot, entity_id)
+    except Exception as exc:  # noqa: BLE001 — unread, said as such
+        log.warning(f"[{DAEMON_NAME}] live read of task {entity_id} failed: {exc}")
+        return None
+    return live if isinstance(live, dict) else None
+
+
 async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
     """
     Handle a Neotoma SSE task event.
@@ -6510,11 +6546,44 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
     # "due today" notice and no dispatch. Checked before the created dedupe is
     # claimed, so a later move back to `pending` is not mistaken for a
     # duplicate of this delivery.
-    if action in ("created", "due_today") and is_backlog(status):
-        log.info(
-            f"[{DAEMON_NAME}] task {entity_id} is in the backlog — "
-            f"ignoring task.{action}"
+    #
+    # The event's own status is not enough when the snapshot was never read
+    # (hydration failed, so it is `{}`) or came embedded in the event payload
+    # (it may predate the planning reset). Then the live record decides, once,
+    # before any notice. A task that is not in the backlog carries on with the
+    # event exactly as delivered.
+    live_unknown = False
+    if action in ("created", "due_today"):
+        if is_backlog(status) and event.hydrated:
+            _forget_parked(entity_id)
+        elif not is_backlog(status) and _status_may_be_stale(event):
+            live = await _live_task_snapshot(entity_id)
+            if live is None:
+                live_unknown = True
+            elif is_backlog(live.get("status")):
+                status = live.get("status")
+                _forget_parked(entity_id)
+        if is_backlog(status):
+            log.info(
+                f"[{DAEMON_NAME}] task {entity_id} is in the backlog — "
+                f"ignoring task.{action}"
+            )
+            return
+
+    # Neither the event nor the live record could be read: the task may be in
+    # the backlog. Nothing is announced and nothing is dispatched. The failure
+    # is counted on the existing unreadable ledger, which reports a task only
+    # after UNREADABLE_ATTEMPTS failures and then once per reassert window,
+    # never on every redelivery; a later readable delivery clears the count.
+    if live_unknown and not event.hydrated:
+        log.warning(
+            f"[{DAEMON_NAME}] task {entity_id} could not be read from the event "
+            f"or the live record (task.{action}) — not announcing or dispatching"
         )
+        if _unroutable.note_unreadable(entity_id):
+            report = _unroutable.drain_unreadable()
+            if report:
+                notifier.send(report, priority=Priority.WARN, handler=DAEMON_NAME)
         return
 
     if action == "created":
@@ -6546,7 +6615,7 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
         # never show the real title. So an unhydrated announce is provisional:
         # it is claimed only weakly and can be upgraded exactly once by the
         # first readable copy.
-        if _should_announce(entity_id, event.hydrated):
+        if not live_unknown and _should_announce(entity_id, event.hydrated):
             notifier.send(
                 f"Task created: {title[:80]}\n  {entity_id}",
                 priority=Priority.INFO,

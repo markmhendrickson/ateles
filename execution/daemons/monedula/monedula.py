@@ -55,6 +55,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from lib.daemon_runtime.logging_setup import configure_daemon_logging  # noqa: E402
+from lib.daemon_runtime.task_lifecycle import is_backlog  # noqa: E402
 from handlers.wise_transfer import WiseTransferHandler  # noqa: E402
 from handler_base import STATUS_FUNDING_PENDING, STATUS_SUBMISSION_UNKNOWN  # noqa: E402
 
@@ -754,6 +755,9 @@ def fetch_due_payment_tasks(handlers: list | None = None) -> list[dict]:
         if not entity:
             continue
         fields = _fields(entity)
+        # A task planning parked in the backlog is kept but reminds nobody.
+        if is_backlog(fields.get("status")):
+            continue
         due = str(fields.get("due_date") or "")
         if due and due[:10] <= today:
             due_tasks.append(entity)

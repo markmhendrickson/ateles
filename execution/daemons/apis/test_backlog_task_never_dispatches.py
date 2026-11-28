@@ -236,3 +236,134 @@ def test_stale_pending_payload_cannot_write_on_a_live_backlog_task(effects, monk
 
 def test_is_backlog_normalizes():
     assert is_backlog(" BackLog ") and not is_backlog("pending") and not is_backlog(None)
+
+
+# ── Round 2: unreadable streak, dated alerts, unhydrated and embedded payloads ─
+
+
+def _unreadable_hydrate(monkeypatch):
+    """Hydration fails: the event keeps an unknown (empty) snapshot."""
+
+    async def _fail(ev):
+        ev.hydrated = False
+        return ev
+
+    monkeypatch.setattr(apis, "hydrate_snapshot", _fail)
+
+
+def _event(entity_id, action="created", snapshot=None, raw=None):
+    return NeotomaEvent(entity_type="task", entity_id=entity_id, action=action,
+                        snapshot=dict(snapshot or {}), raw=dict(raw or {}))
+
+
+def test_readable_backlog_delivery_ends_the_unreadable_streak(effects, monkeypatch):
+    """unreadable, readable backlog x2, unreadable: no "could NOT be read" page."""
+    eid = "ent_streak_1"
+    live = {"value": None}  # the live read fails on the unreadable deliveries
+    monkeypatch.setattr(apis, "fetch_task_snapshot", lambda _id: live["value"])
+    notifier = effects["notifier"]
+
+    def _hydrate_to(snapshot):
+        async def _h(ev):
+            ev.snapshot, ev.hydrated = (dict(snapshot), True) if snapshot else ({}, False)
+            return ev
+        return _h
+
+    for snap in (None, _stale("backlog"), _stale("backlog"), None):
+        monkeypatch.setattr(apis, "hydrate_snapshot", _hydrate_to(snap))
+        asyncio.run(apis.handle_event(_event(eid), notifier))
+    assert not any("could NOT be read" in m for m in notifier.sent), notifier.sent
+    # The last delivery was unreadable, so a fresh streak of one has begun.
+    assert effects["ledger"]._unreadable[eid]["n"] == 1
+
+
+def test_dispatch_backlog_guard_ends_the_unreadable_streak(effects, monkeypatch):
+    """The watchdog/reconciler/approval paths read the task fine: streak ends."""
+    eid = "ent_streak_2"
+    effects["ledger"].note_unreadable(eid)
+    _dispatch(effects, eid, _stale("backlog"), monkeypatch, trigger="reconcile")
+    assert eid not in effects["ledger"]._unreadable
+    effects["ledger"].note_unreadable(eid)  # a later blip starts from zero
+    assert effects["ledger"].drain_unreadable(force=True) is None
+
+
+@pytest.mark.parametrize("snap", [
+    {"status": "backlog", "due_date": "2026-11-25", "title": "overdue"},
+    {"status": "backlog", "due_date": "2026-11-30", "title": "blocked",
+     "blocked_reason": "no route/owner"},
+    {"status": " Backlog ", "due_date": "2026-11-28", "title": "due",
+     "assigned_to": "session"},
+])
+def test_dated_task_alerts_skip_backlog(snap):
+    from datetime import datetime, timezone
+
+    rows = [{"entity_id": "ent_dated_1", "snapshot": snap}]
+    now = datetime(2026, 11, 28, 9, tzinfo=timezone.utc)
+    findings, _ = cdc.check_tasks(lambda off: (rows if off == 0 else [], False), now)
+    assert findings == [], [f.key for f in findings]
+    # The same row, pending, does alert: the skip is about backlog only.
+    rows[0]["snapshot"] = {**snap, "status": "pending"}
+    findings, _ = cdc.check_tasks(lambda off: (rows if off == 0 else [], False), now)
+    assert findings
+
+
+def test_unhydrated_reset_redelivery_reads_live_and_stays_silent(effects, monkeypatch):
+    """Hydration fails; the live record says backlog: no notice, no ledger entry."""
+    _unreadable_hydrate(monkeypatch)
+    monkeypatch.setattr(apis, "fetch_task_snapshot", lambda _id: _stale("backlog"))
+    seen: list = []
+    monkeypatch.setattr(apis, "dispatch_task", lambda eid, *a, **k: seen.append(eid))
+    for action in ("created", "created", "due_today"):
+        asyncio.run(apis.handle_event(_event("ent_unhyd_1", action), effects["notifier"]))
+    assert seen == []
+    _assert_left_alone(effects, "unhydrated reset")
+    assert "ent_unhyd_1" not in effects["ledger"]._unreadable
+
+
+def test_embedded_stale_payload_defers_to_live_backlog(effects, monkeypatch):
+    """The stream carried a pre-reset `pending` snapshot; live says backlog."""
+    monkeypatch.setattr(apis, "fetch_task_snapshot", lambda _id: _stale("backlog"))
+    seen: list = []
+    monkeypatch.setattr(apis, "dispatch_task", lambda eid, *a, **k: seen.append(eid))
+    old = _stale("pending")
+    ev = _event("ent_embed_1", snapshot=old, raw={"snapshot": old})
+    ev.hydrated = True
+    asyncio.run(apis.handle_event(ev, effects["notifier"]))
+    assert seen == [] and effects["notifier"].sent == []
+
+
+def test_both_reads_fail_no_dispatch_no_notice_per_redelivery(effects, monkeypatch):
+    """Unknown status: never dispatched, and at most one report across redeliveries."""
+    _unreadable_hydrate(monkeypatch)
+    monkeypatch.setattr(apis, "fetch_task_snapshot", lambda _id: None)
+    seen: list = []
+    monkeypatch.setattr(apis, "dispatch_task", lambda eid, *a, **k: seen.append(eid))
+    for _ in range(5):
+        asyncio.run(apis.handle_event(_event("ent_unk_1"), effects["notifier"]))
+    assert seen == []
+    assert not any(m.startswith("Task created") for m in effects["notifier"].sent)
+    assert len(effects["notifier"].sent) <= 1, effects["notifier"].sent
+
+
+def test_unhydrated_live_pending_task_keeps_todays_path(effects, monkeypatch):
+    """Not backlog: the event carries on exactly as delivered."""
+    _unreadable_hydrate(monkeypatch)
+    monkeypatch.setattr(apis, "fetch_task_snapshot", lambda _id: _stale("pending"))
+    calls: list = []
+
+    async def _spy(eid, snapshot, **kw):
+        calls.append((eid, snapshot, kw.get("snapshot_hydrated")))
+
+    monkeypatch.setattr(apis, "dispatch_task", _spy)
+    asyncio.run(apis.handle_event(_event("ent_pend_1"), effects["notifier"]))
+    assert calls == [("ent_pend_1", {}, False)]
+    assert any(m.startswith("Task created") for m in effects["notifier"].sent)
+
+
+def test_deferral_rollback_classifies_backlog_as_parked(monkeypatch):
+    monkeypatch.setattr(apis, "fetch_task_snapshot", lambda _id: _stale("backlog"))
+    claim = type("C", (), {"run_id": "r1"})()
+    monkeypatch.setattr(apis, "_expected_deferral",
+                        lambda c: {f: "x" for f in apis._DEFERRAL_FIELDS})
+    state = apis._classify_deferral_state("ent_defer_1", claim)
+    assert state["verdict"] == "moved" and state["kind"] == "terminal"
