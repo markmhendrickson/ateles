@@ -28,10 +28,15 @@ from the webhook payload except the review id, which is only a key to re-read:
   - the swarm App's approval review exists on this head.
 
 On a pass, ``publish.py --version <v> --entity-id <id> --from-github-review
-<review id>`` runs exactly once under a per-version lock, after a final re-read
-of the head. Every refusal publishes nothing, is logged, and is reported through
-the notifier and one pull request comment posted with the App identity. A
-failed notice never leads to a publish.
+<review id> --approved-head <sha>`` runs exactly once under a per-version lock,
+after a final re-read of the head, in its own session so a restart of Apis does
+not stop it mid-step. publish.py merges with the head pinned to that sha and
+checks that the tree it tags is the approved head's tree before publishing.
+Every refusal publishes nothing, is logged, and is reported through the
+notifier and one pull request comment posted with the App identity. A failed
+notice never leads to a publish. While the flag is on, the dispatcher's merge
+call also refuses a release pull request (``merge_refusal``), so no other
+caller merges one.
 
 Design basis: docs/foundation/principles.md#1-a-mechanism-that-does-not-bind-is-not-a-control
 """
@@ -39,8 +44,7 @@ Design basis: docs/foundation/principles.md#1-a-mechanism-that-does-not-bind-is-
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import io
+import json
 import logging
 import os
 import re
@@ -85,6 +89,8 @@ class Deps:
     ``panel_gate(repo, pr, head)`` returns ``(passed, reason)``.
     ``app_bot_login()`` returns the App's bot login (empty when unreadable).
     ``notify(text)`` and ``post_comment(repo, pr, body)`` report a refusal.
+    ``alert(version, detail)`` raises a red release alert through the
+    dispatcher's own alert path (the dispatcher writes the red marker).
     ``run_publish(argv)`` returns ``(returncode, last_output_line)`` and
     raises ``asyncio.TimeoutError`` on timeout.
     """
@@ -98,6 +104,7 @@ class Deps:
     run_publish: Callable[[list[str]], Awaitable[tuple[int, str]]]
     operator_login: str
     release_repo: str
+    alert: Callable[[str, str], None]
     release_branch: str = "main"
     publish_script: str = ""
     python: str = sys.executable
@@ -240,6 +247,24 @@ class ReleaseReviewApproval:
             "published only from the operator's approving review in GitHub",
         )
         return True
+
+    async def merge_refusal(self, repo: str, pr: int) -> str:
+        """Why the dispatcher must not merge this pull request ("" when it may).
+
+        A release pull request is merged only by publish.py after the
+        operator's review; an unreadable pull request counts as one.
+        """
+        try:
+            pr_data = await self._fetch_pr(repo, pr)
+            self._release_version(repo, pr_data)
+        except NotReleasePR:
+            return ""
+        except Refusal as exc:
+            return f"merge held: whether this is a release pull request is unknown ({exc})"
+        return (
+            "merge held: a release pull request is merged only by the release "
+            "publish step after the operator's approving review"
+        )
 
     # ── the decision ────────────────────────────────────────────────────────
 
@@ -424,14 +449,17 @@ class ReleaseReviewApproval:
                 decision.entity_id,
                 "--from-github-review",
                 str(decision.review_id),
+                "--approved-head",
+                decision.head_sha,
             ]
             log.info(f"operator GitHub review approved release {version} on {repo}#{pr} — publishing")
             try:
                 rc, last = await d.run_publish(argv)
             except TimeoutError:
                 log.error(f"publish {version} timed out")
-                self._safe_notify(
-                    f"🔴 Release {version} publish TIMED OUT after a GitHub review "
+                self._safe_alert(
+                    version,
+                    "publish TIMED OUT after a GitHub review "
                     "approval — the publish process may still be running and may "
                     "be partially done; check the release log and the registry "
                     "before retrying."
@@ -439,8 +467,9 @@ class ReleaseReviewApproval:
                 return
             except Exception as exc:  # noqa: BLE001
                 log.error(f"publish {version} error: {exc}")
-                self._safe_notify(
-                    f"🔴 Release {version} approved by GitHub review but publish "
+                self._safe_alert(
+                    version,
+                    "approved by GitHub review but publish "
                     f"errored: {exc}. Publish may not have run."
                 )
                 return
@@ -448,10 +477,17 @@ class ReleaseReviewApproval:
                 log.info(f"publish {version} succeeded: {last}")
             else:
                 log.error(f"publish {version} FAILED rc={rc}: {last}")
-                self._safe_notify(
-                    f"🔴 Release {version} approved by GitHub review but publish "
+                self._safe_alert(
+                    version,
+                    "approved by GitHub review but publish "
                     f"FAILED (rc={rc}): {last[:300]}. See phoenicurus-release.log."
                 )
+
+    def _safe_alert(self, version: str, detail: str) -> None:
+        try:
+            self.deps.alert(version, detail)
+        except Exception as exc:  # noqa: BLE001 — an alert never changes the outcome
+            log.warning(f"release review alert could not be sent: {exc}")
 
     def _safe_notify(self, text: str) -> None:
         try:
@@ -527,34 +563,58 @@ def _release_results_blocking(limit: int = 1000) -> tuple[list[dict], bool]:
     return rows, bool(complete) and len(rows) < limit
 
 
-async def _panel_gate_real(repo: str, pr: int, head_sha: str) -> tuple[bool, str]:
-    """Run approve_pr_as_app.run in dry-run mode; pass only on rc 0 for this head."""
-    scripts = os.path.join(
+PANEL_GATE_TIMEOUT_S = 600
+
+
+def _approve_script_path() -> str:
+    return os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
         "scripts",
+        "approve_pr_as_app.py",
     )
-    if scripts not in sys.path:
-        sys.path.insert(0, scripts)
-    import approve_pr_as_app
 
-    out = io.StringIO()
-    with contextlib.redirect_stdout(out):
-        rc = await approve_pr_as_app.run(
-            repo,
-            pr,
-            [],
-            apply=False,
-            **({"panel_mode": "path"} if approve_pr_as_app._default_panel() == "path" else {}),
-            panel_all=approve_pr_as_app._default_panel() == "all",
-        )
-    text = out.getvalue()
-    if f"head_sha={head_sha}" not in text.splitlines():
+
+def _parse_panel_result(rc: int, out: bytes, head_sha: str) -> tuple[bool, str]:
+    """Judge approve_pr_as_app.py --json output; pass only on rc 0 for this head."""
+    lines = [ln for ln in (out or b"").decode(errors="replace").splitlines() if ln.strip()]
+    try:
+        result = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        result = None
+    if not isinstance(result, dict):
+        return False, "the gate's result could not be read"
+    if result.get("head_sha") != head_sha:
         return False, "the gate evaluated a different head"
-    lines = [ln for ln in text.splitlines() if ln.strip()]
-    if rc != 0:
-        refusing = next((ln for ln in lines if ln.startswith("refusing")), "")
-        return False, refusing or "overall FAIL"
+    if rc != 0 or result.get("exit_code") != 0 or result.get("overall_pass") is not True:
+        return False, str(result.get("refusing") or "overall FAIL")
     return True, ""
+
+
+async def _panel_gate_real(repo: str, pr: int, head_sha: str) -> tuple[bool, str]:
+    """Run approve_pr_as_app.py --json (dry run) as its own process.
+
+    A separate process keeps the gate's printed report out of the daemon's
+    stdout and gives a machine-readable result; nothing process-wide is
+    redirected inside the daemon.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        _approve_script_path(),
+        "--repo",
+        repo,
+        "--pr",
+        str(pr),
+        "--json",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=PANEL_GATE_TIMEOUT_S)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return False, "the gate did not finish in time"
+    return _parse_panel_result(proc.returncode if proc.returncode is not None else -1, out, head_sha)
 
 
 def build_for_dispatcher(dispatcher: Any, sd: Any) -> ReleaseReviewApproval:
@@ -584,6 +644,9 @@ def build_for_dispatcher(dispatcher: Any, sd: Any) -> ReleaseReviewApproval:
     def notify(text: str) -> None:
         dispatcher.notifier.send(text, priority=sd.Priority.BLOCKER, handler=sd.DAEMON_NAME)
 
+    def alert(version: str, detail: str) -> None:
+        dispatcher._release_red_alert(version, detail)
+
     async def post_comment(repo: str, pr: int, body: str) -> bool:
         # App identity only: no PAT fallback, never an empty token.
         token = await sd._ensure_app_write_token(repo)
@@ -600,8 +663,13 @@ def build_for_dispatcher(dispatcher: Any, sd: Any) -> ReleaseReviewApproval:
             return 200 <= resp.status_code < 300
 
     async def run_publish(argv: list[str]) -> tuple[int, str]:
+        # Its own session: restarting Apis (launchctl kickstart -k) signals
+        # Apis's process group, and must not stop a publish mid-step.
         proc = await asyncio.create_subprocess_exec(
-            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
         )
         # On timeout the child is left running, as on the email path: stopping
         # a publish mid-step is worse than finishing it. A second start is
@@ -622,6 +690,7 @@ def build_for_dispatcher(dispatcher: Any, sd: Any) -> ReleaseReviewApproval:
             post_comment=post_comment,
             run_publish=run_publish,
             operator_login=sd._OPERATOR_LOGIN,
+            alert=alert,
             release_repo=sd.PHOENICURUS_RELEASE_REPO,
             release_branch=sd.PHOENICURUS_RELEASE_BRANCH,
             publish_script=_publish_script_path(),

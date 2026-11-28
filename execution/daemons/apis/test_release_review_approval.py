@@ -95,6 +95,7 @@ class Fake:
         self.calls: list[str] = []
         self.publishes: list[list[str]] = []
         self.notices: list[str] = []
+        self.alerts: list[tuple[str, str]] = []
         self.posted: list[str] = []
         self.publish_result = (0, "published")
         self.pr_reads = 0
@@ -146,6 +147,9 @@ class Fake:
         if self.notify_raises:
             raise RuntimeError("notifier down")
 
+    def alert(self, version, detail):
+        self.alerts.append((version, detail))
+
     async def post_comment(self, repo, pr, body):
         self.posted.append(body)
         if self.comment_raises:
@@ -169,6 +173,7 @@ class Fake:
             run_publish=self.run_publish,
             operator_login=OPERATOR,
             release_repo=REPO,
+            alert=self.alert,
             release_branch="main",
             publish_script=script,
             python="python3",
@@ -238,6 +243,7 @@ def test_pass_starts_publish_once_without_force(world):
     assert argv[2:] == [
         "--version", VERSION, "--entity-id", "ent_example",
         "--from-github-review", str(REVIEW_ID),
+        "--approved-head", HEAD,
     ]
     assert fake.posted == []
 
@@ -264,12 +270,12 @@ def test_publish_failure_and_timeout_are_reported(world, tmp_path):
     fake, gate = world
     fake.publish_result = (1, "step failed")
     _run(gate)
-    assert "FAILED" in fake.notices[-1]
+    assert fake.alerts[-1][0] == VERSION and "FAILED" in fake.alerts[-1][1]
     fake2 = Fake()
     fake2.publish_result = "timeout"
     gate2 = rra.ReleaseReviewApproval(fake2.deps(gate.deps.publish_script))
     _run(gate2)
-    assert "TIMED OUT" in fake2.notices[-1]
+    assert "TIMED OUT" in fake2.alerts[-1][1]
 
 
 def test_not_release_branch_returns_to_normal_path(world):
@@ -706,4 +712,203 @@ def test_after_timeout_a_second_delivery_does_not_publish_again(world):
     _run(gate)
     _run(gate, _trigger(review_id=REVIEW_ID))
     assert len(fake.publishes) == 1
-    assert "may still be running" in fake.notices[0]
+    assert "may still be running" in fake.alerts[0][1]
+
+
+# ── red alerts go through the dispatcher's alert path ───────────────────────
+
+
+def test_publish_failure_alert_is_raised_by_the_dispatcher(monkeypatch):
+    d = _dispatcher()
+    d._release_red_alert(VERSION, "approved by GitHub review but publish FAILED (rc=1): x.")
+    sent = d.notifier.sent[-1]
+    import red_conditions
+
+    assert sent.startswith(red_conditions.RED_MARKER)
+    assert red_conditions.classify(sent) == ("release-failed", VERSION)
+
+
+def test_built_gate_routes_alerts_to_the_dispatcher(monkeypatch):
+    d = _dispatcher()
+    monkeypatch.setattr(swarm_dispatch, "PHOENICURUS_RELEASE_REPO", REPO)
+    gate = rra.build_for_dispatcher(d, swarm_dispatch)
+    gate.deps.alert(VERSION, "publish TIMED OUT after a GitHub review approval.")
+    assert d.notifier.sent[-1].startswith("🔴 Release v1.2.3 publish TIMED OUT")
+
+
+# ── no dispatcher merge of a release pull request while the flag is on ──────
+
+
+def _merge_world(monkeypatch, tmp_path, pr_data=None, fail=False):
+    monkeypatch.setenv(rra.FLAG_ENV, "1")
+    monkeypatch.setattr(swarm_dispatch, "PHOENICURUS_RELEASE_REPO", REPO)
+    fake = Fake()
+    if pr_data is not None:
+        fake.pr = pr_data
+    if fail:
+        fake.fail.add("pr")
+    monkeypatch.setattr(rra, "build_for_dispatcher",
+                        lambda *a: rra.ReleaseReviewApproval(fake.deps(str(tmp_path / "p.py"))))
+    d = _dispatcher()
+    reached = []
+
+    async def credential(self, *_a, **_k):
+        reached.append("credential")
+        return False
+
+    monkeypatch.setattr(SwarmDispatcher, "_require_github_write_credential", credential)
+    return d, reached
+
+
+@pytest.mark.parametrize("kwargs", [
+    {},
+    {"expected_head": HEAD},
+    {"expected_head": HEAD, "require_default_base": True},
+])
+def test_merge_pr_refuses_release_pr_for_every_caller_shape(monkeypatch, tmp_path, kwargs):
+    d, reached = _merge_world(monkeypatch, tmp_path)
+    merged, detail = asyncio.run(d._merge_pr(REPO, PR, "squash", **kwargs))
+    assert merged is False
+    assert "release pull request" in detail
+    assert reached == [], "the merge must stop before any write path"
+
+
+def test_merge_pr_refuses_when_pr_unreadable(monkeypatch, tmp_path):
+    d, reached = _merge_world(monkeypatch, tmp_path, fail=True)
+    merged, detail = asyncio.run(d._merge_pr(REPO, PR, "squash"))
+    assert merged is False and "unknown" in detail
+    assert reached == []
+
+
+def test_merge_pr_non_release_pr_continues_as_before(monkeypatch, tmp_path):
+    d, reached = _merge_world(
+        monkeypatch, tmp_path,
+        pr_data=_pr(head={"ref": "feature/x", "sha": HEAD, "repo": {"full_name": REPO}}),
+    )
+    merged, detail = asyncio.run(d._merge_pr(REPO, PR, "squash"))
+    assert merged is False and "credential" in detail
+    assert reached == ["credential"]
+
+
+def test_merge_pr_flag_off_makes_no_release_read(monkeypatch):
+    monkeypatch.delenv(rra.FLAG_ENV, raising=False)
+    monkeypatch.setattr(swarm_dispatch, "PHOENICURUS_RELEASE_REPO", REPO)
+    monkeypatch.setattr(rra, "build_for_dispatcher",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("gate built")))
+    d = _dispatcher()
+
+    async def credential(self, *_a, **_k):
+        return False
+
+    monkeypatch.setattr(SwarmDispatcher, "_require_github_write_credential", credential)
+    merged, detail = asyncio.run(d._merge_pr(REPO, PR, "squash"))
+    assert merged is False and "credential" in detail
+
+
+# ── publish runs in its own session ─────────────────────────────────────────
+
+
+class _Proc:
+    returncode = 0
+
+    async def communicate(self):
+        return b"done\n", b""
+
+
+def test_github_review_publish_starts_in_a_new_session(monkeypatch):
+    seen = {}
+
+    async def fake_exec(*argv, **kw):
+        seen.update(kw)
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    d = _dispatcher()
+    monkeypatch.setattr(swarm_dispatch, "PHOENICURUS_RELEASE_REPO", REPO)
+    gate = rra.build_for_dispatcher(d, swarm_dispatch)
+    rc, last = asyncio.run(gate.deps.run_publish(["python3", "publish.py"]))
+    assert (rc, last) == (0, "done")
+    assert seen.get("start_new_session") is True
+
+
+def test_email_approval_publish_starts_in_a_new_session(monkeypatch):
+    seen = {}
+
+    async def fake_exec(*argv, **kw):
+        seen.update(kw)
+        seen["argv"] = argv
+        return _Proc()
+
+    monkeypatch.setattr(swarm_dispatch.asyncio, "create_subprocess_exec", fake_exec)
+    d = _dispatcher()
+    asyncio.run(d._handle_release_approve(_trigger(kind="release_approve", release_version=VERSION)))
+    assert "--from-email-approval" in seen["argv"]
+    assert seen.get("start_new_session") is True
+
+
+# ── the panel gate runs as its own process with a JSON result ───────────────
+
+
+def test_panel_gate_runs_tool_as_process_and_reads_json(monkeypatch):
+    import json as _json
+    import sys as _sys
+
+    seen = {}
+
+    class P:
+        returncode = 0
+
+        async def communicate(self):
+            return (_json.dumps({"exit_code": 0, "head_sha": HEAD, "overall_pass": True,
+                                 "refusing": "", "report": ""}).encode() + b"\n", None)
+
+    async def fake_exec(*argv, **kw):
+        seen["argv"] = argv
+        return P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    before = _sys.stdout
+    assert asyncio.run(rra._panel_gate_real(REPO, PR, HEAD)) == (True, "")
+    assert _sys.stdout is before, "nothing process-wide is redirected"
+    assert seen["argv"][1].endswith("approve_pr_as_app.py")
+    assert "--json" in seen["argv"] and "--apply" not in seen["argv"]
+
+
+@pytest.mark.parametrize("rc,out,words", [
+    (0, b'{"exit_code": 0, "head_sha": "' + b"b" * 40 + b'", "overall_pass": true}', "different head"),
+    (1, b'{"exit_code": 1, "head_sha": "' + b"a" * 40 + b'", "overall_pass": false, "refusing": "refusing: x"}', "refusing: x"),
+    (0, b"not json", "could not be read"),
+    (0, b"", "could not be read"),
+    (0, b'{"exit_code": 0, "head_sha": "' + b"a" * 40 + b'", "overall_pass": false}', "overall FAIL"),
+])
+def test_panel_result_refuses_unless_clear_pass_on_head(rc, out, words):
+    passed, reason = rra._parse_panel_result(rc, out, HEAD)
+    assert passed is False and words in reason
+
+
+def test_concurrent_panel_gates_keep_their_own_results(monkeypatch):
+    import json as _json
+
+    async def fake_exec(*argv, **kw):
+        pr = int(argv[argv.index("--pr") + 1])
+        head = ("a" if pr == 1 else "b") * 40
+
+        class P:
+            returncode = 0
+
+            async def communicate(self):
+                await asyncio.sleep(0.01 if pr == 1 else 0)
+                return (_json.dumps({"exit_code": 0, "head_sha": head,
+                                     "overall_pass": True}).encode(), None)
+
+        return P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    async def both():
+        return await asyncio.gather(
+            rra._panel_gate_real(REPO, 1, "a" * 40),
+            rra._panel_gate_real(REPO, 2, "b" * 40),
+        )
+
+    assert asyncio.run(both()) == [(True, ""), (True, "")]

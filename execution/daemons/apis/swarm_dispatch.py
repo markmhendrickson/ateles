@@ -8802,6 +8802,10 @@ class SwarmDispatcher:
         409 on a base-branch race — both surface as an honest "not merged".
         """
         method = method if method in ("squash", "merge", "rebase") else "squash"
+        release_hold = await self._release_merge_refusal(repo, pr_number)
+        if release_hold:
+            log.warning(f"[{DAEMON_NAME}] {repo}#{pr_number}: {release_hold}")
+            return False, release_hold
         api = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/merge"
         expected = _normalise_full_sha(expected_head)
         if require_default_base and not expected:
@@ -12308,10 +12312,14 @@ class SwarmDispatcher:
         None (no network call) unless ATELES_PUBLISH_ON_OPERATOR_REVIEW is
         exactly "1" and the trigger is on the release repository.
         """
+        return self._release_review_gate_for(trigger.repository)
+
+    def _release_review_gate_for(self, repository: str):
+        """``_release_review_gate`` keyed by repository alone."""
         if not release_review_approval.enabled():
             return None
         if not release_review_approval.is_release_repo(
-            trigger.repository, PHOENICURUS_RELEASE_REPO
+            repository, PHOENICURUS_RELEASE_REPO
         ):
             return None
         gate = self.__dict__.get("_release_review")
@@ -12321,6 +12329,31 @@ class SwarmDispatcher:
             )
             self.__dict__["_release_review"] = gate
         return gate
+
+    def _release_red_alert(self, version: str, detail: str) -> None:
+        """The dispatcher's red release alert, raised for the release-review gate."""
+        self.notifier.send(
+            f"🔴 Release {version} {detail}",
+            priority=Priority.BLOCKER,
+            handler=DAEMON_NAME,
+        )
+
+    async def _release_merge_refusal(self, repo: str, pr_number: int) -> str:
+        """Why ``_merge_pr`` must not merge this pull request ("" when it may).
+
+        Only while ATELES_PUBLISH_ON_OPERATOR_REVIEW is exactly "1" and only in
+        the release repository: a release pull request (head branch
+        ``release/<version>``, read live; unreadable counts as one) is merged
+        by publish.py after the operator's review, never by a dispatcher
+        merge, whichever caller asked.
+        """
+        gate = self._release_review_gate_for(repo)
+        if gate is None:
+            return ""
+        try:
+            return await gate.merge_refusal(repo, pr_number)
+        except Exception as exc:  # noqa: BLE001 — unreadable holds the merge
+            return f"merge held: the release check could not run ({exc.__class__.__name__})"
 
     async def _release_review_handled(self, trigger: SwarmTrigger) -> bool:
         """True when a release PR review was published or refused by the gate."""
@@ -13756,6 +13789,10 @@ class SwarmDispatcher:
                 "--from-email-approval",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                # Its own session: restarting Apis (launchctl kickstart -k)
+                # signals Apis's process group and must not stop a publish
+                # mid-step.
+                start_new_session=True,
             )
             out, _ = await asyncio.wait_for(
                 proc.communicate(), timeout=PHOENICURUS_PUBLISH_TIMEOUT_S

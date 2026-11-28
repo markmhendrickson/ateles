@@ -6191,3 +6191,74 @@ class TestRateLimitOnTheUrllibPaths:
             lens_authors.clear_cache()
         assert client.posted == []
         assert "resets 2027-01-15" in ei.value.report()
+
+
+# ── --json: a structured dry-run result for a caller in its own process ─────
+
+
+class TestJsonResult:
+    def _main(self, monkeypatch, capsys, argv, run):
+        monkeypatch.delenv("ATELES_APPROVE_PANEL_REQUIRED_ONLY", raising=False)
+        monkeypatch.setattr(
+            sys, "argv", ["approve_pr_as_app.py", "--repo", REPO, "--pr", str(PR), *argv]
+        )
+        monkeypatch.setattr(target, "run", run)
+        code = target.main()
+        out = capsys.readouterr().out
+        return code, out
+
+    def test_pass_prints_exactly_one_json_object(self, monkeypatch, capsys):
+        head = "e" * 40
+        seen = []
+
+        async def fake_run(repo, pr, extra_lenses, *, apply, panel_all=False, panel_mode=""):
+            seen.append(apply)
+            print(f"head_sha={head}")
+            print("overall: PASS")
+            return 0
+
+        code, out = self._main(monkeypatch, capsys, ["--json"], fake_run)
+        lines = [ln for ln in out.splitlines() if ln.strip()]
+        assert code == 0 and len(lines) == 1, out
+        result = json.loads(lines[0])
+        assert result["exit_code"] == 0
+        assert result["head_sha"] == head
+        assert result["overall_pass"] is True
+        assert "overall: PASS" in result["report"]
+        assert seen == [False], "--json is always a dry run"
+
+    def test_refusal_is_reported_in_the_result(self, monkeypatch, capsys):
+        async def fake_run(repo, pr, extra_lenses, *, apply, panel_all=False, panel_mode=""):
+            print("refusing: the required-lens set resolved to EMPTY")
+            return 1
+
+        code, out = self._main(monkeypatch, capsys, ["--json"], fake_run)
+        result = json.loads(out.strip().splitlines()[-1])
+        assert code == 1
+        assert result["overall_pass"] is False
+        assert result["refusing"].startswith("refusing: the required-lens set")
+
+    def test_a_raised_error_is_a_refusal_not_a_traceback(self, monkeypatch, capsys):
+        async def fake_run(*_a, **_k):
+            raise RuntimeError("down")
+
+        code, out = self._main(monkeypatch, capsys, ["--json"], fake_run)
+        result = json.loads(out.strip().splitlines()[-1])
+        assert code == 1 and result["overall_pass"] is False
+        assert "RuntimeError" in result["refusing"]
+
+    def test_json_refuses_apply(self, monkeypatch, capsys):
+        async def fake_run(*_a, **_k):
+            raise AssertionError("must not run")
+
+        code, out = self._main(monkeypatch, capsys, ["--json", "--apply"], fake_run)
+        assert code == 2
+        assert json.loads(out.strip())["overall_pass"] is False
+
+    def test_pass_word_without_zero_exit_is_not_a_pass(self):
+        r = target.gate_result(1, "head_sha=" + "e" * 40 + "\noverall: PASS\n")
+        assert r["overall_pass"] is False
+
+    def test_two_heads_in_one_report_name_no_head(self):
+        r = target.gate_result(0, "head_sha=" + "e" * 40 + "\nhead_sha=" + "f" * 40 + "\noverall: PASS")
+        assert r["head_sha"] == ""
