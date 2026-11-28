@@ -68,6 +68,7 @@ class TaskStatus(str, Enum):
     AWAITING_INPUT = "awaiting_input"  # parked: under-specified, needs operator context (readiness gate)
     DECLINED = "declined"             # operator rejected
     SUPERSEDED = "superseded"         # replaced by another task
+    BACKLOG = "backlog"               # kept, not dispatched until moved back to pending
 
 
 # Synonyms agents actually write for the canonical lifecycle spellings.
@@ -165,6 +166,11 @@ _TRANSITIONS: dict[str, frozenset[str]] = {
     TaskStatus.AWAITING_INPUT.value: frozenset(
         {TaskStatus.ROUTED.value, TaskStatus.DECLINED.value, TaskStatus.BLOCKED.value}
     ),
+    # Kept for later: leaves only by an explicit move back to pending, or by
+    # being closed. Nothing automatic routes it (see `is_backlog`).
+    TaskStatus.BACKLOG.value: frozenset(
+        {TaskStatus.PENDING.value, TaskStatus.DECLINED.value, TaskStatus.SUPERSEDED.value}
+    ),
     # Operator remediation reopens a blocked task for re-dispatch.
     TaskStatus.BLOCKED.value: frozenset(
         {TaskStatus.ROUTED.value, TaskStatus.DECLINED.value, TaskStatus.SUPERSEDED.value}
@@ -196,6 +202,19 @@ def is_terminal(status: str | None) -> bool:
     Absence is NOT terminal: an unset status is a new task, not a finished one.
     """
     return normalize(status) in TERMINAL
+
+
+def is_backlog(status: str | None) -> bool:
+    """True when `status` says the task is kept but must not be dispatched.
+
+    `backlog` is neither terminal (the work is not done) nor ACTIVE (nothing may
+    be dispatched from it): planning parks a stale task here, and every automatic
+    path — dispatch, sweeps, watchdog, reconciler, alerting — leaves it alone
+    until someone moves it back to `pending`. Normalized like every other
+    status, so `" Backlog "` counts. The spelling is the one the live record
+    already carries (docs/foundation/status.md, task row).
+    """
+    return normalize(status) == TaskStatus.BACKLOG.value
 
 
 def can_transition(from_status: str | None, to_status: str | None) -> bool:

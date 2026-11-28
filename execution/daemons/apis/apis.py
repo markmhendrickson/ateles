@@ -306,6 +306,7 @@ from lib.daemon_runtime.gating import (  # noqa: E402
 from lib.daemon_runtime.task_lifecycle import (  # noqa: E402
     TaskStatus,
     complete_task_with_result,
+    is_backlog,
     is_terminal,
     normalize as normalize_status,
     set_task_field_if_version,
@@ -1838,7 +1839,7 @@ class DeferralOutcome(str, Enum):
 #
 #   routed, executing, in_progress, verified   active    MOVED_ON       check it is running
 #   failed                                     failed    MOVED_ON       watchdog may retry; check
-#   done, declined, superseded                 terminal  MOVED_ON       "no action needed" only if
+#   done, declined, superseded, backlog        terminal  MOVED_ON       "no action needed" only if
 #                                                                       no marker remains AND
 #                                                                       nothing is queued for it
 #   awaiting_approval, awaiting_input, blocked gate      MOVED_TO_GATE  may need the operator
@@ -1856,6 +1857,8 @@ _STATUS_KINDS: dict[str, tuple[str, "DeferralOutcome"]] = {
     "awaiting_approval": ("gate", DeferralOutcome.MOVED_TO_GATE),
     "awaiting_input": ("gate", DeferralOutcome.MOVED_TO_GATE),
     "blocked": ("gate", DeferralOutcome.MOVED_TO_GATE),
+    # Parked by planning: nothing automatic acts on it, like a closed task.
+    "backlog": ("terminal", DeferralOutcome.MOVED_ON),
 }
 
 
@@ -2999,6 +3002,26 @@ async def _dispatch_task(
             f"(status={normalize_status(current_status)!r}, trigger={trigger}) "
             "— not dispatching; finished work is not re-opened"
         )
+        return
+
+    # ── Backlog guard: kept, not dispatchable until moved back to pending ────
+    #
+    # Planning returns stale tasks to `backlog`. Neotoma redelivers
+    # `task.created` after that correction, and without this guard the reset
+    # re-entered routing and ended as an escalation or a checkpoint. Above every
+    # write, notice and gate; `gate_override` does not pass either, since an old
+    # approval is not a decision to take the task out of the backlog. Only an
+    # explicit move to `pending` makes it dispatchable again.
+    if is_backlog(current_status):
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} is in the backlog "
+            f"(trigger={trigger}) — not dispatching until it is moved to pending"
+        )
+        # A read that shows backlog is a readable read: end any unreadable
+        # streak and drop any unroutable entry, or a parked task is later
+        # paged as "could NOT be read" or re-reported as unowned.
+        if snapshot_hydrated is not False:
+            _forget_parked(entity_id)
         return
 
     # VERIFIED means the executor already returned successfully and only the
@@ -4959,8 +4982,10 @@ def _file_fresh_checkpoint(
     """Create a replacement checkpoint under the current live policy.
 
     ``notifier=None`` files it silently (the bulk re-issue path sends one
-    summary instead of one page per task).
+    summary instead of one page per task). A backlog task gets no checkpoint.
     """
+    if is_backlog(task_snapshot.get("status")):
+        return None
     skill, action_type, policy, decision = _task_gate_context(task_snapshot)
     if decision.action == GateAction.AUTO_EXECUTE:
         decision = GateDecision(
@@ -5020,7 +5045,16 @@ def _require_fresh_release_authority(
     notifier: Notifier,
     reason: str,
 ) -> str | None:
-    """Create replacement authority before retiring the stale approval."""
+    """Create replacement authority before retiring the stale approval.
+
+    A backlog task gets none: nothing is filed, retired or announced for it.
+    """
+    if is_backlog(task_snapshot.get("status")):
+        log.info(
+            f"[{DAEMON_NAME}] task {task_id} is in the backlog — no replacement "
+            f"for checkpoint {checkpoint_id}"
+        )
+        return None
     if not _checkpoint_may_take_ordinary_effects(
         checkpoint_id,
         effect="ordinary replacement and retirement",
@@ -6105,6 +6139,23 @@ async def handle_checkpoint_brief(
             )
             return False
 
+        # A task parked in the backlog takes no effect from an approval: no
+        # replacement checkpoint, denial, held notice, stamp or release. The
+        # live task is read before any of them; a redelivery stays a no-op, and
+        # a later move to `pending` is judged afresh. An unreadable task keeps
+        # the handling below. A rejection is the operator's own decision and is
+        # handled as before.
+        # Only a well-formed id is read: a malformed one must not reach a fetch
+        # or its log line before the scope check.
+        if resolution == "approved" and _safe_entity_id(task_id) == task_id:
+            parked = _record_snapshot(fetch_task_record(task_id))
+            if parked is not None and is_backlog(parked.get("status")):
+                log.info(
+                    f"[{DAEMON_NAME}] checkpoint {entity_id} approved for task "
+                    f"{task_id}, which is in the backlog — no action"
+                )
+                return False
+
         # The checkpoint's ORIGINAL authenticated scope decides whether any
         # ordinary consuming effect (decline, close, replace, retire, stamp,
         # marker) may follow.  It is read from the checkpoint itself, never from
@@ -6445,6 +6496,35 @@ async def handle_checkpoint_brief(
 # ── Event handler ─────────────────────────────────────────────────────────────
 
 
+def _forget_parked(entity_id: str) -> None:
+    """A readable read showed `backlog`: no unreadable streak, no unroutable entry."""
+    _unroutable.clear_unreadable(entity_id)
+    _unroutable.forget(entity_id)
+
+
+def _status_may_be_stale(event: NeotomaEvent) -> bool:
+    """True when the event's status is not a fresh read of the live record.
+
+    Unhydrated: the read failed and the snapshot is unknown. Embedded: the
+    stream carried the snapshot, which can predate a correction made since.
+    A snapshot `hydrate_snapshot` fetched itself is the live record.
+    """
+    if not event.hydrated:
+        return True
+    embedded = (event.raw or {}).get("snapshot")
+    return isinstance(embedded, dict) and bool(embedded)
+
+
+async def _live_task_snapshot(entity_id: str) -> dict | None:
+    """The live task snapshot, or None when it cannot be read."""
+    try:
+        live = await asyncio.to_thread(fetch_task_snapshot, entity_id)
+    except Exception as exc:  # noqa: BLE001 — unread, said as such
+        log.warning(f"[{DAEMON_NAME}] live read of task {entity_id} failed: {exc}")
+        return None
+    return live if isinstance(live, dict) else None
+
+
 async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
     """
     Handle a Neotoma SSE task event.
@@ -6489,6 +6569,33 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
     if (action == "created" and _fly_defer_holder(snapshot, entity_id) is None
             and _fly_run_refuses_dispatch(snapshot, entity_id, "task.created")):
         return
+
+    # A backlog task is kept but not to be dispatched: no "Task created" or
+    # "due today" notice and no dispatch. Checked before the created dedupe is
+    # claimed, so a later move back to `pending` is not mistaken for a
+    # duplicate of this delivery.
+    #
+    # The event's own status is not enough when the snapshot was never read
+    # (hydration failed, so it is `{}`) or came embedded in the event payload
+    # (it may predate the planning reset). Then the live record decides, once,
+    # before any notice. A task that is not in the backlog carries on with the
+    # event exactly as delivered, and so does one whose live record cannot be
+    # read: its status is unknown, and an unreadable task keeps today's
+    # provisional notice and unreadable count rather than going silent.
+    if action in ("created", "due_today"):
+        if is_backlog(status) and event.hydrated:
+            _forget_parked(entity_id)
+        elif not is_backlog(status) and _status_may_be_stale(event):
+            live = await _live_task_snapshot(entity_id)
+            if live is not None and is_backlog(live.get("status")):
+                status = live.get("status")
+                _forget_parked(entity_id)
+        if is_backlog(status):
+            log.info(
+                f"[{DAEMON_NAME}] task {entity_id} is in the backlog — "
+                f"ignoring task.{action}"
+            )
+            return
 
     if action == "created":
         # Neotoma redelivers `task.created` for the same entity — measured
