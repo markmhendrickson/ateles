@@ -88,8 +88,9 @@ keeps the partial results. A verdict whose head moved is renamed
 | 2 | Usage error, or the PR head could not be read | Fix the arguments |
 | 3 | At least one `FALL BACK TO LOCAL LENS: <lens> (<reason>)` line | Run exactly those lenses locally and post as usual; delivered lenses keep their verdicts |
 | 4 | Verdicts delivered but a `--post` failed (`POST FAILED: <lens> (...)` line) | The verdict is NOT on the PR; post it by hand (below) or re-run if the head moved |
+| 5 | Fly is paused on this host (`execution/scripts/fly_pause.py`); the log line starts `Fly paused` | Wait for the pause to end, then re-run. Do NOT run the lenses locally instead; lenses stopped by the pause show `not_run` in `summary.json` |
 
-When both 3 and 4 apply, the exit is 3; read every line. Exit 0 with `--post`
+When both 3 and 4 apply, the exit is 3; 5 wins over both; read every line. Exit 0 with `--post`
 means the verdicts are on the PR.
 
 Reasons in the fallback line: `queue wait` (the 60 minute queue limit, passed to

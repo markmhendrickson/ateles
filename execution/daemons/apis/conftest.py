@@ -367,3 +367,17 @@ def _usage_alert_backoff_starts_empty():
     usage_alerts._retry_after.clear()
     yield
     usage_alerts._retry_after.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fly_pause_record(monkeypatch, tmp_path):
+    """Never read or write the account's real Fly pause record.
+
+    ``fly_pause.PAUSE_FILE`` is the one fixed path every reader and writer
+    uses; it is never taken from the environment, so a test replaces it
+    in-process.
+    """
+    import fly_pause
+
+    (tmp_path / "fly-pause").mkdir(exist_ok=True)
+    monkeypatch.setattr(fly_pause, "PAUSE_FILE", tmp_path / "fly-pause" / "fly-runner-pause.json")

@@ -38,7 +38,9 @@ into the program (never print or read that file):
 Exit codes: 0 every lens delivered (and posted, with --post); 3 at least one
 lens needs the local fallback (failed, refused, queue wait, stale); 4 verdicts
 delivered but a --post failed (a POST FAILED line names the lens); 2 usage /
-head unresolvable. 3 wins when both apply.
+head unresolvable; 5 Fly is paused on this host (``fly_pause.py``): nothing,
+or nothing further, was dispatched, and the lenses are NOT to be run locally
+instead. 3 wins when both 3 and 4 apply; 5 wins over both.
 Standard library only. See docs/runbooks/fly-lens-review.md.
 """
 from __future__ import annotations
@@ -582,6 +584,19 @@ def post_verdict(*, python: str, post_script: Path, repo: str, pr: int, lens: st
 
 
 # --------------------------------------------------------------------------
+def fly_pause_message() -> str:
+    """The host-wide Fly pause message, or "" when Fly is not paused."""
+    if str(APIS_DIR) not in sys.path:
+        sys.path.insert(0, str(APIS_DIR))
+    try:
+        import fly_pause  # noqa: PLC0415 - daemon module, stdlib only
+
+        state = fly_pause.read_pause(fly_pause.pause_file())
+        return state.message() if state.paused else ""
+    except Exception as exc:  # noqa: BLE001 - fail closed: an unknown pause is a pause
+        return f"Fly paused: the pause state cannot be read ({type(exc).__name__})"
+
+
 def main(argv: list[str] | None = None, *,
          dispatch: Callable[..., dict[str, Any]] = dispatch_once,
          head_resolver: Callable[[str, int], str] = resolve_head,
@@ -609,6 +624,10 @@ def main(argv: list[str] | None = None, *,
     if not args.task_entity_id.startswith("ent_"):
         log("--task-entity-id must be a Neotoma entity id (ent_...)")
         return 2
+    paused = fly_pause_message()
+    if paused:
+        log(f"{paused}. Nothing dispatched; do not run the lenses locally instead.")
+        return 5
     extra = ""
     if args.extra_brief:
         try:
@@ -653,8 +672,19 @@ def main(argv: list[str] | None = None, *,
 
     fallbacks = 0
     post_failures = 0
+    paused = ""
     try:
         for n, lens in enumerate(lenses):  # sequential: one job per provider at a time
+            paused = fly_pause_message()
+            if paused:
+                for other in lenses[n:]:
+                    summary["lenses"].append({
+                        "lens": other, "role": LENS_ROLES[other], "status": "not_run",
+                        "reason": f"stopped: {paused}"})
+                log(f"{paused}. Stopped before {lens}; the remaining lenses were not "
+                    "dispatched and are not to be run locally instead.")
+                save()
+                break
             log(f"{lens}: dispatching on Fly for head {head[:12]}")
             record: dict[str, Any]
             try:
@@ -664,6 +694,22 @@ def main(argv: list[str] | None = None, *,
                     python=sys.executable, dispatch_script=Path(args.dispatch_script),
                     dispatch=dispatch)
             except FallBack as exc:
+                # A refusal because Fly paused while this lens (even the last
+                # or only one) was dispatching is not a fallback: the lens is
+                # not run, here or locally, and the run ends with exit 5.
+                paused = fly_pause_message()
+                if paused:
+                    summary["lenses"].append({
+                        **exc.record, "lens": lens, "role": LENS_ROLES[lens],
+                        "status": "not_run", "reason": f"stopped: {paused}"})
+                    for other in lenses[n + 1:]:
+                        summary["lenses"].append({
+                            "lens": other, "role": LENS_ROLES[other], "status": "not_run",
+                            "reason": f"stopped: {paused}"})
+                    log(f"{paused}. {lens} was refused; it and the remaining lenses are "
+                        "not to be run locally instead.")
+                    save()
+                    break
                 fallbacks += 1
                 record = {"lens": lens, "role": LENS_ROLES[lens], "reviewed_head": head,
                           "status": "fallback", "reason": str(exc), **exc.record}
@@ -725,6 +771,8 @@ def main(argv: list[str] | None = None, *,
         summary["finished"] = now_iso()
         save()
     print(f"summary: {out_dir / 'summary.json'}", flush=True)
+    if paused:
+        return 5
     if fallbacks:
         return 3
     return 4 if post_failures else 0

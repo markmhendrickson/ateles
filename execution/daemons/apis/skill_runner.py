@@ -2160,6 +2160,11 @@ class SkillResult:
     # Fly refused or failed this attempt with nothing run (an eligibility,
     # cost, queue or claim refusal, or a launch that provably did not start).
     fly_nothing_launched: bool = False
+    # The host-wide Fly pause (fly_pause) refused this attempt: nothing ran,
+    # here or on Fly. A structured signal that ends the whole dispatch BEFORE
+    # any failure text is classified: no cooldown, no failover, no local run.
+    # ``error`` carries only the pause's end, never the operator's reason.
+    fly_paused: bool = False
     # An unforced Fly run whose login claim was given up for host capacity or
     # because the machine did not keep the update, with nothing left behind
     # (fly_runner.FlyClaimRefused.left_nothing): the provider loop may try the
@@ -4375,8 +4380,23 @@ async def _run_skill_once(
     # refusal, never a local fallback (ateles#1456).
     _fly_disabled = False
     _fly_provider_specific = False
+    def _fly_paused_result(state, run_id: str = "") -> SkillResult:
+        """The one pause refusal. It carries the pause's end so a panel
+        defers and resumes (an unreadable record has no end, so it waits for
+        attention); the operator's reason goes to the log only."""
+        log.warning(f"[apis] {skill} dispatch deferred — fly runner refused: "
+                    f"{state.message()}")  # fmt: skip
+        return SkillResult(
+            skill, False, None, "", "", error=f"fly runner refused: {state.summary()}",
+            provider=provider, cooled_until=state.until_text(), fly_run_id=run_id,
+            fly_nothing_launched=True, fly_paused=True,
+        )  # fmt: skip
+
     if fly_runner.wants_fly(runner, action_class):
         try:
+            # The host-wide Fly pause: refused before any admission check,
+            # token or reservation, and never sent home to run locally.
+            fly_runner.refuse_if_paused()
             if (
                 github_read_only
                 and action_class is not None
@@ -4418,6 +4438,10 @@ async def _run_skill_once(
         except fly_runner.FlyIneligible as exc:
             _fly_reason = f"not eligible for Fly: {exc}"
             _fly_provider_specific = exc.provider_specific
+        except fly_runner.FlyPaused as exc:
+            # The same refusal as a pause that begins inside run().
+            _cleanup_launch_artifacts()
+            return _fly_paused_result(exc.state)
         except fly_runner.FlyConfigInvalid as exc:
             _fly_reason = str(exc)
             _fly_disabled = True
@@ -4427,7 +4451,12 @@ async def _run_skill_once(
     def _fly_refusal_or_fallback(
         reason: str, provider_specific: bool = False
     ) -> SkillResult | None:
-        """A refusal to return, or None to run locally (logged and counted)."""
+        """A refusal to return, or None to run locally (logged and counted).
+        The only local-fallback branch: while the host-wide pause is in force
+        it never runs locally, whatever the failure was."""
+        paused = fly_runner.pause_state()
+        if paused.paused:
+            return _fly_paused_result(paused, _fly_job.run_id if _fly_job else "")
         fallback_ok = not _fly_forced and not fly_only and not _fly_disabled and (
             reason.startswith("not eligible")
             or fly_runner.get_executor().config.local_fallback
@@ -4598,6 +4627,8 @@ async def _run_skill_once(
                     # that run then goes home with its normal tools.
                     if _fly_job.neotoma_tools_unavailable:
                         _report_fly_capability(fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE)
+                except fly_runner.FlyPaused as exc:
+                    return _fly_paused_result(exc.state, _fly_job.run_id)
                 except fly_runner.FlyRefusal as exc:
                     msg = f"fly runner refused: {exc}"
                     log.warning(f"[apis] {skill} dispatch deferred — {msg}")
@@ -6001,6 +6032,10 @@ async def _run_provider_attempts(
         # its text: no cooldown, no failover to another provider, no retry,
         # even when an infrastructure message resembles a provider failure.
         if result.remote_outcome_unknown:
+            return result
+        # The host-wide Fly pause: a structured refusal, ended here BEFORE any
+        # classification, so no reason text can cool or fail over a provider.
+        if result.fly_paused:
             return result
         # The role's definition or policy could not be loaded: nothing ran, and every other
         # provider would hit the same failure. Ends the dispatch BEFORE any

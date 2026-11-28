@@ -238,6 +238,64 @@ credential, schema, grant or activation gate. These checks establish an
 instance's behavior; this document and its build template do not assert that
 any instance has been deployed.
 
+## Pausing every Fly call from this host
+
+A production deploy can need a window in which this host makes no Fly API
+call at all, without unloading Apis. One command sets, shows and clears that
+pause:
+
+```bash
+python3 execution/scripts/fly_pause.py set --reason "neotoma deploy" [--minutes 60]
+python3 execution/scripts/fly_pause.py show    # exit 1 while paused
+python3 execution/scripts/fly_pause.py clear
+```
+
+The default is 60 minutes, and a pause over 12 hours is refused. The record
+is a small file at one fixed path, `~/.config/ateles/fly-runner-pause.json` in
+the account's home directory. No environment, dotenv or ledger setting
+(including `APIS_FLY_LEDGER_FILE`) moves it, so the file the command writes is
+the file Apis, `dispatch_role.py` and `fly_lens_review.py` read; `set` prints
+the path. It holds the expiry time and the reason. The reason is shown by
+`show` and in the logs only: refusals carry the expiry, never the reason, so
+no reason text can read as a provider failure. Once the expiry passes, the pause is over, and
+nobody needs to clear it.
+
+While the pause is in force:
+
+- **No Machines API request leaves this host through the Fly runner.** Every
+  request goes through `FlyMachinesClient._call`, which refuses before any
+  request is built. That covers the create, get, update, start, stop, lease,
+  destroy, list and wait calls, so it covers launches, polls, clean-up, the
+  reaper, Apis's periodic settlement and `fly_machine_status.py`.
+- **New launches refuse up front** with `Fly paused until <time>`.
+  This covers Apis dispatch, `dispatch_role.py --runner fly` and
+  `fly_lens_review.py`. Nothing is minted, reserved or admitted, and the work
+  never runs locally instead. For a task Apis dispatches, the result reads
+  `fly runner refused: Fly paused until ...`. `fly_lens_review.py` exits 5 and
+  stops before its next lens. Do not run those lenses locally instead.
+- **Apis's periodic step and the reaper skip.** Each logs `periodic step
+  skipped` or `reaper skipped`, with the pause message. Marked reservations
+  stay as they are and are settled by the first periodic step after the pause
+  ends. The rest of Apis's work carries on as normal.
+- **A job already running on Fly is left alone.** It is not stopped, and
+  nothing asks Fly about it. The caller waiting on it checks the pause every 30
+  seconds, without calling Fly, and goes back to polling once the pause ends.
+  If the job's deadline passes during the pause, the caller sees a timeout
+  with an unknown outcome and `remote_state` `unconfirmed`. The job's
+  reservation and lease are kept, marked, and are settled after the pause.
+  The task's own `fly_runner_result` in Neotoma is still the record of what
+  the job did.
+- **Nothing is released while paused.** No path releases a lease, drops a
+  reservation or reports an outcome it could not read.
+
+**An unreadable pause record counts as a pause.** A file that exists but cannot
+be read or parsed blocks every Fly call, and its message says to clear it with
+`python3 execution/scripts/fly_pause.py clear`.
+
+The pause covers code that goes through the Fly runner. A deploy you run
+yourself with `fly deploy` or `flyctl` is not blocked by it: that deploy is
+the reason for the window.
+
 ## Login-machine status for supervision
 
 Supervise from the canonical records first: the task, its `fly_runner_result`
