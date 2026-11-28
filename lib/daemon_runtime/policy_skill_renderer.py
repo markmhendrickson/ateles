@@ -562,6 +562,95 @@ def _sanitize_body(raw: str, max_len: int, *, list_item_safe: bool = False) -> s
     return text
 
 
+def policy_source_id(snap: dict) -> str:
+    """A row's entity id cut to the id charset, the same way `to_skill` cuts
+    it, or "" when nothing printable is left."""
+    raw = str(snap.get("_entity_id") or snap.get("entity_id") or "")
+    return _ENTITY_ID_DISALLOWED.sub("", raw)[:64]
+
+
+# Placeholder printed where a row has no printable id, so the source line and
+# the cut marker still read as complete sentences.
+_ID_NOT_RECORDED = "(id not recorded)"
+
+
+def _cut_marker_line(omitted: int, entity_id: str) -> str:
+    """The one line `_sanitize_body_head_tail` puts between the kept start and
+    the kept end. Indented like every other continuation line, and built only
+    from a number and a charset-cut id, so it cannot open a heading, a bullet
+    or a tier marker."""
+    return (
+        f"{_LIST_ITEM_CONTINUATION_INDENT}[… {omitted} characters of this rule "
+        f"left out here. Fetch agent_policy {entity_id or _ID_NOT_RECORDED} "
+        "and read the full rule before acting on it. …]"
+    )
+
+
+def _head_cut(text: str, budget: int) -> str:
+    """The longest prefix of `text` within `budget` ending at a paragraph
+    break, else a line break, else a space, else exactly at `budget`."""
+    window = text[:budget]
+    for sep in ("\n\n", "\n", " "):
+        at = window.rfind(sep)
+        if at >= budget // 2:
+            return window[:at].rstrip()
+    return window.rstrip()
+
+
+def _tail_cut(text: str, budget: int) -> str:
+    """The longest suffix of `text` within `budget` starting just after a
+    paragraph break, else a line break, else a space, else exactly at the
+    window start."""
+    window = text[len(text) - budget:]
+    for sep in ("\n\n", "\n", " "):
+        at = window.find(sep)
+        if 0 <= at <= budget // 2:
+            return window[at + len(sep):]
+    return window
+
+
+def _sanitize_body_head_tail(raw: str, max_len: int, entity_id: str) -> str:
+    """`_sanitize_body(raw, max_len, list_item_safe=True)` for the dispatch
+    prompt, except that a rule longer than `max_len` keeps its START and its
+    END rather than only its start. Newer rulings are appended to the end of
+    a rule, so a start-only cut dropped exactly the text most likely to
+    govern; this keeps about half the cap from each end and puts one marker
+    line between them naming how much was left out and which `agent_policy`
+    to fetch before acting.
+
+    The whole rule is sanitized first (the same fixed-point,
+    first-line/continuation split as `_sanitize_body`), so both kept parts
+    are cut from already-clean text. The head is a prefix of it, which
+    stays clean. The tail can start mid-line, where a suffix of a clean line
+    can open with `-`, `#` or `>`; its first line is therefore sanitized
+    again on its own and indented, and every later tail line already carries
+    the continuation indent. The marker is indented the same way.
+
+    Size: head + newline + tail is at most `max_len`; the marker and its
+    newline are the only addition. A rule at or under `max_len` is returned
+    exactly as `_sanitize_body` would return it."""
+    full = _sanitize_body(raw, max_len=3 * len(raw) + 2, list_item_safe=True)
+    if len(full) <= max_len:
+        return full
+    indent = _LIST_ITEM_CONTINUATION_INDENT
+    head = _head_cut(full, max_len // 2)
+    # One newline joins head to tail; the tail's first line may gain the
+    # indent after its re-sanitize, so reserve room for it too.
+    tail_budget = max_len - len(head) - 1 - len(indent)
+    tail_raw = _tail_cut(full, tail_budget)
+    omitted = len(full) - len(head) - len(tail_raw)
+    first, sep, rest = tail_raw.lstrip("\n").partition("\n")
+    first = _run_body_pass_to_fixed_point(first.strip()).replace("\n", " ")
+    lines = ([indent + first] if first else []) + (rest.split("\n") if sep else [])
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    tail = "\n".join(lines).rstrip()
+    parts = [head, _cut_marker_line(omitted, entity_id)]
+    if tail:
+        parts.append(tail)
+    return "\n".join(parts)
+
+
 class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
     """Refuse every redirect. `urllib`'s default handler follows a 3xx on a
     POST and re-sends the request headers, `Authorization` included, to

@@ -1411,6 +1411,12 @@ class AgentLoader:
         indented block under its row's bullet rather than being collapsed
         to a single line.
 
+        A rule longer than `_BODY_MAX` keeps its start AND its end, with one
+        marker line between them naming what was left out and the
+        `agent_policy` to fetch (`_sanitize_body_head_tail`): newer rulings
+        are appended at the end, so a start-only cut lost them. Every row
+        ends with an indented `Source: agent_policy <id>` line.
+
         Imported lazily (not at module scope) because `policy_skill_renderer`
         imports FROM this module at import time (`policy_binds_agent_by_edge`
         et al.) — a module-level import here would be circular.
@@ -1424,14 +1430,18 @@ class AgentLoader:
         try:  # package import (normal daemon runtime) with script fallback
             from .policy_skill_renderer import (  # type: ignore
                 _BODY_MAX,
-                _sanitize_body,
+                _ID_NOT_RECORDED,
+                _sanitize_body_head_tail,
                 _sanitize_field,
+                policy_source_id,
             )
         except ImportError:  # pragma: no cover
             from policy_skill_renderer import (  # type: ignore
                 _BODY_MAX,
-                _sanitize_body,
+                _ID_NOT_RECORDED,
+                _sanitize_body_head_tail,
                 _sanitize_field,
+                policy_source_id,
             )
         lines = [
             "\n\n## Active agent policies (apply these)\n",
@@ -1448,8 +1458,10 @@ class AgentLoader:
             raw_rule = p.get("rule")
             if not isinstance(raw_rule, str) or not raw_rule.strip():
                 raise AgentPolicyUnavailable(self.agent_name, "content", "bad_response")
-            rule = _sanitize_body(raw_rule, max_len=_BODY_MAX, list_item_safe=True)
+            entity_id = policy_source_id(p)
+            rule = _sanitize_body_head_tail(raw_rule, _BODY_MAX, entity_id)
             if not rule:
                 raise AgentPolicyUnavailable(self.agent_name, "content", "bad_response")
             lines.append(f"- ({kind}, {status}) {rule}")
+            lines.append(f"  Source: agent_policy {entity_id or _ID_NOT_RECORDED}")
         return "\n".join(lines)
