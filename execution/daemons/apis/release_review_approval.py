@@ -1,0 +1,829 @@
+"""Publish a Neotoma release when the operator approves its release PR on GitHub.
+
+OFF BY DEFAULT. Only ``ATELES_PUBLISH_ON_OPERATOR_REVIEW=1`` (that exact value)
+turns it on; unset or any other value leaves the dispatcher's behaviour exactly
+as before and this module makes no network call.
+
+When it is on, a review on a release pull request of the release repository
+(head branch ``release/<version>``) never reaches the dispatcher's
+approve-and-merge path. This module handles it instead, and the comment and
+email approval commands are refused for a release pull request too. The email
+release approval (the ``release_approve`` trigger, which the gateway's
+approve-release route creates) starts nothing while the flag is on: the
+dispatcher sends a notice naming why. So the only way a release publishes while
+the flag is on is the operator's own GitHub review.
+
+This is a consent gate in front of an irreversible publish, so every doubt
+refuses. Every condition below is read live at decision time; nothing is taken
+from the webhook payload except the review id, which is only a key to re-read:
+
+  - the review with that id is by the operator login (not a bot), is APPROVED,
+    and its commit is the pull request's current head;
+  - the approving review's own body is empty (whitespace counts as empty);
+  - the approval is bare. No word, time or edit is compared: the publish
+    refuses if the operator login has, at any time before or after the
+    approval, (a) any conversation comment on the pull request, (b) any inline
+    review comment, including one that belongs to the approving review itself,
+    or (c) any review, of any state or age, that is not APPROVED with an empty
+    body. An earlier empty approval is allowed. Comments and reviews by the
+    swarm App, bots and other logins are ignored. Every list is read to its
+    last page or the publish refuses, and a row whose author, id or state
+    cannot be read refuses;
+  - the pull request is open, based on the release branch, its head branch is
+    ``release/<version>`` in the same repository, and it is not behind the base;
+  - exactly one release_result matches the version and the pull request URL,
+    with status pending_approval and rc_head_sha equal to the head;
+  - the panel gate that ``execution/scripts/approve_pr_as_app.py`` evaluates
+    passes on this head (its own ``run`` in dry-run mode, not a copy);
+  - the swarm App's approval review exists on this head.
+
+The panel gate is slow, so it runs after a first pass over the other
+conditions. Then, under the per-version lock and immediately before the start,
+every other condition is read again and must give the same result, so a
+withdrawal or change made while the gate ran publishes nothing. Nothing slow
+runs between those reads and the start.
+
+On a pass, ``publish.py --version <v> --entity-id <id> --from-github-review
+<review id> --approved-head <sha>`` runs at most once per version for the life
+of the dispatcher (a second approving review, concurrent or later, or one after
+a timed-out publish, starts nothing), in its own session so a restart of Apis
+does not stop it mid-step. publish.py merges with the head pinned to that sha
+and checks that the tree it tags is the approved head's tree before tagging;
+when that check refuses, the merge has already landed and nothing was tagged
+or published, and the alert says so. Anything the operator posts after
+publish.py has started is not re-read: from then on only stopping publish.py
+itself halts the release.
+Every refusal publishes nothing, is logged, and is reported through the
+notifier and one pull request comment posted with the App identity; an
+unexpected error refuses the same way and also raises a red alert. A failed
+notice never leads to a publish. The release records are read through the
+dispatcher's own Neotoma client; publish.py is never imported here, only
+started as its own process. While the flag is on, the dispatcher's merge
+call also refuses a release pull request (``merge_refusal``), so no other
+caller merges one.
+
+Design basis: docs/foundation/principles.md#1-a-mechanism-that-does-not-bind-is-not-a-control
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import re
+import sys
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any
+
+log = logging.getLogger("apis.release_review_approval")
+
+FLAG_ENV = "ATELES_PUBLISH_ON_OPERATOR_REVIEW"
+RELEASE_HEAD_RE = re.compile(r"^release/(v[0-9][0-9A-Za-z.\-+]*)$")
+# Marker on this module's own notices. It carries no command token, so a
+# notice can never re-trigger a comment command.
+NOTICE_MARKER = "<!-- release-review-approval -->"
+# Prefix of publish.py's tree-check refusal; it is on publish.py's last line.
+TREE_CHECK_MARKER = "tree check FAILED"
+_PER_PAGE = 100
+_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+# Start of every refusal caused by the operator's own activity on the pull
+# request; the kind of activity follows it.
+OPERATOR_ACTIVITY = "the operator login has posted on this release pull request: "
+
+
+def enabled(env: dict[str, str] | None = None) -> bool:
+    """True only when the flag is the exact string ``1``."""
+    source = os.environ if env is None else env
+    return source.get(FLAG_ENV) == "1"
+
+
+class Refusal(Exception):
+    """A condition failed; the message names it in plain words."""
+
+
+class NotReleasePR(Exception):
+    """The pull request is not a release pull request; the normal path applies."""
+
+
+@dataclass
+class Deps:
+    """Everything with a side effect, injected so tests use fakes.
+
+    ``github_get(path, params)`` returns ``(status, json, headers)``.
+    ``release_results()`` returns ``(rows, complete)``.
+    ``panel_gate(repo, pr, head)`` returns ``(passed, reason)``.
+    ``app_bot_login()`` returns the App's bot login (empty when unreadable).
+    ``notify(text)`` and ``post_comment(repo, pr, body)`` report a refusal.
+    ``alert(version, detail)`` raises a red release alert through the
+    dispatcher's own alert path (the dispatcher writes the red marker).
+    ``run_publish(argv)`` returns ``(returncode, last_output_line)`` and
+    raises ``asyncio.TimeoutError`` on timeout.
+    """
+
+    github_get: Callable[[str, dict], Awaitable[tuple[int, Any, dict]]]
+    release_results: Callable[[], Awaitable[tuple[list[dict], bool]]]
+    panel_gate: Callable[[str, int, str], Awaitable[tuple[bool, str]]]
+    app_bot_login: Callable[[], Awaitable[str]]
+    notify: Callable[[str], None]
+    post_comment: Callable[[str, int, str], Awaitable[bool]]
+    run_publish: Callable[[list[str]], Awaitable[tuple[int, str]]]
+    operator_login: str
+    release_repo: str
+    alert: Callable[[str, str], None]
+    release_branch: str = "main"
+    publish_script: str = ""
+    python: str = sys.executable
+
+
+@dataclass
+class _Decision:
+    version: str
+    entity_id: str
+    review_id: int
+    head_sha: str
+
+
+def is_release_repo(repository: str, release_repo: str) -> bool:
+    return bool(repository) and repository.casefold() == (release_repo or "").casefold()
+
+
+def _is_bot(user: dict) -> bool:
+    login = str((user or {}).get("login") or "")
+    return (
+        not login
+        or str((user or {}).get("type") or "") != "User"
+        or login.casefold().endswith("[bot]")
+    )
+
+
+def _login_of(row: dict, what: str) -> str:
+    """The casefolded author login of a list row; an unreadable author refuses."""
+    user = row.get("user")
+    if not isinstance(user, dict) or not isinstance(user.get("login"), str) or not user["login"]:
+        raise Refusal(f"the author of an item in {what} could not be read")
+    return user["login"].casefold()
+
+
+def _is_empty(body: object) -> bool:
+    return body is None or (isinstance(body, str) and not body.strip())
+
+
+def _norm_version(value: object) -> str:
+    v = str(value or "").strip()
+    return v if not v or v.startswith("v") else f"v{v}"
+
+
+def _fields(row: dict) -> dict:
+    return row.get("snapshot") or row.get("fields") or row
+
+
+# The next step a refusal names, by kind of refusal.
+_AFTER_OPERATOR_ACTIVITY = (
+    "This release pull request cannot be published by review once the operator "
+    "has commented on it or submitted any review other than an empty approval; "
+    "the release then needs the operator's go relayed to the session running it."
+)
+_AFTER_CONDITION = (
+    "To publish once the condition is met, submit a new approving review on the "
+    "current head with an empty comment box."
+)
+_AFTER_OTHER_ENTRANCE = (
+    "To publish, submit an approving review on the current head in GitHub with "
+    "an empty comment box."
+)
+_AFTER_ERROR = (
+    "The check stopped on an unexpected error, named in the dispatcher log; "
+    "once it is resolved, submit a new approving review on the current head "
+    "with an empty comment box."
+)
+
+
+def _next_step(reason: str, kind: str = "condition") -> str:
+    """The sentence that tells the reader what to do after this refusal."""
+    if reason.startswith(OPERATOR_ACTIVITY) or OPERATOR_ACTIVITY in reason:
+        return _AFTER_OPERATOR_ACTIVITY
+    if kind == "entrance":
+        return _AFTER_OTHER_ENTRANCE
+    if kind == "error":
+        return _AFTER_ERROR
+    return _AFTER_CONDITION
+
+
+class ReleaseReviewApproval:
+    """The release-review publish gate. One instance per dispatcher."""
+
+    def __init__(self, deps: Deps) -> None:
+        self.deps = deps
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._started_versions: set[str] = set()
+        self._seen_reviews: set[int] = set()
+
+    # ── GitHub reads (fail closed) ──────────────────────────────────────────
+
+    async def _get(self, path: str, what: str, params: dict | None = None) -> Any:
+        try:
+            status, data, _ = await self.deps.github_get(path, params or {})
+        except Exception as exc:
+            raise Refusal(f"{what} could not be read ({exc.__class__.__name__})") from exc
+        if status != 200 or data is None:
+            raise Refusal(f"{what} could not be read (HTTP {status})")
+        return data
+
+    async def _get_all(self, path: str, what: str) -> list[dict]:
+        """Every page of a list endpoint; an unreadable or malformed page refuses."""
+        rows: list[dict] = []
+        for page in range(1, 51):
+            data = await self._get(path, what, {"per_page": _PER_PAGE, "page": page})
+            if not isinstance(data, list) or not all(isinstance(r, dict) for r in data):
+                raise Refusal(f"{what} came back in an unexpected shape")
+            rows.extend(data)
+            if len(data) < _PER_PAGE:
+                return rows
+        raise Refusal(f"{what} has more pages than this check reads")
+
+    async def _fetch_pr(self, repo: str, pr: int) -> dict:
+        data = await self._get(f"/repos/{repo}/pulls/{pr}", "the pull request")
+        if not isinstance(data, dict):
+            raise Refusal("the pull request came back in an unexpected shape")
+        return data
+
+    def _release_version(self, repo: str, pr_data: dict) -> str:
+        head = pr_data.get("head") or {}
+        match = RELEASE_HEAD_RE.match(str(head.get("ref") or ""))
+        if not match:
+            raise NotReleasePR()
+        return match.group(1)
+
+    # ── public entrances ────────────────────────────────────────────────────
+
+    async def handle_review(self, trigger: Any) -> bool:
+        """Handle a pr_review trigger on the release repository.
+
+        Returns False only when the live pull request is not a release pull
+        request (the caller then takes its normal path). Returns True when this
+        module handled it: published, or refused and reported.
+        """
+        repo, pr = trigger.repository, int(trigger.number or 0)
+        version = ""
+        started_before = set(self._started_versions)
+        try:
+            pr_data = await self._fetch_pr(repo, pr)
+            try:
+                version = self._release_version(repo, pr_data)
+            except NotReleasePR:
+                return False
+            decision = await self._evaluate(trigger, pr_data)
+            await self._panel_gate(repo, pr, decision.head_sha)
+            await self._publish(trigger, decision)
+        except Refusal as exc:
+            await self._refuse(repo, pr, str(exc))
+        except Exception as exc:  # noqa: BLE001 — an unexpected error refuses, reported
+            await self._report_error(repo, pr, version, exc, started_before)
+        return True
+
+    async def guard_other_entrance(self, trigger: Any, source: str) -> bool:
+        """True when a comment or email approval must not reach the merge path.
+
+        A release pull request is published only from the operator's GitHub
+        review; an unreadable pull request is treated as one (fail closed).
+        """
+        repo, pr = trigger.repository, int(trigger.number or 0)
+        try:
+            pr_data = await self._fetch_pr(repo, pr)
+            self._release_version(repo, pr_data)
+        except NotReleasePR:
+            return False
+        except Refusal as exc:
+            await self._refuse(repo, pr, f"the {source} was not acted on: {exc}", kind="entrance")
+            return True
+        except Exception as exc:  # noqa: BLE001 — unknown counts as a release PR
+            await self._report_error(repo, pr, "", exc, None, what=f"the {source} was not acted on")
+            return True
+        await self._refuse(
+            repo,
+            pr,
+            f"the {source} was not acted on: a release pull request is "
+            "published only from the operator's approving review in GitHub",
+            kind="entrance",
+        )
+        return True
+
+    async def merge_refusal(self, repo: str, pr: int) -> str:
+        """Why the dispatcher must not merge this pull request ("" when it may).
+
+        A release pull request is merged only by publish.py after the
+        operator's review; an unreadable pull request counts as one.
+        """
+        try:
+            pr_data = await self._fetch_pr(repo, pr)
+            self._release_version(repo, pr_data)
+        except NotReleasePR:
+            return ""
+        except Refusal as exc:
+            return f"merge held: whether this is a release pull request is unknown ({exc})"
+        except Exception as exc:  # noqa: BLE001 — an unexpected error holds, reported
+            await self._report_error(repo, pr, "", exc, None, what="a merge was held")
+            return f"merge held: the release check stopped on an unexpected error ({exc.__class__.__name__})"
+        return (
+            "merge held: a release pull request is merged only by the release "
+            "publish step after the operator's approving review"
+        )
+
+    # ── the decision ────────────────────────────────────────────────────────
+
+    async def _evaluate(self, trigger: Any, pr_data: dict) -> _Decision:
+        """Every live condition except the panel gate; ``pr_data`` is a fresh read.
+
+        Only GitHub and Neotoma reads run here, nothing slow, so it is run
+        once before the panel gate and again under the per-version lock
+        immediately before the start.
+        """
+        d = self.deps
+        repo, pr = trigger.repository, int(trigger.number or 0)
+        raw_review = (getattr(trigger, "raw", None) or {}).get("review") or {}
+        review_id = raw_review.get("id")
+        if not isinstance(review_id, int) or isinstance(review_id, bool) or review_id <= 0:
+            raise Refusal("the review id in the event could not be read")
+        if review_id in self._seen_reviews:
+            raise Refusal(f"review {review_id} was already handled once")
+
+        version = self._release_version(repo, pr_data)
+        head = pr_data.get("head") or {}
+        base = pr_data.get("base") or {}
+        head_sha = str(head.get("sha") or "")
+        if not _FULL_SHA_RE.match(head_sha):
+            raise Refusal("the pull request head commit could not be read")
+        if pr_data.get("state") != "open" or pr_data.get("merged"):
+            raise Refusal("the pull request is not open")
+        if str(base.get("ref") or "") != d.release_branch:
+            raise Refusal(f"the pull request is not based on {d.release_branch}")
+        head_repo = str((head.get("repo") or {}).get("full_name") or "")
+        base_repo = str((base.get("repo") or {}).get("full_name") or "")
+        if not head_repo or head_repo.casefold() != repo.casefold() or base_repo.casefold() != repo.casefold():
+            raise Refusal("the head branch is not in the release repository itself")
+
+        operator = (d.operator_login or "").casefold()
+        if not operator:
+            raise Refusal("the operator login is not configured")
+
+        # The review, re-read by id.
+        review = await self._get(f"/repos/{repo}/pulls/{pr}/reviews/{review_id}", "the review")
+        if not isinstance(review, dict):
+            raise Refusal("the review came back in an unexpected shape")
+        user = review.get("user") or {}
+        if _is_bot(user):
+            raise Refusal("the review is not by a person")
+        if str(user.get("login") or "").casefold() != operator:
+            raise Refusal("the review is not by the operator")
+        if str(review.get("state") or "") != "APPROVED":
+            raise Refusal("the review is not an approval")
+        if str(review.get("commit_id") or "") != head_sha:
+            raise Refusal("the approval is not on the pull request's current head")
+        if not _is_empty(review.get("body")):
+            raise Refusal("the approving review has a comment; an approval used to publish must have none")
+
+        # Every review by the operator must be a bare approval; and the App's
+        # own approval must be on this head.
+        reviews = await self._get_all(f"/repos/{repo}/pulls/{pr}/reviews", "the review list")
+        app_login = ""
+        try:
+            app_login = (await d.app_bot_login() or "").casefold()
+        except Exception:  # noqa: BLE001 — unreadable refuses below
+            app_login = ""
+        app_approved = False
+        for r in reviews:
+            rid = r.get("id")
+            if not isinstance(rid, int) or isinstance(rid, bool):
+                raise Refusal("a review in the list has no readable id")
+            r_state = r.get("state")
+            if not isinstance(r_state, str) or not r_state:
+                raise Refusal("a review in the list has no readable state")
+            r_login = _login_of(r, "the review list")
+            if r_login == operator and not (r_state == "APPROVED" and _is_empty(r.get("body"))):
+                raise Refusal(OPERATOR_ACTIVITY + "a review other than an empty approval")
+            if (
+                app_login
+                and r_login == app_login
+                and r_state == "APPROVED"
+                and str(r.get("commit_id") or "") == head_sha
+            ):
+                app_approved = True
+        if not app_login:
+            raise Refusal("the swarm App's login could not be read")
+        if not app_approved:
+            raise Refusal("the swarm App's panel approval is not on this head")
+
+        # Any comment by the operator, conversation or inline, at any time.
+        for path, what, kind in (
+            (f"/repos/{repo}/issues/{pr}/comments", "the comment list", "a conversation comment"),
+            (f"/repos/{repo}/pulls/{pr}/comments", "the inline comment list", "an inline review comment"),
+        ):
+            for c in await self._get_all(path, what):
+                if _login_of(c, what) == operator:
+                    raise Refusal(OPERATOR_ACTIVITY + kind)
+
+        # Not behind the base branch.
+        compare = await self._get(
+            f"/repos/{repo}/compare/{d.release_branch}...{head_sha}", "the branch comparison"
+        )
+        behind = compare.get("behind_by") if isinstance(compare, dict) else None
+        if not isinstance(behind, int) or isinstance(behind, bool):
+            raise Refusal("how far the branch is behind could not be read")
+        if behind != 0:
+            raise Refusal(f"the release branch is behind {d.release_branch}")
+
+        # Exactly one matching release record, pending approval, on this head.
+        try:
+            rows, complete = await d.release_results()
+        except Exception as exc:
+            raise Refusal(f"the release records could not be read ({exc.__class__.__name__})") from exc
+        if not complete:
+            raise Refusal("the release record list may be incomplete")
+        pr_url = str(pr_data.get("html_url") or "")
+        if not pr_url:
+            raise Refusal("the pull request URL could not be read")
+        matches = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise Refusal("a release record came back in an unexpected shape")
+            f = _fields(row)
+            if _norm_version(f.get("version")) != version:
+                continue
+            if pr_url not in (str(f.get("rc_pr_url") or ""), str(f.get("release_url") or "")):
+                continue
+            matches.append(row)
+        if len(matches) != 1:
+            raise Refusal(f"{len(matches)} release records match {version} and this pull request, not exactly one")
+        record = matches[0]
+        f = _fields(record)
+        entity_id = str(record.get("entity_id") or record.get("id") or "")
+        if not entity_id:
+            raise Refusal("the release record id could not be read")
+        if str(f.get("status") or "") != "pending_approval":
+            raise Refusal(f"the release record status is {f.get('status')!r}, not pending_approval")
+        if str(f.get("rc_head_sha") or "") != head_sha:
+            raise Refusal("the release record was prepared for a different head")
+
+        return _Decision(version=version, entity_id=entity_id, review_id=review_id, head_sha=head_sha)
+
+    async def _panel_gate(self, repo: str, pr: int, head_sha: str) -> None:
+        """The panel gate approve_pr_as_app.py evaluates, on this head (slow)."""
+        try:
+            passed, reason = await self.deps.panel_gate(repo, pr, head_sha)
+        except BaseException as exc:
+            if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+                raise
+            raise Refusal(f"the review panel gate could not be evaluated ({exc.__class__.__name__})") from exc
+        if not passed:
+            raise Refusal(f"the review panel gate did not pass ({reason})")
+
+    # ── effects ─────────────────────────────────────────────────────────────
+
+    async def _publish(self, trigger: Any, decision: _Decision) -> None:
+        d = self.deps
+        repo, pr = trigger.repository, int(trigger.number or 0)
+        version = decision.version
+        lock = self._locks.setdefault(version, asyncio.Lock())
+        if lock.locked():
+            await self._refuse(repo, pr, f"a publish of {version} is already running")
+            return
+        async with lock:
+            if version in self._started_versions or decision.review_id in self._seen_reviews:
+                await self._refuse(repo, pr, f"a publish of {version} was already started once")
+                return
+            # Every live condition again, after the slow panel gate and
+            # immediately before the start: a withdrawal or change made while
+            # the gate ran is seen here. Nothing slow runs between these reads
+            # and the start.
+            try:
+                fresh = await self._fetch_pr(repo, pr)
+                try:
+                    self._release_version(repo, fresh)
+                except NotReleasePR as exc:
+                    raise Refusal("the pull request is no longer a release pull request") from exc
+                final = await self._evaluate(trigger, fresh)
+            except Refusal as exc:
+                await self._refuse(repo, pr, str(exc))
+                return
+            if final != decision:
+                await self._refuse(repo, pr, "the pull request or release record changed before publishing")
+                return
+            if not d.publish_script or not os.path.exists(d.publish_script):
+                await self._refuse(repo, pr, "the publish script is missing")
+                return
+            self._started_versions.add(version)
+            self._seen_reviews.add(decision.review_id)
+            argv = [
+                d.python,
+                d.publish_script,
+                "--version",
+                version,
+                "--entity-id",
+                decision.entity_id,
+                "--from-github-review",
+                str(decision.review_id),
+                "--approved-head",
+                decision.head_sha,
+            ]
+            log.info(f"operator GitHub review approved release {version} on {repo}#{pr} — publishing")
+            try:
+                rc, last = await d.run_publish(argv)
+            except TimeoutError:
+                log.error(f"publish {version} timed out")
+                self._safe_alert(
+                    version,
+                    "publish TIMED OUT after a GitHub review "
+                    "approval — the publish process may still be running and may "
+                    "be partially done; check the release log and the registry "
+                    "before retrying."
+                )
+                return
+            except Exception as exc:  # noqa: BLE001
+                log.error(f"publish {version} error: {exc}")
+                self._safe_alert(
+                    version,
+                    "approved by GitHub review but publish "
+                    f"errored: {exc}. Publish may not have run."
+                )
+                return
+            if rc == 0:
+                log.info(f"publish {version} succeeded: {last}")
+            elif TREE_CHECK_MARKER in last:
+                log.error(f"publish {version} stopped at the tree check: {last}")
+                self._safe_alert(
+                    version,
+                    "approved by GitHub review; publish stopped at the tree "
+                    f"check after the merge (rc={rc}). The release pull request "
+                    f"is already merged into {d.release_branch}; nothing was "
+                    "tagged or published. See the release README section "
+                    "'Tree check stopped a publish after the merge'."
+                )
+            else:
+                log.error(f"publish {version} FAILED rc={rc}: {last}")
+                self._safe_alert(
+                    version,
+                    "approved by GitHub review but publish "
+                    f"FAILED (rc={rc}): {last[:300]}. See phoenicurus-release.log."
+                )
+
+    def _safe_alert(self, version: str, detail: str) -> None:
+        try:
+            self.deps.alert(version, detail)
+        except Exception as exc:  # noqa: BLE001 — an alert never changes the outcome
+            log.warning(f"release review alert could not be sent: {exc}")
+
+    def _safe_notify(self, text: str) -> None:
+        try:
+            self.deps.notify(text)
+        except Exception as exc:  # noqa: BLE001 — a notice never changes the outcome
+            log.warning(f"release review notice could not be sent: {exc}")
+
+    async def _report_error(
+        self,
+        repo: str,
+        pr: int,
+        version: str,
+        exc: BaseException,
+        started_before: set[str] | None,
+        what: str = "",
+    ) -> None:
+        """Report an unexpected error: log it, raise a red alert, and comment.
+
+        When the error came after this delivery started publish.py, the outcome
+        is unknown and the alert says so; otherwise nothing was published.
+        """
+        name = exc.__class__.__name__
+        log.exception(f"release review on {repo}#{pr}: unexpected error ({name})")
+        started = (
+            started_before is not None
+            and bool(version)
+            and version in self._started_versions
+            and version not in started_before
+        )
+        if started:
+            self._safe_alert(
+                version,
+                f"publish outcome is unknown: an unexpected error ({name}) "
+                "came after publish started; check the release log and the "
+                "registry before retrying.",
+            )
+            return
+        reason = f"an unexpected error ({name}) stopped the check"
+        if what:
+            reason = f"{what}: {reason}"
+        self._safe_alert(
+            version or f"check on {repo}#{pr}",
+            f"not published: {reason}. Nothing was released.",
+        )
+        await self._refuse(repo, pr, reason, kind="error")
+
+    async def _refuse(self, repo: str, pr: int, reason: str, kind: str = "condition") -> None:
+        """Publish nothing; log, notify and comment once. Failures are logged only."""
+        step = _next_step(reason, kind)
+        log.warning(f"release review on {repo}#{pr}: not publishing — {reason}")
+        self._safe_notify(f"Release pull request {repo}#{pr} was not published: {reason}. {step}")
+        body = f"{NOTICE_MARKER}\nNot published: {reason}.\n\nNothing was released. {step}"
+        try:
+            ok = await self.deps.post_comment(repo, pr, body)
+            if not ok:
+                log.warning(f"release review notice comment not posted on {repo}#{pr}")
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"release review notice comment failed on {repo}#{pr}: {exc}")
+
+
+# ── real dependencies, built from the dispatcher ────────────────────────────
+
+
+def _publish_script_path() -> str:
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "phoenicurus-release",
+        "publish.py",
+    )
+
+
+RELEASE_RESULT_LIMIT = 1000
+
+
+def _parse_release_results(data: object, limit: int = RELEASE_RESULT_LIMIT) -> tuple[list[dict], bool]:
+    """Rows of an ``entities/query`` answer, and whether the list is complete.
+
+    Complete only when the server says so (``has_more`` is False, or ``total``
+    equals the row count) and the row count is below the limit asked for. No
+    answer, an error, or an unexpected shape is incomplete.
+    """
+    if not isinstance(data, dict):
+        return [], False
+    rows = data.get("entities")
+    if not isinstance(rows, list):
+        return [], False
+    total = data.get("total")
+    complete = data.get("has_more") is False or (
+        isinstance(total, int) and not isinstance(total, bool) and total == len(rows)
+    )
+    return rows, bool(complete) and len(rows) < limit
+
+
+PANEL_GATE_TIMEOUT_S = 600
+
+
+def _approve_script_path() -> str:
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "scripts",
+        "approve_pr_as_app.py",
+    )
+
+
+def _parse_panel_result(rc: int, out: bytes, head_sha: str) -> tuple[bool, str]:
+    """Judge approve_pr_as_app.py --json output; pass only on rc 0 for this head."""
+    lines = [ln for ln in (out or b"").decode(errors="replace").splitlines() if ln.strip()]
+    try:
+        result = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        result = None
+    if not isinstance(result, dict):
+        return False, "the gate's result could not be read"
+    if result.get("head_sha") != head_sha:
+        return False, "the gate evaluated a different head"
+    if rc != 0 or result.get("exit_code") != 0 or result.get("overall_pass") is not True:
+        return False, str(result.get("refusing") or "overall FAIL")
+    return True, ""
+
+
+async def _panel_gate_real(repo: str, pr: int, head_sha: str) -> tuple[bool, str]:
+    """Run approve_pr_as_app.py --json (dry run) as its own process.
+
+    A separate process keeps the gate's printed report out of the daemon's
+    stdout and gives a machine-readable result; nothing process-wide is
+    redirected inside the daemon.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        _approve_script_path(),
+        "--repo",
+        repo,
+        "--pr",
+        str(pr),
+        "--json",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=PANEL_GATE_TIMEOUT_S)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return False, "the gate did not finish in time"
+    return _parse_panel_result(proc.returncode if proc.returncode is not None else -1, out, head_sha)
+
+
+def build_for_dispatcher(dispatcher: Any, sd: Any) -> ReleaseReviewApproval:
+    """Wire the real GitHub, Neotoma, panel gate, notifier and publish runner.
+
+    ``sd`` is the swarm_dispatch module (passed in to avoid a circular import).
+    """
+    import httpx
+
+    async def github_get(path: str, params: dict) -> tuple[int, Any, dict]:
+        url = f"https://api.github.com{path}"
+        repo = "/".join(path.split("/")[2:4])
+        # Mint (or refresh) the App token off the event loop first: the sync
+        # header helper only serves a cached token and would otherwise send the
+        # first read without the App identity.
+        await sd._ensure_app_write_token(repo)
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, params=params, headers=dispatcher._github_headers(repo))
+            try:
+                data = resp.json()
+            except ValueError:
+                data = None
+            return resp.status_code, data, dict(resp.headers)
+
+    async def release_results() -> tuple[list[dict], bool]:
+        # The dispatcher's own Neotoma client and configuration: publish.py is
+        # never imported or run inside the dispatcher.
+        store = sd.IssueSpecStore(
+            dispatcher.config.neotoma_base_url, dispatcher.config.neotoma_token
+        )
+        data = await store._post(
+            "entities/query",
+            {
+                "entity_type": "release_result",
+                "limit": RELEASE_RESULT_LIMIT,
+                "include_snapshots": True,
+            },
+        )
+        return _parse_release_results(data)
+
+    async def app_bot_login() -> str:
+        return await asyncio.to_thread(sd._app_bot_login_blocking)
+
+    def notify(text: str) -> None:
+        dispatcher.notifier.send(text, priority=sd.Priority.BLOCKER, handler=sd.DAEMON_NAME)
+
+    def alert(version: str, detail: str) -> None:
+        dispatcher._release_red_alert(version, detail)
+
+    async def post_comment(repo: str, pr: int, body: str) -> bool:
+        # App identity only: no PAT fallback, never an empty token.
+        token = await sd._ensure_app_write_token(repo)
+        if not token:
+            log.warning(f"no App token for {repo}; release review notice not posted")
+            return False
+        headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}"}
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"https://api.github.com/repos/{repo}/issues/{pr}/comments",
+                json={"body": body},
+                headers=headers,
+            )
+            return 200 <= resp.status_code < 300
+
+    async def run_publish(argv: list[str]) -> tuple[int, str]:
+        # Its own session: restarting Apis (launchctl kickstart -k) signals
+        # Apis's process group, and must not stop a publish mid-step.
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        )
+        # On timeout the child is left running, as on the email path: stopping
+        # a publish mid-step is worse than finishing it. A second start is
+        # still refused (the version is marked started here, and the record
+        # has left pending_approval).
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=sd.PHOENICURUS_PUBLISH_TIMEOUT_S)
+        tail = (out or b"").decode(errors="replace").strip().splitlines()
+        rc = proc.returncode if proc.returncode is not None else -1
+        return rc, (tail[-1] if tail else "")
+
+    return ReleaseReviewApproval(
+        Deps(
+            github_get=github_get,
+            release_results=release_results,
+            panel_gate=_panel_gate_real,
+            app_bot_login=app_bot_login,
+            notify=notify,
+            post_comment=post_comment,
+            run_publish=run_publish,
+            operator_login=sd._OPERATOR_LOGIN,
+            alert=alert,
+            release_repo=sd.PHOENICURUS_RELEASE_REPO,
+            release_branch=sd.PHOENICURUS_RELEASE_BRANCH,
+            publish_script=_publish_script_path(),
+        )
+    )
+
+
+__all__ = [
+    "FLAG_ENV",
+    "Deps",
+    "Refusal",
+    "ReleaseReviewApproval",
+    "build_for_dispatcher",
+    "enabled",
+    "is_release_repo",
+]

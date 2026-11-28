@@ -107,6 +107,7 @@ import lens_authors
 import lens_receipts
 import model_tiering
 import panel_check_gate
+import release_review_approval
 import review_carry
 import review_rounds
 import review_delta
@@ -8801,6 +8802,10 @@ class SwarmDispatcher:
         409 on a base-branch race — both surface as an honest "not merged".
         """
         method = method if method in ("squash", "merge", "rebase") else "squash"
+        release_hold = await self._release_merge_refusal(repo, pr_number)
+        if release_hold:
+            log.warning(f"[{DAEMON_NAME}] {repo}#{pr_number}: {release_hold}")
+            return False, release_hold
         api = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/merge"
         expected = _normalise_full_sha(expected_head)
         if require_default_base and not expected:
@@ -12293,11 +12298,81 @@ class SwarmDispatcher:
             )
             return
 
+        if await self._release_review_handled(trigger):
+            return
         log.info(
             f"[{DAEMON_NAME}] operator GitHub review APPROVED on {ref} — "
             "routing to shared approval path"
         )
         await self._approve_and_maybe_merge(trigger, source="GitHub review")
+
+    def _release_review_gate(self, trigger: SwarmTrigger):
+        """The release-review publish gate, or None when it does not apply.
+
+        None (no network call) unless ATELES_PUBLISH_ON_OPERATOR_REVIEW is
+        exactly "1" and the trigger is on the release repository.
+        """
+        return self._release_review_gate_for(trigger.repository)
+
+    def _release_review_gate_for(self, repository: str):
+        """``_release_review_gate`` keyed by repository alone."""
+        if not release_review_approval.enabled():
+            return None
+        if not release_review_approval.is_release_repo(
+            repository, PHOENICURUS_RELEASE_REPO
+        ):
+            return None
+        gate = self.__dict__.get("_release_review")
+        if gate is None:
+            gate = release_review_approval.build_for_dispatcher(
+                self, sys.modules[__name__]
+            )
+            self.__dict__["_release_review"] = gate
+        return gate
+
+    def _release_red_alert(self, version: str, detail: str) -> None:
+        """The dispatcher's red release alert, raised for the release-review gate."""
+        self.notifier.send(
+            f"🔴 Release {version} {detail}",
+            priority=Priority.BLOCKER,
+            handler=DAEMON_NAME,
+        )
+
+    async def _release_merge_refusal(self, repo: str, pr_number: int) -> str:
+        """Why ``_merge_pr`` must not merge this pull request ("" when it may).
+
+        Only while ATELES_PUBLISH_ON_OPERATOR_REVIEW is exactly "1" and only in
+        the release repository: a release pull request (head branch
+        ``release/<version>``, read live; unreadable counts as one) is merged
+        by publish.py after the operator's review, never by a dispatcher
+        merge, whichever caller asked.
+        """
+        gate = self._release_review_gate_for(repo)
+        if gate is None:
+            return ""
+        try:
+            return await gate.merge_refusal(repo, pr_number)
+        except Exception as exc:  # unreadable holds the merge (logged below)
+            log.exception(
+                f"[{DAEMON_NAME}] release merge check on {repo}#{pr_number} "
+                f"stopped on an unexpected error ({exc.__class__.__name__})"
+            )
+            self._release_red_alert(
+                f"check on {repo}#{pr_number}",
+                "merge held: the release check stopped on an unexpected error "
+                f"({exc.__class__.__name__}).",
+            )
+            return f"merge held: the release check could not run ({exc.__class__.__name__})"
+
+    async def _release_review_handled(self, trigger: SwarmTrigger) -> bool:
+        """True when a release PR review was published or refused by the gate."""
+        gate = self._release_review_gate(trigger)
+        return gate is not None and await gate.handle_review(trigger)
+
+    async def _release_entrance_closed(self, trigger: SwarmTrigger, source: str) -> bool:
+        """True when a comment/email approval on a release PR must stop here."""
+        gate = self._release_review_gate(trigger)
+        return gate is not None and await gate.guard_other_entrance(trigger, source)
 
     async def _handle_email_approve(self, trigger: SwarmTrigger) -> None:
         """Handle an operator email-reply approval (approval loop).
@@ -12314,6 +12389,8 @@ class SwarmDispatcher:
             f"[{DAEMON_NAME}] operator email APPROVE on {ref} — "
             "routing to shared approval path"
         )
+        if await self._release_entrance_closed(trigger, "email approval"):
+            return
         await self._approve_and_maybe_merge(trigger, source="email reply")
 
     async def _handle_ci_status(self, trigger: SwarmTrigger) -> None:
@@ -13686,6 +13763,22 @@ class SwarmDispatcher:
         or failure) so the operator always learns what their reply did.
         """
         version = (trigger.release_version or "").strip()
+        if release_review_approval.enabled():
+            # With ATELES_PUBLISH_ON_OPERATOR_REVIEW on, a release is published
+            # only from the operator's approving review on its release pull
+            # request; this route starts nothing and says why.
+            log.warning(
+                f"[{DAEMON_NAME}] release_approve for {version!r} not acted on: "
+                f"{release_review_approval.FLAG_ENV} is on"
+            )
+            self._release_red_alert(
+                version or "(no version)",
+                "approval by email was not acted on and nothing was published: "
+                f"while {release_review_approval.FLAG_ENV} is on, a release is "
+                "published only from the operator's approving review on its "
+                "release pull request in GitHub.",
+            )
+            return
         if not re.match(r"^v[0-9][0-9A-Za-z.\-+]*$", version):
             log.error(
                 f"[{DAEMON_NAME}] release_approve with invalid version "
@@ -13721,6 +13814,10 @@ class SwarmDispatcher:
                 "--from-email-approval",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                # Its own session: restarting Apis (launchctl kickstart -k)
+                # signals Apis's process group and must not stop a publish
+                # mid-step.
+                start_new_session=True,
             )
             out, _ = await asyncio.wait_for(
                 proc.communicate(), timeout=PHOENICURUS_PUBLISH_TIMEOUT_S
@@ -13779,6 +13876,8 @@ class SwarmDispatcher:
         # NB: the source label is echoed into the GitHub confirmation comment, so
         # it must NOT contain a command token (e.g. "/approve") — a comment body
         # carrying the token would re-trigger this handler (neotoma#1686).
+        if await self._release_entrance_closed(trigger, "approve comment"):
+            return
         await self._approve_and_maybe_merge(trigger, source="approve comment")
 
     async def _approve_and_maybe_merge(

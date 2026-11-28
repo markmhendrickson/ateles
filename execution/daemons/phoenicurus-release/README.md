@@ -190,6 +190,89 @@ Safety properties (match the PR-approve flow + one extra):
 Config: set `APIS_APPROVE_EMAIL_SECRET` (shared, Turdus + Apis) and
 `APIS_APPROVE_RELEASE_URL` (default `http://127.0.0.1:8742/approve-release`).
 
+### Publishing on the operator's GitHub review (off by default)
+
+`ATELES_PUBLISH_ON_OPERATOR_REVIEW` lets the operator's approving review on a
+release pull request (head branch `release/<version>` in
+`PHOENICURUS_RELEASE_REPO`) publish that release. Only the exact value `1`
+turns it on; unset or any other value leaves Apis exactly as it is without the
+flag. The flag governs the dispatcher's routes only: what Apis does with a
+review, comment or email approval on a release pull request. It changes nothing
+in publish.py's own command line.
+
+It is **off by default**, and it is set nowhere in this repository (no plist,
+env file or workflow). It is enabled only after a separate prerequisite change
+has been verified in place. Until then, a release needs the operator's go
+relayed to the session running it.
+
+When it is on, Apis (`execution/daemons/apis/release_review_approval.py`):
+
+- never sends a release pull request review to the merge path; the comment and
+  email approval commands are refused for a release pull request too, and the
+  email release approval (`/approve-release`, the `release_approve` trigger)
+  starts no publish at all: it sends a notice naming why instead;
+- publishes only when every condition holds, each read live at decision time:
+  the review is the operator's (not a bot), is APPROVED on the current head, and
+  its own comment box is empty (whitespace counts as empty); and the approval
+  is bare. No word, time or edit is compared: the publish refuses if the
+  operator login has, at any time before or after the approval, (a) any
+  conversation comment on the pull request, (b) any inline review comment,
+  including one that belongs to the approving review itself, or (c) any
+  review, of any state or age, that is not APPROVED with an empty body. An
+  earlier empty approval is allowed. Comments and reviews by the swarm App,
+  bots and other logins are ignored. Every list is read to its last page or
+  the publish refuses, and a row whose author, id or state cannot be read
+  refuses. The pull request is
+  open, based on the release branch, from the same repository and not behind it;
+  exactly one `release_result` matches the version and pull request URL, with
+  status `pending_approval` and `rc_head_sha` equal to the head; the panel gate
+  of `execution/scripts/approve_pr_as_app.py` passes on the head; and the swarm
+  App's approval review is on the head;
+- then runs `publish.py --version <v> --entity-id <id> --from-github-review
+  <review id> --approved-head <sha>` once, under a per-version lock. The panel
+  gate is slow, so it runs after a first pass over the other conditions; then,
+  under the lock and immediately before the start, every other condition is
+  read again (the review by id, every review and comment, the App approval,
+  the pull request state, head, base and behind count, and the release record)
+  and must give the same result, so a withdrawal made while the gate ran stops
+  the publish. `--from-github-review` requires `--approved-head`, moves
+  `pending_approval` to `approved` only from `pending_approval`, and never
+  combines with `--force`. publish.py refuses unless the record's
+  `rc_head_sha` equals the approved head, merges with `--match-head-commit`
+  pinned to it, and, after the merge and before any tag or publish step,
+  checks that the tree it will tag equals the approved head's tree; a
+  different tree (the base branch moved) stops the run and publishes nothing
+  (see "Tree check stopped a publish after the merge" below). Anything the
+  operator posts after publish.py has started is not re-read: from then on
+  only stopping publish.py itself halts the release;
+- starts publish.py in its own session (`start_new_session=True`), as the email
+  approval path also does, so a restart of Apis does not stop a publish
+  mid-step;
+- holds every dispatcher merge of a release pull request (`_merge_pr`, whichever
+  caller asks, auto-merge included); the head branch is read live and an
+  unreadable pull request is held too;
+- runs the panel gate as its own process (`approve_pr_as_app.py --json`, a dry
+  run that prints one JSON result), so its report never mixes with Apis's
+  output.
+
+Any condition that fails or cannot be read publishes nothing; Apis logs the
+reason, sends a notice, and posts one pull request comment as the App naming
+the condition. When the refusal is caused by the operator's own activity, both
+say plainly that this release pull request cannot be published by review once
+the operator has commented on it (or submitted any review other than an empty
+approval), and that the release then needs the operator's go relayed to the
+session running it. Any other refusal names its own next step: once the
+condition is met, a new approving review on the current head with an empty
+comment box publishes it. An unexpected error during the check, or during the
+merge hold, refuses the same way and also raises a red alert. Apis reads
+reviews, conversation comments and inline review comments only; it does not
+read commit comments, reactions, labels, title or description edits, or the
+draft state. The release records are read through Apis's own Neotoma client;
+publish.py is never imported inside Apis, only started as its own process.
+A failed
+or timed-out publish raises a red alert through the
+dispatcher's alert path.
+
 Turdus also keeps a local consumed-reply state file, `.turdus_state.json`, and
 an `.initialized` marker beside it. An unreadable or malformed state, or a
 missing state after initialization, holds all email approval routing and sends
@@ -255,6 +338,24 @@ against an unmerged PR.
 `merge_rc_pr/insufficient_permissions` is expected/normal until
 [ateles#202](https://github.com/markmhendrickson/ateles/issues/202) lands
 standing merge-rights/approval-routing changes — it is not a regression.
+
+### Tree check stopped a publish after the merge
+
+On the GitHub-review path, publish.py checks the tree only after merging the
+release pull request, because the tree to tag exists only then. When the check
+refuses, the merge has already landed on main, but nothing was tagged, pushed
+as a tag or published to the registry, and the `release_result` is marked
+`failed`. The notice and publish.py's message both say so.
+
+What to do:
+1. Read what main carries beyond the approved head:
+   `git log <approved head>..origin/main` and
+   `git diff <approved head> origin/main`.
+2. Do not re-run publish.py with `--from-github-review` (the record is no
+   longer `pending_approval`, so it refuses) and do not tag main by hand.
+3. Let the next prepare run cut a fresh release candidate from the current
+   main, or start one, so the extra changes get their own review; then approve
+   that new release pull request as usual.
 
 ## Install
 
