@@ -31,6 +31,7 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR), str(_REPO_ROOT / "lib" / "daemon_r
         sys.path.insert(0, _p)
 
 import aauth_signer  # noqa: E402
+import pytest  # noqa: E402
 import store_release_result  # noqa: E402
 
 
@@ -352,6 +353,66 @@ class TestCandidateBoundRecord:
         assert "not confirmed by read-back" in captured.err
         assert "Do NOT send the approval request" in captured.err
         assert "ent_rel (created)" not in captured.out
+
+    @pytest.mark.parametrize(
+        "field, value",
+        [
+            ("rc_head_sha", HEAD_A),  # an earlier candidate of the same version
+            ("rc_head_sha", None),  # field undeclared: dropped from the snapshot
+            ("rc_pr_url", "https://github.com/markmhendrickson/neotoma/pull/2945"),
+            ("rc_pr_url", None),
+            ("rc_branch", "release/v0.32.0-a"),
+            ("version", "v0.31.0"),
+        ],
+    )
+    def test_readback_of_another_candidate_exits_1(
+        self, monkeypatch, capsys, field, value
+    ):
+        """Everything matches this candidate (HEAD_B, PR 2947) except one field."""
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
+        url = "https://github.com/markmhendrickson/neotoma/pull/2947"
+        snapshot = {
+            "version": "v0.32.0",
+            "status": "pending_approval",
+            "rc_branch": "release/v0.32.0",
+            "rc_head_sha": HEAD_B,
+            "rc_pr_url": url,
+        }
+        snapshot[field] = value
+        if value is None:
+            del snapshot[field]
+        server = _store_server([], readback=snapshot)
+        rc = _run_main(
+            monkeypatch,
+            _pending(HEAD_B, "2947"),
+            signer=_non_stub_signer(),
+            urlopen=server,
+        )
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert f"{field} is " in captured.err
+        assert "Do NOT send the approval request" in captured.err
+        assert "ent_rel (created)" not in captured.out
+
+    def test_readback_of_this_candidate_exits_0(self, monkeypatch, capsys):
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
+        snapshot = {
+            "version": "v0.32.0",
+            "status": "pending_approval",
+            "branch": "release/v0.32.0",
+            "rc_head_sha": HEAD_B,
+            "release_url": "https://github.com/markmhendrickson/neotoma/pull/2947",
+        }
+        server = _store_server([], readback=snapshot)
+        assert (
+            _run_main(
+                monkeypatch,
+                _pending(HEAD_B.upper(), "2947"),
+                signer=_non_stub_signer(),
+                urlopen=server,
+            )
+            == 0
+        )
 
     def test_readback_http_error_exits_1(self, monkeypatch, capsys):
         monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")

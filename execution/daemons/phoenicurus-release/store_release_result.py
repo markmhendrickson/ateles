@@ -32,10 +32,16 @@ anything holding a bearer token write that record.
       --rc-head <full SHA of the release branch head> \
       --rc-pr-url https://github.com/owner/repo/pull/123
 
-Exits 0 only when the write landed AND a read-back of the entity shows the
-version and status just written; 1 otherwise. Prints the entity id on success
+Exits 0 only when the write landed AND a read-back of the entity shows what was
+just written: version, status, and (when passed) the release branch, the
+candidate head and the RC PR URL; 1 otherwise. Prints the entity id on success
 so the caller has a resolvable locator rather than an inferred one. A caller
 must not send the approval request unless this exits 0.
+
+`rc_head_sha` must be a declared field on the `release_result` schema (1.2 or
+later). An undeclared field is accepted and routed to raw_fragments, so it is
+absent from the snapshot and the read-back fails: nothing is approved until the
+field is declared.
 
 ## Idempotency
 
@@ -216,7 +222,7 @@ def main() -> int:
         print(f"store returned no entity id: {json.dumps(first)[:300]}", file=sys.stderr)
         return 1
 
-    problem = _read_back(base, entity_id, args, bearer, signer)
+    problem = _read_back(base, entity_id, args, rc_head, bearer, signer)
     if problem:
         print(
             f"store of {entity_id} not confirmed by read-back: {problem}\n"
@@ -228,8 +234,14 @@ def main() -> int:
     return 0
 
 
-def _read_back(base: str, entity_id: str, args, bearer: str, signer) -> str | None:
-    """Fetch the stored entity; return a problem string, or None if it matches."""
+def _read_back(
+    base: str, entity_id: str, args, rc_head: str, bearer: str, signer
+) -> str | None:
+    """Fetch the stored entity; return a problem string, or None if it matches.
+
+    Version, status and branch are shared by every candidate of one version, so
+    the head (and the PR URL) are what prove the record is for this candidate.
+    """
     headers = {"User-Agent": USER_AGENT}
     if bearer:
         headers["Authorization"] = f"Bearer {bearer}"
@@ -249,10 +261,24 @@ def _read_back(base: str, entity_id: str, args, bearer: str, signer) -> str | No
     for key, want in (("version", args.version), ("status", args.status)):
         if str(fields.get(key) or "") != want:
             return f"{key} is {fields.get(key)!r}, want {want!r}"
-    if args.rc_branch:
-        branch = str(fields.get("rc_branch") or fields.get("branch") or "")
-        if branch != args.rc_branch:
-            return f"rc_branch is {branch!r}, want {args.rc_branch!r}"
+    # Same field precedence as publish.py: the rc_* name, else the plain one.
+    for names, want in (
+        (("rc_branch", "branch"), args.rc_branch),
+        (("rc_pr_url", "release_url"), args.rc_pr_url),
+    ):
+        if want:
+            have = str(fields.get(names[0]) or fields.get(names[1]) or "")
+            if have != want:
+                return f"{names[0]} is {have!r}, want {want!r}"
+    if rc_head:
+        have = str(fields.get("rc_head_sha") or "")
+        if have.lower() != rc_head:
+            hint = (
+                ""
+                if have
+                else " (is rc_head_sha declared on the release_result schema?)"
+            )
+            return f"rc_head_sha is {have!r}, want {rc_head!r}{hint}"
     return None
 
 
