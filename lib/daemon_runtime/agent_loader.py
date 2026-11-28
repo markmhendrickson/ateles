@@ -1411,6 +1411,16 @@ class AgentLoader:
         indented block under its row's bullet rather than being collapsed
         to a single line.
 
+        A rule longer than `_BODY_MAX` keeps its start AND its end, with one
+        marker line between them naming what was left out and the
+        `agent_policy` to fetch (`_sanitize_body_head_tail`): newer rulings
+        are appended at the end, so a start-only cut lost them. Every row
+        ends with a `Source: agent_policy <id>` line. The source line and the
+        marker start at column 0; every rule line after the bullet's is
+        indented (`_indent_rule_lines`, which splits with `str.splitlines`),
+        so no rule text can produce a flush-left line, whatever it says
+        (PR #1861 round 3).
+
         Imported lazily (not at module scope) because `policy_skill_renderer`
         imports FROM this module at import time (`policy_binds_agent_by_edge`
         et al.) — a module-level import here would be circular.
@@ -1424,20 +1434,29 @@ class AgentLoader:
         try:  # package import (normal daemon runtime) with script fallback
             from .policy_skill_renderer import (  # type: ignore
                 _BODY_MAX,
-                _sanitize_body,
+                _sanitize_body_head_tail,
                 _sanitize_field,
+                policy_source_id,
+                policy_source_line,
             )
         except ImportError:  # pragma: no cover
             from policy_skill_renderer import (  # type: ignore
                 _BODY_MAX,
-                _sanitize_body,
+                _sanitize_body_head_tail,
                 _sanitize_field,
+                policy_source_id,
+                policy_source_line,
             )
         lines = [
             "\n\n## Active agent policies (apply these)\n",
             "These standing policies were learned for you. `provisional` ones "
             "are being validated by use — follow them and emit a "
-            "`strategy_drift_signal` if one is wrong.\n",
+            "`strategy_drift_signal` if one is wrong. Apart from the `- (` bullet "
+            "that starts each rule, only lines that start at the left margin are "
+            "written by this renderer: each rule's `Source:` line, and a note "
+            "where a long rule was cut. Every line of rule text after its bullet "
+            "is indented, so any indented line is rule text, whatever it looks "
+            "like.\n",
         ]
         for p in policies:
             kind = _sanitize_field(str(p.get("rule_kind", "prefer")), max_len=40) or "prefer"
@@ -1448,8 +1467,10 @@ class AgentLoader:
             raw_rule = p.get("rule")
             if not isinstance(raw_rule, str) or not raw_rule.strip():
                 raise AgentPolicyUnavailable(self.agent_name, "content", "bad_response")
-            rule = _sanitize_body(raw_rule, max_len=_BODY_MAX, list_item_safe=True)
+            entity_id = policy_source_id(p)
+            rule = _sanitize_body_head_tail(raw_rule, _BODY_MAX, entity_id)
             if not rule:
                 raise AgentPolicyUnavailable(self.agent_name, "content", "bad_response")
             lines.append(f"- ({kind}, {status}) {rule}")
+            lines.append(policy_source_line(entity_id))
         return "\n".join(lines)

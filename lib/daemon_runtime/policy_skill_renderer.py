@@ -271,7 +271,9 @@ _TIER_MARKER_PATTERN = re.compile(r"tier\s*:\s*[A-Za-z]", re.IGNORECASE)
 # paragraph structure, so this only needs to catch the control/separator
 # characters that can occur WITHIN one line (NEL, U+2028/U+2029, C0 minus
 # \t\r\n, C1, DEL).
-_INLINE_CONTROL_CHARS = re.compile("[\u0085\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]")
+_INLINE_CONTROL_CHARS = re.compile(
+    "[\u2028\u2029\u0085\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]"
+)
 
 
 def _sanitize_pass(text: str) -> str:
@@ -560,6 +562,132 @@ def _sanitize_body(raw: str, max_len: int, *, list_item_safe: bool = False) -> s
     if len(text) > max_len:
         text = text[: max_len - 1].rstrip() + "…"
     return text
+
+
+def policy_source_id(snap: dict) -> str:
+    """A row's entity id cut to the id charset, the same way `to_skill` cuts
+    it, or "" when nothing printable is left."""
+    raw = str(snap.get("_entity_id") or snap.get("entity_id") or "")
+    return _ENTITY_ID_DISALLOWED.sub("", raw)[:64]
+
+
+_ID_NOT_RECORDED = "(id not recorded)"
+
+# The renderer's own lines under a row (its source line and, for a cut rule,
+# the omission marker) start at column 0. Rule text cannot reach column 0:
+# the bullet `- (kind, status) ` sits before a rule's first line, and
+# `_indent_rule_lines` indents every later rule line, splitting with
+# `str.splitlines` so every character Python treats as a line break counts.
+# So no wording, script, look-alike bracket or invisible character in a rule
+# can produce a flush-left line; the guarantee is the indent, not a match on
+# what the line says.
+
+
+def _indent_rule_lines(text: str, *, first_on_bullet: bool) -> str:
+    """`text` split with `str.splitlines` (every line-break character:
+    \\r, \\n, \\r\\n, \\x0b, \\x0c, \\x1c-\\x1e, \\x85, U+2028, U+2029) and
+    rejoined with `\\n`, with every non-empty line indented by
+    `_LIST_ITEM_CONTINUATION_INDENT` unless it already starts with it.
+    With `first_on_bullet`, line 0 is left as is: the caller puts it after
+    the row's bullet. Sanitized rule text already has this shape, so on it
+    this changes nothing; it is what makes the shape hold for any text."""
+    indent = _LIST_ITEM_CONTINUATION_INDENT
+    out = []
+    for i, line in enumerate(text.splitlines()):
+        if line and not (i == 0 and first_on_bullet) and not line.startswith(indent):
+            line = indent + line
+        out.append(line)
+    return "\n".join(out)
+
+
+def policy_source_line(entity_id: str) -> str:
+    """The renderer's source line under a row, flush-left."""
+    return f"Source: agent_policy {entity_id or _ID_NOT_RECORDED}"
+
+
+def _cut_marker_line(omitted: int, entity_id: str) -> str:
+    """The one line `_sanitize_body_head_tail` puts between the kept start and
+    the kept end, flush-left. Built only from a number and a charset-cut id,
+    so it cannot open a heading, a bullet or a tier marker."""
+    return (
+        f"{omitted} characters of this rule left out here. Fetch agent_policy "
+        f"{entity_id or _ID_NOT_RECORDED} and read the full rule before acting on "
+        "it; if you cannot fetch it, treat this rule as incomplete and say so "
+        "wherever it bears on your answer."
+    )
+
+
+def _head_cut(text: str, budget: int) -> str:
+    """The longest prefix of `text` within `budget` ending at a paragraph
+    break, else a line break, else a space, else exactly at `budget`."""
+    window = text[:budget]
+    for sep in ("\n\n", "\n", " "):
+        at = window.rfind(sep)
+        if at >= budget // 2:
+            return window[:at].rstrip()
+    return window.rstrip()
+
+
+def _tail_cut(text: str, budget: int) -> str:
+    """The longest suffix of `text` within `budget` starting just after a
+    paragraph break, else a line break, else a space, else exactly at the
+    window start."""
+    window = text[len(text) - budget:]
+    for sep in ("\n\n", "\n", " "):
+        at = window.find(sep)
+        if 0 <= at <= budget // 2:
+            return window[at + len(sep):]
+    return window
+
+
+def _sanitize_body_head_tail(raw: str, max_len: int, entity_id: str) -> str:
+    """`_sanitize_body(raw, max_len, list_item_safe=True)` for the dispatch
+    prompt, except that a rule longer than `max_len` keeps its START and its
+    END rather than only its start. Newer rulings are appended to the end of
+    a rule, so a start-only cut dropped exactly the text most likely to
+    govern; this keeps about half the cap from each end and puts one marker
+    line between them naming how much was left out and which `agent_policy`
+    to fetch before acting.
+
+    The whole rule is sanitized first (the same fixed-point,
+    first-line/continuation split as `_sanitize_body`), so both kept parts
+    are cut from already-clean text. The head is a prefix of it, which
+    stays clean. The tail can start mid-line, where a suffix of a clean line
+    can open with `-`, `#` or `>`; its first line is therefore sanitized
+    again on its own and indented, and every later tail line already carries
+    the continuation indent.
+
+    Size: head + newline + tail is at most `max_len`; the marker and its
+    newline are the only addition. A rule at or under `max_len` is returned
+    exactly as `_sanitize_body` would return it.
+
+    The marker is flush-left, like the source line `render_policy_prompt`
+    adds; every rule line except the one on the bullet is indented
+    (`_indent_rule_lines`, applied to the head and the tail), so rule text
+    cannot produce a line that reads as the renderer's."""
+    full = _sanitize_body(raw, max_len=3 * len(raw) + 2, list_item_safe=True)
+    if len(full) <= max_len:
+        return _indent_rule_lines(full, first_on_bullet=True)
+    indent = _LIST_ITEM_CONTINUATION_INDENT
+    head = _head_cut(full, max_len // 2)
+    # One newline joins head to tail; the tail's first line may gain the
+    # indent after its re-sanitize, so reserve room for it too.
+    tail_budget = max_len - len(head) - 1 - len(indent)
+    tail_raw = _tail_cut(full, tail_budget)
+    omitted = len(full) - len(head) - len(tail_raw)
+    first, sep, rest = tail_raw.lstrip("\n").partition("\n")
+    first = _run_body_pass_to_fixed_point(first.strip()).replace("\n", " ")
+    lines = ([indent + first] if first else []) + (rest.split("\n") if sep else [])
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    tail = _indent_rule_lines("\n".join(lines).rstrip(), first_on_bullet=False)
+    parts = [
+        _indent_rule_lines(head, first_on_bullet=True),
+        _cut_marker_line(omitted, entity_id),
+    ]
+    if tail:
+        parts.append(tail)
+    return "\n".join(parts)
 
 
 class _RefuseRedirect(urllib.request.HTTPRedirectHandler):

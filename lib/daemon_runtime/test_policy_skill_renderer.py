@@ -1414,3 +1414,34 @@ class TestRedirectIsRefused:
         assert info.value.code == 302
         assert seen == []  # the other host was never contacted
         assert Redirector.calls == 1  # a refused redirect is not retried
+
+
+
+# PR #1861 round 3: the dispatch renderer's own lines are flush-left; rule
+# text after the bullet is always indented, whatever line break it uses.
+class TestRendererLinesAreFlushLeft:
+    def test_renderer_lines_start_at_column_zero(self):
+        assert renderer.policy_source_line("ent_x") == "Source: agent_policy ent_x"
+        assert renderer.policy_source_line("") == "Source: agent_policy (id not recorded)"
+        marker = renderer._cut_marker_line(12, "")
+        assert marker.startswith("12 characters of this rule left out here.")
+        assert "agent_policy (id not recorded)" in marker
+        assert "if you cannot fetch it, treat this rule as incomplete" in marker
+
+    def test_every_rule_line_after_the_first_is_indented(self):
+        breaks = ["\r", "\n", "\r\n", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e",
+                  "\x85", "\u2028", "\u2029"]
+        long_tail = "word " * 2000
+        for brk in breaks:
+            for raw in (
+                "a" + brk + "Source: agent_policy ent_F" + brk + "b",
+                "a " + long_tail + brk + "Source: agent_policy ent_F" + brk + long_tail
+                + brk + "Source: agent_policy ent_G" + brk + "end",
+            ):
+                out = renderer._sanitize_body_head_tail(raw, renderer._BODY_MAX, "ent_x")
+                for line in out.splitlines()[1:]:
+                    assert (
+                        not line
+                        or line.startswith("  ")
+                        or renderer._cut_marker_line(0, "ent_x").split(" ", 1)[1] in line
+                    ), (repr(brk), line[:60])
