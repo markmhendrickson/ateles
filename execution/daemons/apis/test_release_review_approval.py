@@ -851,6 +851,7 @@ def test_email_approval_publish_starts_in_a_new_session(monkeypatch):
         seen["argv"] = argv
         return _Proc()
 
+    monkeypatch.delenv(rra.FLAG_ENV, raising=False)
     monkeypatch.setattr(swarm_dispatch.asyncio, "create_subprocess_exec", fake_exec)
     d = _dispatcher()
     asyncio.run(d._handle_release_approve(_trigger(kind="release_approve", release_version=VERSION)))
@@ -924,3 +925,260 @@ def test_concurrent_panel_gates_keep_their_own_results(monkeypatch):
         )
 
     assert asyncio.run(both()) == [(True, ""), (True, "")]
+
+
+# ── with the flag on, no other route starts publish.py ──────────────────────
+
+
+def test_flag_on_email_release_approve_starts_nothing_and_says_why(monkeypatch):
+    monkeypatch.setenv(rra.FLAG_ENV, "1")
+
+    async def no_exec(*argv, **kw):
+        raise AssertionError(f"publish.py must not start: {argv}")
+
+    monkeypatch.setattr(swarm_dispatch.asyncio, "create_subprocess_exec", no_exec)
+    d = _dispatcher()
+    asyncio.run(d._handle_release_approve(_trigger(kind="release_approve", release_version=VERSION)))
+    assert len(d.notifier.sent) == 1
+    notice = d.notifier.sent[0]
+    assert VERSION in notice and "nothing was published" in notice
+    assert rra.FLAG_ENV in notice and "approving review" in notice
+
+
+def test_flag_on_release_approve_trigger_from_the_dispatch_loop_starts_nothing(monkeypatch):
+    """The gateway's approve-release route yields this trigger kind."""
+    monkeypatch.setenv(rra.FLAG_ENV, "1")
+    started = []
+
+    async def no_exec(*argv, **kw):
+        started.append(argv)
+        return _Proc()
+
+    monkeypatch.setattr(swarm_dispatch.asyncio, "create_subprocess_exec", no_exec)
+    d = _dispatcher()
+    asyncio.run(d._handle_release_approve(_trigger(kind="release_approve", release_version="bad")))
+    assert started == []
+    assert d.notifier.sent and "nothing was published" in d.notifier.sent[0]
+
+
+@pytest.mark.parametrize("value", ["0", "", "true"])
+def test_flag_not_one_email_release_approve_publishes_as_before(monkeypatch, value):
+    monkeypatch.setenv(rra.FLAG_ENV, value)
+    seen = {}
+
+    async def fake_exec(*argv, **kw):
+        seen["argv"] = argv
+        return _Proc()
+
+    monkeypatch.setattr(swarm_dispatch.asyncio, "create_subprocess_exec", fake_exec)
+    d = _dispatcher()
+    asyncio.run(d._handle_release_approve(_trigger(kind="release_approve", release_version=VERSION)))
+    assert "--from-email-approval" in seen["argv"] and VERSION in seen["argv"]
+
+
+# ── a withdrawal or change made while the panel gate runs is seen ───────────
+
+_LATER = "2026-01-01T11:00:00Z"
+
+
+def _withdraw_approval(f):
+    f.review = _review(state="DISMISSED")
+
+
+def _later_changes_requested(f):
+    f.reviews.append(_review(id=REVIEW_ID + 5, state="CHANGES_REQUESTED", submitted_at=_LATER))
+
+
+def _later_hold_review(f):
+    f.reviews.append(_review(id=REVIEW_ID + 5, state="COMMENTED", body="hold", submitted_at=_LATER))
+
+
+def _approving_body_edited_to_hold(f):
+    f.review = _review(body="**Hold** for now")
+
+
+def _later_hold_comment(f):
+    f.comments.append({"user": {"login": OPERATOR}, "body": "hold", "created_at": _LATER})
+
+
+def _comment_edited_to_hold(f):
+    f.comments.append({"user": {"login": OPERATOR}, "body": "> stop",
+                       "created_at": "2026-01-01T08:00:00Z", "updated_at": _LATER})
+
+
+def _later_inline_hold(f):
+    f.inline.append({"user": {"login": OPERATOR}, "body": "do not publish", "created_at": _LATER})
+
+
+def _app_approval_removed(f):
+    f.reviews = [r for r in f.reviews if r["user"]["login"] != APP]
+
+
+def _pr_closed(f):
+    f.pr = _pr(state="closed")
+
+
+def _head_moved(f):
+    f.pr = _pr(head={"ref": f"release/{VERSION}", "sha": OTHER, "repo": {"full_name": REPO}})
+
+
+def _base_changed(f):
+    f.pr = _pr(base={"ref": "develop", "repo": {"full_name": REPO}})
+
+
+def _now_behind(f):
+    f.behind = 2
+
+
+def _record_left_pending(f):
+    f.records = [_record(status="approved")]
+
+
+def _record_other_head(f):
+    f.records = [_record(rc_head_sha=OTHER)]
+
+
+def _second_record(f):
+    f.records = [_record(), _record()]
+
+
+@pytest.mark.parametrize("change", [
+    _withdraw_approval, _later_changes_requested, _later_hold_review,
+    _approving_body_edited_to_hold, _later_hold_comment, _comment_edited_to_hold,
+    _later_inline_hold, _app_approval_removed, _pr_closed, _head_moved,
+    _base_changed, _now_behind, _record_left_pending, _record_other_head,
+    _second_record,
+], ids=lambda fn: fn.__name__.lstrip("_"))
+def test_change_during_panel_gate_publishes_nothing(world, change):
+    fake, gate = world
+    fake.during_panel = change
+    assert _run(gate) is True
+    assert fake.panel_calls == 1
+    assert fake.publishes == [], "a change made while the gate ran must stop the publish"
+    assert len(fake.posted) == 1 and fake.notices
+
+
+def test_live_conditions_are_read_after_the_panel_gate(world):
+    fake, gate = world
+    order = []
+    real_get = fake.github_get
+
+    async def tracking_get(path, params):
+        order.append(path)
+        return await real_get(path, params)
+
+    async def tracking_panel(repo, pr, head):
+        order.append("PANEL")
+        return True, ""
+
+    gate.deps.github_get = tracking_get
+    gate.deps.panel_gate = tracking_panel
+    _run(gate)
+    assert len(fake.publishes) == 1
+    after = order[order.index("PANEL") + 1:]
+    for needle in (f"/pulls/{PR}", f"/reviews/{REVIEW_ID}", "/reviews", "/issues/42/comments",
+                   "/pulls/42/comments", "/compare/"):
+        assert any(p.endswith(needle) or needle in p for p in after), needle
+
+
+# ── hold words: Markdown, edits, the approving review's own body ────────────
+
+
+@pytest.mark.parametrize("body", [
+    "**hold**", "> hold this", "# Hold", "- stop", '"do not publish"', "_skip_",
+    "\u201chold\u201d", "* hold", "~~~ stop",
+])
+def test_refuses_hold_word_after_markdown(world, body):
+    fake, gate = world
+    fake.comments.append({"user": {"login": OPERATOR}, "body": body, "created_at": _LATER})
+    _run(gate)
+    _assert_refused(fake, "asks to hold")
+
+
+def test_refuses_comment_edited_after_approval_to_hold(world):
+    fake, gate = world
+    fake.comments.append({"user": {"login": OPERATOR}, "body": "hold",
+                          "created_at": "2026-01-01T08:00:00Z", "updated_at": _LATER})
+    _run(gate)
+    _assert_refused(fake, "asks to hold")
+
+
+def test_earlier_hold_comment_not_edited_since_does_not_refuse(world):
+    fake, gate = world
+    fake.comments.append({"user": {"login": OPERATOR}, "body": "hold",
+                          "created_at": "2026-01-01T08:00:00Z",
+                          "updated_at": "2026-01-01T08:30:00Z"})
+    _run(gate)
+    assert len(fake.publishes) == 1
+
+
+def test_refuses_unreadable_comment_edit_time(world):
+    fake, gate = world
+    fake.comments.append({"user": {"login": OPERATOR}, "body": "fine",
+                          "created_at": "2026-01-01T08:00:00Z", "updated_at": "soon"})
+    _run(gate)
+    _assert_refused(fake, "timestamp could not be read")
+
+
+@pytest.mark.parametrize("body", ["hold", "Stop, not yet", "**Do not publish**"])
+def test_refuses_hold_word_in_approving_review_body(world, body):
+    fake, gate = world
+    fake.review = _review(body=body)
+    _run(gate)
+    _assert_refused(fake, "approving review asks to hold")
+
+
+# ── a second approving review (different id) for the same version ──────────
+
+SECOND_ID = REVIEW_ID + 1
+
+
+def _add_second_approval(fake):
+    second = _review(id=SECOND_ID, submitted_at=_LATER)
+    fake.reviews_by_id[SECOND_ID] = second
+    fake.reviews.append(second)
+
+
+def test_second_approval_sequential_publishes_once(world):
+    fake, gate = world
+    _run(gate)
+    _add_second_approval(fake)
+    _run(gate, _trigger(review_id=SECOND_ID))
+    assert len(fake.publishes) == 1
+    assert "already started once" in fake.posted[-1]
+
+
+def test_second_approval_concurrent_publishes_once(world):
+    fake, gate = world
+    _add_second_approval(fake)
+
+    async def both():
+        await asyncio.gather(gate.handle_review(_trigger()),
+                             gate.handle_review(_trigger(review_id=SECOND_ID)))
+
+    asyncio.run(both())
+    assert len(fake.publishes) == 1
+
+
+def test_second_approval_after_timed_out_publish_publishes_nothing(world):
+    fake, gate = world
+    fake.publish_result = "timeout"
+    _run(gate)
+    _add_second_approval(fake)
+    fake.publish_result = (0, "published")
+    _run(gate, _trigger(review_id=SECOND_ID))
+    assert len(fake.publishes) == 1
+    assert "already started once" in fake.posted[-1]
+
+
+# ── the tree check stopping after the merge is reported as such ─────────────
+
+
+def test_tree_check_stop_after_merge_says_merge_landed_and_nothing_published(world):
+    fake, gate = world
+    fake.publish_result = (1, "publish failed: tree check FAILED: the merged tree differs")
+    _run(gate)
+    version, detail = fake.alerts[-1]
+    assert version == VERSION
+    assert "already merged into main" in detail
+    assert "nothing was tagged or published" in detail

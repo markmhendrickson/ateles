@@ -881,7 +881,7 @@ def test_github_review_tree_mismatch_publishes_nothing(monkeypatch):
         raise AssertionError(f"unexpected {cmd}")
 
     monkeypatch.setattr(publish, "run", fake_run)
-    with pytest.raises(publish.StepError, match="Nothing was tagged or published"):
+    with pytest.raises(publish.StepError, match="already landed; nothing was tagged or published"):
         publish.publish_release(_release("pending_approval"), "v0.20.0",
                                 dry_run=False, force=False, github_review_id=77,
                                 approved_head=_HEAD)
@@ -899,6 +899,35 @@ def test_tree_check_unreadable_refuses(monkeypatch, head_rc, approved_rc):
     monkeypatch.setattr(publish, "run", fake_run)
     with pytest.raises(publish.StepError, match="could not be read"):
         publish.verify_tree_matches_approved_head(_HEAD, dry_run=False)
+
+
+def test_tree_check_refusal_says_merge_landed_and_nothing_published(monkeypatch):
+    def fake_run(cmd, **_kw):
+        if cmd[-1] == "HEAD^{tree}":
+            return _proc(stdout="1" * 40)
+        return _proc(stdout="2" * 40)
+
+    monkeypatch.setattr(publish, "run", fake_run)
+    with pytest.raises(publish.StepError) as info:
+        publish.verify_tree_matches_approved_head(_HEAD, dry_run=False)
+    text = str(info.value)
+    assert text.startswith("tree check FAILED")
+    assert "already landed" in text and "nothing was tagged or published" in text
+
+
+def test_step_error_is_the_last_output_line(monkeypatch, capsys):
+    monkeypatch.setattr(publish, "find_release", lambda *_a: _release("pending_approval"))
+    monkeypatch.setattr(publish, "telegram_send", lambda _t: None)
+    monkeypatch.setattr(publish, "set_release_status", lambda *_a, **_k: None)
+
+    def boom(*_a, **_k):
+        raise publish.StepError("tree check FAILED: example")
+
+    monkeypatch.setattr(publish, "publish_release", boom)
+    monkeypatch.setattr(sys, "argv", ["publish.py", "--version", "v0.20.0"])
+    assert publish.main() == 1
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert lines[-1] == "publish failed: tree check FAILED: example"
 
 
 def test_tree_check_passes_on_equal_trees(monkeypatch):

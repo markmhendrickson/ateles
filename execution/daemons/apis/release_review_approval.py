@@ -7,8 +7,11 @@ as before and this module makes no network call.
 When it is on, a review on a release pull request of the release repository
 (head branch ``release/<version>``) never reaches the dispatcher's
 approve-and-merge path. This module handles it instead, and the comment and
-email approval commands are refused for a release pull request too, so the only
-way such an approval publishes is the operator's own GitHub review.
+email approval commands are refused for a release pull request too. The email
+release approval (the ``release_approve`` trigger, which the gateway's
+approve-release route creates) starts nothing while the flag is on: the
+dispatcher sends a notice naming why. So the only way a release publishes while
+the flag is on is the operator's own GitHub review.
 
 This is a consent gate in front of an irreversible publish, so every doubt
 refuses. Every condition below is read live at decision time; nothing is taken
@@ -17,8 +20,11 @@ from the webhook payload except the review id, which is only a key to re-read:
   - the review with that id is by the operator login (not a bot), is APPROVED,
     and its commit is the pull request's current head;
   - no later review by that login is CHANGES_REQUESTED or DISMISSED, and no
-    later comment or review body by that login starts with hold, skip, stop or
-    do not publish;
+    later comment or review body by that login, nor the approving review's
+    own body, starts with hold, skip, stop or do not publish (leading Markdown
+    or quote marks are ignored). A comment counts as later when it was created
+    or edited after the approval; GitHub gives a review summary no edit time,
+    so a review counts from when it was submitted;
   - the pull request is open, based on the release branch, its head branch is
     ``release/<version>`` in the same repository, and it is not behind the base;
   - exactly one release_result matches the version and the pull request URL,
@@ -27,11 +33,20 @@ from the webhook payload except the review id, which is only a key to re-read:
     passes on this head (its own ``run`` in dry-run mode, not a copy);
   - the swarm App's approval review exists on this head.
 
+The panel gate is slow, so it runs after a first pass over the other
+conditions. Then, under the per-version lock and immediately before the start,
+every other condition is read again and must give the same result, so a
+withdrawal or change made while the gate ran publishes nothing. Nothing slow
+runs between those reads and the start.
+
 On a pass, ``publish.py --version <v> --entity-id <id> --from-github-review
-<review id> --approved-head <sha>`` runs exactly once under a per-version lock,
-after a final re-read of the head, in its own session so a restart of Apis does
-not stop it mid-step. publish.py merges with the head pinned to that sha and
-checks that the tree it tags is the approved head's tree before publishing.
+<review id> --approved-head <sha>`` runs at most once per version for the life
+of the dispatcher (a second approving review, concurrent or later, or one after
+a timed-out publish, starts nothing), in its own session so a restart of Apis
+does not stop it mid-step. publish.py merges with the head pinned to that sha
+and checks that the tree it tags is the approved head's tree before tagging;
+when that check refuses, the merge has already landed and nothing was tagged
+or published, and the alert says so.
 Every refusal publishes nothing, is logged, and is reported through the
 notifier and one pull request comment posted with the App identity. A failed
 notice never leads to a publish. While the flag is on, the dispatcher's merge
