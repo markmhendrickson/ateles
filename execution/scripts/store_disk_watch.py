@@ -44,6 +44,53 @@ FILESYSTEM_METRICS = (
 APP_LABEL, MOUNT_LABEL, INSTANCE_LABEL = "app", "mount", "instance"
 FAILURE_RECEIPT = "store-watch:state-failure"
 DELIVERY_PREFIX = "store-watch-delivery: "
+RUNBOOK = "See docs/store_disk_watch.md#failure-and-recovery-behavior."
+FAILURES = frozenset(
+    (
+        "invalid_number",
+        "metrics_endpoint_invalid",
+        "metrics_token_missing_or_invalid",
+        "metrics_auth_failure",
+        "metrics_http_failure",
+        "metrics_request_failure",
+        "metrics_partial_or_invalid",
+        "metrics_not_vector",
+        "metrics_empty_or_invalid",
+        "metrics_labels_mismatch",
+        "metrics_duplicate_series",
+        "metrics_invalid_sample",
+        "metrics_stale",
+        "metrics_clock_skew",
+        "metrics_invalid_capacity",
+        "metrics_gauge_missing",
+        "metrics_instance_missing",
+        "instance_inventory_unknown",
+        "configuration_unknown",
+        "metrics_read_failure",
+    )
+)
+
+
+def diagnostic(error, fallback):
+    return (
+        str(error)
+        if isinstance(error, Unknown) and str(error) in FAILURES
+        else fallback
+    )
+
+
+def valid_instances(value):
+    return (
+        isinstance(value, list)
+        and all(
+            isinstance(i, str)
+            and i
+            and len(i) <= 200
+            and not any(ord(c) < 32 for c in i)
+            for i in value
+        )
+        and len(value) == len(set(value))
+    )
 
 
 class Unknown(RuntimeError):
@@ -135,12 +182,14 @@ class Metrics:
         url = urlsplit(self.url)
         if (
             url.scheme != "https"
-            or not url.hostname
+            or url.netloc != "api.fly.io"
             or url.username
             or url.password
             or url.query
             or url.fragment
-            or not url.path.endswith("/api/v1/query")
+            or not re.fullmatch(
+                r"/prometheus/[a-z0-9][a-z0-9-]*/api/v1/query", url.path
+            )
         ):
             raise Unknown("metrics_endpoint_invalid")
         self.token = environ.get(TOKEN_ENV, "").strip()
@@ -156,6 +205,8 @@ class Metrics:
             timeout=15,
             follow_redirects=False,
         )
+        if response.status_code in (401, 403):
+            raise Unknown("metrics_auth_failure")
         if response.status_code != 200:
             raise Unknown("metrics_http_failure")
         data = response.json()
@@ -177,59 +228,67 @@ class Metrics:
         rows = body.get("result")
         if not isinstance(rows, list) or not rows:
             raise Unknown("metrics_empty_or_invalid")
-        samples, complete = {}, True
+        samples, failure = {}, None
         for row in rows:
             metric = row.get("metric") if isinstance(row, dict) else None
             if (
                 not isinstance(metric, dict)
                 or any(metric.get(k) != v for k, v in labels.items())
-                or not isinstance(metric.get(INSTANCE_LABEL), str)
-                or not metric[INSTANCE_LABEL]
+                or not valid_instances([metric.get(INSTANCE_LABEL)])
                 or any(not isinstance(v, str) for v in metric.values())
             ):
-                complete = False
+                failure = failure or "metrics_labels_mismatch"
                 continue
             # timestamp() removes the metric name; all other labels must match
             # exactly across gauges to avoid mixing two different filesystems.
             key = tuple(sorted((k, v) for k, v in metric.items() if k != "__name__"))
             if key in samples:
-                samples[key], complete = None, False
+                samples[key] = None
+                failure = failure or "metrics_duplicate_series"
                 continue
             try:
                 pair = row.get("value")
                 if not isinstance(pair, list) or len(pair) != 2:
                     raise Unknown("metrics_invalid_sample")
                 stamp, value = map(finite, pair)
-                if not -30 <= now - stamp <= SAMPLE_MAX_AGE:
+                if stamp > now + 30:
+                    raise Unknown("metrics_clock_skew")
+                if now - stamp > SAMPLE_MAX_AGE:
                     raise Unknown("metrics_stale")
                 samples[key] = value
-            except Unknown:
-                samples[key], complete = None, False
-        return samples, complete
+            except Unknown as error:
+                samples[key] = None
+                failure = failure or diagnostic(error, "metrics_invalid_sample")
+        return samples, failure
 
     def read(self, target, now):
         labels = {APP_LABEL: target["app"], MOUNT_LABEL: target["mount"]}
         selector = ",".join(k + "=" + json.dumps(v) for k, v in sorted(labels.items()))
-        vectors, complete = [], True
+        vectors, failure = [], None
         for name in FILESYSTEM_METRICS:
             query = name + "{" + selector + "}"
             # Both arguments are plain instant-vector selectors, valid inputs
             # to timestamp(v instant-vector); no aggregation/range selectors.
             for expression in (query, f"timestamp({query})"):
                 try:
-                    samples, valid = self.sample(expression, labels, now)
-                except Exception:
-                    samples, valid = {}, False
+                    samples, problem = self.sample(expression, labels, now)
+                except Exception as error:
+                    samples, problem = {}, diagnostic(error, "metrics_request_failure")
                 vectors.append(samples)
-                complete = complete and valid
+                failure = failure or problem
         instances = []
-        for key in sorted(set().union(*(v.keys() for v in vectors))):
+        keys = sorted(set().union(*(v.keys() for v in vectors)))
+        for key in keys:
             try:
+                if any(key not in v for v in vectors):
+                    raise Unknown("metrics_gauge_missing")
                 blocks, t_blocks, free, t_free, avail, t_avail = (
                     finite(v.get(key)) for v in vectors
                 )
                 stamps = (t_blocks, t_free, t_avail)
-                if not all(-30 <= now - stamp <= SAMPLE_MAX_AGE for stamp in stamps):
+                if any(stamp > now + 30 for stamp in stamps):
+                    raise Unknown("metrics_clock_skew")
+                if any(now - stamp > SAMPLE_MAX_AGE for stamp in stamps):
                     raise Unknown("metrics_stale")
                 used = blocks - free
                 if not (
@@ -243,9 +302,14 @@ class Metrics:
                         "stamp": min(stamps),
                     }
                 )
-            except Unknown:
-                complete = False
-        return {"instances": instances, "complete": complete and bool(instances)}
+            except Unknown as error:
+                failure = failure or diagnostic(error, "metrics_invalid_sample")
+        return {
+            "instances": instances,
+            "seen_instances": sorted({dict(key)[INSTANCE_LABEL] for key in keys}),
+            "complete": failure is None and bool(instances),
+            "failure": failure,
+        }
 
 
 class Notifications:
@@ -259,6 +323,7 @@ class Notifications:
     def __call__(self, event):
         from lib.notify import Priority
 
+        runtime_paths()
         result = self.notifier.send(
             event["message"],
             Priority.CRITICAL if event["severity"] == "critical" else Priority.WARN,
@@ -298,7 +363,7 @@ class Notifications:
 
 
 def new_state():
-    return {"version": 1, "volumes": {}, "configuration_failed": False, "events": []}
+    return {"version": 2, "volumes": {}, "configuration_failed": False, "events": []}
 
 
 def require(condition):
@@ -318,7 +383,7 @@ def read_state(path, now):
         )
         require(
             type(state["version"]) is int
-            and state["version"] == 1
+            and state["version"] in (1, 2)
             and type(state["configuration_failed"]) is bool
         )
         require(
@@ -329,6 +394,11 @@ def read_state(path, now):
             require(set(value["target"]) == {"app", "mount"})
             require(all(isinstance(v, str) and v for v in value["target"].values()))
             require(value["level"] in LEVELS and type(value["stale"]) is bool)
+            if state["version"] == 2:
+                require(
+                    value["seen_instances"] is None
+                    or valid_instances(value["seen_instances"])
+                )
             for name in ("first_seen", "last_success"):
                 require(
                     (value[name] is None and name == "last_success")
@@ -352,6 +422,12 @@ def read_state(path, now):
             require(not event["recorded"] or event["task_id"] is not None)
     except (KeyError, TypeError, Unknown):
         raise Unknown("state_unreadable") from None
+    if state["version"] == 1:
+        # Old state cannot prove which machines vanished before migration.
+        # Preserve its alarms/clock and require an explicit human baseline.
+        for value in state["volumes"].values():
+            value["seen_instances"] = None
+        state["version"] = 2
     return state
 
 
@@ -359,7 +435,7 @@ def add_event(state, message, severity="critical", identifier=None):
     state["events"].append(
         {
             "id": identifier or "store-watch:" + uuid.uuid4().hex,
-            "message": message,
+            "message": message + " " + RUNBOOK,
             "severity": severity,
             "delivery": "undelivered",
             "task_id": None,
@@ -428,7 +504,7 @@ def record_event(event, request):
             or not all(k in actual for k in wanted)
             or any(
                 actual.get(k) != wanted[k]
-                for k in ("title", "description", "assigned_to")
+                for k in ("title", "description", "status", "assigned_to", "priority")
             )
         ):
             raise Unknown("task_readback_mismatch")
@@ -518,6 +594,8 @@ def run_once(path, request, read_usage, notify, environ=None, now=None):
     environ = os.environ if environ is None else environ
     now = time.time() if now is None else finite(now)
     state = read_state(path, now)
+    if not path.parent.is_dir():
+        raise Unknown("state_directory_missing")
 
     def save():
         held_view.atomic_write(path, json.dumps(state, sort_keys=True, allow_nan=False))
@@ -536,7 +614,11 @@ def run_once(path, request, read_usage, notify, environ=None, now=None):
     else:
         configured = True
         if state["configuration_failed"]:
-            add_event(state, "Store disk watch configuration recovered.", "warning")
+            add_event(
+                state,
+                "Store disk watch configuration recovered; filesystem usage still requires a complete read.",
+                "warning",
+            )
         state["configuration_failed"] = False
     results = []
     selected = {target_key(t) for t in targets}
@@ -559,9 +641,11 @@ def run_once(path, request, read_usage, notify, environ=None, now=None):
                 "last_success": None,
                 "level": "healthy",
                 "stale": False,
+                "seen_instances": [],
             },
         )
         label = json.dumps(target, sort_keys=True)
+        failure = None
         try:
             if not configured:
                 raise Unknown("configuration_unknown")
@@ -569,7 +653,23 @@ def run_once(path, request, read_usage, notify, environ=None, now=None):
             complete = reading["complete"]
             require(type(complete) is bool)
             instances = reading["instances"]
-            require(isinstance(instances, list) and bool(instances))
+            require(isinstance(instances, list))
+            seen = reading.get("seen_instances", [s["instance"] for s in instances])
+            require(valid_instances(seen))
+            failure = reading.get("failure")
+            if failure not in FAILURES:
+                failure = None if complete else "metrics_partial_or_invalid"
+            if value["seen_instances"] is None:
+                complete, failure = False, failure or "instance_inventory_unknown"
+            else:
+                missing = set(value["seen_instances"]) - set(seen)
+                value["seen_instances"] = sorted(
+                    set(value["seen_instances"]) | set(seen)
+                )
+                if missing:
+                    complete, failure = False, failure or "metrics_instance_missing"
+            if not instances:
+                raise Unknown(failure or "metrics_empty_or_invalid")
             for sample in instances:
                 percent, stamp = finite(sample["percent"]), finite(sample["stamp"])
                 require(0 <= percent <= 100 and -30 <= now - stamp <= SAMPLE_MAX_AGE)
@@ -578,8 +678,16 @@ def run_once(path, request, read_usage, notify, environ=None, now=None):
                 )
             worst = max(instances, key=lambda sample: sample["percent"])
             percent = finite(worst["percent"])
-        except Exception:
-            results.append({"target": target, "status": "unknown", "complete": False})
+        except Exception as error:
+            failure = diagnostic(error, "metrics_read_failure")
+            results.append(
+                {
+                    "target": target,
+                    "status": "unknown",
+                    "complete": False,
+                    "failure": failure,
+                }
+            )
         else:
             current = level(percent)
             if complete:
@@ -599,7 +707,7 @@ def run_once(path, request, read_usage, notify, environ=None, now=None):
                     f"Filesystem {current}: {target['app']} {target['mount']} "
                     f"instance {worst['instance']}: {percent:.1f}% used. "
                     + (
-                        "All returned series valid. "
+                        "Complete known instance set valid. "
                         if complete
                         else "Some series UNKNOWN. "
                     )
@@ -615,6 +723,8 @@ def run_once(path, request, read_usage, notify, environ=None, now=None):
                     else "unknown",
                     "percent": percent,
                     "complete": complete,
+                    "failure": failure,
+                    "instances": instances,
                 }
             )
         since = (
@@ -626,7 +736,9 @@ def run_once(path, request, read_usage, notify, environ=None, now=None):
             add_event(
                 state,
                 "Store disk watch critical: no successful filesystem read for one hour; usage UNKNOWN. "
-                + label,
+                + label
+                + "; failure="
+                + (failure or "metrics_stale"),
             )
             value["stale"] = True
     # This checkpoint is mandatory before any external write/send. Replay uses
@@ -649,7 +761,7 @@ def run_once(path, request, read_usage, notify, environ=None, now=None):
 
 @contextmanager
 def failure_journal():
-    path = held_view.journal_path()
+    path = runtime_paths()
     with held_view.file_lock(
         path.with_name(path.name + ".lock"), fail_open=False
     ) as locked:
@@ -733,6 +845,53 @@ def failure_episode(request, notify, recovered=False):
     return event
 
 
+def runtime_paths(state_path=None):
+    configured = os.environ.get("ATELES_DEDUPE_JOURNAL_PATH", "").strip()
+    if not configured:
+        raise Unknown("journal_path_missing")
+    path = Path(configured)
+    if not path.is_absolute() or not path.parent.is_dir():
+        raise Unknown("journal_directory_missing")
+    if state_path is not None and not state_path.parent.is_dir():
+        raise Unknown("state_directory_missing")
+    return path
+
+
+def change_inventory(path, action, selection, now):
+    """Checkpoint an explicit human inventory edit without asserting recovery."""
+    app, mount, *instances = selection
+    if not valid_instances(instances) or not instances:
+        raise Unknown("inventory_action_invalid")
+    state = read_state(path, now)
+    value = state["volumes"].get(target_key({"app": app, "mount": mount}))
+    if value is None:
+        raise Unknown("inventory_target_unknown")
+    if action == "retire":
+        if (
+            value["seen_instances"] is None
+            or instances[0] not in value["seen_instances"]
+        ):
+            raise Unknown("inventory_instance_unknown")
+        value["seen_instances"].remove(instances[0])
+    else:
+        if value["seen_instances"] is not None:
+            raise Unknown("inventory_already_known")
+        value["seen_instances"] = sorted(instances)
+    add_event(
+        state,
+        "Store disk watch inventory "
+        + action
+        + ": "
+        + json.dumps(
+            {"target": value["target"], "instances": instances}, sort_keys=True
+        )
+        + ". Human assessment recorded; usage remains UNKNOWN until a complete read.",
+        "warning",
+    )
+    held_view.atomic_write(path, json.dumps(state, sort_keys=True, allow_nan=False))
+    return state
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -741,9 +900,17 @@ def main(argv=None):
         required=True,
         help="Private state file on persistent storage",
     )
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument(
+        "--retire-instance", nargs=3, metavar=("APP", "MOUNT", "INSTANCE")
+    )
+    actions.add_argument(
+        "--confirm-instances", nargs="+", metavar="APP_MOUNT_INSTANCES"
+    )
     args = parser.parse_args(argv)
-    notifications = Notifications()
     try:
+        runtime_paths(args.state)
+        notifications = Notifications()
         with held_view.file_lock(
             args.state.with_suffix(".lock"), blocking=False, fail_open=False
         ) as locked:
@@ -751,7 +918,36 @@ def main(argv=None):
                 raise Unknown("state_lock_unavailable")
             import httpx
 
-            with httpx.Client() as client:
+            if args.retire_instance or args.confirm_instances:
+                selection = args.retire_instance or args.confirm_instances
+                if len(selection) < 3:
+                    raise Unknown("inventory_action_invalid")
+                state = change_inventory(
+                    args.state,
+                    "retire" if args.retire_instance else "confirm",
+                    selection,
+                    time.time(),
+                )
+                drain(
+                    state,
+                    lambda: held_view.atomic_write(
+                        args.state, json.dumps(state, sort_keys=True, allow_nan=False)
+                    ),
+                    request_json,
+                    notifications,
+                )
+                print(
+                    json.dumps(
+                        {
+                            "status": "unknown",
+                            "inventory": "updated",
+                            "event": state["events"][-1],
+                        }
+                    )
+                )
+                return 1
+
+            with httpx.Client(trust_env=False) as client:
 
                 def read_usage(target, now):
                     return Metrics(os.environ, client).read(target, now)
@@ -774,6 +970,8 @@ def main(argv=None):
         # Never replace damaged watch state. Persist episode identity before
         # external effects in the existing receipt journal, or report locally.
         try:
+            runtime_paths(args.state)
+            notifications = Notifications()
             with held_view.file_lock(
                 args.state.with_suffix(".lock"), blocking=False, fail_open=False
             ) as locked:

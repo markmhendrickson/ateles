@@ -13,6 +13,26 @@ the job raises a separate critical event, once until reads recover.
 This does not read application logs, scheduler output, web errors or application
 health checks. It never resizes a volume or deploys anything.
 
+## Activation checklist
+
+- Pre-provision the private persistent state directory and a dedicated notifier
+  journal directory; set `ATELES_DEDUPE_JOURNAL_PATH` explicitly. This job must
+  be the journal's only user. Missing directories or an unset/blank journal
+  setting fail closed, without creating directories or using a temporary fallback.
+- Configure and read back every selected deployment record and exact mount
+  label. Supply the existing read-only metrics credential and documented endpoint.
+- Run the job end to end against the real endpoint before enabling its schedule.
+  Require `configuration=ok`, `complete=true` for every target, an `instance` id
+  in each target's `instances`, and a percentage matching `df` on that same
+  instance/mount. The synthetic tests do not satisfy this check.
+- Check host time synchronization. A source/evaluation timestamp more than
+  30 seconds ahead of the host is `metrics_clock_skew`; a host clock more than
+  30 seconds ahead can make source samples stale. Resolve clock skew before
+  trusting the result; the maximum source age remains five minutes.
+- Prove one authorized notice and its task surface in the actual coordinator
+  harness. The task is the record a person acts on; transport acceptance alone
+  does not establish that the person saw it. Then enable the existing schedule.
+
 ## Runtime configuration
 
 Use the existing swarm Fly setup, with Python 3.13+ and this repository's locked
@@ -30,6 +50,9 @@ storage, separate from the volumes being monitored. Keep these existing notifier
 files on that same persistent storage using `ATELES_DEDUPE_JOURNAL_PATH`,
 `ATELES_DIGEST_QUEUE_PATH` and `ATELES_NOTIFY_SINK_DIR`. Do not use temporary
 container storage: losing state resets the no-read clock and threshold memory.
+The journal path must be absolute and its parent directory must already exist.
+It is dedicated to this job, including state-failure receipts; other jobs must
+use a different journal. The state parent must also already exist.
 Only one scheduled owner may run against the same state; the shared notifier's
 fail-closed file lock excludes overlapping polls.
 
@@ -38,7 +61,7 @@ Required runtime settings:
 | Setting | Required value |
 | --- | --- |
 | `STORE_WATCH_FLY_METRICS_TOKEN` | Operator-created, organization-scoped, read-only metrics credential, including its `FlyV1 ` prefix. No fallback to an ambient Fly token. |
-| `STORE_WATCH_METRICS_URL` | `https://api.fly.io/prometheus/<org-slug>/api/v1/query`; no URL credentials, query or fragment. |
+| `STORE_WATCH_METRICS_URL` | `https://api.fly.io/prometheus/<org-slug>/api/v1/query`; the exact documented host, no explicit port, URL credentials, query or fragment. The metrics client ignores proxy and certificate environment settings (`trust_env=False`). |
 | `STORE_WATCH_CONFIG_IDS` | Nonempty JSON array of the selected existing `deployment_configuration` entity ids. Every selected record is read on every run. |
 | `NEOTOMA_BASE_URL`, `NEOTOMA_BEARER_TOKEN` | Existing authorized production record endpoint and credential, able to read selected deployment records and create/read tasks and correct their notes. |
 
@@ -52,6 +75,11 @@ or migration. Read it back after editing it; undeclared fields are not an altern
 missing/malformed mounts, failed record reads, empty selection and partial
 selection fail the entire configuration. The job emits a critical configuration
 event and retains the last known target list for the no-read alarm.
+On a first run with invalid configuration there are no known targets to poll:
+the configuration event/task is raised immediately, the report is UNKNOWN and
+the exit is nonzero. No per-target one-hour clock exists until a target has
+been loaded successfully. Configuration recovery reports configuration only;
+it cannot establish filesystem recovery.
 
 ### Confirm real series before activation
 
@@ -85,6 +113,10 @@ gauge. The reported level/percent is the worst valid instance and its notice
 identifies the instance. Only a complete, valid, fresh set advances the target's
 last-success clock or clears a prior condition. Partial healthy data remains
 UNKNOWN; partial data can escalate but cannot downgrade an existing alert.
+The persisted instance inventory includes ids observed even in incomplete
+gauge sets. A previously seen instance missing entirely from a later poll makes
+that poll partial, across process restarts and past provider lookback expiry.
+No instance ages out automatically. A newly discovered instance joins the set.
 HTTP errors, redirects, warnings, partial-response flags and malformed envelopes
 are UNKNOWN. An empty vector is not a healthy target.
 
@@ -136,14 +168,72 @@ readback confirms the merged value, not atomicity. Only a literal successful
 send or a valid `delivered` receipt confirms transport acceptance. Held, absent,
 failed and uncertain sends remain `undelivered` in the task notes and local
 event. This confirms transport acceptance, not that a person read it.
+The initial create readback verifies `status`, `assigned_to` and `priority`
+alongside the task text. Later changes to those human-owned fields are tolerated
+only after the event has a verified task id. A lost create response with no
+identified task cannot establish that a mismatched field was a person's edit;
+the event stays unrecorded for assessment rather than trusting it.
 
 Before trusting activation, send one authorized synthetic notice through the
 intended host, read its receipt and task back, and prove the linked escalation
 surfaces in the operator's actual coordinator harness. Until that succeeds,
-human delivery is **unverified**. Apprise was unavailable on the build host;
+human delivery is **unverified**. The tests use synthetic transports and records;
 no real notification or production write was attempted during testing.
 
 ## Failure and recovery behavior
+
+Target results carry a fixed `failure` category (or `null` on complete success),
+and the one-hour no-read notice/task carries that category. Provider response
+text and exceptions are never copied. `metrics_auth_failure` means a 401/403:
+check the selected credential and scope without printing the token.
+`metrics_token_missing_or_invalid` means the dedicated token is absent/malformed.
+`metrics_labels_mismatch` means returned labels do not match the app/mount;
+`metrics_empty_or_invalid` can also mean a wrong mount matched no series: confirm
+the exact observed label. `metrics_clock_skew` means a timestamp is over
+30 seconds in the future; check host time synchronization. `metrics_stale`
+means a sample exceeded the age bound. `metrics_instance_missing` requires
+restoring that instance's series or explicit retirement below. Other fixed
+categories distinguish invalid capacity, duplicate series, missing gauges,
+partial envelopes and request failures. Failure notices and their task text
+point to this section for the next step.
+
+### Instance retirement and legacy state
+
+After a person confirms a machine was deliberately retired/replaced, run this
+explicit action with the app, literal mount label and exact persisted instance
+id (synthetic example):
+
+```bash
+python3 execution/scripts/store_disk_watch.py --state /data/store-watch/state.json --retire-instance synthetic /data synthetic-a
+```
+
+This removes only that instance from the expected set and checkpoints a warning
+event/task before sending. It does not poll metrics, clear the stored level or
+stale alarm, or advance `last_success`. Its JSON status remains UNKNOWN and its
+exit is 1; only the next complete read can report recovery. If the instance
+reappears, it is observed again. A failed checkpoint creates no retirement
+effects; a crash after the checkpoint replays the same pending event on the
+next poll. Assess the task before retrying an action that may already have
+committed; re-retiring an absent id is refused.
+
+State version 1 lacked an inventory. Migration to version 2 preserves all
+levels, timestamps and pending events, and sets existing inventories unknown.
+Reads may escalate but cannot clear or refresh them. After independently
+confirming the full current instance set for a legacy target, record its initial
+baseline (one or more ids after the app and mount):
+
+```bash
+python3 execution/scripts/store_disk_watch.py --state /data/store-watch/state.json --confirm-instances synthetic /data synthetic-a synthetic-b
+```
+
+This action is accepted only for an unknown legacy inventory; it cannot replace
+an already known set or silently retire machines. Like retirement, it records
+an event without declaring recovery. A first-ever version 2 target seeds its
+inventory from observed series; the activation check must confirm all intended
+instances, since no metrics-only poll can discover a machine never observed.
+Target removal is separate: an explicit edit of the selected configuration
+removes an app/mount and records a warning task, rather than a healthy event.
+Do not remove a target to hide an unreadable configuration or vanished machine.
 
 The job reuses the notifier's private atomic-file writer and file locks. It
 checkpoints new events before any task write or send. Crashing before that

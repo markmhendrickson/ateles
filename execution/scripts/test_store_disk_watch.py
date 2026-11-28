@@ -25,6 +25,8 @@ GAUGES = {
 def reading(percent, stamp):
     return {
         "complete": True,
+        "failure": None,
+        "seen_instances": ["synthetic-a"],
         "instances": [{"instance": "synthetic-a", "percent": percent, "stamp": stamp}],
     }
 
@@ -227,6 +229,153 @@ def test_silent_task_field_drop_is_not_success(rig):
 
 
 @pytest.mark.parametrize(
+    "field,replacement",
+    [("status", "pending"), ("assigned_to", "synthetic"), ("priority", "p3")],
+)
+def test_initial_task_readback_verifies_human_routing_fields(rig, field, replacement):
+    original = rig.records.__call__
+
+    def request(method, path, body=None):
+        result = original(method, path, body)
+        if path == "/store":
+            next(iter(rig.records.tasks.values()))[field] = replacement
+        return result
+
+    report = watch.run_once(
+        rig.path, request, lambda *a: reading(90, NOW), lambda e: True, ENV, NOW
+    )
+    assert report["unrecorded"] == 1
+    event = watch.read_state(rig.path, NOW)["events"][0]
+    assert event["task_id"] is None and event["recorded"] is False
+
+
+def test_identified_task_retry_preserves_human_routing_and_priority(rig):
+    rig.poll(90, notify=lambda e: False)
+    task = next(iter(rig.records.tasks.values()))
+    task.update(status="done", assigned_to="synthetic", priority="p3")
+    assert rig.poll(90, NOW + 60)["unrecorded"] == 0
+    assert (task["status"], task["assigned_to"], task["priority"]) == (
+        "done",
+        "synthetic",
+        "p3",
+    )
+
+
+@pytest.mark.parametrize(
+    "problem,category",
+    [
+        ("auth", "metrics_auth_failure"),
+        ("mount", "metrics_labels_mismatch"),
+        ("clock", "metrics_clock_skew"),
+    ],
+)
+def test_fixed_failure_category_reaches_result_and_one_hour_notice(
+    rig, problem, category
+):
+    rig.poll(40)
+
+    def handler(request):
+        payload = metric_reply(request.url.params["query"])
+        if problem == "auth":
+            return httpx.Response(401, text="untrusted provider text")
+        for row in payload["data"]["result"]:
+            if problem == "mount":
+                row["metric"]["mount"] = "wrong"
+            else:
+                row["value"][0] = NOW + 3631
+        return httpx.Response(200, json=payload)
+
+    for now in (NOW + 60, NOW + 3600):
+        result = rig.poll(now=now, read=metrics(handler).read)["volumes"][0]
+        assert result["status"] == "unknown" and result["failure"] == category
+    assert "failure=" + category in rig.sent[-1]["message"]
+    assert watch.RUNBOOK in rig.sent[-1]["message"]
+    assert watch.RUNBOOK in next(iter(rig.records.tasks.values()))["description"]
+    assert "untrusted provider text" not in json.dumps(rig.sent)
+
+
+def test_unrecognized_exception_text_is_never_exported(rig):
+    def fail(*args):
+        raise watch.Unknown("untrusted provider text")
+
+    result = rig.poll(read=fail)["volumes"][0]
+    assert result["failure"] == "metrics_read_failure"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://metrics.invalid/prometheus/synthetic/api/v1/query",
+        "https://api.fly.io.attacker.invalid/prometheus/synthetic/api/v1/query",
+        "https://api.fly.io:443/prometheus/synthetic/api/v1/query",
+        "https://api.fly.io/wrong/api/v1/query",
+        "http://api.fly.io/prometheus/synthetic/api/v1/query",
+        "https://user@api.fly.io/prometheus/synthetic/api/v1/query",
+        "https://api.fly.io/prometheus/synthetic/api/v1/query?query=x",
+        "https://api.fly.io/prometheus/synthetic/api/v1/query#fragment",
+    ],
+)
+def test_metrics_endpoint_rejects_unapproved_host_or_shape(url):
+    with pytest.raises(watch.Unknown, match="metrics_endpoint_invalid"):
+        watch.Metrics(
+            {"STORE_WATCH_METRICS_URL": url, watch.TOKEN_ENV: "FlyV1 synthetic"}, None
+        )
+
+
+def test_main_metrics_client_ignores_proxy_environment(rig, monkeypatch, capsys):
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid")
+    monkeypatch.setenv("ALL_PROXY", "http://proxy.invalid")
+    monkeypatch.setenv("STORE_WATCH_CONFIG_IDS", ENV["STORE_WATCH_CONFIG_IDS"])
+    monkeypatch.setattr(watch, "request_json", rig.records)
+    monkeypatch.setattr(watch, "Notifications", lambda: lambda e: True)
+    monkeypatch.setattr(watch.time, "time", lambda: NOW)
+    real = httpx.Client
+    seen = []
+
+    def client(**kwargs):
+        seen.append(kwargs)
+        return real(
+            transport=httpx.MockTransport(lambda r: pytest.fail("unexpected request")),
+            **kwargs,
+        )
+
+    monkeypatch.setattr(httpx, "Client", client)
+    monkeypatch.setattr(
+        watch, "Metrics", lambda *a: SimpleNamespace(read=lambda *a: reading(40, NOW))
+    )
+    assert watch.main(["--state", str(rig.path)]) == 0
+    assert seen == [{"trust_env": False}]
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    "problem", ["unset", "blank", "journal_parent", "state_parent"]
+)
+def test_main_missing_runtime_paths_never_create_directories_or_effects(
+    rig, monkeypatch, capsys, problem
+):
+    state_path = rig.path
+    missing = rig.path.parent / "absent"
+    if problem == "unset":
+        monkeypatch.delenv("ATELES_DEDUPE_JOURNAL_PATH")
+    elif problem == "blank":
+        monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", "  ")
+    elif problem == "journal_parent":
+        monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(missing / "receipts.json"))
+    else:
+        state_path = missing / "state.json"
+    monkeypatch.setattr(
+        watch, "request_json", lambda *a: pytest.fail("no external effects")
+    )
+    monkeypatch.setattr(
+        watch, "Notifications", lambda: pytest.fail("no notifier fallback")
+    )
+    assert watch.main(["--state", str(state_path)]) == 1
+    assert not missing.exists() and not state_path.exists()
+    assert json.loads(capsys.readouterr().out)["status"] == "unknown"
+
+
+@pytest.mark.parametrize(
     "environment",
     [
         {},
@@ -345,7 +494,7 @@ def metric_reply(query, values=None, timestamps=None):
 
 def metrics(handler):
     env = {
-        "STORE_WATCH_METRICS_URL": "https://metrics.invalid/api/v1/query",
+        "STORE_WATCH_METRICS_URL": "https://api.fly.io/prometheus/synthetic/api/v1/query",
         watch.TOKEN_ENV: "FlyV1 synthetic",
     }
     return watch.Metrics(env, httpx.Client(transport=httpx.MockTransport(handler)))
@@ -432,6 +581,280 @@ def test_all_instances_valid_uses_worst_level(rig):
     assert "synthetic-a" in rig.sent[0]["message"]
 
 
+def test_vanished_instance_across_restart_never_recovers_and_still_alarms(rig):
+    values = {
+        "synthetic-a": dict(GAUGES),
+        "synthetic-b": dict.fromkeys(GAUGES, 100),
+    }
+    values["synthetic-b"]["fly_instance_filesystem_blocks_free"] = 60
+    values["synthetic-b"]["fly_instance_filesystem_blocks_avail"] = 60
+
+    def poll(now, worker=watch):
+        def handler(request):
+            payload = metric_reply(request.url.params["query"], values)
+            for row in payload["data"]["result"]:
+                row["value"][0] = now
+                if request.url.params["query"].startswith("timestamp("):
+                    row["value"][1] = str(now)
+            return httpx.Response(200, json=payload)
+
+        return worker.run_once(
+            rig.path,
+            rig.records,
+            metrics(handler).read,
+            lambda event: rig.sent.append(copy.deepcopy(event)) or True,
+            ENV,
+            now,
+        )
+
+    assert poll(NOW)["volumes"][0]["complete"] is True
+    first = rig.path.read_text()
+    # Import a fresh module, in addition to re-reading the persisted checkpoint.
+    spec = importlib.util.spec_from_file_location("watch_after_restart", watch.__file__)
+    restarted = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(restarted)
+    assert restarted.read_state(rig.path, NOW) == json.loads(first)
+    del values["synthetic-a"]
+    report = poll(NOW + 60, restarted)
+    result = report["volumes"][0]
+    assert result["status"] == "unknown" and result["complete"] is False
+    assert result["failure"] == "metrics_instance_missing"
+    state = restarted.read_state(rig.path, NOW + 60)["volumes"][
+        watch.target_key(TARGET)
+    ]
+    assert state["level"] == "critical" and state["last_success"] == NOW
+    assert len(rig.sent) == 1
+    poll(NOW + 3600, restarted)
+    assert len(rig.sent) == 2
+    assert "one hour" in rig.sent[-1]["message"]
+    assert "failure=metrics_instance_missing" in rig.sent[-1]["message"]
+    assert not any(
+        "healthy" in e["message"] or "reads recovered" in e["message"] for e in rig.sent
+    )
+
+
+def test_explicit_retirement_checkpoints_notice_without_recovering(
+    rig, monkeypatch, capsys
+):
+    rig.poll(90)
+    monkeypatch.setattr(watch, "request_json", rig.records)
+    monkeypatch.setattr(watch.time, "time", lambda: NOW + 60)
+    monkeypatch.setattr(
+        watch,
+        "Notifications",
+        lambda: lambda e: rig.sent.append(copy.deepcopy(e)) or True,
+    )
+    monkeypatch.setattr(
+        watch, "Metrics", lambda *a: pytest.fail("retirement must not read metrics")
+    )
+    assert (
+        watch.main(
+            [
+                "--state",
+                str(rig.path),
+                "--retire-instance",
+                "synthetic",
+                "/data",
+                "synthetic-a",
+            ]
+        )
+        == 1
+    )
+    assert json.loads(capsys.readouterr().out)["status"] == "unknown"
+    value = watch.read_state(rig.path, NOW + 60)["volumes"][watch.target_key(TARGET)]
+    assert value["seen_instances"] == []
+    assert value["level"] == "critical" and value["last_success"] == NOW
+    assert "inventory retire" in rig.sent[-1]["message"]
+    replacement = reading(40, NOW + 120)
+    replacement["instances"][0]["instance"] = "synthetic-b"
+    replacement["seen_instances"] = ["synthetic-b"]
+    assert (
+        rig.poll(now=NOW + 120, read=lambda *a: replacement)["volumes"][0]["status"]
+        == "healthy"
+    )
+    assert "healthy" in rig.sent[-1]["message"]
+
+
+def test_retirement_write_failure_precedes_external_effects(rig, monkeypatch):
+    rig.poll(90)
+    before = rig.path.read_text()
+    monkeypatch.setattr(
+        watch.held_view, "atomic_write", lambda *a: (_ for _ in ()).throw(OSError())
+    )
+    with pytest.raises(OSError):
+        watch.change_inventory(
+            rig.path, "retire", ["synthetic", "/data", "synthetic-a"], NOW + 60
+        )
+    assert rig.path.read_text() == before and len(rig.sent) == 1
+
+
+@pytest.mark.parametrize(
+    "inventory", ["synthetic-a", {}, [None], [""], ["a", "a"], ["a\n"]]
+)
+def test_invalid_persisted_instance_inventory_fails_closed(rig, inventory):
+    rig.poll()
+    state = json.loads(rig.path.read_text())
+    state["volumes"][watch.target_key(TARGET)]["seen_instances"] = inventory
+    rig.path.write_text(json.dumps(state))
+    before = rig.path.read_text()
+    with pytest.raises(watch.Unknown):
+        rig.poll()
+    assert rig.path.read_text() == before
+
+
+def test_legacy_migration_requires_explicit_baseline_and_preserves_alarm(
+    rig, monkeypatch, capsys
+):
+    rig.poll(90)
+    legacy = json.loads(rig.path.read_text())
+    legacy["version"] = 1
+    del legacy["volumes"][watch.target_key(TARGET)]["seen_instances"]
+    rig.path.write_text(json.dumps(legacy))
+    result = rig.poll(40, NOW + 60)["volumes"][0]
+    assert (
+        result["status"] == "unknown"
+        and result["failure"] == "instance_inventory_unknown"
+    )
+    value = watch.read_state(rig.path, NOW + 60)["volumes"][watch.target_key(TARGET)]
+    assert value["level"] == "critical" and value["last_success"] == NOW
+    monkeypatch.setattr(watch, "request_json", rig.records)
+    monkeypatch.setattr(watch.time, "time", lambda: NOW + 120)
+    monkeypatch.setattr(watch, "Notifications", lambda: lambda e: True)
+    assert (
+        watch.main(
+            [
+                "--state",
+                str(rig.path),
+                "--confirm-instances",
+                "synthetic",
+                "/data",
+                "synthetic-a",
+            ]
+        )
+        == 1
+    )
+    assert json.loads(capsys.readouterr().out)["status"] == "unknown"
+    value = watch.read_state(rig.path, NOW + 120)["volumes"][watch.target_key(TARGET)]
+    assert value["level"] == "critical" and value["last_success"] == NOW
+    assert rig.poll(40, NOW + 180)["volumes"][0]["status"] == "healthy"
+
+
+def test_instance_seen_only_in_bad_gauge_is_retained(rig):
+    values = {
+        "synthetic-a": dict(GAUGES),
+        "synthetic-b": {"fly_instance_filesystem_blocks": 100},
+    }
+    source = metrics(
+        lambda r: httpx.Response(200, json=metric_reply(r.url.params["query"], values))
+    )
+    rig.poll(read=source.read)
+    assert watch.read_state(rig.path, NOW)["volumes"][watch.target_key(TARGET)][
+        "seen_instances"
+    ] == ["synthetic-a", "synthetic-b"]
+    assert rig.poll(now=NOW + 60)["volumes"][0]["failure"] == "metrics_instance_missing"
+
+
+def test_missing_instance_still_allows_escalation_but_never_downgrade(rig):
+    rig.poll(75)
+    replacement = reading(90, NOW + 60)
+    replacement["seen_instances"] = ["synthetic-b"]
+    replacement["instances"][0]["instance"] = "synthetic-b"
+    assert (
+        rig.poll(now=NOW + 60, read=lambda *a: replacement)["volumes"][0]["status"]
+        == "critical"
+    )
+    assert "Filesystem critical" in rig.sent[-1]["message"]
+    replacement["instances"][0].update(percent=75, stamp=NOW + 120)
+    report = rig.poll(now=NOW + 120, read=lambda *a: replacement)
+    assert report["volumes"][0]["complete"] is False
+    value = watch.read_state(rig.path, NOW + 120)["volumes"][watch.target_key(TARGET)]
+    assert value["level"] == "critical" and value["last_success"] == NOW
+    assert len(rig.sent) == 2
+
+
+def test_retirement_event_survives_interruption_and_does_not_recover_stale_reads(
+    rig, monkeypatch
+):
+    rig.poll(90)
+    rig.poll(now=NOW + 3600, read=no_read)
+    original = watch.drain
+    monkeypatch.setattr(watch, "request_json", rig.records)
+    monkeypatch.setattr(watch.time, "time", lambda: NOW + 3660)
+    monkeypatch.setattr(watch, "Notifications", lambda: lambda e: True)
+    monkeypatch.setattr(
+        watch, "drain", lambda *a: (_ for _ in ()).throw(KeyboardInterrupt())
+    )
+    with pytest.raises(KeyboardInterrupt):
+        watch.main(
+            [
+                "--state",
+                str(rig.path),
+                "--retire-instance",
+                "synthetic",
+                "/data",
+                "synthetic-a",
+            ]
+        )
+    state = watch.read_state(rig.path, NOW + 3660)
+    value = state["volumes"][watch.target_key(TARGET)]
+    event = state["events"][-1]
+    assert (
+        value["stale"] is True
+        and value["level"] == "critical"
+        and value["last_success"] == NOW
+    )
+    assert event["recorded"] is False and "inventory retire" in event["message"]
+    monkeypatch.setattr(watch, "drain", original)
+    rig.poll(now=NOW + 3720, read=no_read)
+    assert rig.sent[-1]["id"] == event["id"]
+    assert not any("reads recovered" in e["message"] for e in rig.sent)
+
+
+def test_configuration_recovery_never_claims_filesystem_recovery(rig):
+    rig.poll(90)
+    rig.records.fail_config = True
+    rig.poll(now=NOW + 3600)
+    rig.records.fail_config = False
+    result = rig.poll(now=NOW + 3660, read=no_read)
+    value = watch.read_state(rig.path, NOW + 3660)["volumes"][watch.target_key(TARGET)]
+    assert (
+        result["configuration"] == "ok" and result["volumes"][0]["status"] == "unknown"
+    )
+    assert (
+        value["level"] == "critical"
+        and value["stale"] is True
+        and value["last_success"] == NOW
+    )
+    assert "configuration recovered" in rig.sent[-1]["message"]
+    assert not any(
+        "reads recovered" in e["message"] or "healthy" in e["message"] for e in rig.sent
+    )
+
+
+def test_explicit_configuration_target_removal_records_a_person_event(rig):
+    rig.records.config["snapshot"]["gotchas"] = ['store-watch:["/data", "/other"]']
+    rig.poll(90)
+    rig.records.config["snapshot"]["gotchas"] = ['store-watch:["/data"]']
+    rig.poll(90, NOW + 60)
+    assert "target removed from configuration" in rig.sent[-1]["message"]
+    assert '"mount": "/other"' in rig.sent[-1]["message"]
+    assert not any("healthy" in e["message"] for e in rig.sent)
+
+
+@pytest.mark.parametrize("name", list(GAUGES))
+def test_each_source_gauge_detects_clock_skew(name):
+    source = metrics(
+        lambda r: httpx.Response(
+            200,
+            json=metric_reply(
+                r.url.params["query"], timestamps={("synthetic-a", name): NOW + 31}
+            ),
+        )
+    )
+    result = source.read(TARGET, NOW)
+    assert result["complete"] is False and result["failure"] == "metrics_clock_skew"
+
+
 def test_partial_healthy_read_cannot_clear_critical_or_stale_alarm(rig):
     rig.poll(90)
     rig.poll(now=NOW + 3600, read=no_read)
@@ -467,7 +890,9 @@ def test_empty_partial_wrong_and_unparsable_metrics_are_unknown(change):
         change(payload)
         return httpx.Response(200, json=payload)
 
-    assert metrics(handler).read(TARGET, NOW) == {"instances": [], "complete": False}
+    result = metrics(handler).read(TARGET, NOW)
+    assert result["instances"] == [] and result["complete"] is False
+    assert result["failure"] in watch.FAILURES
 
 
 @pytest.mark.parametrize("name", list(GAUGES))
@@ -480,7 +905,9 @@ def test_source_freshness_checked_for_every_gauge(name):
             ),
         )
     )
-    assert source.read(TARGET, NOW) == {"instances": [], "complete": False}
+    result = source.read(TARGET, NOW)
+    assert result["instances"] == [] and result["complete"] is False
+    assert result["failure"] in watch.FAILURES
 
 
 def test_no_application_space_is_100_percent():
@@ -498,7 +925,9 @@ def test_http_failures_and_redirects_are_unknown(status):
             status, headers={"Location": "https://other.invalid/"}
         )
     )
-    assert source.read(TARGET, NOW) == {"instances": [], "complete": False}
+    result = source.read(TARGET, NOW)
+    assert result["instances"] == [] and result["complete"] is False
+    assert result["failure"] in watch.FAILURES
 
 
 def test_real_notifier_receipt_survives_crash_without_resending(tmp_path, monkeypatch):
@@ -647,7 +1076,9 @@ def test_main_exercises_configuration_metrics_task_and_notice_path(
         )
 
     monkeypatch.setattr(
-        httpx, "Client", lambda: client_class(transport=httpx.MockTransport(handler))
+        httpx,
+        "Client",
+        lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs),
     )
     monkeypatch.setattr(watch, "request_json", rig.records)
     monkeypatch.setattr(watch.time, "time", lambda: NOW)
@@ -658,7 +1089,7 @@ def test_main_exercises_configuration_metrics_task_and_notice_path(
     )
     for name, value in {
         **ENV,
-        "STORE_WATCH_METRICS_URL": "https://metrics.invalid/api/v1/query",
+        "STORE_WATCH_METRICS_URL": "https://api.fly.io/prometheus/synthetic/api/v1/query",
         watch.TOKEN_ENV: "FlyV1 synthetic",
     }.items():
         monkeypatch.setenv(name, value)
@@ -831,7 +1262,7 @@ def test_retry_merges_notes_again_after_lost_correction_response(rig):
     assert json.loads(line[len(watch.DELIVERY_PREFIX) :])["delivery"] == "delivered"
 
 
-def test_lost_create_response_preserves_human_changed_status_and_notes(rig):
+def test_lost_create_response_without_identified_task_cannot_trust_changed_status(rig):
     original = rig.records.__call__
     lost = [False]
 
@@ -848,7 +1279,7 @@ def test_lost_create_response_preserves_human_changed_status_and_notes(rig):
     report = watch.run_once(
         rig.path, request, lambda *args: reading(90, NOW), lambda e: True, ENV, NOW
     )
-    assert report["unrecorded"] == 0 and len(rig.records.tasks) == 1
+    assert report["unrecorded"] == 1 and len(rig.records.tasks) == 1
     task = next(iter(rig.records.tasks.values()))
     assert task["status"] == "done" and task["notes"].endswith(
         "Human acted before replay."
