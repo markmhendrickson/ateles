@@ -217,13 +217,28 @@ When it is on, Apis (`execution/daemons/apis/release_review_approval.py`):
   of `execution/scripts/approve_pr_as_app.py` passes on the head; and the swarm
   App's approval review is on the head;
 - then runs `publish.py --version <v> --entity-id <id> --from-github-review
-  <review id>` once, under a per-version lock, after re-reading the head.
-  `--from-github-review` moves `pending_approval` to `approved` only from
-  `pending_approval` and never combines with `--force`.
+  <review id> --approved-head <sha>` once, under a per-version lock, after
+  re-reading the head. `--from-github-review` requires `--approved-head`, moves
+  `pending_approval` to `approved` only from `pending_approval`, and never
+  combines with `--force`. publish.py refuses unless the record's
+  `rc_head_sha` equals the approved head, merges with `--match-head-commit`
+  pinned to it, and, after the merge and before any tag or publish step,
+  checks that the tree it will tag equals the approved head's tree; a
+  different tree (the base branch moved) stops the run and publishes nothing;
+- starts publish.py in its own session (`start_new_session=True`), as the email
+  approval path also does, so a restart of Apis does not stop a publish
+  mid-step;
+- holds every dispatcher merge of a release pull request (`_merge_pr`, whichever
+  caller asks, auto-merge included); the head branch is read live and an
+  unreadable pull request is held too;
+- runs the panel gate as its own process (`approve_pr_as_app.py --json`, a dry
+  run that prints one JSON result), so its report never mixes with Apis's
+  output.
 
 Any condition that fails or cannot be read publishes nothing; Apis logs the
 reason, sends a notice, and posts one pull request comment as the App naming
-the condition.
+the condition. A failed or timed-out publish raises a red alert through the
+dispatcher's alert path.
 
 Turdus also keeps a local consumed-reply state file, `.turdus_state.json`, and
 an `.initialized` marker beside it. An unreadable or malformed state, or a
