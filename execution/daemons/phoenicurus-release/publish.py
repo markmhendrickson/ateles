@@ -29,7 +29,7 @@ Usage:
   python3 publish.py --version v0.16.0 --dry-run # plan only, no irreversible actions
   python3 publish.py --entity-id ent_xxx         # publish by release entity id
   python3 publish.py --version v0.16.0 --force    # publish even if status != approved
-  python3 publish.py --version v0.16.0 --entity-id ent_xxx --from-github-review 123
+  python3 publish.py --version v0.16.0 --entity-id ent_xxx --from-github-review 123 --approved-head <sha>
                                                  # operator approved the release PR in GitHub
 
 Exit codes:
@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -715,13 +716,35 @@ def _owner_repo_from_remote_url(url: str) -> str:
     return "/".join(url.rsplit("/", 2)[-2:])
 
 
-def merge_rc_pr(rc_pr_url: str, rc_branch: str, dry_run: bool, version: str = "") -> None:
+_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def merge_rc_pr(
+    rc_pr_url: str,
+    rc_branch: str,
+    dry_run: bool,
+    version: str = "",
+    match_head: str = "",
+) -> None:
+    """Merge the RC pull request server-side, then check out origin/main.
+
+    With ``match_head`` (the GitHub-review path), the merge is pinned with
+    ``--match-head-commit``: GitHub refuses it if the head moved after the
+    approval, and a failed merge is never treated as "already merged".
+    """
     if dry_run:
         log.info(f"[dry-run] would merge RC PR {rc_pr_url}")
         return
-    # Merge via gh (squash to keep main linear); tolerate already-merged.
     pr_ref = rc_pr_url or rc_branch
-    proc = run(["gh", "pr", "merge", pr_ref, "--merge"], check=False)
+    cmd = ["gh", "pr", "merge", pr_ref, "--merge"]
+    if match_head:
+        cmd += ["--match-head-commit", match_head]
+    proc = run(cmd, check=False)
+    if proc.returncode != 0 and match_head:
+        raise StepError(
+            f"RC PR merge pinned to the approved head {match_head[:12]} did not "
+            f"complete: {(proc.stderr or proc.stdout or '').strip()[:500]}"
+        )
     if proc.returncode != 0:
         stderr = proc.stderr or ""
         if "does not have the correct permissions" in stderr.lower():
@@ -756,6 +779,36 @@ def merge_rc_pr(rc_pr_url: str, rc_branch: str, dry_run: bool, version: str = ""
         f"merge_rc_pr: checked out origin/main in detached HEAD ({sha}) — "
         f"safe under concurrent worktrees."
     )
+
+
+def verify_tree_matches_approved_head(approved_head: str, dry_run: bool) -> None:
+    """Refuse unless the checked-out tree (what gets tagged) is the approved head's tree.
+
+    Runs after merge_rc_pr and before any tag or publish step on the
+    GitHub-review path. If the base branch moved between the gate's checks
+    and the merge, the merge result carries commits nobody approved; its tree
+    then differs from the approved head's tree and nothing is published.
+    """
+    if dry_run:
+        log.info(f"[dry-run] would verify HEAD's tree equals {approved_head}'s tree")
+        return
+    head_tree = run(["git", "rev-parse", "HEAD^{tree}"], check=False)
+    approved_tree = run(["git", "rev-parse", f"{approved_head}^{{tree}}"], check=False)
+    got = (head_tree.stdout or "").strip() if head_tree.returncode == 0 else ""
+    want = (approved_tree.stdout or "").strip() if approved_tree.returncode == 0 else ""
+    if not got or not want:
+        raise StepError(
+            "tree check FAILED: the tree to be tagged or the approved head "
+            f"{approved_head[:12]} could not be read. Nothing was tagged or published."
+        )
+    if got != want:
+        raise StepError(
+            f"tree check FAILED: the merged tree ({got[:12]}) is not the approved "
+            f"head {approved_head[:12]}'s tree ({want[:12]}); the base branch "
+            "carries changes the approval did not cover. Nothing was tagged or "
+            "published."
+        )
+    log.info(f"tree check OK: the tree to be tagged equals approved head {approved_head[:12]}")
 
 
 def tag_and_push(version: str, dry_run: bool) -> None:
@@ -1006,6 +1059,7 @@ def publish_release(
     resume_from: str | None = None,
     email_approval: bool = False,
     github_review_id: int | None = None,
+    approved_head: str = "",
 ) -> None:
     f = _entity_fields(release)
     # The exact entity find_release resolved; every status write targets it.
@@ -1046,6 +1100,16 @@ def publish_release(
                 f"is {status!r}, not 'pending_approval'. A release can only be "
                 "approved by GitHub review from pending_approval."
             )
+        if not _FULL_SHA_RE.match(approved_head or ""):
+            raise StepError(
+                f"github-review approval for {version} refused: the approved "
+                "head commit is missing or not a full commit id."
+            )
+        if str(f.get("rc_head_sha") or "") != approved_head:
+            raise StepError(
+                f"github-review approval for {version} refused: the release "
+                "record was prepared for a different head than the one approved."
+            )
         if not dry_run:
             set_release_status(version, "approved", entity_id=entity_id)
         status = "approved"
@@ -1085,7 +1149,12 @@ def publish_release(
     if resume_idx <= STEP_ORDER.index("preflight"):
         preflight(version, rc_branch, dry_run)
     if resume_idx <= STEP_ORDER.index("merge_rc_pr"):
-        merge_rc_pr(rc_pr_url, rc_branch, dry_run, version=version)
+        if github_review_id is not None:
+            merge_rc_pr(rc_pr_url, rc_branch, dry_run, version=version,
+                        match_head=approved_head)
+            verify_tree_matches_approved_head(approved_head, dry_run)
+        else:
+            merge_rc_pr(rc_pr_url, rc_branch, dry_run, version=version)
     if resume_idx <= STEP_ORDER.index("tag_and_push"):
         # Always runs before the first irreversible step (tag_and_push), even
         # when resuming past merge_rc_pr (e.g. an operator merged manually and
@@ -1164,9 +1233,24 @@ def main() -> int:
         "Requires --version and --entity-id; refuses any other starting state "
         "and never combines with --force or --from-email-approval.",
     )
+    ap.add_argument(
+        "--approved-head",
+        default="",
+        metavar="SHA",
+        help="the full head commit the operator approved; required with "
+        "--from-github-review. Publishing refuses unless the release record's "
+        "rc_head_sha equals it; the merge is pinned to it and the tree to be "
+        "tagged must equal its tree.",
+    )
     args = ap.parse_args()
 
+    if args.approved_head and args.from_github_review is None:
+        log.error("--approved-head is only used with --from-github-review")
+        return 2
     if args.from_github_review is not None:
+        if not _FULL_SHA_RE.match(args.approved_head or ""):
+            log.error("--from-github-review requires --approved-head <full commit id>")
+            return 2
         if args.from_github_review <= 0:
             log.error("--from-github-review needs a positive review id")
             return 2
@@ -1220,6 +1304,7 @@ def main() -> int:
             resume_from=args.resume_from,
             email_approval=args.from_email_approval,
             github_review_id=args.from_github_review,
+            approved_head=args.approved_head,
         )
         return 0
     except StatusWriteError as exc:
