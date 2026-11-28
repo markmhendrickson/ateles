@@ -20,14 +20,15 @@ from the webhook payload except the review id, which is only a key to re-read:
   - the review with that id is by the operator login (not a bot), is APPROVED,
     and its commit is the pull request's current head;
   - the approving review's own body is empty (whitespace counts as empty);
-  - the operator has done nothing else since approving. No word in a comment
-    is interpreted: any conversation comment or inline review comment by the
-    operator login created or edited at or after the approval's submission
-    time refuses, whatever it says; any other review by that login submitted
-    at or after it, or with a higher id, refuses, except one that is APPROVED
-    on the same head with an empty body. Comments by the swarm App, bots and
-    other logins are ignored. A missing, malformed or time-zone-less timestamp
-    on any of these refuses;
+  - the approval is bare. No word, time or edit is compared: the publish
+    refuses if the operator login has, at any time before or after the
+    approval, (a) any conversation comment on the pull request, (b) any inline
+    review comment, including one that belongs to the approving review itself,
+    or (c) any review, of any state or age, that is not APPROVED with an empty
+    body. An earlier empty approval is allowed. Comments and reviews by the
+    swarm App, bots and other logins are ignored. Every list is read to its
+    last page or the publish refuses, and a row whose author, id or state
+    cannot be read refuses;
   - the pull request is open, based on the release branch, its head branch is
     ``release/<version>`` in the same repository, and it is not behind the base;
   - exactly one release_result matches the version and the pull request URL,
@@ -71,7 +72,6 @@ import re
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any
 
 log = logging.getLogger("apis.release_review_approval")
@@ -85,6 +85,9 @@ NOTICE_MARKER = "<!-- release-review-approval -->"
 TREE_CHECK_MARKER = "tree check FAILED"
 _PER_PAGE = 100
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+# Start of every refusal caused by the operator's own activity on the pull
+# request; the kind of activity follows it.
+OPERATOR_ACTIVITY = "the operator login has posted on this release pull request: "
 
 
 def enabled(env: dict[str, str] | None = None) -> bool:
@@ -152,29 +155,16 @@ def _is_bot(user: dict) -> bool:
     )
 
 
-def _parse_time(value: object) -> datetime:
-    if not isinstance(value, str) or not value:
-        raise Refusal(f"a timestamp could not be read ({value!r})")
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError as exc:
-        raise Refusal(f"a timestamp could not be read ({value!r})") from exc
-    if parsed.tzinfo is None:
-        raise Refusal(f"a timestamp carries no time zone ({value!r})")
-    return parsed
+def _login_of(row: dict, what: str) -> str:
+    """The casefolded author login of a list row; an unreadable author refuses."""
+    user = row.get("user")
+    if not isinstance(user, dict) or not isinstance(user.get("login"), str) or not user["login"]:
+        raise Refusal(f"the author of an item in {what} could not be read")
+    return user["login"].casefold()
 
 
 def _is_empty(body: object) -> bool:
     return body is None or (isinstance(body, str) and not body.strip())
-
-
-def _at_or_after(row: dict, cutoff: datetime, *keys: str) -> bool:
-    """True when any of ``keys`` is at or after cutoff; every key must be readable."""
-    hit = False
-    for key in keys:
-        if _parse_time(row.get(key)) >= cutoff:
-            hit = True
-    return hit
 
 
 def _norm_version(value: object) -> str:
@@ -184,6 +174,15 @@ def _norm_version(value: object) -> str:
 
 def _fields(row: dict) -> dict:
     return row.get("snapshot") or row.get("fields") or row
+
+
+_HOW_TO_PUBLISH = (
+    "This release pull request cannot be published by review once the operator "
+    "has commented on it or submitted any review other than an empty approval; "
+    "the release then needs the operator's go relayed to the session running it. "
+    "Otherwise, to publish once the condition is met, submit a new approving "
+    "review on the current head with an empty comment box."
+)
 
 
 class ReleaseReviewApproval:
@@ -348,9 +347,9 @@ class ReleaseReviewApproval:
             raise Refusal("the approval is not on the pull request's current head")
         if not _is_empty(review.get("body")):
             raise Refusal("the approving review has a comment; an approval used to publish must have none")
-        approved_at = _parse_time(review.get("submitted_at"))
 
-        # Later reviews by the operator; and the App's own approval on this head.
+        # Every review by the operator must be a bare approval; and the App's
+        # own approval must be on this head.
         reviews = await self._get_all(f"/repos/{repo}/pulls/{pr}/reviews", "the review list")
         app_login = ""
         try:
@@ -360,22 +359,14 @@ class ReleaseReviewApproval:
         app_approved = False
         for r in reviews:
             rid = r.get("id")
-            if not isinstance(rid, int):
+            if not isinstance(rid, int) or isinstance(rid, bool):
                 raise Refusal("a review in the list has no readable id")
-            r_login = str((r.get("user") or {}).get("login") or "").casefold()
-            r_state = str(r.get("state") or "")
-            if r_login == operator and rid != review_id:
-                if r_state == "PENDING":
-                    continue
-                later = _at_or_after(r, approved_at, "submitted_at") or rid > review_id
-                if later and r_state in ("CHANGES_REQUESTED", "DISMISSED"):
-                    raise Refusal("the operator later requested changes or dismissed a review")
-                if later and not (
-                    r_state == "APPROVED"
-                    and str(r.get("commit_id") or "") == head_sha
-                    and _is_empty(r.get("body"))
-                ):
-                    raise Refusal("the operator submitted another review after approving")
+            r_state = r.get("state")
+            if not isinstance(r_state, str) or not r_state:
+                raise Refusal("a review in the list has no readable state")
+            r_login = _login_of(r, "the review list")
+            if r_login == operator and not (r_state == "APPROVED" and _is_empty(r.get("body"))):
+                raise Refusal(OPERATOR_ACTIVITY + "a review other than an empty approval")
             if (
                 app_login
                 and r_login == app_login
@@ -388,16 +379,14 @@ class ReleaseReviewApproval:
         if not app_approved:
             raise Refusal("the swarm App's panel approval is not on this head")
 
-        # Later comments by the operator (conversation and inline).
-        for path, what in (
-            (f"/repos/{repo}/issues/{pr}/comments", "the comment list"),
-            (f"/repos/{repo}/pulls/{pr}/comments", "the inline comment list"),
+        # Any comment by the operator, conversation or inline, at any time.
+        for path, what, kind in (
+            (f"/repos/{repo}/issues/{pr}/comments", "the comment list", "a conversation comment"),
+            (f"/repos/{repo}/pulls/{pr}/comments", "the inline comment list", "an inline review comment"),
         ):
             for c in await self._get_all(path, what):
-                if str((c.get("user") or {}).get("login") or "").casefold() != operator:
-                    continue
-                if _at_or_after(c, approved_at, "created_at", "updated_at"):
-                    raise Refusal("the operator commented or edited a comment after approving")
+                if _login_of(c, what) == operator:
+                    raise Refusal(OPERATOR_ACTIVITY + kind)
 
         # Not behind the base branch.
         compare = await self._get(
@@ -558,18 +547,8 @@ class ReleaseReviewApproval:
     async def _refuse(self, repo: str, pr: int, reason: str) -> None:
         """Publish nothing; log, notify and comment once. Failures are logged only."""
         log.warning(f"release review on {repo}#{pr}: not publishing — {reason}")
-        self._safe_notify(
-            f"Release pull request {repo}#{pr} was not published: {reason}. To publish, "
-            "submit a new approving review on the current head with an empty comment "
-            "box, and add no comment after it."
-        )
-        body = (
-            f"{NOTICE_MARKER}\n"
-            f"Not published: {reason}.\n\n"
-            "Nothing was released. To publish once the condition is met, submit a "
-            "new approving review on the current head with an empty comment box, "
-            "and add no comment after it."
-        )
+        self._safe_notify(f"Release pull request {repo}#{pr} was not published: {reason}. {_HOW_TO_PUBLISH}")
+        body = f"{NOTICE_MARKER}\nNot published: {reason}.\n\nNothing was released. {_HOW_TO_PUBLISH}"
         try:
             ok = await self.deps.post_comment(repo, pr, body)
             if not ok:

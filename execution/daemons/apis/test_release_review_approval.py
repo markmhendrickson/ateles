@@ -356,52 +356,11 @@ def test_refuses_review_on_old_head(world):
     _assert_refused(fake, "current head")
 
 
-def test_refuses_later_changes_requested(world):
-    fake, gate = world
-    fake.reviews.append(_review(id=REVIEW_ID + 1, state="CHANGES_REQUESTED",
-                                submitted_at="2026-01-01T11:00:00Z"))
-    _run(gate)
-    _assert_refused(fake, "requested changes or dismissed")
-
-
-def test_refuses_later_dismissed(world):
-    fake, gate = world
-    fake.reviews.append(_review(id=REVIEW_ID + 1, state="DISMISSED",
-                                submitted_at="2026-01-01T11:00:00Z"))
-    _run(gate)
-    _assert_refused(fake, "requested changes or dismissed")
-
-
 def _comment(body, created="2026-01-01T11:00:00Z", updated=None, login=OPERATOR, **over):
-    data = {"user": {"login": login, "type": "User"}, "body": body,
+    data = {"id": 5000, "user": {"login": login, "type": "User"}, "body": body,
             "created_at": created, "updated_at": updated or created}
     data.update(over)
     return data
-
-
-def test_earlier_comment_not_edited_since_does_not_refuse(world):
-    fake, gate = world
-    fake.comments.append(_comment("hold", created="2026-01-01T08:00:00Z",
-                                  updated="2026-01-01T08:30:00Z"))
-    fake.inline.append(_comment("stop", created="2026-01-01T08:00:00Z"))
-    _run(gate)
-    assert len(fake.publishes) == 1
-
-
-def test_refuses_malformed_comment_timestamp(world):
-    fake, gate = world
-    fake.comments.append(_comment("fine", created=None, updated="2026-01-01T08:00:00Z"))
-    _run(gate)
-    _assert_refused(fake, "timestamp could not be read")
-
-
-def test_refuses_missing_comment_edit_time(world):
-    fake, gate = world
-    c = _comment("fine", created="2026-01-01T08:00:00Z")
-    del c["updated_at"]
-    fake.comments.append(c)
-    _run(gate)
-    _assert_refused(fake, "timestamp could not be read")
 
 
 def test_refuses_unreadable_review_list(world):
@@ -711,13 +670,6 @@ def test_flag_on_non_release_pr_in_release_repo_merges_as_before(monkeypatch, tm
     assert merged == ["GitHub review"]
 
 
-def test_refuses_timestamp_without_zone(world):
-    fake, gate = world
-    fake.review = _review(submitted_at="2026-01-01T10:00:00")
-    _run(gate)
-    _assert_refused(fake, "no time zone")
-
-
 def test_after_timeout_a_second_delivery_does_not_publish_again(world):
     fake, gate = world
     fake.publish_result = "timeout"
@@ -989,24 +941,20 @@ def _later_changes_requested(f):
     f.reviews.append(_review(id=REVIEW_ID + 5, state="CHANGES_REQUESTED", submitted_at=_LATER))
 
 
-def _later_hold_review(f):
+def _later_commented_review(f):
     f.reviews.append(_review(id=REVIEW_ID + 5, state="COMMENTED", body="hold", submitted_at=_LATER))
 
 
-def _approving_body_edited_to_hold(f):
-    f.review = _review(body="**Hold** for now")
+def _approving_body_edited(f):
+    f.review = _review(body="a note")
 
 
-def _later_hold_comment(f):
-    f.comments.append(_comment("hold"))
+def _conversation_comment(f):
+    f.comments.append(_comment("a note"))
 
 
-def _comment_edited_to_hold(f):
-    f.comments.append(_comment("> stop", created="2026-01-01T08:00:00Z", updated=_LATER))
-
-
-def _later_inline_hold(f):
-    f.inline.append(_comment("do not publish"))
+def _inline_comment(f):
+    f.inline.append(_comment("a note"))
 
 
 def _app_approval_removed(f):
@@ -1042,9 +990,9 @@ def _second_record(f):
 
 
 @pytest.mark.parametrize("change", [
-    _withdraw_approval, _later_changes_requested, _later_hold_review,
-    _approving_body_edited_to_hold, _later_hold_comment, _comment_edited_to_hold,
-    _later_inline_hold, _app_approval_removed, _pr_closed, _head_moved,
+    _withdraw_approval, _later_changes_requested, _later_commented_review,
+    _approving_body_edited, _conversation_comment, _inline_comment,
+    _app_approval_removed, _pr_closed, _head_moved,
     _base_changed, _now_behind, _record_left_pending, _record_other_head,
     _second_record,
 ], ids=lambda fn: fn.__name__.lstrip("_"))
@@ -1080,42 +1028,79 @@ def test_live_conditions_are_read_after_the_panel_gate(world):
         assert any(p.endswith(needle) or needle in p for p in after), needle
 
 
-# ── any operator activity after the approval refuses, whatever it says ─────
+# ── publish only on a bare approval: any other operator activity refuses ──
 
-# Each of these was a stop the operator might type that word matching missed,
-# plus an ordinary sentence: none of them is read for meaning any more.
-ACTIVITY_BODIES = [
-    "/hold", "/reject", "Don't publish", "1. hold", "(hold)", "hold",
-    "**Do not publish**", "Looks good, thanks for preparing this.",
-]
+ACTIVITY = "the operator login has posted on this release pull request"
+_EARLIER = "2026-01-01T08:00:00Z"
+# Comment bodies are never read; an empty or ordinary one refuses like any other.
+BODIES = ["", "/hold", "Looks good, thanks for preparing this."]
 
 
-@pytest.mark.parametrize("body", ACTIVITY_BODIES)
-def test_refuses_any_later_conversation_comment(world, body):
+@pytest.mark.parametrize("created", [_EARLIER, _LATER])
+@pytest.mark.parametrize("body", BODIES)
+def test_a_refuses_any_operator_conversation_comment(world, body, created):
     fake, gate = world
-    fake.comments.append(_comment(body))
+    fake.comments.append(_comment(body, created=created))
     _run(gate)
-    _assert_refused(fake, "commented or edited a comment after approving")
+    _assert_refused(fake, ACTIVITY + ": a conversation comment")
 
 
-@pytest.mark.parametrize("body", ACTIVITY_BODIES)
-def test_refuses_any_later_inline_comment(world, body):
+@pytest.mark.parametrize("created", [_EARLIER, _LATER])
+@pytest.mark.parametrize("body", BODIES)
+def test_b_refuses_any_operator_inline_comment(world, body, created):
     fake, gate = world
-    fake.inline.append(_comment(body))
+    fake.inline.append(_comment(body, created=created, pull_request_review_id=REVIEW_ID + 7))
     _run(gate)
-    _assert_refused(fake, "commented or edited a comment after approving")
+    _assert_refused(fake, ACTIVITY + ": an inline review comment")
 
 
-@pytest.mark.parametrize("state", ["COMMENTED", "APPROVED"])
-@pytest.mark.parametrize("body", ACTIVITY_BODIES)
-def test_refuses_any_later_review_with_a_body(world, body, state):
+def test_b_refuses_inline_comment_of_the_approving_review_itself(world):
+    """The approving review's own inline comment, created before it was submitted.
+
+    A pending review's inline comments carry the time they were written, so
+    they predate the review's submission time. The approval is not bare.
+    """
     fake, gate = world
-    fake.reviews.append(_review(id=REVIEW_ID + 1, state=state, body=body, submitted_at=_LATER))
+    fake.inline.append(_comment("a note on line 3", created=_EARLIER,
+                                pull_request_review_id=REVIEW_ID))
     _run(gate)
-    _assert_refused(fake, "submitted another review after approving")
+    _assert_refused(fake, ACTIVITY + ": an inline review comment")
 
 
-@pytest.mark.parametrize("body", ACTIVITY_BODIES + ["   \n x"])
+@pytest.mark.parametrize("state", ["COMMENTED", "CHANGES_REQUESTED", "DISMISSED", "PENDING"])
+@pytest.mark.parametrize("submitted", [_EARLIER, _LATER, None])
+def test_c_refuses_operator_review_of_any_other_state(world, state, submitted):
+    fake, gate = world
+    fake.reviews.append(_review(id=REVIEW_ID + 1, state=state, body="", submitted_at=submitted))
+    _run(gate)
+    _assert_refused(fake, ACTIVITY + ": a review other than an empty approval")
+
+
+@pytest.mark.parametrize("submitted", [_EARLIER, _LATER])
+def test_c_refuses_operator_approval_with_a_body(world, submitted):
+    fake, gate = world
+    fake.reviews.append(_review(id=REVIEW_ID - 1, body="approved, one note", submitted_at=submitted))
+    _run(gate)
+    _assert_refused(fake, ACTIVITY + ": a review other than an empty approval")
+
+
+@pytest.mark.parametrize("body", ["", "   ", None])
+def test_earlier_empty_approval_is_allowed(world, body):
+    fake, gate = world
+    fake.reviews.insert(1, _review(id=REVIEW_ID - 1, commit_id=OTHER, body=body,
+                                   submitted_at=_EARLIER))
+    _run(gate)
+    assert len(fake.publishes) == 1
+
+
+def test_later_empty_approval_is_allowed(world):
+    fake, gate = world
+    fake.reviews.append(_review(id=REVIEW_ID + 1, submitted_at=_LATER))
+    _run(gate)
+    assert len(fake.publishes) == 1
+
+
+@pytest.mark.parametrize("body", BODIES[1:] + ["   \n x"])
 def test_refuses_approving_review_with_a_body(world, body):
     fake, gate = world
     fake.review = _review(body=body)
@@ -1131,73 +1116,61 @@ def test_approving_review_with_empty_or_whitespace_body_publishes(world, body):
     assert len(fake.publishes) == 1
 
 
-def test_refuses_comment_at_the_same_second_as_the_approval(world):
-    fake, gate = world
-    fake.comments.append(_comment("ok", created="2026-01-01T10:00:00Z"))
-    _run(gate)
-    _assert_refused(fake, "commented or edited a comment after approving")
-
-
-@pytest.mark.parametrize("path", ["comments", "inline"])
-def test_refuses_earlier_comment_edited_after_approval(world, path):
-    fake, gate = world
-    getattr(fake, path).append(_comment("fine", created="2026-01-01T08:00:00Z", updated=_LATER))
-    _run(gate)
-    _assert_refused(fake, "commented or edited a comment after approving")
-
-
-def test_refuses_unreadable_comment_edit_time(world):
-    fake, gate = world
-    fake.comments.append(_comment("fine", created="2026-01-01T08:00:00Z", updated="soon"))
-    _run(gate)
-    _assert_refused(fake, "timestamp could not be read")
-
-
-def test_refuses_later_review_on_other_head_even_if_empty_approval(world):
-    fake, gate = world
-    fake.reviews.append(_review(id=REVIEW_ID + 1, commit_id=OTHER, submitted_at=_LATER))
-    _run(gate)
-    _assert_refused(fake, "submitted another review after approving")
-
-
-def test_refuses_later_review_without_readable_time(world):
-    fake, gate = world
-    fake.reviews.append(_review(id=REVIEW_ID + 1, state="COMMENTED", submitted_at=None))
-    _run(gate)
-    _assert_refused(fake, "timestamp could not be read")
-
-
-def test_later_empty_approval_on_same_head_does_not_refuse(world):
-    fake, gate = world
-    fake.reviews.append(_review(id=REVIEW_ID + 1, submitted_at=_LATER))
-    _run(gate)
-    assert len(fake.publishes) == 1
-
-
 @pytest.mark.parametrize("login,kind", [(APP, "Bot"), ("someone-else", "User"),
                                          ("helper[bot]", "Bot")])
-def test_comments_by_app_bots_and_others_are_ignored(world, login, kind):
+def test_comments_and_reviews_by_app_bots_and_others_are_ignored(world, login, kind):
     fake, gate = world
-    fake.comments.append(_comment("/hold", login=login, user={"login": login, "type": kind}))
-    fake.inline.append(_comment("(hold)", login=login, user={"login": login, "type": kind}))
+    user = {"login": login, "type": kind}
+    fake.comments.append(_comment("/hold", user=user))
+    fake.inline.append(_comment("(hold)", user=user))
+    fake.reviews.append(_review(id=REVIEW_ID + 3, user=user, state="CHANGES_REQUESTED", body="no"))
     _run(gate)
     assert len(fake.publishes) == 1
 
 
-def test_clean_case_publishes(world):
+@pytest.mark.parametrize("where", ["comments", "inline", "reviews"])
+@pytest.mark.parametrize("user", [None, {}, {"login": None}, {"login": ""}, "someone"])
+def test_refuses_row_without_readable_author(world, where, user):
+    fake, gate = world
+    row = (_review(id=REVIEW_ID + 2, user=user) if where == "reviews"
+           else _comment("x", user=user))
+    getattr(fake, where).append(row)
+    _run(gate)
+    _assert_refused(fake, "author of an item")
+
+
+@pytest.mark.parametrize("state", [None, "", 3])
+def test_refuses_review_without_readable_state(world, state):
+    fake, gate = world
+    fake.reviews.append(_review(id=REVIEW_ID + 2, user={"login": "someone-else", "type": "User"},
+                                state=state))
+    _run(gate)
+    _assert_refused(fake, "no readable state")
+
+
+def test_refuses_review_with_unreadable_id(world):
+    fake, gate = world
+    fake.reviews.append(_review(id="1001"))
+    _run(gate)
+    _assert_refused(fake, "no readable id")
+
+
+def test_clean_case_publishes_exactly_once(world):
     fake, gate = world
     _run(gate)
+    _run(gate)
     assert len(fake.publishes) == 1
-    assert fake.posted == []
 
 
-def test_refusal_says_how_to_approve_again(world):
+def test_refusal_says_review_cannot_publish_after_operator_comment(world):
     fake, gate = world
-    fake.comments.append(_comment("/hold"))
+    fake.comments.append(_comment("a note"))
     _run(gate)
     for text in (fake.posted[0], fake.notices[0]):
+        assert ("cannot be published by review once the operator has commented on it"
+                in text), text
+        assert "needs the operator's go relayed to the session running it" in text
         assert "new approving review on the current head with an empty comment box" in text
-        assert "add no comment after it" in text
 
 
 def test_change_during_panel_gate_seen_only_by_comparison_refuses(world):
