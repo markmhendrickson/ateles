@@ -6551,16 +6551,15 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
     # (hydration failed, so it is `{}`) or came embedded in the event payload
     # (it may predate the planning reset). Then the live record decides, once,
     # before any notice. A task that is not in the backlog carries on with the
-    # event exactly as delivered.
-    live_unknown = False
+    # event exactly as delivered, and so does one whose live record cannot be
+    # read: its status is unknown, and an unreadable task keeps today's
+    # provisional notice and unreadable count rather than going silent.
     if action in ("created", "due_today"):
         if is_backlog(status) and event.hydrated:
             _forget_parked(entity_id)
         elif not is_backlog(status) and _status_may_be_stale(event):
             live = await _live_task_snapshot(entity_id)
-            if live is None:
-                live_unknown = True
-            elif is_backlog(live.get("status")):
+            if live is not None and is_backlog(live.get("status")):
                 status = live.get("status")
                 _forget_parked(entity_id)
         if is_backlog(status):
@@ -6569,22 +6568,6 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
                 f"ignoring task.{action}"
             )
             return
-
-    # Neither the event nor the live record could be read: the task may be in
-    # the backlog. Nothing is announced and nothing is dispatched. The failure
-    # is counted on the existing unreadable ledger, which reports a task only
-    # after UNREADABLE_ATTEMPTS failures and then once per reassert window,
-    # never on every redelivery; a later readable delivery clears the count.
-    if live_unknown and not event.hydrated:
-        log.warning(
-            f"[{DAEMON_NAME}] task {entity_id} could not be read from the event "
-            f"or the live record (task.{action}) — not announcing or dispatching"
-        )
-        if _unroutable.note_unreadable(entity_id):
-            report = _unroutable.drain_unreadable()
-            if report:
-                notifier.send(report, priority=Priority.WARN, handler=DAEMON_NAME)
-        return
 
     if action == "created":
         # Neotoma redelivers `task.created` for the same entity — measured
@@ -6615,7 +6598,7 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
         # never show the real title. So an unhydrated announce is provisional:
         # it is claimed only weakly and can be upgraded exactly once by the
         # first readable copy.
-        if not live_unknown and _should_announce(entity_id, event.hydrated):
+        if _should_announce(entity_id, event.hydrated):
             notifier.send(
                 f"Task created: {title[:80]}\n  {entity_id}",
                 priority=Priority.INFO,

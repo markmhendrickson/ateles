@@ -332,17 +332,17 @@ def test_embedded_stale_payload_defers_to_live_backlog(effects, monkeypatch):
     assert seen == [] and effects["notifier"].sent == []
 
 
-def test_both_reads_fail_no_dispatch_no_notice_per_redelivery(effects, monkeypatch):
-    """Unknown status: never dispatched, and at most one report across redeliveries."""
+def test_both_reads_fail_keeps_todays_provisional_notice(effects, monkeypatch):
+    """Unknown status: one provisional notice across redeliveries, nothing run."""
     _unreadable_hydrate(monkeypatch)
     monkeypatch.setattr(apis, "fetch_task_snapshot", lambda _id: None)
-    seen: list = []
-    monkeypatch.setattr(apis, "dispatch_task", lambda eid, *a, **k: seen.append(eid))
+    monkeypatch.setattr(apis, "_announced", {})
     for _ in range(5):
         asyncio.run(apis.handle_event(_event("ent_unk_1"), effects["notifier"]))
-    assert seen == []
-    assert not any(m.startswith("Task created") for m in effects["notifier"].sent)
-    assert len(effects["notifier"].sent) <= 1, effects["notifier"].sent
+    created = [m for m in effects["notifier"].sent if m.startswith("Task created")]
+    assert len(created) == 1, effects["notifier"].sent
+    assert effects["writes"] == [] and effects["briefs"] == []
+    assert effects["spawns"] == []
 
 
 def test_unhydrated_live_pending_task_keeps_todays_path(effects, monkeypatch):
