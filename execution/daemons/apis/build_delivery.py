@@ -1853,11 +1853,18 @@ _FLY_STATUS_TEXT = {
 
 
 
+# The opening of the hold ``fly_prelaunch_failure_summary`` writes. The
+# prelaunch-refusal recovery recognizes a hold only by this exact opening.
+PRELAUNCH_REFUSAL_OPENINGS = (
+    "Existing PR correction not launched; its own prelaunch receipt was removed.",
+    "Existing PR correction not launched; no delivery receipt was reserved.",
+)
+
+
 def fly_prelaunch_failure_summary(result) -> str:
     """Technical repair evidence without inventing an unknown remote effect."""
-    cleanup = ("its own prelaunch receipt was removed" if result.fly_delivery_cleanup == "released"
-               else "no delivery receipt was reserved")
-    parts = [f"Existing PR correction not launched; {cleanup}."]
+    parts = [PRELAUNCH_REFUSAL_OPENINGS[0] if result.fly_delivery_cleanup == "released"
+             else PRELAUNCH_REFUSAL_OPENINGS[1]]
     for label, value in (("Cause", result.error), ("Configuration repair", result.configuration_repair),
                          ("Provider", result.provider), ("Provider attempts", ", ".join(result.attempted_providers)),
                          ("stderr", result.stderr), ("output", result.stdout)):

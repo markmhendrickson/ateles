@@ -5737,6 +5737,133 @@ def reissue_held_task_checkpoint(
     )
 
 
+def _prelaunch_refused_correction_refusal(task_id: str, record) -> str | None:
+    """Why a blocked correction may NOT be re-held for fresh approval, else None.
+
+    Reads only. Admits exactly one shape: an ``existing_pr_correction`` task at
+    ``blocked`` whose stored hold is the one the postdispatch branch writes for
+    a correction Fly refused before anything launched
+    (``build_delivery.PRELAUNCH_REFUSAL_OPENINGS``), with a verified tenant, a
+    version token and a decodable target; no delivery receipt for its key and
+    no live, unknown or other-task run in the Fly ledger; no in-process
+    dispatch, detached run or build claim; an action approval could release
+    (``_approval_cannot_release``); and a readable checkpoint history in which
+    every answer was an approval the ordinary consumer already claimed
+    (stamped dispatched), at least one exists, and nothing is pending or
+    declined. Any unreadable, malformed or ambiguous input is a refusal."""
+    snapshot = _record_snapshot(record) if isinstance(record, dict) else None
+    if snapshot is None:
+        return "task could not be read"
+    if snapshot.get("task_type") != "existing_pr_correction":
+        return "not an existing_pr_correction task"
+    status = normalize_status(snapshot.get("status"))
+    if status != TaskStatus.BLOCKED.value:
+        return f"not blocked (status={status or 'unset'})"
+    reason = snapshot.get("blocked_reason")
+    if (not isinstance(reason, str) or reason != snapshot.get("result")
+            or not reason.startswith(build_delivery.PRELAUNCH_REFUSAL_OPENINGS)):
+        return "the hold is not a proven prelaunch refusal"
+    version = record.get("entity_version")
+    if not isinstance(version, str) or not version:
+        return "task has no version token"
+    if not read_verified_entity_owner(task_id, record):
+        return "task tenant provenance could not be verified"
+    repository = _dispatch_repo_from_snapshot(snapshot)
+    try:
+        target = build_delivery.existing_pr_target(snapshot, repository) if repository else None
+    except build_delivery.BuildWorktreeError:
+        target = None
+    if target is None:
+        return "correction target could not be decoded"
+    key = _fly_receipt_key(snapshot, task_id)
+    if not key:
+        return "delivery key could not be derived"
+    in_flight, _unowned = _fly_run_state(snapshot, task_id)
+    if in_flight is not False:
+        return "a Fly run is in flight or unknown for this task"
+    try:
+        receipts = build_delivery._delivery_ledger().snapshot().get("deliveries", {})
+        receipt = build_delivery._receipt_for(build_delivery.canonical_key(key), receipts)
+    except Exception:  # noqa: BLE001 — an unread ledger proves nothing
+        return "the Fly delivery ledger could not be read"
+    if receipt is not None:
+        return "a delivery receipt exists for this correction"
+    if (task_id in _tasks_in_dispatch or task_id in _detached_runs_in_progress
+            or _fly_run_held_by_other_task(snapshot, task_id) is not None):
+        return "a dispatch or build claim is live for this task"
+    if _approval_cannot_release(snapshot):
+        return "approval could never release this task"
+    rows = checkpoints_for_task(task_id, strict=True)
+    if rows is None:
+        return "checkpoint history could not be read"
+    consumed = 0
+    for row in rows:
+        if _malformed_checkpoint_row(row, task_id):
+            return "checkpoint history holds a malformed row"
+        item = _record_snapshot(row) or {}
+        if str(item.get("status") or "").strip().lower() == CHECKPOINT_SUPERSEDED:
+            continue
+        if (read_checkpoint_resolution(item) != "approved"
+                or not checkpoint_already_dispatched(item)):
+            return "checkpoint history holds an answer that is not a consumed approval"
+        consumed += 1
+    if not consumed:
+        return "no consumed approval released the refused attempt"
+    return None
+
+
+def reopen_prelaunch_refused_correction(task_id: str, *, apply: bool) -> ReissueResult:
+    """Re-hold a correction Fly refused before launch, for fresh approval.
+
+    The producer half of same-task recovery. The task, its receipt state, its
+    checkpoint/approval history and its attempt record are kept; only
+    ``status`` moves ``blocked`` -> ``awaiting_approval``, by one write
+    conditioned on the exact version the qualification read
+    (``set_task_field_if_version``). The fresh signed, current-bound checkpoint
+    is then produced by ``reissue_held_task_checkpoint`` (the existing
+    held-task path), and only the ordinary checkpoint consumer can release it.
+    The old approval stays consumed history. Nothing here dispatches, approves
+    or retries.
+
+    Outcomes: ``refused`` (not admitted; nothing written), ``would_reopen``
+    (dry run; nothing written), ``failed`` (the conditional write did not
+    commit; nothing was written), ``incomplete`` (the task is held but did not
+    read back exactly, or its checkpoint is not proven; rerun
+    ``reissue_held_checkpoints --task`` once reconciled), else the reissue
+    outcome (``reissued``, ``needs_operator``, ...)."""
+    try:
+        record = fetch_task_record(task_id)
+        refusal = _prelaunch_refused_correction_refusal(task_id, record)
+    except Exception as exc:  # noqa: BLE001 — unknown is a refusal
+        record, refusal = None, f"qualification failed ({type(exc).__name__})"
+    if refusal:
+        return ReissueResult(task_id, "refused", refusal)
+    if not apply:
+        return ReissueResult(task_id, "would_reopen",
+                             "prelaunch-refused correction; would re-hold and reissue")
+    version = record["entity_version"]
+    expected = dict(_snapshot_with_tenant(record))
+    write = set_task_field_if_version(
+        task_id, "status", TaskStatus.AWAITING_APPROVAL.value,
+        expected_version=version, handler=DAEMON_NAME,
+        key_suffix=f"prelaunch-reopen-{version}")
+    if not write or not write.version:
+        return ReissueResult(task_id, "failed",
+                             "conditional re-hold did not commit (version race or write failure)")
+    expected["status"] = TaskStatus.AWAITING_APPROVAL.value
+    after = fetch_task_record(task_id)
+    if (not isinstance(after, dict) or after.get("entity_version") != write.version
+            or _correction_lifecycle_shape(_snapshot_with_tenant(after))
+            != _correction_lifecycle_shape(expected)):
+        return ReissueResult(task_id, "incomplete",
+                             "re-hold committed but did not read back exactly; reconcile first")
+    result = reissue_held_task_checkpoint(task_id, apply=True)
+    if result.outcome in {"failed", "unknown", "skipped"} and not result.checkpoint_id:
+        return dataclasses.replace(result, outcome="incomplete",
+                                   detail=f"task re-held; checkpoint not proven: {result.detail}")
+    return result
+
+
 def iter_held_task_ids(*, limit: int | None = None):
     """Yield the id of every task at ``awaiting_approval``, paging to the end.
 
