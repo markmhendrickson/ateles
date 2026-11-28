@@ -62,6 +62,8 @@ HOLD_PREFIXES = ("hold", "skip", "stop", "do not publish")
 # Marker on this module's own notices. It carries no command token, so a
 # notice can never re-trigger a comment command.
 NOTICE_MARKER = "<!-- release-review-approval -->"
+# Prefix of publish.py's tree-check refusal; it is on publish.py's last line.
+TREE_CHECK_MARKER = "tree check FAILED"
 _PER_PAGE = 100
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
@@ -143,9 +145,23 @@ def _parse_time(value: object) -> datetime:
     return parsed
 
 
+# Leading Markdown and quoting a person might type before a word: emphasis,
+# block quotes, headings, list markers, code ticks and quote marks.
+_LEADING_MARKUP_RE = re.compile(r"^[\s>*_#~`\-+=\"'\u201c\u201d\u2018\u2019\u00ab\u00bb]+")
+
+
 def _starts_with_hold(body: object) -> bool:
     text = str(body or "").strip().casefold()
+    text = _LEADING_MARKUP_RE.sub("", text)
     return any(text.startswith(p) for p in HOLD_PREFIXES)
+
+
+def _changed_after(row: dict, created_key: str, cutoff: datetime) -> bool:
+    """True when the row was created, or (where it says so) edited, after cutoff."""
+    if _parse_time(row.get(created_key)) > cutoff:
+        return True
+    updated = row.get("updated_at")
+    return updated is not None and _parse_time(updated) > cutoff
 
 
 def _norm_version(value: object) -> str:
@@ -219,10 +235,11 @@ class ReleaseReviewApproval:
             except NotReleasePR:
                 return False
             decision = await self._evaluate(trigger, pr_data)
+            await self._panel_gate(repo, pr, decision.head_sha)
         except Refusal as exc:
             await self._refuse(repo, pr, str(exc))
             return True
-        await self._publish(repo, pr, decision)
+        await self._publish(trigger, decision)
         return True
 
     async def guard_other_entrance(self, trigger: Any, source: str) -> bool:
@@ -269,6 +286,12 @@ class ReleaseReviewApproval:
     # ── the decision ────────────────────────────────────────────────────────
 
     async def _evaluate(self, trigger: Any, pr_data: dict) -> _Decision:
+        """Every live condition except the panel gate; ``pr_data`` is a fresh read.
+
+        Only GitHub and Neotoma reads run here, nothing slow, so it is run
+        once before the panel gate and again under the per-version lock
+        immediately before the start.
+        """
         d = self.deps
         repo, pr = trigger.repository, int(trigger.number or 0)
         raw_review = (getattr(trigger, "raw", None) or {}).get("review") or {}
@@ -331,7 +354,7 @@ class ReleaseReviewApproval:
             if r_login == operator and rid != review_id:
                 if r_state == "PENDING":
                     continue
-                later = rid > review_id or _parse_time(r.get("submitted_at")) > approved_at
+                later = rid > review_id or _changed_after(r, "submitted_at", approved_at)
                 if later and r_state in ("CHANGES_REQUESTED", "DISMISSED"):
                     raise Refusal("the operator later requested changes or dismissed a review")
                 if later and _starts_with_hold(r.get("body")):
@@ -356,7 +379,7 @@ class ReleaseReviewApproval:
             for c in await self._get_all(path, what):
                 if str((c.get("user") or {}).get("login") or "").casefold() != operator:
                     continue
-                if _parse_time(c.get("created_at")) > approved_at and _starts_with_hold(c.get("body")):
+                if _changed_after(c, "created_at", approved_at) and _starts_with_hold(c.get("body")):
                     raise Refusal("a later comment by the operator asks to hold")
 
         # Not behind the base branch.
@@ -401,9 +424,12 @@ class ReleaseReviewApproval:
         if str(f.get("rc_head_sha") or "") != head_sha:
             raise Refusal("the release record was prepared for a different head")
 
-        # The panel gate approve_pr_as_app.py evaluates, on this head.
+        return _Decision(version=version, entity_id=entity_id, review_id=review_id, head_sha=head_sha)
+
+    async def _panel_gate(self, repo: str, pr: int, head_sha: str) -> None:
+        """The panel gate approve_pr_as_app.py evaluates, on this head (slow)."""
         try:
-            passed, reason = await d.panel_gate(repo, pr, head_sha)
+            passed, reason = await self.deps.panel_gate(repo, pr, head_sha)
         except BaseException as exc:
             if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
                 raise
@@ -411,12 +437,11 @@ class ReleaseReviewApproval:
         if not passed:
             raise Refusal(f"the review panel gate did not pass ({reason})")
 
-        return _Decision(version=version, entity_id=entity_id, review_id=review_id, head_sha=head_sha)
-
     # ── effects ─────────────────────────────────────────────────────────────
 
-    async def _publish(self, repo: str, pr: int, decision: _Decision) -> None:
+    async def _publish(self, trigger: Any, decision: _Decision) -> None:
         d = self.deps
+        repo, pr = trigger.repository, int(trigger.number or 0)
         version = decision.version
         lock = self._locks.setdefault(version, asyncio.Lock())
         if lock.locked():
@@ -426,14 +451,22 @@ class ReleaseReviewApproval:
             if version in self._started_versions or decision.review_id in self._seen_reviews:
                 await self._refuse(repo, pr, f"a publish of {version} was already started once")
                 return
-            # Final re-read of the head, immediately before starting.
+            # Every live condition again, after the slow panel gate and
+            # immediately before the start: a withdrawal or change made while
+            # the gate ran is seen here. Nothing slow runs between these reads
+            # and the start.
             try:
                 fresh = await self._fetch_pr(repo, pr)
+                try:
+                    self._release_version(repo, fresh)
+                except NotReleasePR as exc:
+                    raise Refusal("the pull request is no longer a release pull request") from exc
+                final = await self._evaluate(trigger, fresh)
             except Refusal as exc:
                 await self._refuse(repo, pr, str(exc))
                 return
-            if fresh.get("state") != "open" or str((fresh.get("head") or {}).get("sha") or "") != decision.head_sha:
-                await self._refuse(repo, pr, "the pull request head changed before publishing")
+            if final != decision:
+                await self._refuse(repo, pr, "the pull request or release record changed before publishing")
                 return
             if not d.publish_script or not os.path.exists(d.publish_script):
                 await self._refuse(repo, pr, "the publish script is missing")
@@ -475,6 +508,16 @@ class ReleaseReviewApproval:
                 return
             if rc == 0:
                 log.info(f"publish {version} succeeded: {last}")
+            elif TREE_CHECK_MARKER in last:
+                log.error(f"publish {version} stopped at the tree check: {last}")
+                self._safe_alert(
+                    version,
+                    "approved by GitHub review; publish stopped at the tree "
+                    f"check after the merge (rc={rc}). The release pull request "
+                    f"is already merged into {d.release_branch}; nothing was "
+                    "tagged or published. See the release README section "
+                    "'Tree check stopped a publish after the merge'."
+                )
             else:
                 log.error(f"publish {version} FAILED rc={rc}: {last}")
                 self._safe_alert(

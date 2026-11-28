@@ -101,6 +101,9 @@ class Fake:
         self.pr_reads = 0
         self.notify_raises = False
         self.comment_raises = False
+        self.reviews_by_id: dict[int, dict] = {}
+        self.during_panel = None  # called while the fake panel gate runs
+        self.panel_calls = 0
 
     async def github_get(self, path, params):
         self.calls.append(path)
@@ -111,10 +114,15 @@ class Fake:
             if self.pr_reads > 1 and self.pr_after is not None:
                 return 200, self.pr_after, {}
             return 200, self.pr, {}
-        if path.endswith(f"/reviews/{REVIEW_ID}"):
+        if "/reviews/" in path:
             if "review" in self.fail:
                 return 404, None, {}
-            return 200, self.review, {}
+            rid = int(path.rsplit("/", 1)[1])
+            if rid == REVIEW_ID:
+                return 200, self.review, {}
+            if rid in self.reviews_by_id:
+                return 200, self.reviews_by_id[rid], {}
+            return 404, None, {}
         if path.endswith("/reviews"):
             if "reviews" in self.fail:
                 return 200, {"not": "a list"}, {}
@@ -135,8 +143,12 @@ class Fake:
         return self.records, self.complete
 
     async def panel_gate(self, repo, pr, head):
+        self.panel_calls += 1
         if "panel" in self.fail:
             raise RuntimeError("panel down")
+        if self.during_panel is not None:
+            self.during_panel(self)
+        await asyncio.sleep(0)
         return self.panel
 
     async def app_bot_login(self):
@@ -553,7 +565,7 @@ def test_refuses_head_changed_before_publish(world):
     fake.pr_after = _pr(head={"ref": f"release/{VERSION}", "sha": OTHER,
                               "repo": {"full_name": REPO}})
     _run(gate)
-    _assert_refused(fake, "head changed before publishing")
+    _assert_refused(fake, "current head")
 
 
 def test_refuses_missing_publish_script(world):

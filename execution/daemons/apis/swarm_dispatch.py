@@ -13754,6 +13754,22 @@ class SwarmDispatcher:
         or failure) so the operator always learns what their reply did.
         """
         version = (trigger.release_version or "").strip()
+        if release_review_approval.enabled():
+            # With ATELES_PUBLISH_ON_OPERATOR_REVIEW on, a release is published
+            # only from the operator's approving review on its release pull
+            # request; this route starts nothing and says why.
+            log.warning(
+                f"[{DAEMON_NAME}] release_approve for {version!r} not acted on: "
+                f"{release_review_approval.FLAG_ENV} is on"
+            )
+            self._release_red_alert(
+                version or "(no version)",
+                "approval by email was not acted on and nothing was published: "
+                f"while {release_review_approval.FLAG_ENV} is on, a release is "
+                "published only from the operator's approving review on its "
+                "release pull request in GitHub.",
+            )
+            return
         if not re.match(r"^v[0-9][0-9A-Za-z.\-+]*$", version):
             log.error(
                 f"[{DAEMON_NAME}] release_approve with invalid version "

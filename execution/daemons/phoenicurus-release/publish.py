@@ -796,17 +796,21 @@ def verify_tree_matches_approved_head(approved_head: str, dry_run: bool) -> None
     approved_tree = run(["git", "rev-parse", f"{approved_head}^{{tree}}"], check=False)
     got = (head_tree.stdout or "").strip() if head_tree.returncode == 0 else ""
     want = (approved_tree.stdout or "").strip() if approved_tree.returncode == 0 else ""
+    after_merge = (
+        "The merge of the release pull request into main already landed; "
+        "nothing was tagged or published. See the release README, 'Tree check "
+        "stopped a publish after the merge'."
+    )
     if not got or not want:
         raise StepError(
             "tree check FAILED: the tree to be tagged or the approved head "
-            f"{approved_head[:12]} could not be read. Nothing was tagged or published."
+            f"{approved_head[:12]} could not be read. {after_merge}"
         )
     if got != want:
         raise StepError(
             f"tree check FAILED: the merged tree ({got[:12]}) is not the approved "
             f"head {approved_head[:12]}'s tree ({want[:12]}); the base branch "
-            "carries changes the approval did not cover. Nothing was tagged or "
-            "published."
+            f"carries changes the approval did not cover. {after_merge}"
         )
     log.info(f"tree check OK: the tree to be tagged equals approved head {approved_head[:12]}")
 
@@ -1320,6 +1324,8 @@ def main() -> int:
         log.error(f"publish failed: {exc}")
         _mark_failed(str(exc))
         telegram_send(f"🔴 Phoenicurus: {version} publish FAILED — {exc}")
+        # The last output line, which the caller reads as the outcome.
+        print(f"publish failed: {exc}", flush=True)
         return 1
     except Exception as exc:  # noqa: BLE001 — last-resort guard for a release tool
         log.exception(f"unexpected fatal error: {exc}")
