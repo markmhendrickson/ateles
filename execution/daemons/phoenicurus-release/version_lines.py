@@ -30,7 +30,11 @@ deterministically and then verifies all of them before the candidate is opened.
 Without `--check`, the prose lines are rewritten in place. Every mode then
 verifies package.json, package-lock.json and both prose lines. With
 `--product-check`, the product repository's own test
-(`tests/unit/llms_txt_claims.test.ts`) also runs. Exits 0 only when every
+(`tests/unit/llms_txt_claims.test.ts`) also runs, with an isolated environment:
+only basic shell settings are passed on, with a temporary home and data
+directory, so the test cannot reach the store this host's services use. It is
+refused if the checkout holds a repository env file, which the product would
+load over those settings. Exits 0 only when every
 check passes; otherwise prints what is missing and exits 1, and the caller
 must not open the candidate.
 """
@@ -39,9 +43,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 _SEMVER = r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?"
@@ -84,6 +90,23 @@ def _wanted(rel: str, full: str) -> str:
 
 PRODUCT_CHECK_TEST = "tests/unit/llms_txt_claims.test.ts"
 PRODUCT_CHECK_TIMEOUT_S = 300
+
+# The only settings the product check inherits. Everything else is withheld: the
+# caller's environment selects the store this host's services use.
+PRODUCT_CHECK_ENV_KEEP = (
+    "PATH",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+)
+# Repository env files the product config loads itself, some of them over the
+# process environment.
+PRODUCT_ENV_FILES = (".env", ".env.development", ".env.production")
 
 
 class VersionLineError(Exception):
@@ -172,6 +195,16 @@ def verify(repo: Path, version: str) -> list[str]:
     return problems
 
 
+def _isolated_env(scratch: Path) -> dict[str, str]:
+    """Environment for the product check: kept settings, temporary home and data."""
+    env = {k: os.environ[k] for k in PRODUCT_CHECK_ENV_KEEP if k in os.environ}
+    for name in ("home", "data"):
+        (scratch / name).mkdir()
+    env["HOME"] = str(scratch / "home")
+    env["NEOTOMA_DATA_DIR"] = str(scratch / "data")
+    return env
+
+
 def run_product_check(repo: Path) -> tuple[bool, str]:
     """Run the product repository's own version-line test with its own vitest."""
     vitest = repo / "node_modules" / ".bin" / "vitest"
@@ -179,14 +212,22 @@ def run_product_check(repo: Path) -> tuple[bool, str]:
         return False, f"{vitest} not found: run `npm ci` in {repo} first"
     if not (repo / PRODUCT_CHECK_TEST).exists():
         return False, f"{PRODUCT_CHECK_TEST} not found in {repo}"
-    try:
-        proc = subprocess.run(
-            [str(vitest), "run", PRODUCT_CHECK_TEST],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            timeout=PRODUCT_CHECK_TIMEOUT_S,
+    env_files = [name for name in PRODUCT_ENV_FILES if (repo / name).exists()]
+    if env_files:
+        return False, (
+            f"{', '.join(env_files)} in {repo} would override the isolated test "
+            "settings: run the check in a worktree without it"
         )
+    try:
+        with tempfile.TemporaryDirectory(prefix="version-check-") as scratch:
+            proc = subprocess.run(
+                [str(vitest), "run", PRODUCT_CHECK_TEST],
+                cwd=repo,
+                env=_isolated_env(Path(scratch)),
+                capture_output=True,
+                text=True,
+                timeout=PRODUCT_CHECK_TIMEOUT_S,
+            )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, f"product check did not complete: {type(exc).__name__}: {exc}"
     tail = (proc.stdout + proc.stderr)[-4000:]
